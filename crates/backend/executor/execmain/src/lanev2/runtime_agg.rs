@@ -5032,6 +5032,11 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // (its fold-bypass has no dict leg; mixing paths would reorder
     // first-seen arrivals).
     let mut k2_dict_code = false;
+    // DictCoded-kind marker (set in the expr-key arm below): consumed by
+    // the strminmax group-estimate gate — hold disposition D2 exempts this
+    // kind (lockstep with the dropped m5 mirror in the dict-key
+    // classifier; the class letter carries the witnessed parity cell).
+    let mut dict_coded_kind = false;
     if ss.ss.ps_ProjInfo.is_some() {
         let Some(xk) = xk else {
             refuse(estate, ea, node_id, "projected scan without an expr-key decide");
@@ -5101,6 +5106,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                 width = 8;
             }
             super::exprkey::SinkXkKind::DictCoded => {
+                dict_coded_kind = true;
                 // GL-DICTDRAIN-1: the Dict key class through the 1-Intern
                 // compact spec (the C2 single-text shape, computed-key
                 // fed). Cap-aware admission probe — no table armed on the
@@ -5303,7 +5309,16 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // offer reaches here WITHOUT any suppression, so the probe-side ceiling
     // alone cannot close the band. Refuse fail-open to the serial arm (the
     // measured winner there). Leader-side pre-launch => workers never arm.
-    if est_groups as f64 >= strminmax_max_groups()
+    // Hold disposition D2 (GL-HEAVYTIER-1, coordinator-approved): the
+    // DictCoded kind is EXEMPT from this ceiling — its byref-text
+    // combine/emit rides the allocator-exact StrStateArena substrate and
+    // the class's engaged sink is the witnessed winner with parity at
+    // production scale far above the band (the class letter's cell). The
+    // m5 dict-key classifier dropped its mirror in the SAME commit
+    // (knob-coherence lockstep); every other kind keeps the ceiling
+    // byte-for-byte.
+    if !dict_coded_kind
+        && est_groups as f64 >= strminmax_max_groups()
         && combines
             .iter()
             .any(|c| matches!(c.kind, ::nodeagg::sink::SinkCombineKind::VarlenaMinMax { .. }))

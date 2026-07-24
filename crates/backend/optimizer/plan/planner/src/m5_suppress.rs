@@ -1524,6 +1524,27 @@ fn strminmax_max_groups() -> f64 {
     })
 }
 
+/// Dict-key-class group-estimate ceiling (GL-HEAVYTIER-1 hold disposition
+/// D1, coordinator-approved): the dict-key expr-key classifier carries its
+/// OWN ceiling instead of the shared groupby_high floor — the class's
+/// engaged sink is the witnessed winner far above 4e6 (same-pod cell on the
+/// production-scale sorted bank: engaged 0.44-0.50 s vs 6.7-6.8 s at est
+/// 6.63M groups, byte parity; the class letter carries the ladder).
+/// PROVISIONAL default 12e6 = the banked cell's estimate + wobble headroom,
+/// below unladdered territory (the fix-4a ceiling precedent). Every OTHER
+/// classifier keeps the shared floor byte-for-byte. Env-overridable for
+/// recalibration ladders (`PGRUST_M5_DICTKEY_MAX_GROUPS`, > 0).
+fn dictkey_max_groups() -> f64 {
+    static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CEIL.get_or_init(|| {
+        std::env::var("PGRUST_M5_DICTKEY_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(12_000_000.0)
+    })
+}
+
 /// PROVISIONAL floor for the SE-MKTEXT knob path: the CbGroupedAggTextKey
 /// economics verbatim (min_dop 12, low-dop win region ≤3M — the same
 /// text-keyed grouped engagement, one more key word/tail). GL-MKTEXT-1
@@ -7855,7 +7876,6 @@ fn classify_dictkey_exprkey<'mcx>(
     }
     // Emit discipline: the key by sortgroupref; every other entry a
     // passenger from the class vocabulary.
-    let mut n_strminmax = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
         if tle.ressortgroupref != 0 && tle.ressortgroupref == key_ref {
@@ -7880,10 +7900,12 @@ fn classify_dictkey_exprkey<'mcx>(
         // restoring allocator-exactness across migration; the sink shape
         // check stays armed as the permanent detector. Admission mirrors
         // the sibling grouped classifiers (strminmax car knob + default
-        // collation + bare text Var); the GL-STRMM-2 group-estimate
-        // ceiling mirror below still holds (fail-closed).
+        // collation + bare text Var). The GL-STRMM-2 group-estimate
+        // ceiling no longer mirrors HERE: hold disposition D2 exempts the
+        // DictCoded kind on the EXECUTOR half (same commit, lockstep), so
+        // a suppressed shape past the old ceiling engages instead of
+        // landing suppress-then-serial.
         if agg_strminmax_enabled() && grouped_str_minmax_arg(tle.expr, rti).is_some() {
-            n_strminmax += 1;
             continue;
         }
         return Ok(None);
@@ -7926,15 +7948,24 @@ fn classify_dictkey_exprkey<'mcx>(
         let input_rows = run.root.rel(rel_id).rows.max(1.0);
         crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
     };
-    if ngroups >= groupby_high_floor() {
+    // GL-HEAVYTIER-1 hold disposition D1 (coordinator-approved): this
+    // classifier carries its own witnessed ceiling instead of the shared
+    // groupby_high floor — the engaged sink is the measured winner for the
+    // class far above the shared floor (fn doc on `dictkey_max_groups`).
+    // The shared floor stays byte-for-byte for every other classifier;
+    // the class kill (`PGRUST_LANE_V2_AGG_DICTKEY=0|off`) restores the
+    // whole classifier off, holds included.
+    if ngroups >= dictkey_max_groups() {
         return Ok(Some(false));
     }
-    // GL-STRMM-2 ceiling mirror: the executor refuses VarlenaMinMax
-    // engagements past the band (runtime_agg's leader gate, same env
-    // spelling) — a keyed shape there would land suppress-then-serial.
-    if n_strminmax > 0 && ngroups >= strminmax_max_groups() {
-        return Ok(Some(false));
-    }
+    // GL-HEAVYTIER-1 hold disposition D2 (coordinator-approved): the
+    // GL-STRMM-2 ceiling mirror is DROPPED here in LOCKSTEP with the
+    // executor's leader-gate exemption for the DictCoded kind
+    // (runtime_agg's strminmax gate skips DictCoded engagements — same
+    // commit; knob-coherence law). The byref MIN/MAX(text) combine/emit
+    // for THIS kind rides the cross-thread-allocator-exact substrate the
+    // dict-class letter banked with parity at production scale; every
+    // other kind keeps the ceiling on both halves byte-for-byte.
     Ok(Some(finish_knob_path(
         run,
         "dictkey",
