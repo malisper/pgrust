@@ -59,8 +59,23 @@ fn MOD(x: i64, y: i64) -> i64 {
     x & (y - 1)
 }
 
-// C's uncontended S_LOCK/S_UNLOCK shape (one TAS / one release store); the
-// contended SpinDelayStatus backoff is not wired — M1 runs one backend thread.
+// s_lock.h shape: one TAS on the uncontended path, and contended acquires go
+// through C's perform_spin_delay backoff (s_lock.c:97 `s_lock`, reached from
+// S_LOCK at s_lock.h:665).
+//
+// These guard the freeList[i].mutex of SHARED, PARTITIONED dynahash tables --
+// the heavyweight lock manager's LOCK and PROCLOCK hashes and the two SSI
+// predicate-lock hashes -- so they are on the path of every relation lock
+// acquire that misses the fastpath, and every release. The previous unbounded
+// busy-spin had no SPIN_DELAY, no sleep, and no NUM_DELAYS valve, so it also
+// lost C's `PANIC: stuck spinlock detected`: a leaked or corrupted freelist
+// mutex hung the backend silently instead of failing loudly.
+//
+// This is the same shape, and the same mistake, that already cost this tree a
+// measured regression at transam_xlog/src/ctl.rs:10-13 -- whose comment records
+// that an unbounded busy-spin collapsed the multi-client write gate once
+// clients exceeded vCPU. That site is the model followed here (a non-Spinlock
+// lock word driving the same seam).
 #[inline]
 unsafe fn SpinLockInit(m: *mut AtomicI32) {
     (*m).store(0, Ordering::Relaxed);
@@ -68,11 +83,25 @@ unsafe fn SpinLockInit(m: *mut AtomicI32) {
 
 #[inline]
 unsafe fn SpinLockAcquire(m: *mut AtomicI32) {
-    while (*m).swap(1, Ordering::Acquire) != 0 {
-        while (*m).load(Ordering::Relaxed) != 0 {
-            core::hint::spin_loop();
-        }
+    if (*m).swap(1, Ordering::Acquire) != 0 {
+        SpinLockAcquireContended(m);
     }
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn SpinLockAcquireContended(m: *mut AtomicI32) {
+    let mut delay =
+        s_lock_seams::SpinDelayStatus::new(file!(), line!() as i32, "dynahash freeList");
+    loop {
+        // C's TAS_SPIN: an unlocked read before each TAS, so a spinning waiter
+        // does not keep the cache line exclusive.
+        if (*m).load(Ordering::Relaxed) == 0 && (*m).swap(1, Ordering::Acquire) == 0 {
+            break;
+        }
+        s_lock_seams::perform_spin_delay::call(&mut delay);
+    }
+    s_lock_seams::finish_spin_delay::call(&delay);
 }
 
 #[inline]
