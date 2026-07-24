@@ -87,6 +87,13 @@ const JT3: u32 = 16402;
 const JT4: u32 = 16403;
 const STT: u32 = 16410;
 const PTT: u32 = 16411;
+// Torn-stats fixtures (GL-STATSLOT-1): slot kinds recorded at bundle-probe
+// time paired with arrays from a later row generation — the MCV slot carries
+// values but an EMPTY numbers array, the shape a concurrent ANALYZE rewrite
+// produces through the lazy per-slot image re-probe (RWREG-2 rung b2/post-7
+// panic evidence).
+const TORN: u32 = 16412;
+const TORN2: u32 = 16413;
 const INT4EQ_OP: u32 = 96;
 const INT4_LT_OP: u32 = 97;
 const INT4_GT_OP: u32 = 521;
@@ -536,6 +543,65 @@ fn install_scan_fixtures() {
                 slots,
             }));
         }
+        // TBL.pk carries a degenerate CORRELATION slot with an EMPTY numbers
+        // array — the exact shape the RWREG-2 rung b2 backend panics hit at
+        // selfuncs.rs:2708 (stock-latent, fixed at t47 by 3e606afd9). Every
+        // btcostestimate over TBL now traverses the guarded read; C-parity
+        // (btcostestimate reads numbers[0] only under nnumbers > 0) leaves
+        // index_correlation at its 0.0 default, so all existing plan/cost
+        // expectations are unchanged.
+        if relid == TBL && attnum == 1 && !inh {
+            let mut slots = mcx::PgVec::new_in(mcx);
+            slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+                3,
+                INT4_LT_OP,
+                0,
+                23,
+                mcx::PgVec::new_in(mcx),
+                mcx::PgVec::new_in(mcx),
+                mcx::PgVec::new_in(mcx),
+            ));
+            return Ok(Some(syscache_seams::PgStatisticBundle {
+                stanullfrac: 0.0,
+                stawidth: 4,
+                stadistinct: 0.0,
+                slots,
+            }));
+        }
+        // TORN/TORN2: MCV slot with values but an EMPTY numbers array (torn),
+        // plus a well-formed histogram — drives the unguarded numbers[i]
+        // reads in var_eq_const / mcv_selectivity / eqjoinsel.
+        if (relid == TORN || relid == TORN2) && attnum == 1 && !inh {
+            let mut slots = mcx::PgVec::new_in(mcx);
+            let mut mcv_values = mcx::PgVec::new_in(mcx);
+            mcv_values.extend([datum::Datum::from_i32(1), datum::Datum::from_i32(2)]);
+            slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+                1,
+                INT4EQ_OP,
+                0,
+                23,
+                mcv_values,
+                mcx::PgVec::new_in(mcx),
+                mcx::PgVec::new_in(mcx),
+            ));
+            let mut hist_values = mcx::PgVec::new_in(mcx);
+            hist_values.extend([0i32, 10, 20, 30, 40].map(datum::Datum::from_i32));
+            slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+                2,
+                INT4_LT_OP,
+                0,
+                23,
+                hist_values,
+                mcx::PgVec::new_in(mcx),
+                mcx::PgVec::new_in(mcx),
+            ));
+            return Ok(Some(syscache_seams::PgStatisticBundle {
+                stanullfrac: 0.0,
+                stawidth: 4,
+                stadistinct: 10.0,
+                slots,
+            }));
+        }
         if relid != STT || attnum != 1 || inh {
             return Ok(None);
         }
@@ -581,6 +647,8 @@ fn install_scan_fixtures() {
             JT3 => make_join_rel_fixture(mcx, JT3, "jt3", 100, 10000.0),
             JT4 => make_join_rel_fixture(mcx, JT4, "jt4", 100, 10000.0),
             STT => make_join_rel_fixture(mcx, STT, "stt", 10, 1000.0),
+            TORN => make_join_rel_fixture(mcx, TORN, "torn", 10, 1000.0),
+            TORN2 => make_join_rel_fixture(mcx, TORN2, "torn2", 10, 1000.0),
             PTT => make_text_rel_fixture(mcx, PTT, "ptt", 10, 1000.0),
             other => panic!("fixture relation_open: unknown oid {other}"),
         })
@@ -630,7 +698,7 @@ fn install_scan_fixtures() {
             IDX => 30,
             JT1 | JT2 => 1,
             JT3 | JT4 => 100,
-            STT | PTT => 10,
+            STT | PTT | TORN | TORN2 => 10,
             other => panic!("fixture nblocks: unknown oid {other}"),
         })
     });
@@ -3511,6 +3579,204 @@ mod stats_arms {
         // histfrac = (1 + (15-10)/(20-10))/4 - eq_selec 1/8 = 0.25;
         // selec = (1 - 0.50)*0.25 + mcv(1,2 both < 15 -> 0.50) = 0.625.
         assert_eq!(plan_rows(mcx, INT4_LT_OP, 66, 15, "SELECT a FROM stt WHERE a < 15"), 625.0);
+    }
+}
+
+// GL-STATSLOT-1: torn statistics slots must degrade like C (soft fallback),
+// never panic. C reads pg_statistic from a pinned tuple copy, so a slot's
+// kind and its arrays can never disagree; our lazy per-slot image re-probe
+// can pair a bundle-time kind with arrays from a rewritten row (ANALYZE
+// racing per-bind replanning), witnessed as an MCV/CORRELATION slot whose
+// numbers array is empty. Born RED at t49 (index-out-of-bounds backend
+// panic), except the correlation site which t47 3e606afd9 already guards.
+mod torn_stats_arms {
+    use super::*;
+
+    fn torn_query<'mcx>(mcx: Mcx<'mcx>, opno: u32, opfuncid: u32, constval: i32) -> Query<'mcx> {
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = TORN;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        rte.inh = false;
+        let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let konst =
+            Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(constval), false, true).unwrap();
+        let qual = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno,
+                opfuncid,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, var, konst).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+
+        let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: Some(qual) },
+        )
+        .unwrap();
+        let v = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 30,
+            ..Query::default()
+        }
+    }
+
+    fn plan_rows(mcx: Mcx<'_>, opno: u32, opfuncid: u32, constval: i32, sql: &'static str) -> f64 {
+        let stmt = planner(
+            mcx,
+            leak_q(mcx, torn_query(mcx, opno, opfuncid, constval)),
+            sql,
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let scan = stmt.planTree.unwrap().as_seq_scan().expect("SeqScan");
+        scan.scan.plan.plan_rows
+    }
+
+    #[test]
+    fn eqsel_torn_mcv_slot_falls_back_like_absent_mcv() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // var_eq_const: no (value, freq) pair exists, so the const matches no
+        // MCV entry; C's no-match arm with sumcommon = 0 over zero numbers:
+        // selec = (1 - 0 - 0) / (10 - 0) = 0.1 -> 100 of 1000 tuples.
+        assert_eq!(
+            plan_rows(mcx, INT4EQ_OP, INT4EQ_PROC, 1, "SELECT a FROM torn WHERE a = 1"),
+            100.0
+        );
+    }
+
+    #[test]
+    fn scalarltsel_torn_mcv_slot_uses_histogram_only() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // mcv_selectivity over zero pairs yields (0, 0); histogram [0,10,20,
+        // 30,40] for a < 15: histfrac = (1 + 0.5)/4 - eq_selec 1/(10-0) =
+        // 0.275; selec = (1 - 0)*0.275 + 0 -> 275 of 1000 tuples.
+        assert_eq!(
+            plan_rows(mcx, INT4_LT_OP, 66, 15, "SELECT a FROM torn WHERE a < 15"),
+            275.0
+        );
+    }
+
+    fn torn_join_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
+        let mk_rte = |relid: u32| {
+            let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            rte.rtekind = RTEKind::RTE_RELATION;
+            rte.relid = relid;
+            rte.relkind = b'r';
+            rte.rellockmode = 1;
+            rte.inh = false;
+            rte.seal()
+        };
+        let mut rtable = NodeList::make1(mcx, mk_rte(TORN)).unwrap();
+        rtable.lappend(mcx, mk_rte(TORN2)).unwrap();
+
+        let qual = {
+            let l = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            let r = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::OpExpr {
+                    opno: INT4EQ_OP,
+                    opfuncid: INT4EQ_PROC,
+                    opresulttype: 16,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, l, r).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        let rtr1 = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let rtr2 = Node::mk_range_tbl_ref(mcx, 2).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make2(mcx, rtr1, rtr2).unwrap(), quals: Some(qual) },
+        )
+        .unwrap();
+        let v = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 42,
+            ..Query::default()
+        }
+    }
+
+    #[test]
+    fn eqjoinsel_torn_mcv_slots_fall_back_to_distinct_ratio() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // eqjoinsel_inner over zero (value, freq) pairs: matchprodfreq = 0,
+        // otherfreq1 = otherfreq2 = 1; totalsel = 1/(nd - 0) = 0.1 ->
+        // 1000 * 1000 * 0.1 rows at the join.
+        let stmt = planner(
+            mcx,
+            leak_q(mcx, torn_join_query(mcx)),
+            "SELECT torn.a FROM torn, torn2 WHERE torn.a = torn2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let root = stmt.planTree.unwrap();
+        let rows = if let Some(hj) = root.as_hash_join() {
+            hj.join.plan.plan_rows
+        } else if let Some(mj) = root.as_merge_join() {
+            mj.join.plan.plan_rows
+        } else if let Some(nl) = root.as_nest_loop() {
+            nl.join.plan.plan_rows
+        } else {
+            panic!("join root expected, got {:?}", root.node_tag())
+        };
+        assert_eq!(rows, 100000.0);
+    }
+
+    #[test]
+    fn btcost_tolerates_empty_correlation_slot() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // TBL.pk carries a CORRELATION slot whose numbers array is empty (the
+        // RWREG-2 witnessed shape). btcostestimate must leave the correlation
+        // at its 0.0 default, exactly as when the slot is absent (C reads
+        // numbers[0] only under nnumbers > 0); the unique-index eq estimate
+        // is 1 row and the IndexScan choice is unchanged.
+        let stmt = planner(
+            mcx,
+            leak_q(mcx, table_query(mcx, Some(eq_qual(mcx, 1, 1)))),
+            "SELECT * FROM t WHERE pk = 1",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let iscan = stmt.planTree.unwrap().as_index_scan().expect("IndexScan");
+        assert_eq!(iscan.scan.plan.plan_rows, 1.0);
     }
 }
 
