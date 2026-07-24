@@ -4,8 +4,8 @@
 
 use ::bufmgr_seams::BufferPin;
 use ::types_core::xact::InvalidTransactionId;
-use ::types_core::{GlobalVisStateHandle, TransactionId};
 use ::types_core::xact::TransactionIdIsValid;
+use ::types_core::{GlobalVisStateHandle, TransactionId};
 use ::types_error::PgResult;
 use ::types_rel::RelationData;
 use ::types_snapshot::SnapshotData;
@@ -82,18 +82,12 @@ pub fn heap_fetch<'mcx>(
     // invariant, item_raw_unchecked contract).
     let (ptr, len) = unsafe { page.item_raw_unchecked(lp) };
     // SAFETY: pinned + share-locked page, normal line pointer.
-    let mut tuple =
-        unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, relation.rd_id) };
+    let mut tuple = unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, relation.rd_id) };
 
     let valid = hv_seam::heap_tuple_satisfies_visibility::call(&mut tuple, snapshot, pin.buffer())?;
 
     if valid {
-        predicate_seams::predicate_lock_tid::call(
-            relation,
-            tid,
-            snapshot,
-            tuple.t_data().xmin(),
-        )?;
+        predicate_seams::predicate_lock_tid::call(relation, tid, snapshot, tuple.t_data().xmin())?;
     }
     HeapCheckForSerializableConflictOut(valid, relation, &mut tuple, pin.buffer(), snapshot)?;
 
@@ -156,18 +150,12 @@ pub fn heap_fetch_dirty<'mcx>(
     // invariant, item_raw_unchecked contract).
     let (ptr, len) = unsafe { page.item_raw_unchecked(lp) };
     // SAFETY: pinned + share-locked page, normal line pointer.
-    let mut tuple =
-        unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, relation.rd_id) };
+    let mut tuple = unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, relation.rd_id) };
 
     let valid = hv_seam::heap_tuple_satisfies_dirty::call(&mut tuple, snapshot, pin.buffer())?;
 
     if valid {
-        predicate_seams::predicate_lock_tid::call(
-            relation,
-            tid,
-            snapshot,
-            tuple.t_data().xmin(),
-        )?;
+        predicate_seams::predicate_lock_tid::call(relation, tid, snapshot, tuple.t_data().xmin())?;
     }
     HeapCheckForSerializableConflictOut(valid, relation, &mut tuple, pin.buffer(), snapshot)?;
 
@@ -210,7 +198,11 @@ pub fn heap_hot_search_buffer<'p, 'mcx>(
     let mut prev_xmax: TransactionId = InvalidTransactionId;
     let mut vistest: Option<GlobalVisStateHandle> = None;
     // Not first call: the previous call returned a live tuple.
-    let mut all_dead = if want_all_dead { Some(first_call) } else { None };
+    let mut all_dead = if want_all_dead {
+        Some(first_call)
+    } else {
+        None
+    };
 
     debug_assert!(pin.block_number() == blkno);
     let page = pin.page();
@@ -299,9 +291,7 @@ pub fn heap_hot_search_buffer<'p, 'mcx>(
         }
 
         if heap_tuple.is_hot_updated() {
-            debug_assert!(
-                ItemPointerGetBlockNumber(&heap_tuple.t_data().t_ctid) == blkno
-            );
+            debug_assert!(ItemPointerGetBlockNumber(&heap_tuple.t_data().t_ctid) == blkno);
             offnum = ItemPointerGetOffsetNumber(&heap_tuple.t_data().t_ctid);
             at_chain_start = false;
             prev_xmax = HeapTupleHeaderGetUpdateXid(heap_tuple.t_data())?;

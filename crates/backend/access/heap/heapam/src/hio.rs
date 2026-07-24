@@ -13,7 +13,6 @@ use ::types_storage::bufpage::{
 };
 use ::types_tuple::{HeapTupleData, InvalidOffsetNumber, ItemPointerSet};
 
-
 // Aliases of TABLE_INSERT_* (heapam.h): options pass through tableam unmapped.
 pub const HEAP_INSERT_SKIP_FSM: i32 = 0x0002;
 pub const HEAP_INSERT_FROZEN: i32 = 0x0004;
@@ -136,7 +135,10 @@ fn RelationAddBlocks(
     // SAFETY: pinned + exclusively locked (EB_LOCK_FIRST).
     let mut page = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
     if !page.as_ref().is_new() {
-        panic!("page {first_block} of relation \"{}\" should be empty but is not", relation.name());
+        panic!(
+            "page {first_block} of relation \"{}\" should be empty but is not",
+            relation.name()
+        );
     }
     page.init(0);
     bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
@@ -210,9 +212,8 @@ pub fn RelationPutHeapTuple(
         let id: ItemIdData = r.item_id(offnum);
         let (ptr, len) = r.item_raw(id);
         // SAFETY: stored image just written at offnum; header-sized prefix.
-        let mut item = unsafe {
-            HeapTupleData::from_raw_parts(ptr, len, tuple.t_self, tuple.t_tableOid)
-        };
+        let mut item =
+            unsafe { HeapTupleData::from_raw_parts(ptr, len, tuple.t_self, tuple.t_tableOid) };
         item.t_data_mut().t_ctid = tuple.t_self;
     }
     Ok(())
@@ -255,7 +256,10 @@ pub fn RelationGetBufferForTuple<'mcx>(
     // engage seam's admission). Page read/init/lock/fill below is the
     // UNCHANGED serial protocol.
     let run_mode = bistate.as_deref().is_some_and(|bi| bi.block_run.is_some());
-    debug_assert!(!run_mode || !use_fsm, "block-run mode requires HEAP_INSERT_SKIP_FSM");
+    debug_assert!(
+        !run_mode || !use_fsm,
+        "block-run mode requires HEAP_INSERT_SKIP_FSM"
+    );
 
     if len > MaxHeapTupleSize {
         return Err(row_too_big(len));
@@ -297,7 +301,8 @@ pub fn RelationGetBufferForTuple<'mcx>(
         }
     }
     if target_block == InvalidBlockNumber && use_fsm {
-        target_block = freespace_seams::get_page_with_free_space::call(relation, target_free_space)?;
+        target_block =
+            freespace_seams::get_page_with_free_space::call(relation, target_free_space)?;
     }
     if target_block == InvalidBlockNumber && !run_mode {
         let nblocks = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
@@ -323,11 +328,9 @@ pub fn RelationGetBufferForTuple<'mcx>(
                     pin
                 }
                 Some(ob) => {
-                    let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(
-                        relation,
-                        target_block,
-                    )?)
-                    .expect("ReadBuffer returned InvalidBuffer");
+                    let pin =
+                        BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, target_block)?)
+                            .expect("ReadBuffer returned InvalidBuffer");
                     if ob < target_block {
                         bufmgr_seams::lock_buffer::call(
                             other_pin.unwrap().buffer(),
@@ -388,7 +391,9 @@ pub fn RelationGetBufferForTuple<'mcx>(
                 }
             }
 
-            let next_free = bistate.as_deref().map_or(InvalidBlockNumber, |bi| bi.next_free);
+            let next_free = bistate
+                .as_deref()
+                .map_or(InvalidBlockNumber, |bi| bi.next_free);
             if next_free != InvalidBlockNumber {
                 let bi = bistate.as_deref_mut().unwrap();
                 debug_assert!(bi.next_free <= bi.last_free);

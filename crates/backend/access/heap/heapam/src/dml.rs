@@ -7,15 +7,14 @@
 // disables it under wal_level=logical), records stay redo-compatible.
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
 use ::tableam_vocab::{
-    BulkInsertStateData, LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
-    TU_UpdateIndexes,
+    BulkInsertStateData, LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
 };
 use ::types_core::xact::{InvalidTransactionId, InvalidXLogRecPtr, TransactionIdIsValid};
 use ::types_core::{CommandId, InvalidBlockNumber, MultiXactId, TransactionId};
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_rel::{
-    RelationData, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_RELATION,
-    REPLICA_IDENTITY_FULL, REPLICA_IDENTITY_NOTHING,
+    RelationData, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_RELATION, REPLICA_IDENTITY_FULL,
+    REPLICA_IDENTITY_NOTHING,
 };
 use ::types_snapshot::SnapshotData;
 use ::types_storage::bufpage::{ItemIdData, PageMut, PageRef, SizeofHeapTupleHeader};
@@ -27,10 +26,10 @@ use ::types_storage::multixact::{
 };
 use ::types_tuple::{
     FirstOffsetNumber, HeapTupleData, ItemPointerData, ItemPointerGetBlockNumber,
-    ItemPointerGetOffsetNumber, HEAP2_XACT_MASK, HEAP_KEYS_UPDATED, HEAP_LOCK_MASK, HEAP_MOVED,
-    HEAP_UPDATED, HEAP_XACT_MASK, HEAP_XMAX_BITS, HEAP_XMAX_COMMITTED, HEAP_XMAX_EXCL_LOCK,
-    HEAP_XMAX_INVALID, HEAP_XMAX_IS_LOCKED_ONLY, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
-    HEAP_XMAX_LOCK_ONLY, HEAP_XMAX_SHR_LOCK, HEAP_COMBOCID, HEAP_LOCKED_UPGRADED,
+    ItemPointerGetOffsetNumber, HEAP2_XACT_MASK, HEAP_COMBOCID, HEAP_KEYS_UPDATED,
+    HEAP_LOCKED_UPGRADED, HEAP_LOCK_MASK, HEAP_MOVED, HEAP_UPDATED, HEAP_XACT_MASK, HEAP_XMAX_BITS,
+    HEAP_XMAX_COMMITTED, HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_INVALID, HEAP_XMAX_IS_LOCKED_ONLY,
+    HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK, HEAP_XMAX_LOCK_ONLY, HEAP_XMAX_SHR_LOCK,
 };
 use ::xloginsert_seams::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
@@ -118,8 +117,7 @@ pub fn relation_is_accessible_in_logical_decoding(rel: &RelationData<'_>) -> boo
 // "debug asserts are not witnesses" law: unmarked worker-thread inserts must
 // ERROR in release builds too.
 fn is_parallel_worker() -> bool {
-    parallel_seams::is_parallel_worker::is_installed()
-        && parallel_seams::is_parallel_worker::call()
+    parallel_seams::is_parallel_worker::is_installed() && parallel_seams::is_parallel_worker::call()
 }
 
 // W2a carve: the parallel-write capability token. C forbids ALL worker
@@ -165,11 +163,27 @@ fn xl_heap_header(hdr: &::types_tuple::HeapTupleHeaderData) -> [u8; 5] {
 
 #[inline]
 fn compute_infobits(infomask: u16, infomask2: u16) -> u8 {
-    (if (infomask & HEAP_XMAX_IS_MULTI) != 0 { XLHL_XMAX_IS_MULTI } else { 0 })
-        | (if (infomask & HEAP_XMAX_LOCK_ONLY) != 0 { XLHL_XMAX_LOCK_ONLY } else { 0 })
-        | (if (infomask & HEAP_XMAX_EXCL_LOCK) != 0 { XLHL_XMAX_EXCL_LOCK } else { 0 })
-        | (if (infomask & HEAP_XMAX_KEYSHR_LOCK) != 0 { XLHL_XMAX_KEYSHR_LOCK } else { 0 })
-        | (if (infomask2 & HEAP_KEYS_UPDATED) != 0 { XLHL_KEYS_UPDATED } else { 0 })
+    (if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        XLHL_XMAX_IS_MULTI
+    } else {
+        0
+    }) | (if (infomask & HEAP_XMAX_LOCK_ONLY) != 0 {
+        XLHL_XMAX_LOCK_ONLY
+    } else {
+        0
+    }) | (if (infomask & HEAP_XMAX_EXCL_LOCK) != 0 {
+        XLHL_XMAX_EXCL_LOCK
+    } else {
+        0
+    }) | (if (infomask & HEAP_XMAX_KEYSHR_LOCK) != 0 {
+        XLHL_XMAX_KEYSHR_LOCK
+    } else {
+        0
+    }) | (if (infomask2 & HEAP_KEYS_UPDATED) != 0 {
+        XLHL_KEYS_UPDATED
+    } else {
+        0
+    })
 }
 
 #[inline]
@@ -298,13 +312,14 @@ pub fn heap_insert(
     let pin =
         RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options, bistate, 0)?;
 
-    predicate_seams::check_for_serializable_conflict_in::call(
-        relation,
-        None,
-        InvalidBlockNumber,
-    )?;
+    predicate_seams::check_for_serializable_conflict_in::call(relation, None, InvalidBlockNumber)?;
 
-    RelationPutHeapTuple(relation, &pin, heaptup, (options & HEAP_INSERT_SPECULATIVE) != 0)?;
+    RelationPutHeapTuple(
+        relation,
+        &pin,
+        heaptup,
+        (options & HEAP_INSERT_SPECULATIVE) != 0,
+    )?;
 
     // C pins the VM page inside RelationGetBufferForTuple, before the content
     // lock, so the clear here never does IO under the lock; this pin-at-clear
@@ -388,7 +403,8 @@ pub fn heap_insert(
             )],
         )?;
         // SAFETY: pinned + exclusively locked since RelationGetBufferForTuple.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         pm.set_lsn(recptr);
     }
 
@@ -409,8 +425,17 @@ pub fn heap_insert(
 }
 
 /// `simple_heap_insert`.
-pub fn simple_heap_insert(relation: &RelationData<'_>, tup: &mut HeapTupleData<'_>) -> PgResult<()> {
-    heap_insert(relation, tup, xact_seams::get_current_command_id::call(true)?, 0, None)
+pub fn simple_heap_insert(
+    relation: &RelationData<'_>,
+    tup: &mut HeapTupleData<'_>,
+) -> PgResult<()> {
+    heap_insert(
+        relation,
+        tup,
+        xact_seams::get_current_command_id::call(true)?,
+        0,
+        None,
+    )
 }
 
 pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
@@ -579,8 +604,7 @@ pub fn heap_multi_insert<'mcx>(
         }
         let mut nthispage = 1usize;
         while ndone + nthispage < ntuples {
-            let need =
-                ((heaptuples[ndone + nthispage].t_len as usize + 7) & !7) + save_free_space;
+            let need = ((heaptuples[ndone + nthispage].t_len as usize + 7) & !7) + save_free_space;
             if pin.page().heap_free_space() < need {
                 break;
             }
@@ -724,8 +748,7 @@ pub fn heap_multi_insert<'mcx>(
                 InvalidXLogRecPtr,
                 &vmb,
                 InvalidTransactionId,
-                visibilitymap::VISIBILITYMAP_ALL_VISIBLE
-                    | visibilitymap::VISIBILITYMAP_ALL_FROZEN,
+                visibilitymap::VISIBILITYMAP_ALL_VISIBLE | visibilitymap::VISIBILITYMAP_ALL_FROZEN,
             )?;
         }
 
@@ -921,7 +944,9 @@ pub(crate) fn MultiXactIdWait(
     oper: ::types_storage::lock::XLTW_Oper,
     remaining: Option<&mut i32>,
 ) -> PgResult<()> {
-    Do_MultiXactIdWait(multi, status, infomask, false, relation, ctid, oper, remaining, false)?;
+    Do_MultiXactIdWait(
+        multi, status, infomask, false, relation, ctid, oper, remaining, false,
+    )?;
     Ok(())
 }
 
@@ -1178,8 +1203,7 @@ fn log_heap_new_cid(relation: &RelationData<'_>, tup: &HeapTupleData<'_>) -> PgR
             combocid_seams::heap_tuple_header_get_cmax::call(hdr),
             hdr.raw_command_id(),
         )
-    } else if (hdr.t_infomask & HEAP_XMAX_INVALID) != 0
-        || HEAP_XMAX_IS_LOCKED_ONLY(hdr.t_infomask)
+    } else if (hdr.t_infomask & HEAP_XMAX_INVALID) != 0 || HEAP_XMAX_IS_LOCKED_ONLY(hdr.t_infomask)
     {
         (hdr.raw_command_id(), invalid, invalid)
     } else {
@@ -1212,7 +1236,12 @@ fn erase_owned(mut t: heaptuple::HeapTuple<'_>) -> HeapTupleData<'static> {
     let ht = t.as_tuple_mut();
     // SAFETY: image owned by the caller-held context (page_tuple model).
     let tup = unsafe {
-        HeapTupleData::from_raw_parts(ht.header_ptr().cast_mut(), ht.t_len, ht.t_self, ht.t_tableOid)
+        HeapTupleData::from_raw_parts(
+            ht.header_ptr().cast_mut(),
+            ht.t_len,
+            ht.t_self,
+            ht.t_tableOid,
+        )
     };
     // Drop is heap_freetuple; the image is bulk-freed with the context.
     core::mem::forget(t);
@@ -1253,8 +1282,15 @@ fn extract_replica_identity(
     if replident == REPLICA_IDENTITY_FULL {
         if tp.has_external() {
             let ctx = ::mcx::MemoryContext::new("ExtractReplicaIdentity");
-            let tup = erase_owned(heaptoast_seams::toast_flatten_tuple::call(ctx.mcx(), tp, desc)?);
-            return Ok(Some(OldKeyTuple { tup, _ctx: Some(ctx) }));
+            let tup = erase_owned(heaptoast_seams::toast_flatten_tuple::call(
+                ctx.mcx(),
+                tp,
+                desc,
+            )?);
+            return Ok(Some(OldKeyTuple {
+                tup,
+                _ctx: Some(ctx),
+            }));
         }
         // SAFETY: aliases the caller's tuple image, valid while its pin holds.
         let tup = unsafe {
@@ -1296,11 +1332,16 @@ fn extract_replica_identity(
 
     let mut tup = erase_owned(heaptuple::heap_form_tuple(cmcx, desc, &values, &nulls)?);
     if tup.has_external() {
-        tup = erase_owned(heaptoast_seams::toast_flatten_tuple::call(cmcx, &tup, desc)?);
+        tup = erase_owned(heaptoast_seams::toast_flatten_tuple::call(
+            cmcx, &tup, desc,
+        )?);
     }
     drop(values);
     drop(nulls);
-    Ok(Some(OldKeyTuple { tup, _ctx: Some(ctx) }))
+    Ok(Some(OldKeyTuple {
+        tup,
+        _ctx: Some(ctx),
+    }))
 }
 
 /// `heap_delete` core. Concurrent-updater wait lanes past the self-update
@@ -1359,8 +1400,12 @@ pub fn heap_delete(
             let infomask = tp.t_data().t_infomask;
 
             if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
-                let conf =
-                    DoesMultiXactIdConflict(xwait, infomask, LockTupleMode::LockTupleExclusive, true)?;
+                let conf = DoesMultiXactIdConflict(
+                    xwait,
+                    infomask,
+                    LockTupleMode::LockTupleExclusive,
+                    true,
+                )?;
                 if conf.conflict {
                     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
 
@@ -1487,7 +1532,8 @@ pub fn heap_delete(
     let mut all_visible_cleared = false;
     {
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         page_set_prunable(&mut pm, xid);
         if pm.as_ref().is_all_visible() {
             all_visible_cleared = true;
@@ -1567,7 +1613,8 @@ pub fn heap_delete(
             )],
         )?;
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         pm.set_lsn(recptr);
     }
 
@@ -1653,7 +1700,8 @@ pub fn heap_lock_tuple(
     // qualification loop; the outer loop is that arc.
     let result = loop {
         let result = 'l3: loop {
-            let mut result = hv_seam::heap_tuple_satisfies_update::call(&mut tp, cid, pin.buffer())?;
+            let mut result =
+                hv_seam::heap_tuple_satisfies_update::call(&mut tp, cid, pin.buffer())?;
 
             if result == TM_Result::TM_Invisible {
                 break 'l3 TM_Result::TM_Invisible;
@@ -1707,9 +1755,12 @@ pub fn heap_lock_tuple(
                         let already = match mode {
                             LockTupleMode::LockTupleKeyShare => true,
                             LockTupleMode::LockTupleShare => {
-                                HEAP_XMAX_IS_SHR_LOCKED(infomask) || HEAP_XMAX_IS_EXCL_LOCKED(infomask)
+                                HEAP_XMAX_IS_SHR_LOCKED(infomask)
+                                    || HEAP_XMAX_IS_EXCL_LOCKED(infomask)
                             }
-                            LockTupleMode::LockTupleNoKeyExclusive => HEAP_XMAX_IS_EXCL_LOCKED(infomask),
+                            LockTupleMode::LockTupleNoKeyExclusive => {
+                                HEAP_XMAX_IS_EXCL_LOCKED(infomask)
+                            }
                             LockTupleMode::LockTupleExclusive => {
                                 HEAP_XMAX_IS_EXCL_LOCKED(infomask)
                                     && (infomask2 & HEAP_KEYS_UPDATED) != 0
@@ -1752,7 +1803,8 @@ pub fn heap_lock_tuple(
                             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                             relock_tp!();
                             if !hv_seam::heap_tuple_header_is_only_locked::call(tp.t_data())?
-                                && (((tp.t_data().t_infomask2 & HEAP_KEYS_UPDATED) != 0) || !updated)
+                                && (((tp.t_data().t_infomask2 & HEAP_KEYS_UPDATED) != 0)
+                                    || !updated)
                             {
                                 continue 'l3;
                             }
@@ -1760,7 +1812,8 @@ pub fn heap_lock_tuple(
                         }
                     }
                     LockTupleMode::LockTupleShare => {
-                        if HEAP_XMAX_IS_LOCKED_ONLY(infomask) && !HEAP_XMAX_IS_EXCL_LOCKED(infomask) {
+                        if HEAP_XMAX_IS_LOCKED_ONLY(infomask) && !HEAP_XMAX_IS_EXCL_LOCKED(infomask)
+                        {
                             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                             relock_tp!();
                             if !HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask)
@@ -1775,7 +1828,10 @@ pub fn heap_lock_tuple(
                         if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
                             if !DoesMultiXactIdConflict(xwait, infomask, mode, false)?.conflict {
                                 // no conflict; restart if xmax moved meanwhile
-                                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                                bufmgr_seams::lock_buffer::call(
+                                    pin.buffer(),
+                                    BUFFER_LOCK_EXCLUSIVE,
+                                )?;
                                 relock_tp!();
                                 if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
                                     || tp.t_data().xmax_raw() != xwait
@@ -1821,7 +1877,13 @@ pub fn heap_lock_tuple(
                     break 'l3 result;
                 } else if require_sleep {
                     if !skip_tuple_lock
-                        && !heap_acquire_tuplock(relation, tid, mode, wait_policy, &mut have_tuple_lock)?
+                        && !heap_acquire_tuplock(
+                            relation,
+                            tid,
+                            mode,
+                            wait_policy,
+                            &mut have_tuple_lock,
+                        )?
                     {
                         bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                         relock_tp!();
@@ -1831,9 +1893,7 @@ pub fn heap_lock_tuple(
                         let status = get_mxact_status_for_lock(mode, false)?;
                         // we only ever lock tuples here, never update them
                         if status >= MultiXactStatus::MultiXactStatusNoKeyUpdate {
-                            return Err(crate::elog_error(
-                                "invalid lock mode in heap_lock_tuple",
-                            ));
+                            return Err(crate::elog_error("invalid lock mode in heap_lock_tuple"));
                         }
                         match wait_policy {
                             LockWaitPolicy::LockWaitBlock => {
@@ -1898,7 +1958,8 @@ pub fn heap_lock_tuple(
                             }
                         }
                     }
-                    if follow_updates && !HEAP_XMAX_IS_LOCKED_ONLY(infomask) && tp.t_self != t_ctid {
+                    if follow_updates && !HEAP_XMAX_IS_LOCKED_ONLY(infomask) && tp.t_self != t_ctid
+                    {
                         let res = heap_lock_updated_tuple(
                             relation,
                             infomask,
@@ -2068,7 +2129,9 @@ pub fn simple_heap_delete(relation: &RelationData<'_>, tid: &ItemPointerData) ->
     )?;
     match result {
         TM_Result::TM_Ok => Ok(()),
-        TM_Result::TM_SelfModified => Err(Box::new(PgError::error("tuple already updated by self"))),
+        TM_Result::TM_SelfModified => {
+            Err(Box::new(PgError::error("tuple already updated by self")))
+        }
         TM_Result::TM_Updated => Err(Box::new(PgError::error("tuple concurrently updated"))),
         TM_Result::TM_Deleted => Err(Box::new(PgError::error("tuple concurrently deleted"))),
         _ => Err(Box::new(PgError::error(std::format!(
@@ -2079,10 +2142,7 @@ pub fn simple_heap_delete(relation: &RelationData<'_>, tid: &ItemPointerData) ->
 
 /// `heap_finish_speculative`: replace the speculative token in t_ctid with a
 /// real self-pointing ctid.
-pub fn heap_finish_speculative(
-    relation: &RelationData<'_>,
-    tid: &ItemPointerData,
-) -> PgResult<()> {
+pub fn heap_finish_speculative(relation: &RelationData<'_>, tid: &ItemPointerData) -> PgResult<()> {
     let block = ItemPointerGetBlockNumber(tid);
     let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
         .expect("ReadBuffer returned InvalidBuffer");
@@ -2118,7 +2178,8 @@ pub fn heap_finish_speculative(
             )],
         )?;
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         pm.set_lsn(recptr);
     }
 
@@ -2129,10 +2190,7 @@ pub fn heap_finish_speculative(
 
 /// `heap_abort_speculative`: super-delete — xmin goes invalid so the tuple is
 /// immediately dead to everyone, including our own transaction.
-pub fn heap_abort_speculative(
-    relation: &RelationData<'_>,
-    tid: &ItemPointerData,
-) -> PgResult<()> {
+pub fn heap_abort_speculative(relation: &RelationData<'_>, tid: &ItemPointerData) -> PgResult<()> {
     let xid = xact_seams::get_current_transaction_id::call()?;
 
     let block = ItemPointerGetBlockNumber(tid);
@@ -2153,7 +2211,9 @@ pub fn heap_abort_speculative(
     }
     // Toast chunks of a speculative tuple carry no token themselves.
     if !(catalog_seams::is_toast_relation::call(relation) || tp.t_data().is_speculative()) {
-        return Err(Box::new(PgError::error("attempted to kill a non-speculative tuple")));
+        return Err(Box::new(PgError::error(
+            "attempted to kill a non-speculative tuple",
+        )));
     }
     debug_assert!(!tp.t_data().is_heap_only());
 
@@ -2162,16 +2222,15 @@ pub fn heap_abort_speculative(
         // prune hint is TransactionXmin, clamped to relfrozenxid.
         let txmin = snapmgr_seams::transaction_xmin::call();
         debug_assert!(TransactionIdIsValid(txmin));
-        let prune_xid = if ::types_core::xact::TransactionIdPrecedes(
-            txmin,
-            relation.rd_rel.relfrozenxid,
-        ) {
-            relation.rd_rel.relfrozenxid
-        } else {
-            txmin
-        };
+        let prune_xid =
+            if ::types_core::xact::TransactionIdPrecedes(txmin, relation.rd_rel.relfrozenxid) {
+                relation.rd_rel.relfrozenxid
+            } else {
+                txmin
+            };
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         page_set_prunable(&mut pm, prune_xid);
     }
 
@@ -2206,7 +2265,8 @@ pub fn heap_abort_speculative(
             )],
         )?;
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         pm.set_lsn(recptr);
     }
 
@@ -2388,7 +2448,9 @@ pub fn heap_update(
 
     // Indexless relations take the C empty-bitmap path (HOT when same-page).
     let attr_bitmaps = if relation.rd_rel.relhasindex {
-        Some(relcache_seams::relation_get_index_attr_bitmap::call(relation.rd_id)?)
+        Some(relcache_seams::relation_get_index_attr_bitmap::call(
+            relation.rd_id,
+        )?)
     } else {
         None
     };
@@ -2452,7 +2514,8 @@ pub fn heap_update(
     let mut result = 'l2: loop {
         checked_lockers = false;
         locker_remains = false;
-        let mut result = hv_seam::heap_tuple_satisfies_update::call(&mut oldtup, cid, pin.buffer())?;
+        let mut result =
+            hv_seam::heap_tuple_satisfies_update::call(&mut oldtup, cid, pin.buffer())?;
         debug_assert!(result != TM_Result::TM_BeingModified || wait);
 
         if result == TM_Result::TM_Invisible {
@@ -2460,8 +2523,7 @@ pub fn heap_update(
             // invisible_tuple("update") before delivery.
             let td = oldtup.t_data();
             let dbg_xmin = td.xmin_raw();
-            let dbg_is_cur =
-                xact_seams::transaction_id_is_current_transaction_id::call(dbg_xmin);
+            let dbg_is_cur = xact_seams::transaction_id_is_current_transaction_id::call(dbg_xmin);
             let dbg_committed =
                 transam_seams::transaction_id_did_commit::call(dbg_xmin).unwrap_or(false);
             let dbg = std::format!(
@@ -2649,8 +2711,7 @@ pub fn heap_update(
         hdr.set_xmax(xmax_new_tuple);
     }
 
-    let (cid, iscombo) =
-        combocid_seams::heap_tuple_header_adjust_cmax::call(oldtup.t_data(), cid)?;
+    let (cid, iscombo) = combocid_seams::heap_tuple_header_adjust_cmax::call(oldtup.t_data(), cid)?;
 
     let need_toast = if relation.rd_rel.relkind != RELKIND_RELATION
         && relation.rd_rel.relkind != RELKIND_MATVIEW
@@ -2758,7 +2819,9 @@ pub fn heap_update(
                 Some(&oldtup),
                 0,
             )?;
-            toasted.as_ref().map_or(newtup.t_len, |t| t.as_tuple().t_len)
+            toasted
+                .as_ref()
+                .map_or(newtup.t_len, |t| t.as_tuple().t_len)
         } else {
             newtup.t_len
         };
@@ -2857,7 +2920,8 @@ pub fn heap_update(
     }
     if !same_page {
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         pm.set_full();
     }
 
@@ -2866,7 +2930,8 @@ pub fn heap_update(
 
     {
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         page_set_prunable(&mut pm, xid);
     }
 
@@ -2931,7 +2996,8 @@ pub fn heap_update(
             pm.set_lsn(recptr);
         }
         // SAFETY: pin + exclusive lock held.
-        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         pm.set_lsn(recptr);
     }
 
@@ -3005,7 +3071,9 @@ pub fn simple_heap_update(
     )?;
     match result {
         TM_Result::TM_Ok => Ok(()),
-        TM_Result::TM_SelfModified => Err(Box::new(PgError::error("tuple already updated by self"))),
+        TM_Result::TM_SelfModified => {
+            Err(Box::new(PgError::error("tuple already updated by self")))
+        }
         TM_Result::TM_Updated => Err(Box::new(PgError::error("tuple concurrently updated"))),
         TM_Result::TM_Deleted => Err(Box::new(PgError::error("tuple concurrently deleted"))),
         _ => Err(Box::new(PgError::error(std::format!(
@@ -3107,7 +3175,10 @@ fn datum_is_equal(v1: ::datum::Datum, v2: ::datum::Datum, typbyval: bool, typlen
         -1 => {
             // SAFETY: byref varlena datums off live tuples.
             let (s1, s2) = unsafe {
-                (::types_tuple::varatt::varsize_any(p1), ::types_tuple::varatt::varsize_any(p2))
+                (
+                    ::types_tuple::varatt::varsize_any(p1),
+                    ::types_tuple::varatt::varsize_any(p2),
+                )
             };
             if s1 != s2 {
                 return false;

@@ -296,7 +296,10 @@ fn bottomup_nblocksfavorable(
     nblocksfavorable
 }
 
-fn bottomup_sort_and_shrink_cmp(g1: &IndexDeleteCounts, g2: &IndexDeleteCounts) -> core::cmp::Ordering {
+fn bottomup_sort_and_shrink_cmp(
+    g1: &IndexDeleteCounts,
+    g2: &IndexDeleteCounts,
+) -> core::cmp::Ordering {
     use core::cmp::Ordering;
     // npromisingtids desc (caller bucketed to powers of two)
     match g2.npromisingtids.cmp(&g1.npromisingtids) {
@@ -346,7 +349,10 @@ fn bottomup_sort_and_shrink<'mcx>(
             blockgroups.last_mut().expect("group started").ntids += 1;
         }
         if promising {
-            blockgroups.last_mut().expect("group started").npromisingtids += 1;
+            blockgroups
+                .last_mut()
+                .expect("group started")
+                .npromisingtids += 1;
         }
     }
 
@@ -355,8 +361,7 @@ fn bottomup_sort_and_shrink<'mcx>(
         if group.npromisingtids <= 4 {
             group.npromisingtids = 4;
         } else {
-            group.npromisingtids =
-                (group.npromisingtids as u32).next_power_of_two() as i16;
+            group.npromisingtids = (group.npromisingtids as u32).next_power_of_two() as i16;
         }
     }
 

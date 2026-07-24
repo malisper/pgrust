@@ -4,11 +4,11 @@
 //! TBM iterator + bitmap ride in as parameters instead of
 //! rs_base.st.rs_tbmiterator (the iterator carries no bitmap back-pointer).
 
-use tidbitmap::{TbmIterator, TIDBitmap, TBM_MAX_TUPLES_PER_PAGE};
+use tidbitmap::{TIDBitmap, TbmIterator, TBM_MAX_TUPLES_PER_PAGE};
 
 use crate::{
-    heap_hot_search_buffer, store_ctup_into_slot, HeapScanDescData,
-    HeapCheckForSerializableConflictOut,
+    heap_hot_search_buffer, store_ctup_into_slot, HeapCheckForSerializableConflictOut,
+    HeapScanDescData,
 };
 use ::bufmgr_seams::BufferPin;
 use ::mcx::Mcx;
@@ -72,7 +72,10 @@ pub fn heap_scan_bitmap_batch_store<'mcx>(
     let targoffset = scan.rs_vistuples[i as usize];
     let block = scan.rs_cblock;
     let rd_id = scan.rs_base.rs_rd.rd_id;
-    let pin = scan.rs_cbuf.as_ref().expect("bitmap scan positioned without a buffer");
+    let pin = scan
+        .rs_cbuf
+        .as_ref()
+        .expect("bitmap scan positioned without a buffer");
     let page = pin.page();
     let lp = page.item_id(targoffset);
     debug_assert!(lp.is_normal());
@@ -122,7 +125,13 @@ fn bitmap_next_block(
         } else {
             0
         };
-        break (tbmres.blockno, tbmres.lossy, tbmres.recheck, noffsets, offsets);
+        break (
+            tbmres.blockno,
+            tbmres.lossy,
+            tbmres.recheck,
+            noffsets,
+            offsets,
+        );
     };
 
     *recheck = res_recheck;
@@ -134,7 +143,10 @@ fn bitmap_next_block(
         scan.rs_strategy.clone(),
     )?;
     scan.rs_cbuf = BufferPin::adopt(buf);
-    let pin = scan.rs_cbuf.as_ref().expect("read_buffer returned an invalid buffer");
+    let pin = scan
+        .rs_cbuf
+        .as_ref()
+        .expect("read_buffer returned an invalid buffer");
 
     pruneheap_seams::heap_page_prune_opt::call(&scan.rs_base.rs_rd, pin.buffer())?;
 
@@ -183,8 +195,11 @@ fn bitmap_next_block(
                     relation.rd_id,
                 )
             };
-            let valid =
-                crate::hv_seam::heap_tuple_satisfies_visibility::call(&mut loctup, snapshot, buffer)?;
+            let valid = crate::hv_seam::heap_tuple_satisfies_visibility::call(
+                &mut loctup,
+                snapshot,
+                buffer,
+            )?;
             if valid {
                 scan.rs_vistuples[ntup as usize] = offnum;
                 ntup += 1;

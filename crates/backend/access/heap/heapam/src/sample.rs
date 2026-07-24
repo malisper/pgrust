@@ -3,8 +3,8 @@
 //! as the SampleScanDriver trait object (tsmapi.h's open extension point).
 
 use crate::{
-    check_for_interrupts, heap_prepare_pagescan, pgstat_count_heap_getnext,
-    store_ctup_into_slot, HeapCheckForSerializableConflictOut, HeapScanDescData,
+    check_for_interrupts, heap_prepare_pagescan, pgstat_count_heap_getnext, store_ctup_into_slot,
+    HeapCheckForSerializableConflictOut, HeapScanDescData,
 };
 use ::bufmgr_seams::BufferPin;
 use ::mcx::Mcx;
@@ -93,11 +93,18 @@ pub fn heap_scan_sample_next_tuple<'mcx>(
             .rs_snapshot
             .as_deref()
             .expect("sample scan requires an MVCC snapshot");
-        let pin = scan.rs_cbuf.as_ref().expect("sample scan positioned without a buffer");
+        let pin = scan
+            .rs_cbuf
+            .as_ref()
+            .expect("sample scan positioned without a buffer");
         let buffer = pin.buffer();
         // Non-pagemode visibility checks run under the content lock; found
         // tuples stay good under the pin alone after unlock (as C).
-        let lock = if pagemode { None } else { Some(pin.lock_share()?) };
+        let lock = if pagemode {
+            None
+        } else {
+            Some(pin.lock_share()?)
+        };
         let page = pin.page();
         let all_visible = page.is_all_visible() && !snapshot.takenDuringRecovery;
         let maxoffset = page.max_offset_number();
@@ -131,7 +138,13 @@ pub fn heap_scan_sample_next_tuple<'mcx>(
             };
             // In pagemode heap_prepare_pagescan already did this per tuple.
             if !pagemode {
-                HeapCheckForSerializableConflictOut(visible, relation, &mut loctup, buffer, snapshot)?;
+                HeapCheckForSerializableConflictOut(
+                    visible,
+                    relation,
+                    &mut loctup,
+                    buffer,
+                    snapshot,
+                )?;
             }
             if visible {
                 found = Some((ptr, len, tupoffset));
@@ -182,7 +195,11 @@ fn sample_heap_tuple_visible(
             .rs_snapshot
             .as_deref()
             .expect("sample scan requires an MVCC snapshot");
-        let buffer = scan.rs_cbuf.as_ref().expect("visibility check without a buffer").buffer();
+        let buffer = scan
+            .rs_cbuf
+            .as_ref()
+            .expect("visibility check without a buffer")
+            .buffer();
         crate::hv_seam::heap_tuple_satisfies_visibility::call(loctup, snapshot, buffer)
     }
 }

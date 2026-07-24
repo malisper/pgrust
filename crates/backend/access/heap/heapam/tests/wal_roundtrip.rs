@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use heapam::{heap_delete, heap_insert};
 use heaptuple::heap_form_tuple;
-use mcx::{MemoryContext, Mcx, PgVec};
+use mcx::{Mcx, MemoryContext, PgVec};
 use tableam_vocab::{TM_FailureData, TM_Result};
 use transam_xlog::control_file::{
     FirstNormalUnloggedLSN, FLOATFORMAT_VALUE, PG_CONTROL_FILE_SIZE, PG_CONTROL_VERSION,
@@ -21,13 +21,11 @@ use transam_xlog::control_file::{
 };
 use transam_xlog::{XLogRecPtrToBytePos, DB_IN_PRODUCTION, RECOVERY_STATE_DONE};
 use types_core::{
-    BackendType, BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, Oid, TimeLineID,
-    XLogRecPtr, XLogSegNo, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    BackendType, BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, Oid, TimeLineID, XLogRecPtr,
+    XLogSegNo, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
 };
 use types_error::PgResult;
-use types_rel::{
-    FormData_pg_class, LockInfoData, LockRelId, RelationData, RELKIND_RELATION,
-};
+use types_rel::{FormData_pg_class, LockInfoData, LockRelId, RelationData, RELKIND_RELATION};
 use types_snapshot::{SnapshotData, SnapshotType};
 use types_storage::bufpage::PageRef;
 use types_storage::RelFileLocator;
@@ -259,7 +257,9 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    RelationData { rd_locator: Cell::new(RLOC), rd_smgr: Default::default(),
+    RelationData {
+        rd_locator: Cell::new(RLOC),
+        rd_smgr: Default::default(),
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -269,7 +269,10 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: REL_OID, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: REL_OID,
+                dbId: 5,
+            },
         },
         rd_rel,
         rd_att: int4_tupdesc(mcx),
@@ -282,13 +285,16 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         pgstat_enabled: Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     }
 }
 
@@ -421,8 +427,12 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
     let ctl = transam_xlog::ctl::XLogCtl();
     ctl.InsertTimeLineID.store(1, Relaxed);
     ctl.PrevTimeLineID.store(1, Relaxed);
-    ctl.Insert.CurrBytePos.store(XLogRecPtrToBytePos(end_of_log), Relaxed);
-    ctl.Insert.PrevBytePos.store(XLogRecPtrToBytePos(prev_rec), Relaxed);
+    ctl.Insert
+        .CurrBytePos
+        .store(XLogRecPtrToBytePos(end_of_log), Relaxed);
+    ctl.Insert
+        .PrevBytePos
+        .store(XLogRecPtrToBytePos(prev_rec), Relaxed);
     ctl.Insert.fullPageWrites.store(true, Relaxed);
     ctl.Insert.RedoRecPtr.store(prev_rec, Relaxed);
     ctl.RedoRecPtr.store(prev_rec, Relaxed);
@@ -445,10 +455,7 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
     // Three committed-xid inserts, one aborted-xid insert.
     let mut tids = Vec::new();
     for (i, val) in [41i32, 42, 43, 44].iter().enumerate() {
-        CURRENT_XID.store(
-            if i == 3 { ABORTED_XID } else { COMMITTED_XID },
-            Relaxed,
-        );
+        CURRENT_XID.store(if i == 3 { ABORTED_XID } else { COMMITTED_XID }, Relaxed);
         let mut tup =
             heap_form_tuple(mcx, &tupdesc, &[::datum::Datum::from_i32(*val)], &[false]).unwrap();
         heap_insert(&rel, tup.as_tuple_mut(), CID, 0, None).unwrap();
@@ -466,7 +473,11 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
 
     with_fake(|f| {
         assert!(f.pins.iter().all(|p| *p == 0), "leaked pins: {:?}", f.pins);
-        assert!(f.locks.iter().all(|l| *l == 0), "leaked locks: {:?}", f.locks);
+        assert!(
+            f.locks.iter().all(|l| *l == 0),
+            "leaked locks: {:?}",
+            f.locks
+        );
     });
 
     // Page bytes == the C reference page (pd_lsn compared separately).
@@ -496,7 +507,9 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
     let reader_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("reader")));
     let mut reader = xlogreader::XLogReaderState::allocate(reader_ctx.mcx(), SEG).unwrap();
     reader.system_identifier = SYS_ID;
-    let mut routine = SegFileRead { wal_dir: dir.join("pg_wal") };
+    let mut routine = SegFileRead {
+        wal_dir: dir.join("pg_wal"),
+    };
 
     let first_rec = end_of_log + 40; // long page header on the fresh segment
     reader.XLogBeginRead(first_rec);
@@ -559,14 +572,20 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
     let buf = bufmgr_seams::read_buffer::call(&rel, 0).unwrap();
     let snap = mvcc_snapshot(mcx);
     let mut t1 = page0_tuple(1);
-    assert!(heapam_visibility_seams::heap_tuple_satisfies_visibility::call(&mut t1, &snap, buf)
-        .unwrap());
+    assert!(
+        heapam_visibility_seams::heap_tuple_satisfies_visibility::call(&mut t1, &snap, buf)
+            .unwrap()
+    );
     let mut t2 = page0_tuple(2);
-    assert!(!heapam_visibility_seams::heap_tuple_satisfies_visibility::call(&mut t2, &snap, buf)
-        .unwrap());
+    assert!(
+        !heapam_visibility_seams::heap_tuple_satisfies_visibility::call(&mut t2, &snap, buf)
+            .unwrap()
+    );
     let mut t4 = page0_tuple(4);
-    assert!(!heapam_visibility_seams::heap_tuple_satisfies_visibility::call(&mut t4, &snap, buf)
-        .unwrap());
+    assert!(
+        !heapam_visibility_seams::heap_tuple_satisfies_visibility::call(&mut t4, &snap, buf)
+            .unwrap()
+    );
     bufmgr_seams::release_buffer::call(buf).unwrap();
 
     let _ = std::fs::remove_dir_all(&dir);
