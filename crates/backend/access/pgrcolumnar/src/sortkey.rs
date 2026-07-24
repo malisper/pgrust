@@ -5,9 +5,17 @@
 //! string whose unsigned lexicographic (memcmp) order equals the
 //! `CbIngestSort` comparator order (signed-int order per kind — the
 //! sign-flipped big-endian trick). The identity chain this preserves:
-//! memcmp key order == datum comparator order == (measured, load-r2 wave 4:
-//! byte-identical part bodies, zero datum ties) the frozen-bank GNU
+//! memcmp key order == datum comparator order == the frozen-bank GNU
 //! `LC_ALL=C` recipe order.
+//!
+//! GL-LOADDET-1 CORRECTION: this header used to claim "zero datum ties" as
+//! part of that measured chain. It is FALSE on the analytics key set, and it
+//! was load-bearing for the wrong reason — a tie-free key pins the output
+//! permutation all by itself, so every byte-identity gate built on a tie-free
+//! fixture passed while the load was in fact non-deterministic on tied keys.
+//! Key ties are ordinary; what makes them safe is the deterministic run
+//! partition + input-major merge order + arrival-order batch sort
+//! (`PGRUST_PARALLEL_COPY_SORT_DETERMINISTIC`), NOT their absence.
 //!
 //! Int-class kinds only (fixed width). `TextC` keys have no fixed-width
 //! encoding here — the parallel load-sort refuses them at admission
