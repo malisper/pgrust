@@ -401,6 +401,48 @@ fn read_miss_then_warm_hit() {
 }
 
 #[test]
+fn privref_new_pin_entry_is_independently_droppable() {
+    // GL-ASSERTMASK-1 A1 — the born-RED, at the accounting layer.
+    //
+    // Deliberately NOT routed through PinBuffer_Locked: that function guards
+    // this very state with `debug_assert!(GetPrivateRefCount(b) == 0)`, so a
+    // test that drives it is inert (worse, red) in the dev tier — which is the
+    // same profile-blindness this lane exists to fix. Nothing below trips a
+    // debug assertion, so this bar is live in BOTH the dev and the shipped
+    // profiles.
+    const B: Buffer = 31337;
+    assert_eq!(GetPrivateRefCount(B), 0, "stale private entry from another test");
+
+    // Pin #1 — PinBuffer's path; its caller added one shared refcount.
+    privref::ReservePrivateRefCountEntry();
+    assert_eq!(privref::track_pin(B), 0);
+
+    // Pin #2 — PinBuffer_Locked's path. Its caller has ALREADY added a second
+    // shared refcount unconditionally (the bump is fused into the header
+    // unlock), so the private entry it takes must be droppable on its own.
+    privref::ReservePrivateRefCountEntry();
+    privref::new_pin_entry(B);
+
+    // track_unpin returns true exactly when the caller must release one shared
+    // refcount. Two shared bumps therefore have to produce two of them; the
+    // merged-counter shape produced only one and leaked the other forever.
+    let drops =
+        i32::from(privref::track_unpin(B)) + i32::from(privref::track_unpin(B));
+    assert_eq!(
+        drops, 2,
+        "two shared bumps produced {drops} shared drop(s): the buffer keeps a \
+         shared pin forever, never becomes replaceable, and InvalidateBuffer \
+         spins on it without bound"
+    );
+    assert_eq!(GetPrivateRefCount(B), 0, "no private entry should remain");
+}
+
+// End-to-end companion on the real shared header word. Gated to the shipped
+// profiles because it DOES drive PinBuffer_Locked on an already-pinned buffer,
+// which is the state its own `debug_assert!` forbids — i.e. the defect exists
+// only where the assertion does not, which is precisely the thesis.
+#[cfg(not(debug_assertions))]
+#[test]
 fn pin_buffer_locked_pairs_each_shared_bump_with_its_own_drop() {
     // GL-ASSERTMASK-1 A1 — born-RED for the assertion-masked shared-refcount
     // leak. `PinBuffer_Locked` adds a shared refcount UNCONDITIONALLY (the
