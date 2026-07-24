@@ -1006,9 +1006,14 @@ impl RunReader {
     }
 }
 
-/// Heap entry: min-heap by (key, run index) — the run index tiebreak makes
-/// the merge deterministic even under key ties (none exist on the
-/// benchmark key set; determinism is still a gate-friendly property).
+/// Heap entry: min-heap by (key, run index) — the run index breaks key ties.
+///
+/// GL-LOADDET-1: this comment used to add "(none exist on the benchmark key
+/// set)". They do exist, and the run index only makes the merge deterministic
+/// if the run ORDER is itself deterministic — which it was not, because the
+/// registry was appended to in worker-completion order. The caller
+/// (`merge_sorted_runs`) now orders the inputs by input coordinate, so this
+/// tiebreak is input-major; see `PGRUST_PARALLEL_COPY_SORT_DETERMINISTIC`.
 struct HeapEntry {
     key: Vec<u8>,
     run: usize,
