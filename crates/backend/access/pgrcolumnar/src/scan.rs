@@ -2246,6 +2246,13 @@ impl<'mcx> CbScanDescData<'mcx> {
                             lazy,
                             lazy_ensure,
                             lazy_ensure_all,
+                            // Witness law (F-R1-1): every dict build puts
+                            // the images in ONE owned region — build_dict's
+                            // arena / the mmap payload, or DictLazy's single
+                            // backing buf (bytes exist post-ensure, which
+                            // whole-dict consumers already run first per the
+                            // lazy-seam contract).
+                            contig: true,
                         },
                     },
                 );
@@ -2419,6 +2426,13 @@ impl<'mcx> CbScanDescData<'mcx> {
                             lazy,
                             lazy_ensure,
                             lazy_ensure_all,
+                            // Witness law (F-R1-1): every dict build puts
+                            // the images in ONE owned region — build_dict's
+                            // arena / the mmap payload, or DictLazy's single
+                            // backing buf (bytes exist post-ensure, which
+                            // whole-dict consumers already run first per the
+                            // lazy-seam contract).
+                            contig: true,
                         },
                     },
                 );
@@ -2529,6 +2543,8 @@ impl<'mcx> CbScanDescData<'mcx> {
                 lazy,
                 lazy_ensure,
                 lazy_ensure_all,
+                // Witness law (F-R1-1): see the dict-lane fill sites.
+                contig: true,
             },
         })
     }

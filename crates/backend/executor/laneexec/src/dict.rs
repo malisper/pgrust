@@ -582,9 +582,13 @@ fn eval_dict_lane(
             // false return leaves the memo cleared and the per-entry loop
             // (identical verdicts, identical first error) runs instead.
             let swept = match &cl.kernel {
-                Some(LikeKernel::Contains(f)) => {
-                    fill_memo_contains_sweep(f, dict, cl.op.negated(), &mut cl.memo)
-                }
+                Some(LikeKernel::Contains(f)) => fill_memo_contains_sweep(
+                    f,
+                    dict,
+                    lane.table.contig,
+                    cl.op.negated(),
+                    &mut cl.memo,
+                ),
                 _ => false,
             };
             if swept {
@@ -686,27 +690,33 @@ fn eval_dict_lane_lazy(
 
 /// Contains-kernel memo fill by ONE memmem sweep over the dictionary arena
 /// (q22fix2; the `eval_contains_blob` shape over dict entries instead of row
-/// values). Engages only when the dict's images prove (a) strictly ascending
-/// pointers — one arena, writer layout order — and (b) all inline (1B-short /
-/// 4B-U): the per-entry loop raises `non_inline_lane_datum` on ANY non-inline
-/// entry (eager fill), so the sweep must refuse whenever one exists anywhere,
-/// not only when it owns a hit. Under (a)+(b) the span between consecutive
-/// image starts is readable (same allocation) and the hit→entry mapping is
-/// the blob pass's: a hit fully inside entry e's payload marks e and resumes
-/// at entry e+1's image start; header/padding/straddle hits resume one byte
+/// values). Engages only when (0) the PUBLISHER witnessed the images'
+/// readability (`contig` — SoaDictTable's whole-span witness; ascending
+/// pointers alone never establish one allocation: separate allocations
+/// ascend by accident and the sweep then reads the foreign gap between
+/// them — GL-TESTFIX-1 F-R1-1, ASan heap-buffer-overflow), and the dict's
+/// images prove (a) strictly ascending pointers — writer layout order —
+/// and (b) all inline (1B-short / 4B-U): the per-entry loop raises
+/// `non_inline_lane_datum` on ANY non-inline entry (eager fill), so the
+/// sweep must refuse whenever one exists anywhere, not only when it owns a
+/// hit. Under (0)+(a)+(b) the span between consecutive image starts is
+/// readable (same allocation) and the hit→entry mapping is the blob
+/// pass's: a hit fully inside entry e's payload marks e and resumes at
+/// entry e+1's image start; header/padding/straddle hits resume one byte
 /// later. An entry is marked iff its payload contains the needle — exactly
-/// the per-entry kernel verdict — and `memo[e] = matched != negated` matches
-/// `eval_pred`'s kernel arm. True = memo fully written (len == dict.len());
-/// false = memo untouched beyond a possible resize, caller must clear + run
-/// the per-entry loop.
+/// the per-entry kernel verdict — and `memo[e] = matched != negated`
+/// matches `eval_pred`'s kernel arm. True = memo fully written (len ==
+/// dict.len()); false = memo untouched beyond a possible resize, caller
+/// must clear + run the per-entry loop.
 fn fill_memo_contains_sweep(
     f: &SubstrFinder,
     dict: &[Datum],
+    contig: bool,
     negated: bool,
     memo: &mut Vec<bool>,
 ) -> bool {
     let n = dict.len();
-    if n == 0 {
+    if n == 0 || !contig {
         return false;
     }
     // Ascending + all-inline proof pass (pointer compares + one header byte
@@ -724,8 +734,11 @@ fn fill_memo_contains_sweep(
     // Span end: the last (highest) image's payload end.
     let last = inline_varlena_payload(dict[n - 1]).expect("proven inline above");
     let len = last.as_ptr() as usize + last.len() - base;
-    // SAFETY: proven above — ascending images inside one live arena
-    // allocation; [base, base+len) is readable for the dict's lifetime.
+    // SAFETY: the publisher's `contig` witness guarantees every image lies
+    // in ONE readable allocation, and the ascending pass above placed
+    // [base, base+len) between the first and last image of that
+    // allocation; readable for the dict's lifetime (staged-window
+    // contract).
     let hay = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
     let nlen = f.needle_len();
     memo.clear();
@@ -962,7 +975,8 @@ mod tests {
             offs.iter().map(|&o| Datum::from_usize(blob.as_ptr() as usize + o)).collect();
         let f = SubstrFinder::new(needle.to_vec());
         let mut memo = Vec::new();
-        fill_memo_contains_sweep(&f, &dict, negated, &mut memo).then_some(memo)
+        // contig: the helper's blob IS one Vec allocation.
+        fill_memo_contains_sweep(&f, &dict, true, negated, &mut memo).then_some(memo)
     }
 
     #[test]
@@ -1001,7 +1015,20 @@ mod tests {
         dict.swap(0, 1);
         let f = SubstrFinder::new(b"a".to_vec());
         let mut memo = Vec::new();
-        assert!(!fill_memo_contains_sweep(&f, &dict, false, &mut memo));
+        assert!(!fill_memo_contains_sweep(&f, &dict, true, false, &mut memo));
+    }
+
+    /// F-R1-1 pin: WITHOUT the publisher witness the sweep must refuse, no
+    /// matter how contiguous the images happen to look — ascending pointers
+    /// across separate allocations are an accident, not a readability proof.
+    #[test]
+    fn dict_sweep_refuses_without_contig_witness() {
+        let (blob, offs) = blob_of(&[b"aaa", b"bbb"]);
+        let dict: Vec<Datum> =
+            offs.iter().map(|&o| Datum::from_usize(blob.as_ptr() as usize + o)).collect();
+        let f = SubstrFinder::new(b"a".to_vec());
+        let mut memo = Vec::new();
+        assert!(!fill_memo_contains_sweep(&f, &dict, false, false, &mut memo));
     }
 
     #[test]

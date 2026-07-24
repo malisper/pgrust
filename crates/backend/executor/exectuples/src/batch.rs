@@ -327,6 +327,18 @@ pub struct SoaDictTable {
     pub lazy: *const (),
     pub lazy_ensure: Option<unsafe fn(*const (), u32)>,
     pub lazy_ensure_all: Option<unsafe fn(*const ())>,
+    /// Dict-images readability witness (GL-TESTFIX-1 F-R1-1; the dict-tier
+    /// twin of [`SoaTextSpan`]'s publisher law): true = the PUBLISHER
+    /// guarantees every entry's varlena image lies inside ONE readable
+    /// allocation it owns (the decode arena / the mmap'd part payload), so
+    /// whole-span readers (the contains-memo memmem sweep) may form one
+    /// slice over [first image, last image end) after re-verifying
+    /// ascending+inline. Ascending pointers alone can NEVER establish this
+    /// — separate allocations ascend by accident, and a sweep over the gap
+    /// reads foreign memory (ASan heap-buffer-overflow, F-R1-1). Only a
+    /// fill that owns the backing buffer may set it; false = per-entry
+    /// reads only.
+    pub contig: bool,
 }
 
 impl SoaDictTable {

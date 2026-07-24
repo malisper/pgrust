@@ -485,6 +485,9 @@ impl DictFixture {
                 lazy: core::ptr::null(),
                 lazy_ensure: None,
                 lazy_ensure_all: None,
+                // Separate per-image Vec allocations: NO whole-span
+                // readability witness (F-R1-1).
+                contig: false,
             },
         }
     }
