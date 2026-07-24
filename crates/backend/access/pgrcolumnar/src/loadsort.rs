@@ -233,19 +233,32 @@ impl RowCodec {
 
 // ---- bounded in-memory batch -> sorted run ---------------------------------
 
-/// Bounded (key, row) accumulator. `sort()` orders entries by memcmp key —
-/// the total order proven equal to the recipe order (no ties on the
-/// benchmark key set; the identity gate stays the enforcement).
+/// Bounded (key, row) accumulator. `sort()` orders entries by memcmp key.
+///
+/// GL-LOADDET-1: key-equal entries are NOT byte-equal entries (the payload
+/// columns differ), so their relative order is an output byte surface. A
+/// `stable` batch breaks those ties by ARRIVAL order; the legacy batch leaves
+/// them to pdqsort's pivot walk over whatever the batch happened to hold.
 pub struct SortBatch {
     key_w: usize,
     arena: Vec<u8>,
     /// (entry offset, entry len incl. key) in arena.
     index: Vec<(u64, u32)>,
+    /// GL-LOADDET-1: break key ties by arrival order (see `sort`).
+    stable: bool,
 }
 
 impl SortBatch {
+    /// Legacy (key-only, unstable) tie order. Kept as the default so the
+    /// determinism kill switch reproduces the pre-GL-LOADDET-1 byte image
+    /// exactly, and so the DST/unit corpora keep their recorded orders.
     pub fn new(key_w: usize) -> SortBatch {
-        SortBatch { key_w, arena: Vec::new(), index: Vec::new() }
+        SortBatch { key_w, arena: Vec::new(), index: Vec::new(), stable: false }
+    }
+
+    /// GL-LOADDET-1: arrival-order tie break — the deterministic batch.
+    pub fn new_stable(key_w: usize) -> SortBatch {
+        SortBatch { stable: true, ..SortBatch::new(key_w) }
     }
 
     pub fn bytes(&self) -> usize {
@@ -272,11 +285,23 @@ impl SortBatch {
         &arena[e.0 as usize..e.0 as usize + key_w]
     }
 
+    /// Sort the batch into key order.
+    ///
+    /// GL-LOADDET-1 (`stable`): the arena offset is monotone in push order
+    /// (every push appends), so `(key, offset)` is a TOTAL order that
+    /// reproduces a stable sort without storing a second index — the tie
+    /// compare is reached only on an actual key tie.
     pub fn sort(&mut self) {
         let (arena, kw) = (&self.arena, self.key_w);
-        self.index.sort_unstable_by(|a, b| {
-            Self::key_of(arena, kw, *a).cmp(Self::key_of(arena, kw, *b))
-        });
+        if self.stable {
+            self.index.sort_unstable_by(|a, b| {
+                Self::key_of(arena, kw, *a).cmp(Self::key_of(arena, kw, *b)).then(a.0.cmp(&b.0))
+            });
+        } else {
+            self.index.sort_unstable_by(|a, b| {
+                Self::key_of(arena, kw, *a).cmp(Self::key_of(arena, kw, *b))
+            });
+        }
     }
 
     /// Write the (sorted) batch as one run and clear the batch for reuse.
@@ -1986,6 +2011,64 @@ mod tests {
         }
         assert_eq!(p_lens, ref_lens, "prefetch V2 row lengths diverge");
         assert_eq!(p_arena, ref_arena, "prefetch V2 row bytes diverge");
+    }
+
+    /// GL-LOADDET-1: the stable batch orders key-tied entries by ARRIVAL, and
+    /// the legacy batch demonstrably does not — a determinism knob whose two
+    /// arms cannot be told apart would be a knob over nothing.
+    #[test]
+    fn stable_batch_breaks_key_ties_by_arrival_and_legacy_does_not() {
+        const KW: usize = 4;
+        const N: u32 = 4096;
+        // 8 distinct key values, INTERLEAVED across arrival order, so the sort
+        // genuinely has to move entries (an all-equal comparator leaves
+        // pdqsort's input untouched and would witness nothing). The payload
+        // records arrival position, so the expected stable answer is exact.
+        let key_of_i = |i: u32| -> [u8; KW] { (i.wrapping_mul(2654435761) % 8).to_be_bytes() };
+        let drain = |mut b: SortBatch| -> Vec<(u32, u32)> {
+            for i in 0..N {
+                b.push(&key_of_i(i), &i.to_be_bytes());
+            }
+            b.sort();
+            let (arena, kw) = (&b.arena, b.key_w);
+            b.index
+                .iter()
+                .map(|e| {
+                    let s = e.0 as usize;
+                    let k = u32::from_be_bytes(arena[s..s + kw].try_into().unwrap());
+                    let p = u32::from_be_bytes(
+                        arena[s + kw..s + e.1 as usize].try_into().unwrap(),
+                    );
+                    (k, p)
+                })
+                .collect()
+        };
+        // Expected stable answer: key-major, arrival-minor.
+        let mut want: Vec<(u32, u32)> = (0..N)
+            .map(|i| (u32::from_be_bytes(key_of_i(i)), i))
+            .collect();
+        want.sort_by_key(|&(k, p)| (k, p));
+
+        let stable = drain(SortBatch::new_stable(KW));
+        assert_eq!(stable, want, "stable batch did not order key-major / arrival-minor");
+        // The legacy arm is deterministic for a fixed input but NOT arrival
+        // order — that difference is the whole reason the bank bytes move.
+        let legacy = drain(SortBatch::new(KW));
+        assert_ne!(
+            legacy, want,
+            "legacy batch happened to reproduce arrival order — this test can no longer \
+             witness the difference the knob exists to make (pick a harder permutation)"
+        );
+        // Both arms must still be correctly key-ordered.
+        for arm in [&stable, &legacy] {
+            assert!(arm.windows(2).all(|w| w[0].0 <= w[1].0), "key order broken");
+        }
+        // Whatever the order, no entry may be lost or duplicated.
+        let mut a = stable.clone();
+        let mut b = legacy.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "the two arms disagree on the MULTISET, not just the order");
     }
 
     #[test]
