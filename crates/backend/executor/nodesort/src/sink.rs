@@ -34,7 +34,7 @@ use std::collections::BinaryHeap;
 /// scan-shaped anyway. Admission (inc-2) refuses larger bounds.
 pub const TOPN_MAX_BOUND: usize = 1 << 16;
 
-const ROWREF_BITS: u32 = 48;
+pub const ROWREF_BITS: u32 = 48;
 /// Largest encodable rowref: `refsort_encode`'s (row_group << 32) | row
 /// address space (48 bits, monotone in physical position).
 pub const TOPN_MAX_ROWREF: u64 = (1 << ROWREF_BITS) - 1;
@@ -341,6 +341,61 @@ pub fn topn_merge<T: Ord + Copy>(sealed: &[Vec<T>], bound: usize) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GL-ASSERTMASK-1 R1 — the row-ref ENVELOPE, locked.
+    ///
+    /// `TopnEntry` packs `(tier << 112) | (word << 48) | rowref`, so the
+    /// row ref gets exactly [`ROWREF_BITS`] bits and the only thing standing
+    /// between an oversized ref and a silently corrupted sort key is a
+    /// `debug_assert!` that no shipped profile compiles. The mints must
+    /// therefore refuse anything this pack cannot represent; the columnar
+    /// scan's `staged_rowref_base` does (`rg > u16::MAX => None`) and its
+    /// sibling `window_ref` does not — see the letter's R1 row.
+    ///
+    /// This test locks the arithmetic both mints' refusal threshold rests on,
+    /// with real `assert!`s so it is release-effective. It is a boundary bar,
+    /// NOT a born-RED for the mint fix: driving `window_ref` past the
+    /// threshold needs a relation with 2^16 row groups (> 2^32 rows), which
+    /// no fixture in this tree can build.
+    #[test]
+    fn rowref_envelope_boundary_is_exactly_where_the_mints_refuse() {
+        // A row group holds at most RG_ROWS = 2^16 rows, so an rg-local row
+        // index spans 0..=65535 and the pack is (rg << 32) | row.
+        const MAX_ROW: u64 = (1 << 16) - 1;
+        const MAX_ADMISSIBLE_RG: u64 = u16::MAX as u64;
+        let pack = |rg: u64, row: u64| (rg << 32) | row;
+
+        // Every address the mints admit must survive the carrier intact.
+        for rg in [0, 1, 2, MAX_ADMISSIBLE_RG - 1, MAX_ADMISSIBLE_RG] {
+            for row in [0, 1, MAX_ROW / 2, MAX_ROW] {
+                let rr = pack(rg, row);
+                assert!(rr <= TOPN_MAX_ROWREF, "admissible (rg={rg}, row={row}) does not fit");
+                let e = TopnEntry::encode(-42, false, false, false, rr);
+                assert_eq!(e.rowref(), rr, "carrier lost an admissible ref ({rg}, {row})");
+                let clean = TopnEntry::encode(-42, false, false, false, 0);
+                assert_eq!(
+                    e.raw() >> ROWREF_BITS,
+                    clean.raw() >> ROWREF_BITS,
+                    "an admissible ref disturbed the key image ({rg}, {row})"
+                );
+            }
+        }
+
+        // And the FIRST address past the threshold must not — this is the
+        // damage the mints exist to prevent, and it is why the threshold sits
+        // at u16::MAX rather than anywhere else.
+        let over = pack(MAX_ADMISSIBLE_RG + 1, 0);
+        assert!(over > TOPN_MAX_ROWREF, "the refusal threshold is not the carrier's limit");
+        let e = TopnEntry::encode(-42, false, false, false, over);
+        assert_ne!(e.rowref(), over, "expected the carrier to truncate past its envelope");
+        assert_eq!(e.rowref(), 0, "the first unrepresentable ref aliases (rg=0, row=0)");
+        let clean = TopnEntry::encode(-42, false, false, false, 0);
+        assert_ne!(
+            e.raw() >> ROWREF_BITS,
+            clean.raw() >> ROWREF_BITS,
+            "expected the overflow to corrupt the key image"
+        );
+    }
 
     /// Deterministic PRNG (splitmix64) — no rand dependency, reproducible
     /// failures.

@@ -2619,11 +2619,22 @@ impl<'mcx> CbScanDescData<'mcx> {
 
     /// Staged-window base for ref-carrying consumers: (row group, rg-global
     /// row index of staged row 0); ref = base + i resolves via `gather_row`
-    /// for the life of the scan (the Part mmap). None = nothing staged.
+    /// for the life of the scan (the Part mmap). None = nothing staged, or
+    /// the part exceeds the consumers' 48-bit rowref envelope.
+    ///
+    /// The envelope refusal is the SAME bound `staged_rowref_base` applies,
+    /// and for the same reason: every consumer of this pair packs it as
+    /// `(rg << 32) | row` into a 48-bit carrier — the sort-heap entry's
+    /// `TopnEntry` field (`nodesort::sink::TOPN_MAX_ROWREF`) and the
+    /// tuplesort's six `mt_padding` bytes. At `>= 2^16` row groups the pack
+    /// silently overruns both: the high rg bits land on the sort key's low
+    /// bits and the address itself is masked back down, so the top-N would
+    /// return the wrong rows in the wrong order with no error. Refusing here
+    /// hands the consumer its existing demote backstop instead. Never
+    /// reached on the analytics banks (2^16 row groups is > 2^32 rows).
     pub fn window_ref(&self) -> Option<(u32, u32)> {
-        (self.rg_claimed && self.decoded && self.staged_rows > 0).then(|| {
-            (self.rg as u32, (self.granule * GRANULE_ROWS + self.staged_lo) as u32)
-        })
+        (self.rg_claimed && self.decoded && self.staged_rows > 0 && self.rg <= u16::MAX as usize)
+            .then(|| (self.rg as u32, (self.granule * GRANULE_ROWS + self.staged_lo) as u32))
     }
 
     /// Materialize rg-global `row` of row group `rg` into the slot under the
