@@ -405,13 +405,57 @@ pub fn mdzeroextend(
     let r = mdzeroextend_inner(rlocator, st, forknum, blocknum, nblocks, skip_fsync);
     if !is_temp(rlocator) {
         match &r {
-            Ok(()) => {
-                nblocks_cache::extend_to(rlocator.locator, forknum, blocknum + nblocks as BlockNumber)
-            }
+            Ok(()) => match cache_extent_after(blocknum, nblocks) {
+                Some(end) => nblocks_cache::extend_to(rlocator.locator, forknum, end),
+                // Not representable as a block count: do exactly what the
+                // error arm does and forget the size, so the next read
+                // measures the real file. Never publish a guessed value here —
+                // extend_to() only ever RAISES, so a too-high entry is
+                // permanent until something invalidates it.
+                None => nblocks_cache::invalidate(rlocator.locator, forknum),
+            },
             Err(_) => nblocks_cache::invalidate(rlocator.locator, forknum),
         }
     }
     r
+}
+
+/// The relation's block count after a successful `mdzeroextend` of `nblocks`
+/// blocks starting at `blocknum`, or `None` when that is not a representable
+/// block count — in which case no cached size may be published.
+///
+/// Checked rather than wrapping, and the reason is specific. `nblocks` is C's
+/// `int` (`md.c` `mdzeroextend`), so the obvious `blocknum + nblocks as
+/// BlockNumber` wraps whenever `nblocks` is negative. The dangerous direction
+/// is `blocknum + nblocks < 0`, where it wraps **upward**: `(0, -1)` lands
+/// exactly on `InvalidBlockNumber`, and `(5, -10)` on 4294967291. Because
+/// `nblocks_cache::extend_to` only ever raises the cached size, publishing one
+/// of those means every later size read reports a relation *longer than its
+/// file*, i.e. past-EOF blocks served as valid. C cannot express this defect:
+/// it keeps no cross-backend size cache, so out-of-contract `nblocks` there is
+/// simply a loop that does not run.
+///
+/// Two further notes worth keeping next to the arithmetic:
+///
+/// * `overflow-checks` would **not** have caught the dangerous cases. They stay
+///   inside `u32` (`0 + 0xFFFFFFFF == 0xFFFFFFFF`), so a trapping build traps
+///   only the *harmless* downward cases such as `(1000, -1) -> 999`. Checked
+///   arithmetic on a wider signed type is the only thing that sees them.
+/// * `nblocks <= 0` is out of contract (`mdzeroextend_inner` asserts
+///   `nblocks > 0`), and this returns `None` for it rather than the technically
+///   truthful `blocknum`, so the contract stays "Some only for a well-formed
+///   extension" and the caller's response to anything else is uniform.
+fn cache_extent_after(blocknum: BlockNumber, nblocks: i32) -> Option<BlockNumber> {
+    if nblocks <= 0 {
+        return None;
+    }
+    let end = i64::from(blocknum) + i64::from(nblocks);
+    // mdzeroextend_inner rejects this range itself; keep the helper total so it
+    // is correct read on its own.
+    if end >= i64::from(InvalidBlockNumber) {
+        return None;
+    }
+    Some(end as BlockNumber)
 }
 
 fn mdzeroextend_inner(
@@ -1564,6 +1608,46 @@ mod tests {
             md_relpath(&temp),
             format!("1663|5|16384|{me}|{}", ForkNumber::FSM_FORKNUM as i32)
         );
+    }
+
+    // GL-MDWRAP-1. The bar sits on `cache_extent_after` and on `wrapping_add`,
+    // NOT on a call into mdzeroextend, and that placement is deliberate:
+    // mdzeroextend_inner asserts `nblocks > 0`, so any fixture that drove the
+    // out-of-contract input through it would be correct in the shipped profiles
+    // and RED at the test profile (which inherits dev, where assertions live).
+    // Everything asserted here means the same thing under `cargo test` and
+    // `cargo test --release`, so the bar can neither break the gate at one tier
+    // nor go inert at the other.
+    #[test]
+    fn zeroextend_cache_extent_is_checked_not_wrapping() {
+        // Well-formed extensions still publish the new block count.
+        assert_eq!(cache_extent_after(0, 1), Some(1));
+        assert_eq!(cache_extent_after(100, 64), Some(164));
+        assert_eq!(cache_extent_after(RELSEG_SIZE, 1), Some(RELSEG_SIZE + 1));
+
+        // Out of contract => no cached size is published at all, so the caller
+        // invalidates and the next read measures the real file.
+        for (b, n) in [(0u32, -1i32), (0, -64), (5, -10), (1000, -1), (0, 0), (7, 0)] {
+            assert_eq!(cache_extent_after(b, n), None, "blocknum={b} nblocks={n}");
+        }
+
+        // Representability ceiling (mdzeroextend_inner errors in this range, so
+        // the cache must not be handed a value from either arm).
+        assert_eq!(cache_extent_after(InvalidBlockNumber - 1, 1), None);
+        assert_eq!(cache_extent_after(InvalidBlockNumber - 2, 1), Some(InvalidBlockNumber - 1));
+
+        // What the shipped profiles computed BEFORE the fix, written with
+        // wrapping_add so it denotes the same value at every profile. Two of
+        // these exceed `blocknum` -- a relation size ABOVE the real file length,
+        // i.e. past-EOF blocks served as valid -- and the first is exactly the
+        // InvalidBlockNumber sentinel.
+        assert_eq!(0u32.wrapping_add(-1i32 as u32), InvalidBlockNumber);
+        assert!(0u32.wrapping_add(-64i32 as u32) > 0);
+        assert!(5u32.wrapping_add(-10i32 as u32) > 5);
+        // And the reason `overflow-checks` was never going to catch this: the
+        // dangerous cases stay inside u32, so a trapping build traps only the
+        // HARMLESS downward one.
+        assert_eq!(1000u32.wrapping_add(-1i32 as u32), 999);
     }
 
     #[test]
