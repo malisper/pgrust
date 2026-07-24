@@ -8,8 +8,8 @@ use ::types_rel::RelationData;
 use ::types_storage::bufpage::{PageMut, PageRef};
 use ::types_storage::lock::{InplaceUpdateTupleLock, XLTW_Oper};
 use ::types_tuple::{
-    HeapTupleData, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, HEAP_XMAX_IS_MULTI,
-    HEAP_XMAX_IS_KEYSHR_LOCKED,
+    HeapTupleData, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber,
+    HEAP_XMAX_IS_KEYSHR_LOCKED, HEAP_XMAX_IS_MULTI,
 };
 
 use ::bufmgr_seams::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
@@ -142,9 +142,8 @@ pub fn heap_inplace_update_and_unlock(
     }
 
     // SAFETY: tuple's image is t_len readable bytes.
-    let src = unsafe {
-        core::slice::from_raw_parts(tuple.header_ptr().add(new_hoff as usize), newlen)
-    };
+    let src =
+        unsafe { core::slice::from_raw_parts(tuple.header_ptr().add(new_hoff as usize), newlen) };
 
     let (inval_messages, relcache_init_file_inval): (
         ::mcx::PgVec<'_, SharedInvalidationMessage>,
@@ -180,8 +179,7 @@ pub fn heap_inplace_update_and_unlock(
 
     if relation_needs_wal(relation) {
         let mut xlrec = [0u8; MIN_SIZE_OF_HEAP_INPLACE];
-        xlrec[0..2]
-            .copy_from_slice(&ItemPointerGetOffsetNumber(&tuple.t_self).to_ne_bytes());
+        xlrec[0..2].copy_from_slice(&ItemPointerGetOffsetNumber(&tuple.t_self).to_ne_bytes());
         xlrec[4..8].copy_from_slice(&init_small::globals::MyDatabaseId().to_ne_bytes());
         xlrec[8..12].copy_from_slice(&init_small::globals::MyDatabaseTableSpace().to_ne_bytes());
         xlrec[12] = relcache_init_file_inval as u8;

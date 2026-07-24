@@ -16,10 +16,10 @@ use ::tableam_vocab::{
     SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TEMP_SNAPSHOT, SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
 };
 use ::types_core::xact::TransactionIdIsValid;
+use ::types_core::xact::{InvalidTransactionId, TransactionIdPrecedes};
 use ::types_core::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, MultiXactId, OffsetNumber, TransactionId,
 };
-use ::types_core::xact::{InvalidTransactionId, TransactionIdPrecedes};
 use ::types_error::{PgError, PgResult};
 use ::types_fmgr::LocalFcinfo;
 use ::types_rel::{Relation, RelationData};
@@ -27,13 +27,13 @@ use ::types_scan::scankey::{ScanKeyData, SK_ISNULL};
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsForward};
 use ::types_slot::SlotData;
 use ::types_snapshot::{HTSV_Result, IsMVCCSnapshot, SnapshotData, SnapshotType, XidVisMemo};
-use ::types_storage::bufpage::{MaxHeapTuplesPerPage, MaxOffsetNumber, PageRef};
 use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
+use ::types_storage::bufpage::{MaxHeapTuplesPerPage, MaxOffsetNumber, PageRef};
 use ::types_storage::multixact::ISUPDATE_from_mxstatus;
 use ::types_tuple::{
     heap_getattr, FirstOffsetNumber, HeapTupleData, HeapTupleHeaderData, ItemPointerCompare,
-    ItemPointerData, ItemPointerGetBlockNumberNoCheck, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI,
-    HEAP_XMAX_IS_LOCKED_ONLY,
+    ItemPointerData, ItemPointerGetBlockNumberNoCheck, HEAP_XMAX_INVALID, HEAP_XMAX_IS_LOCKED_ONLY,
+    HEAP_XMAX_IS_MULTI,
 };
 
 use heapam_visibility_seams as hv_seam;
@@ -47,10 +47,17 @@ pub mod index_delete;
 pub mod inplace;
 pub mod sample;
 pub(crate) mod wal;
+pub use dml::{
+    heap_abort_speculative, heap_delete, heap_finish_speculative, heap_insert, heap_lock_tuple,
+    heap_multi_insert, heap_update, relation_is_accessible_in_logical_decoding,
+    relation_is_logically_logged, relation_needs_wal, simple_heap_delete, simple_heap_insert,
+    simple_heap_update, ParallelWriteGuard,
+};
 pub use fetch::{heap_fetch, heap_fetch_dirty, heap_get_latest_tid, heap_hot_search_buffer};
+pub use hio::{
+    GetBulkInsertState, RelationGetBufferForTuple, RelationPutHeapTuple, ReleaseBulkInsertStatePin,
+};
 pub use index_delete::heap_index_delete_tuples;
-pub use dml::{heap_abort_speculative, heap_delete, heap_finish_speculative, heap_insert, heap_lock_tuple, heap_multi_insert, heap_update, relation_is_accessible_in_logical_decoding, relation_is_logically_logged, relation_needs_wal, simple_heap_delete, simple_heap_insert, simple_heap_update, ParallelWriteGuard};
-pub use hio::{GetBulkInsertState, RelationGetBufferForTuple, RelationPutHeapTuple, ReleaseBulkInsertStatePin};
 pub use inplace::{heap_inplace_lock, heap_inplace_unlock, heap_inplace_update_and_unlock};
 #[cfg(test)]
 mod tests;
@@ -213,9 +220,7 @@ pub fn heap_tuple_needs_eventual_freeze(tuple: &HeapTupleHeaderData) -> bool {
     } else if TransactionIdIsNormal(tuple.xmax_raw()) {
         return true;
     }
-    if (tuple.t_infomask & ::types_tuple::HEAP_MOVED) != 0
-        && TransactionIdIsNormal(tuple.xvac())
-    {
+    if (tuple.t_infomask & ::types_tuple::HEAP_MOVED) != 0 && TransactionIdIsNormal(tuple.xvac()) {
         return true;
     }
     false
@@ -380,11 +385,7 @@ pub fn heap_setscanlimits(
 /// start position is the runtime's claim, not a scan-order heuristic), so
 /// `SO_ALLOW_SYNC` is cleared — which also satisfies the
 /// `heap_setscanlimits` invariant this function inherits.
-pub fn heap_set_block_range(
-    scan: &mut HeapScanDescData<'_>,
-    b0: u64,
-    b1: u64,
-) -> PgResult<()> {
+pub fn heap_set_block_range(scan: &mut HeapScanDescData<'_>, b0: u64, b1: u64) -> PgResult<()> {
     if scan.rs_base.rs_parallel.is_some() {
         return Err(elog_error(
             "heap: block-range positioning on a parallel scan".to_string(),
@@ -562,14 +563,21 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
                 true
             } else if mvcc {
                 hv_seam::heap_tuple_satisfies_mvcc_page::call(
-                    &mut loctup, snapshot, buffer, &mut memo,
+                    &mut loctup,
+                    snapshot,
+                    buffer,
+                    &mut memo,
                 )?
             } else {
                 hv_seam::heap_tuple_satisfies_visibility::call(&mut loctup, snapshot, buffer)?
             };
             if CHECK_SERIALIZABLE {
                 HeapCheckForSerializableConflictOut(
-                    valid, relation, &mut loctup, buffer, snapshot,
+                    valid,
+                    relation,
+                    &mut loctup,
+                    buffer,
+                    snapshot,
                 )?;
             }
             valid
@@ -594,7 +602,10 @@ pub fn heap_prepare_pagescan(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
 
     pruneheap_seams::heap_page_prune_opt::call(
         &scan.rs_base.rs_rd,
-        scan.rs_cbuf.as_ref().expect("pagescan without buffer").buffer(),
+        scan.rs_cbuf
+            .as_ref()
+            .expect("pagescan without buffer")
+            .buffer(),
     )?;
 
     let relation = &scan.rs_base.rs_rd;
@@ -712,7 +723,11 @@ fn parallel_next_block(scan: &mut HeapScanDescData<'_>, first: bool) -> PgResult
         .expect("parallel scan without rs_parallelworkerdata");
 
     if first {
-        ::tableam_vocab::table_block_parallelscan_startblock_init(&scan.rs_base.rs_rd, worker, pbscan)?;
+        ::tableam_vocab::table_block_parallelscan_startblock_init(
+            &scan.rs_base.rs_rd,
+            worker,
+            pbscan,
+        )?;
     }
     ::tableam_vocab::table_block_parallelscan_nextpage(&scan.rs_base.rs_rd, worker, pbscan)
 }
@@ -778,11 +793,7 @@ fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
     Ok(())
 }
 
-fn heapgettup_start_page(
-    page: &PageRef<'_>,
-    linesleft: &mut i32,
-    lineoff: &mut OffsetNumber,
-) {
+fn heapgettup_start_page(page: &PageRef<'_>, linesleft: &mut i32, lineoff: &mut OffsetNumber) {
     *linesleft = page.max_offset_number() as i32 - FirstOffsetNumber as i32 + 1;
     *lineoff = FirstOffsetNumber;
 }
@@ -1034,8 +1045,7 @@ fn heapgettup_pagemode<'mcx>(scan: &mut HeapScanDescData<'mcx>) -> PgResult<()> 
         // SAFETY: rs_cpage is the image of the page pinned by rs_cbuf
         // (pagemode_next_page set it; every pin move nulls it), so it stays
         // valid across this walk. No call edge on the per-tuple path.
-        let page: PageRef<'_> =
-            unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
+        let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
 
         // No content lock: rs_vistuples entries stay good under the pin.
         while linesleft > 0 {
@@ -1251,7 +1261,10 @@ pub fn heap_batch_complete_deform_soa<'mcx>(
     sel: &[u64],
 ) {
     debug_assert!(!scan.rs_cpage.is_null() || soa.nrows() == 0);
-    debug_assert!(soa.nrows() <= scan.rs_ntuples, "completion outside the staged batch");
+    debug_assert!(
+        soa.nrows() <= scan.rs_ntuples,
+        "completion outside the staged batch"
+    );
     let atts: &[_] = &scan.rs_base.rs_rd.rd_att.compact_attrs;
     exectuples::soa_deform_columns_set(soa, plan, atts, cols, Some(sel));
 }
@@ -1408,7 +1421,13 @@ pub fn heap_rescan(
         } else {
             scan.rs_base.rs_flags &= !SO_ALLOW_SYNC;
         }
-        if allow_pagemode && scan.rs_base.rs_snapshot.as_deref().is_some_and(IsMVCCSnapshot) {
+        if allow_pagemode
+            && scan
+                .rs_base
+                .rs_snapshot
+                .as_deref()
+                .is_some_and(IsMVCCSnapshot)
+        {
             scan.rs_base.rs_flags |= SO_ALLOW_PAGEMODE;
         } else {
             scan.rs_base.rs_flags &= !SO_ALLOW_PAGEMODE;
@@ -1531,9 +1550,8 @@ fn store_ctup_into_slot<'mcx>(
         )
     };
     // SAFETY: same pinned image as rs_ctup; ExecStoreBufferHeapTuple takes its own pin (C contract).
-    let tuple = unsafe {
-        HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
-    };
+    let tuple =
+        unsafe { HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid) };
     exectuples::exec_store_buffer_heap_tuple(slot, mcx, tuple, pin.buffer());
 }
 

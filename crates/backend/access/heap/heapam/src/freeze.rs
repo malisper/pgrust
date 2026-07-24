@@ -54,9 +54,29 @@ const FRM_RETURN_IS_XID: u16 = 0x0004;
 const FRM_RETURN_IS_MULTI: u16 = 0x0008;
 const FRM_MARK_COMMITTED: u16 = 0x0010;
 
-// Fixed member scratch: single-backend milestone keeps member counts tiny;
-// overflow is a loud panic, never a truncation.
-const MAX_FREEZE_MEMBERS: usize = 256;
+// C palloc's the member arrays at exactly the length the multixact reports --
+// `palloc(length * sizeof(MultiXactMember))` in GetMultiXactIdMembers
+// (multixact.c:1569) and `palloc(sizeof(MultiXactMember) * nmembers)` in
+// FreezeMultiXactId (heapam.c:6881) -- and imposes NO cap at any level. There
+// is no MaxMultiXactMembers in PostgreSQL: MULTIXACT_MEMBERS_PER_PAGE is a page
+// granularity, not a per-multixact limit, and a multixact's members are a
+// contiguous run in the global 32-bit offset space that freely spans pages.
+//
+// So the member count is bounded only by how many distinct in-progress lockers
+// accumulate on one tuple, and MultiXactIdExpand retains every member whose xid
+// is still in progress. That is reachable, and it is reachable WITHOUT high
+// concurrency: prepared transactions keep a dummy PGPROC in the procarray, so
+// max_prepared_transactions rounds of (BEGIN; SELECT ... FOR KEY SHARE; PREPARE
+// TRANSACTION) grow one multixact without ever having two live backend threads.
+// A fixed cap enforced by a release `assert!` was therefore a ported-in limit C
+// never had, and a reachable release assertion is a crash. The scratch is now
+// dynamic, in a reset-per-call bump context standing in for C's palloc into
+// CurrentMemoryContext -- there is no per-tuple mcx reachable this deep in the
+// freeze path, the same reason KEY_TEST_SCRATCH exists in this crate's lib.rs.
+std::thread_local! {
+    static FREEZE_MEMBER_SCRATCH: core::cell::RefCell<::mcx::MemoryContext> =
+        core::cell::RefCell::new(::mcx::MemoryContext::new_bump("freeze multixact members"));
+}
 
 #[cold]
 #[inline(never)]
@@ -64,29 +84,6 @@ fn data_corrupted(msg: String) -> PgResult<()> {
     let mut e = ::types_error::PgError::error(msg);
     e.sqlstate = ERRCODE_DATA_CORRUPTED;
     Err(Box::new(e))
-}
-
-fn collect_members(
-    multi: MultiXactId,
-    is_lock_only: bool,
-    buf: &mut [MultiXactMember; MAX_FREEZE_MEMBERS],
-) -> PgResult<i32> {
-    let mut n = 0i32;
-    let nres = multixact_seams::get_multi_xact_id_members::call(
-        multi,
-        false,
-        is_lock_only,
-        &mut |members| {
-            assert!(
-                members.len() <= MAX_FREEZE_MEMBERS,
-                "FreezeMultiXactId: multixact {multi} has {} members (> scratch cap)",
-                members.len()
-            );
-            buf[..members.len()].copy_from_slice(members);
-            n = members.len() as i32;
-        },
-    )?;
-    Ok(if nres <= 0 { nres } else { n })
 }
 
 fn FreezeMultiXactId(
@@ -104,23 +101,19 @@ fn FreezeMultiXactId(
         pagefrz.freeze_required = true;
         return Ok(InvalidTransactionId);
     } else if MultiXactIdPrecedes(multi, cutoffs.relminmxid) {
-        data_corrupted(
-            format!(
-                "found multixact {multi} from before relminmxid {}",
-                cutoffs.relminmxid
-            ),
-        )?;
+        data_corrupted(format!(
+            "found multixact {multi} from before relminmxid {}",
+            cutoffs.relminmxid
+        ))?;
     } else if MultiXactIdPrecedes(multi, cutoffs.OldestMxact) {
         if multixact_seams::multi_xact_id_is_running::call(
             multi,
             HEAP_XMAX_IS_LOCKED_ONLY(t_infomask),
         )? {
-            data_corrupted(
-                format!(
-                    "multixact {multi} from before multi freeze cutoff {} found to be still running",
-                    cutoffs.OldestMxact
-                ),
-            )?;
+            data_corrupted(format!(
+                "multixact {multi} from before multi freeze cutoff {} found to be still running",
+                cutoffs.OldestMxact
+            ))?;
         }
 
         if HEAP_XMAX_IS_LOCKED_ONLY(t_infomask) {
@@ -131,12 +124,10 @@ fn FreezeMultiXactId(
 
         let update_xact = crate::MultiXactIdGetUpdateXid(multi, t_infomask)?;
         if TransactionIdPrecedes(update_xact, cutoffs.relfrozenxid) {
-            data_corrupted(
-                format!(
-                    "multixact {multi} contains update XID {update_xact} from before relfrozenxid {}",
-                    cutoffs.relfrozenxid
-                ),
-            )?;
+            data_corrupted(format!(
+                "multixact {multi} contains update XID {update_xact} from before relfrozenxid {}",
+                cutoffs.relfrozenxid
+            ))?;
         } else if TransactionIdPrecedes(update_xact, cutoffs.OldestXmin) {
             if transam_seams::transaction_id_did_commit::call(update_xact)? {
                 data_corrupted(
@@ -156,17 +147,26 @@ fn FreezeMultiXactId(
         return Ok(update_xact);
     }
 
-    let mut members = [MultiXactMember {
-        xid: InvalidTransactionId,
-        status: MultiXactStatus::MultiXactStatusForKeyShare,
-    }; MAX_FREEZE_MEMBERS];
-    let nmembers = collect_members(multi, HEAP_XMAX_IS_LOCKED_ONLY(t_infomask), &mut members)?;
-    if nmembers <= 0 {
+    FREEZE_MEMBER_SCRATCH.with(|cell| {
+        let mut ctx = cell
+            .try_borrow_mut()
+            .expect("FreezeMultiXactId scratch is not re-entrant");
+        ctx.reset();
+        let scratch = ctx.mcx();
+
+    let mut members: ::mcx::PgVec<'_, MultiXactMember> = ::mcx::PgVec::new_in(scratch);
+    let nres = multixact_seams::get_multi_xact_id_members::call(
+        multi,
+        false,
+        HEAP_XMAX_IS_LOCKED_ONLY(t_infomask),
+        &mut |ms| members.extend_from_slice(ms),
+    )?;
+    if nres <= 0 || members.is_empty() {
         *flags |= FRM_INVALIDATE_XMAX;
         pagefrz.freeze_required = true;
         return Ok(InvalidTransactionId);
     }
-    let members = &members[..nmembers as usize];
+    let members = &members[..];
 
     let mut need_replace = false;
     let mut freeze_page_relfrozenxid = pagefrz.FreezePageRelfrozenXid;
@@ -193,11 +193,9 @@ fn FreezeMultiXactId(
         return Ok(multi);
     }
 
-    let mut newmembers = [MultiXactMember {
-        xid: InvalidTransactionId,
-        status: MultiXactStatus::MultiXactStatusForKeyShare,
-    }; MAX_FREEZE_MEMBERS];
-    let mut nnewmembers = 0usize;
+    // heapam.c:6881 sizes this off nmembers; it can never exceed it.
+    let mut newmembers: ::mcx::PgVec<'_, MultiXactMember> =
+        ::mcx::PgVec::with_capacity_in(members.len(), scratch);
     let mut has_lockers = false;
     let mut update_xid = InvalidTransactionId;
     let mut update_committed = false;
@@ -218,8 +216,7 @@ fn FreezeMultiXactId(
                         ),
                     )?;
                 }
-                newmembers[nnewmembers] = *m;
-                nnewmembers += 1;
+                newmembers.push(*m);
                 has_lockers = true;
             }
             continue;
@@ -251,16 +248,15 @@ fn FreezeMultiXactId(
                 ),
             )?;
         }
-        newmembers[nnewmembers] = *m;
-        nnewmembers += 1;
+        newmembers.push(*m);
     }
 
     let newxmax;
-    if nnewmembers == 0 {
+    if newmembers.is_empty() {
         *flags |= FRM_INVALIDATE_XMAX;
         newxmax = InvalidTransactionId;
     } else if TransactionIdIsValid(update_xid) && !has_lockers {
-        debug_assert!(nnewmembers == 1);
+        debug_assert!(newmembers.len() == 1);
         *flags |= FRM_RETURN_IS_XID;
         if update_committed {
             *flags |= FRM_MARK_COMMITTED;
@@ -268,13 +264,14 @@ fn FreezeMultiXactId(
         newxmax = update_xid;
     } else {
         newxmax = multixact_seams::multi_xact_id_create_from_members::call(
-            &mut newmembers[..nnewmembers],
+            &mut newmembers[..],
         )?;
         *flags |= FRM_RETURN_IS_MULTI;
     }
 
     pagefrz.freeze_required = true;
     Ok(newxmax)
+    })
 }
 
 pub(crate) fn GetMultiXactIdHintBits(multi: MultiXactId) -> PgResult<(u16, u16)> {
@@ -348,12 +345,10 @@ pub fn heap_prepare_freeze_tuple(
         xmin_already_frozen = true;
     } else {
         if TransactionIdPrecedes(xid, cutoffs.relfrozenxid) {
-            data_corrupted(
-                format!(
-                    "found xmin {xid} from before relfrozenxid {}",
-                    cutoffs.relfrozenxid
-                ),
-            )?;
+            data_corrupted(format!(
+                "found xmin {xid} from before relfrozenxid {}",
+                cutoffs.relfrozenxid
+            ))?;
         }
         freeze_xmin = TransactionIdPrecedes(xid, cutoffs.OldestXmin);
         if freeze_xmin {
@@ -402,12 +397,10 @@ pub fn heap_prepare_freeze_tuple(
         debug_assert!(pagefrz.freeze_required || (!freeze_xmax && !replace_xmax));
     } else if TransactionIdIsNormal(xid) {
         if TransactionIdPrecedes(xid, cutoffs.relfrozenxid) {
-            data_corrupted(
-                format!(
-                    "found xmax {xid} from before relfrozenxid {}",
-                    cutoffs.relfrozenxid
-                ),
-            )?;
+            data_corrupted(format!(
+                "found xmax {xid} from before relfrozenxid {}",
+                cutoffs.relfrozenxid
+            ))?;
         }
         freeze_xmax = TransactionIdPrecedes(xid, cutoffs.OldestXmin);
         if freeze_xmax && !HEAP_XMAX_IS_LOCKED_ONLY(tuple.t_infomask) {
@@ -417,12 +410,10 @@ pub fn heap_prepare_freeze_tuple(
         debug_assert!(tuple.t_infomask & HEAP_XMAX_IS_MULTI == 0);
         xmax_already_frozen = true;
     } else {
-        data_corrupted(
-            format!(
-                "found raw xmax {xid} (infomask 0x{:04x}) not invalid and not multi",
-                tuple.t_infomask
-            ),
-        )?;
+        data_corrupted(format!(
+            "found raw xmax {xid} (infomask 0x{:04x}) not invalid and not multi",
+            tuple.t_infomask
+        ))?;
     }
 
     if freeze_xmin {
@@ -506,9 +497,7 @@ pub fn heap_pre_freeze_checks(buffer: Buffer, tuples: &[HeapTupleFreeze]) -> PgR
             let xmin = htup.xmin_raw();
             debug_assert!(!htup.xmin_frozen());
             if !transam_seams::transaction_id_did_commit::call(xmin)? {
-                data_corrupted(
-                    format!("uncommitted xmin {xmin} needs to be frozen"),
-                )?;
+                data_corrupted(format!("uncommitted xmin {xmin} needs to be frozen"))?;
             }
         }
         // TransactionIdDidAbort is unreliable for crashed xacts; only check
@@ -517,9 +506,7 @@ pub fn heap_pre_freeze_checks(buffer: Buffer, tuples: &[HeapTupleFreeze]) -> PgR
             let xmax = htup.xmax_raw();
             debug_assert!(TransactionIdIsNormal(xmax));
             if transam_seams::transaction_id_did_commit::call(xmax)? {
-                data_corrupted(
-                    format!("cannot freeze committed xmax {xmax}"),
-                )?;
+                data_corrupted(format!("cannot freeze committed xmax {xmax}"))?;
             }
         }
     }

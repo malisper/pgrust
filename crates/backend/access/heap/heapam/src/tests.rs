@@ -5,10 +5,9 @@ use ::types_rel::{FormData_pg_class, LockInfoData, LockRelId, RELKIND_RELATION};
 use ::types_scan::sdir::ForwardScanDirection;
 use ::types_snapshot::SnapshotType;
 use ::types_storage::bufpage::{
-    ItemIdData, SizeOfPageHeaderData, LP_DEAD, LP_NORMAL, LP_REDIRECT, LP_UNUSED,
-    PD_ALL_VISIBLE,
+    ItemIdData, SizeOfPageHeaderData, LP_DEAD, LP_NORMAL, LP_REDIRECT, LP_UNUSED, PD_ALL_VISIBLE,
 };
-use ::types_tuple::{NameData, TupleDescData, FormData_pg_attribute, CompactAttribute};
+use ::types_tuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
 use datum::Datum;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -123,14 +122,20 @@ fn install_seams() {
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
 
         pruneheap_seams::heap_page_prune_opt::set(|_rel, _buf| Ok(()));
-        procarray_seams::global_vis_test_for::set(|_rel| ::types_core::GlobalVisStateHandle::new(0));
+        procarray_seams::global_vis_test_for::set(|_rel| {
+            ::types_core::GlobalVisStateHandle::new(0)
+        });
     });
 }
 
 fn quiesced() {
     with_fake(|f| {
         assert!(f.pins.iter().all(|p| *p == 0), "leaked pins: {:?}", f.pins);
-        assert!(f.locks.iter().all(|l| *l == 0), "leaked locks: {:?}", f.locks);
+        assert!(
+            f.locks.iter().all(|l| *l == 0),
+            "leaked locks: {:?}",
+            f.locks
+        );
     });
 }
 
@@ -340,7 +345,10 @@ fn test_relation_opts<'mcx>(
         rd_firstRelfilelocatorSubid: std::cell::Cell::new(0),
         rd_droppedSubid: std::cell::Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: oid, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: oid,
+                dbId: 5,
+            },
         },
         rd_rel,
         rd_att: int4_tupdesc(mcx),
@@ -349,19 +357,21 @@ fn test_relation_opts<'mcx>(
         rd_opfamily: PgVec::new_in(mcx),
         rd_indoption: PgVec::new_in(mcx),
         rd_indcollation: PgVec::new_in(mcx),
-        rd_options: user_catalog.then(|| {
-            ::types_rel::reloptions::RdOptions::Std(user_catalog_std_options())
-        }),
+        rd_options: user_catalog
+            .then(|| ::types_rel::reloptions::RdOptions::Std(user_catalog_std_options())),
         pgstat_enabled: std::cell::Cell::new(true),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     };
     Relation::open(data, None)
 }
@@ -429,9 +439,7 @@ fn kernel_page_borrow() {
     assert!(id1.is_normal());
     let (p1, l1) = view.item_raw(id1);
     // SAFETY: item within the live page.
-    let mut t1 = unsafe {
-        HeapTupleData::from_raw_parts(p1, l1, ItemPointerData::new(0, 1), 1)
-    };
+    let mut t1 = unsafe { HeapTupleData::from_raw_parts(p1, l1, ItemPointerData::new(0, 1), 1) };
     assert_eq!(t1.t_data().xmin_raw(), 10);
     t1.t_data_mut().set_xmin_committed(); // the tolerated hint-bit store
 
@@ -439,9 +447,7 @@ fn kernel_page_borrow() {
     let id3 = view.item_id(3);
     let (p3, l3) = view.item_raw(id3);
     // SAFETY: as above.
-    let t3 = unsafe {
-        HeapTupleData::from_raw_parts(p3, l3, ItemPointerData::new(0, 3), 1)
-    };
+    let t3 = unsafe { HeapTupleData::from_raw_parts(p3, l3, ItemPointerData::new(0, 3), 1) };
     assert_eq!(t3.t_data().xmin_raw(), 11);
     // A second view still reads the page (and sees the hint bit).
     let view2 = unsafe { PageRef::from_raw(ptr) };
@@ -505,7 +511,10 @@ fn all_visible_page_skips_visibility_and_filtered_otherwise() {
 
     // all-visible page: the visibility seam must not fire.
     let oid = fresh_oid();
-    register_table(oid, vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], true)]);
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], true)],
+    );
     let rel = test_relation(mcx, oid);
     let before = VIS_CALLS.load(Ordering::Relaxed);
     let mut scan = begin_seqscan(mcx, &rel, mvcc_snapshot(mcx));
@@ -596,9 +605,16 @@ fn scan_keys_filter_pagemode_and_lockmode() {
         sk_func: ::types_fmgr::FmgrInfo::new(int4eq, 65, 2, true, false),
         sk_argument: Datum::from_i32(42),
     });
-    let mut scan =
-        heap_beginscan(mcx, &rel, self_snap, 1, key2, None, SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE)
-            .unwrap();
+    let mut scan = heap_beginscan(
+        mcx,
+        &rel,
+        self_snap,
+        1,
+        key2,
+        None,
+        SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE,
+    )
+    .unwrap();
     assert_eq!(scan.rs_base.rs_flags & SO_ALLOW_PAGEMODE, 0);
     let vals = collect_vals(&mut scan, ForwardScanDirection);
     assert_eq!(vals, vec![(0, 2, 42), (0, 3, 42)]);
@@ -628,7 +644,10 @@ fn advance_block_wraps_and_honors_scanlimits() {
     scan.rs_inited = true;
     assert_eq!(heapgettup_advance_block(&mut scan, 2).unwrap(), 3);
     assert_eq!(heapgettup_advance_block(&mut scan, 3).unwrap(), 0);
-    assert_eq!(heapgettup_advance_block(&mut scan, 1).unwrap(), InvalidBlockNumber);
+    assert_eq!(
+        heapgettup_advance_block(&mut scan, 1).unwrap(),
+        InvalidBlockNumber
+    );
 
     // (backward-execution wave B7: the backward walk legs - 1, 0, wrap to 3,
     // done at startblock - retired with the backward stepping arms.)
@@ -639,7 +658,10 @@ fn advance_block_wraps_and_honors_scanlimits() {
     heap_setscanlimits(&mut scan, 1, 2);
     assert_eq!(heapgettup_initial_block(&mut scan), 1);
     assert_eq!(heapgettup_advance_block(&mut scan, 1).unwrap(), 2);
-    assert_eq!(heapgettup_advance_block(&mut scan, 2).unwrap(), InvalidBlockNumber);
+    assert_eq!(
+        heapgettup_advance_block(&mut scan, 2).unwrap(),
+        InvalidBlockNumber
+    );
 
     heap_endscan(scan).unwrap();
     quiesced();
@@ -685,10 +707,26 @@ fn parallel_pagebatch_partitions_blocks_disjointly() {
         // anyway, and the fake bufmgr has no strategy seam.
         let flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
         let mut scans = [
-            heap_beginscan(mcx, &rel, mvcc_snapshot(mcx), 0, PgVec::new_in(mcx), Some(pptr), flags)
-                .unwrap(),
-            heap_beginscan(mcx, &rel, mvcc_snapshot(mcx), 0, PgVec::new_in(mcx), Some(pptr), flags)
-                .unwrap(),
+            heap_beginscan(
+                mcx,
+                &rel,
+                mvcc_snapshot(mcx),
+                0,
+                PgVec::new_in(mcx),
+                Some(pptr),
+                flags,
+            )
+            .unwrap(),
+            heap_beginscan(
+                mcx,
+                &rel,
+                mvcc_snapshot(mcx),
+                0,
+                PgVec::new_in(mcx),
+                Some(pptr),
+                flags,
+            )
+            .unwrap(),
         ];
         assert!(scans.iter().all(|s| s.rs_nblocks == nblocks));
 
@@ -783,7 +821,9 @@ fn tidrange_limits_and_empty_range() {
         &ItemPointerData::new(1, 1),
     );
     assert_eq!(scan.rs_numblocks, 0);
-    assert!(heap_getnext(&mut scan, ForwardScanDirection).unwrap().is_none());
+    assert!(heap_getnext(&mut scan, ForwardScanDirection)
+        .unwrap()
+        .is_none());
     heap_endscan(scan).unwrap();
     quiesced();
 }
@@ -857,7 +897,10 @@ fn hot_chain_search_and_latest_tid() {
     set_ctid(&mut t3, 0, 3);
     register_table(
         oid,
-        vec![build_page(&[Item::Redirect(2), Item::Tuple(t2), Item::Tuple(t3)], false)],
+        vec![build_page(
+            &[Item::Redirect(2), Item::Tuple(t2), Item::Tuple(t3)],
+            false,
+        )],
     );
     let rel = test_relation(mcx, oid);
     let snap = SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_MVCC);
@@ -865,15 +908,8 @@ fn hot_chain_search_and_latest_tid() {
     let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(&rel, 0).unwrap()).unwrap();
     {
         let _lock = pin.lock_share().unwrap();
-        let r = heap_hot_search_buffer(
-            ItemPointerData::new(0, 1),
-            &rel,
-            &pin,
-            &snap,
-            true,
-            true,
-        )
-        .unwrap();
+        let r = heap_hot_search_buffer(ItemPointerData::new(0, 1), &rel, &pin, &snap, true, true)
+            .unwrap();
         assert!(r.found);
         assert_eq!(r.tid, ItemPointerData::new(0, 3));
         assert_eq!(r.tuple.as_ref().unwrap().t_data().xmin_raw(), 20);
@@ -941,8 +977,14 @@ pub(crate) fn wal_insert_record_hook(
     for frag in main_data {
         main.extend_from_slice(frag);
     }
-    let regs = blocks.iter().map(|b| (b.flags, b.bufdata.concat())).collect();
-    XLOG_RECS.lock().unwrap().push((info, main, blocks.len(), regs));
+    let regs = blocks
+        .iter()
+        .map(|b| (b.flags, b.bufdata.concat()))
+        .collect();
+    XLOG_RECS
+        .lock()
+        .unwrap()
+        .push((info, main, blocks.len(), regs));
     Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
 }
 
@@ -1003,9 +1045,7 @@ fn install_dml_seams() {
         catalog_seams::is_catalog_relation::set(|_rel| false);
         catalog_seams::is_toast_relation::set(|_rel| false);
         snapmgr_seams::transaction_xmin::set(|| FAKE_XID);
-        transam_xlog_seams::xlog_logical_info_active::set(|| {
-            LOGICAL.load(Ordering::Relaxed)
-        });
+        transam_xlog_seams::xlog_logical_info_active::set(|| LOGICAL.load(Ordering::Relaxed));
         xact_seams::get_top_transaction_id_if_any::set(|| FAKE_XID);
         combocid_seams::heap_tuple_header_get_cmin::set(|hdr| hdr.raw_command_id());
         relcache_seams::relation_get_index_attr_bitmap::set(|_relid| {
@@ -1075,12 +1115,7 @@ fn page_tuple_at(oid: Oid, page_idx: usize, off: u16) -> HeapTupleData<'static> 
     let (ptr, len) = page.item_raw(id);
     // SAFETY: in-page image.
     unsafe {
-        HeapTupleData::from_raw_parts(
-            ptr,
-            len,
-            ItemPointerData::new(page_idx as u32, off),
-            oid,
-        )
+        HeapTupleData::from_raw_parts(ptr, len, ItemPointerData::new(page_idx as u32, off), oid)
     }
 }
 
@@ -1373,7 +1408,10 @@ fn dml_row_too_big_is_54000() {
     register_table(oid, vec![]);
     let rel = test_relation(mcx, oid);
     let err = hio::RelationGetBufferForTuple(&rel, BLCKSZ, None, 0, None, 0).unwrap_err();
-    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(
+        err.sqlstate(),
+        ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED
+    );
     quiesced();
 }
 
@@ -1407,7 +1445,10 @@ fn dml_speculative_insert_finish() {
     assert_eq!(recs.len(), 2);
     assert_eq!(recs[0].0, dml::XLOG_HEAP_INSERT | dml::XLOG_HEAP_INIT_PAGE);
     // xl_heap_insert flags carry XLH_INSERT_IS_SPECULATIVE
-    assert_eq!(recs[0].1[2] & dml::XLH_INSERT_IS_SPECULATIVE, dml::XLH_INSERT_IS_SPECULATIVE);
+    assert_eq!(
+        recs[0].1[2] & dml::XLH_INSERT_IS_SPECULATIVE,
+        dml::XLH_INSERT_IS_SPECULATIVE
+    );
     assert_eq!(recs[1].0, dml::XLOG_HEAP_CONFIRM);
     // xl_heap_confirm: offnum
     assert_eq!(u16::from_ne_bytes([recs[1].1[0], recs[1].1[1]]), 1);
@@ -1433,7 +1474,11 @@ fn dml_speculative_insert_abort_super_deletes() {
 
     dml::heap_abort_speculative(&rel, &tid).unwrap();
     let stored = page_tuple_at(oid, 0, 1);
-    assert_eq!(stored.t_data().xmin_raw(), 0, "xmin invalid: dead to everyone");
+    assert_eq!(
+        stored.t_data().xmin_raw(),
+        0,
+        "xmin invalid: dead to everyone"
+    );
     assert!(!stored.t_data().is_speculative());
     assert_eq!(stored.t_data().t_ctid, tid);
     assert!((stored.t_data().t_infomask2 & HEAP_KEYS_UPDATED) == 0);
@@ -1448,7 +1493,10 @@ fn dml_speculative_insert_abort_super_deletes() {
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].0, dml::XLOG_HEAP_DELETE);
     // xl_heap_delete: xmax(4) offnum(2) infobits(1) flags(1)
-    assert_eq!(u32::from_ne_bytes(recs[0].1[0..4].try_into().unwrap()), FAKE_XID);
+    assert_eq!(
+        u32::from_ne_bytes(recs[0].1[0..4].try_into().unwrap()),
+        FAKE_XID
+    );
     assert_eq!(u16::from_ne_bytes([recs[0].1[4], recs[0].1[5]]), 1);
     assert_eq!(recs[0].1[7], dml::XLH_DELETE_IS_SUPER);
     quiesced();
@@ -1458,13 +1506,15 @@ fn dml_speculative_insert_abort_super_deletes() {
 fn index_delete_sort_orders_by_block_then_offset() {
     use ::tableam_vocab::TM_IndexDelete;
     let tid = |b: u32, p: u16| ::types_tuple::ItemPointerData::new(b, p);
-    let mut deltids: Vec<TM_IndexDelete> = [
-        (7, 3), (1, 2), (7, 1), (0, 5), (1, 1), (2048, 9), (0, 4),
-    ]
-    .iter()
-    .enumerate()
-    .map(|(i, &(b, p))| TM_IndexDelete { tid: tid(b, p), id: i as i16 })
-    .collect();
+    let mut deltids: Vec<TM_IndexDelete> =
+        [(7, 3), (1, 2), (7, 1), (0, 5), (1, 1), (2048, 9), (0, 4)]
+            .iter()
+            .enumerate()
+            .map(|(i, &(b, p))| TM_IndexDelete {
+                tid: tid(b, p),
+                id: i as i16,
+            })
+            .collect();
 
     index_delete::index_delete_sort(&mut deltids);
 
@@ -1477,7 +1527,10 @@ fn index_delete_sort_orders_by_block_then_offset() {
             )
         })
         .collect();
-    assert_eq!(got, vec![(0, 4), (0, 5), (1, 1), (1, 2), (7, 1), (7, 3), (2048, 9)]);
+    assert_eq!(
+        got,
+        vec![(0, 4), (0, 5), (1, 1), (1, 2), (7, 1), (7, 3), (2048, 9)]
+    );
 }
 
 static TOAST_INIT: Once = Once::new();
@@ -1491,11 +1544,7 @@ fn install_toast_seam() {
             let mut t = ::heaptuple::HeapTuple::alloc_zeroed(mcx, 28)?;
             // SAFETY: 24 header bytes from the live stamped source; 28B image.
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    newtup.header_ptr(),
-                    t.image_mut().as_mut_ptr(),
-                    24,
-                );
+                core::ptr::copy_nonoverlapping(newtup.header_ptr(), t.image_mut().as_mut_ptr(), 24);
             }
             t.image_mut()[24..28].copy_from_slice(&0x7A7A7A7Ai32.to_ne_bytes());
             t.as_tuple_mut().t_tableOid = newtup.t_tableOid;
@@ -1504,10 +1553,7 @@ fn install_toast_seam() {
     });
 }
 
-fn heap_slot_with<'mcx>(
-    mcx: Mcx<'mcx>,
-    img: &[u8],
-) -> ::types_slot::SlotData<'mcx> {
+fn heap_slot_with<'mcx>(mcx: Mcx<'mcx>, img: &[u8]) -> ::types_slot::SlotData<'mcx> {
     use ::types_slot::TupleSlotKind;
     let mut slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(int4_tupdesc(mcx)));
@@ -1542,7 +1588,10 @@ fn multi_insert_places_stamped_tuples() {
     }
     let recs = take_xlog();
     assert_eq!(recs.len(), 1, "one MULTI_INSERT record");
-    assert_eq!(recs[0].0 & !dml::XLOG_HEAP_INIT_PAGE, dml::XLOG_HEAP2_MULTI_INSERT);
+    assert_eq!(
+        recs[0].0 & !dml::XLOG_HEAP_INIT_PAGE,
+        dml::XLOG_HEAP2_MULTI_INSERT
+    );
     quiesced();
 }
 
@@ -1569,8 +1618,15 @@ fn multi_insert_toast_copy_survives_to_placement() {
     assert_eq!(TOAST_CALLS.load(Ordering::Relaxed), calls0 + 1);
 
     let toasted = page_tuple_at(oid, 0, 1);
-    assert_eq!(toasted.t_data().xmin_raw(), FAKE_XID, "toast copy xmin intact at placement");
-    assert_eq!(toasted.t_len, 28, "replacement image placed, not the source");
+    assert_eq!(
+        toasted.t_data().xmin_raw(),
+        FAKE_XID,
+        "toast copy xmin intact at placement"
+    );
+    assert_eq!(
+        toasted.t_len, 28,
+        "replacement image placed, not the source"
+    );
     // SAFETY: sentinel payload at t_hoff within the placed image.
     let got = unsafe { toasted.header_ptr().add(24).cast::<i32>().read_unaligned() };
     assert_eq!(got, 0x7A7A7A7A);
@@ -1624,15 +1680,20 @@ fn install_vm_seams() {
         });
         xlogutils_seams::in_recovery::set(|| false);
         transam_xlog_seams::data_checksums_enabled::set(|| false);
-        guc_tables::vars::wal_log_hints
-            .install(guc_tables::GucVarAccessors { get: || false, set: |_| {} });
+        guc_tables::vars::wal_log_hints.install(guc_tables::GucVarAccessors {
+            get: || false,
+            set: |_| {},
+        });
         // visibilitymap's WAL goes through the xloginsert seam (not this
         // crate's direct wal.rs hook); capture into the same record log so
         // take_xlog sees both records in emission order.
         xloginsert_seams::xlog_insert_record::set(|_rmid, info, _flags, main_data, bufs| {
             let main = main_data.concat();
             let regs = bufs.iter().map(|b| (b.flags, b.bufdata.concat())).collect();
-            XLOG_RECS.lock().unwrap().push((info, main, bufs.len(), regs));
+            XLOG_RECS
+                .lock()
+                .unwrap()
+                .push((info, main, bufs.len(), regs));
             Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
         });
     });
@@ -1680,23 +1741,50 @@ fn multi_insert_frozen_sets_vm_bits_and_logs_both_records() {
     let mut s1 = heap_slot_with(mcx, &tuple_image(0, 0, 41));
     let mut s2 = heap_slot_with(mcx, &tuple_image(0, 0, 42));
     let mut slots = [&mut s1, &mut s2];
-    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, crate::hio::HEAP_INSERT_FROZEN, None)
-        .unwrap();
+    dml::heap_multi_insert(
+        mcx,
+        &rel,
+        &mut slots,
+        7,
+        crate::hio::HEAP_INSERT_FROZEN,
+        None,
+    )
+    .unwrap();
 
     for off in [1u16, 2] {
         let stored = page_tuple_at(oid, 0, off);
-        assert!(stored.t_data().xmin_frozen(), "tuple {off} frozen at insert");
+        assert!(
+            stored.t_data().xmin_frozen(),
+            "tuple {off} frozen at insert"
+        );
     }
-    assert!(heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE set at insert time");
-    assert_eq!(vm_first_byte(oid), 0x03, "VM all-visible|all-frozen for block 0");
+    assert!(
+        heap_page_flags_check(oid, 0),
+        "PD_ALL_VISIBLE set at insert time"
+    );
+    assert_eq!(
+        vm_first_byte(oid),
+        0x03,
+        "VM all-visible|all-frozen for block 0"
+    );
 
     let recs = take_xlog();
     assert_eq!(recs.len(), 2, "MULTI_INSERT then HEAP2_VISIBLE");
-    assert_eq!(recs[0].0, dml::XLOG_HEAP2_MULTI_INSERT | dml::XLOG_HEAP_INIT_PAGE);
-    assert_ne!(recs[0].1[0] & dml::XLH_INSERT_ALL_FROZEN_SET, 0, "ALL_FROZEN_SET flag");
+    assert_eq!(
+        recs[0].0,
+        dml::XLOG_HEAP2_MULTI_INSERT | dml::XLOG_HEAP_INIT_PAGE
+    );
+    assert_ne!(
+        recs[0].1[0] & dml::XLH_INSERT_ALL_FROZEN_SET,
+        0,
+        "ALL_FROZEN_SET flag"
+    );
     assert_eq!(recs[0].1[0] & dml::XLH_INSERT_ALL_VISIBLE_CLEARED, 0);
     assert_eq!(recs[1].0, XLOG_HEAP2_VISIBLE);
-    assert_eq!(recs[1].1[4], 0x03, "xl_heap_visible.flags = ALL_VISIBLE|ALL_FROZEN");
+    assert_eq!(
+        recs[1].1[4], 0x03,
+        "xl_heap_visible.flags = ALL_VISIBLE|ALL_FROZEN"
+    );
     assert_eq!(&recs[1].1[0..4], &[0u8; 4], "InvalidTransactionId cutoff");
     quiesced();
 }
@@ -1711,20 +1799,37 @@ fn multi_insert_frozen_keeps_all_visible_bit_on_nonempty_page() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let oid = fresh_oid();
-    register_table(oid, vec![build_page(&[Item::Tuple(tuple_image(9, 0, 1))], true)]);
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(9, 0, 1))], true)],
+    );
     register_table(oid + VM_OID_OFFSET, vec![vm_test_page(0x03)]);
     let rel = test_relation(mcx, oid);
     let _ = take_xlog();
 
     let mut s1 = heap_slot_with(mcx, &tuple_image(0, 0, 43));
     let mut slots = [&mut s1];
-    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, crate::hio::HEAP_INSERT_FROZEN, None)
-        .unwrap();
+    dml::heap_multi_insert(
+        mcx,
+        &rel,
+        &mut slots,
+        7,
+        crate::hio::HEAP_INSERT_FROZEN,
+        None,
+    )
+    .unwrap();
 
-    assert!(heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE survives frozen append");
+    assert!(
+        heap_page_flags_check(oid, 0),
+        "PD_ALL_VISIBLE survives frozen append"
+    );
     assert_eq!(vm_first_byte(oid), 0x03, "VM bits survive frozen append");
     let recs = take_xlog();
-    assert_eq!(recs.len(), 1, "no HEAP2_VISIBLE for a page not started empty");
+    assert_eq!(
+        recs.len(),
+        1,
+        "no HEAP2_VISIBLE for a page not started empty"
+    );
     assert_eq!(recs[0].1[0] & dml::XLH_INSERT_ALL_VISIBLE_CLEARED, 0);
     assert_eq!(recs[0].1[0] & dml::XLH_INSERT_ALL_FROZEN_SET, 0);
     quiesced();
@@ -1740,7 +1845,10 @@ fn multi_insert_nonfrozen_clears_all_visible() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let oid = fresh_oid();
-    register_table(oid, vec![build_page(&[Item::Tuple(tuple_image(9, 0, 1))], true)]);
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(9, 0, 1))], true)],
+    );
     register_table(oid + VM_OID_OFFSET, vec![vm_test_page(0x03)]);
     let rel = test_relation(mcx, oid);
     let _ = take_xlog();
@@ -1847,7 +1955,11 @@ fn logical_delete_catalog_rel_logs_new_cid_cmax() {
     assert_eq!(f(4..8), !0u32);
     assert_eq!(f(8..12), 7);
     assert_eq!(recs[1].0, dml::XLOG_HEAP_DELETE);
-    assert_eq!(recs[1].1.len(), 8, "empty identity: no replica identity payload");
+    assert_eq!(
+        recs[1].1.len(),
+        8,
+        "empty identity: no replica identity payload"
+    );
     quiesced();
 }
 
@@ -1878,8 +1990,14 @@ fn logical_delete_full_replident_logs_old_tuple() {
     assert_eq!(main.len(), 8 + 5 + 5);
     let stored = page_tuple_at(oid, 0, 1);
     let hdr = stored.t_data();
-    assert_eq!(u16::from_ne_bytes(main[8..10].try_into().unwrap()), hdr.t_infomask2);
-    assert_eq!(u16::from_ne_bytes(main[10..12].try_into().unwrap()), hdr.t_infomask);
+    assert_eq!(
+        u16::from_ne_bytes(main[8..10].try_into().unwrap()),
+        hdr.t_infomask2
+    );
+    assert_eq!(
+        u16::from_ne_bytes(main[10..12].try_into().unwrap()),
+        hdr.t_infomask
+    );
     assert_eq!(main[12], hdr.t_hoff);
     assert_eq!(i32::from_ne_bytes(main[14..18].try_into().unwrap()), 1);
     quiesced();
@@ -1935,7 +2053,10 @@ fn logical_delete_empty_identity_logs_no_key() {
     let recs = take_xlog();
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].1.len(), 8);
-    assert_eq!(recs[0].1[7] & (dml::XLH_DELETE_CONTAINS_OLD_TUPLE | dml::XLH_DELETE_CONTAINS_OLD_KEY), 0);
+    assert_eq!(
+        recs[0].1[7] & (dml::XLH_DELETE_CONTAINS_OLD_TUPLE | dml::XLH_DELETE_CONTAINS_OLD_KEY),
+        0
+    );
     quiesced();
 }
 
@@ -2012,7 +2133,10 @@ fn end_claim_release_drops_midclaim_pin_and_repositions() {
     // drain error / abort between segments / shed).
     heap_set_block_range(&mut scan, 0, 3).unwrap();
     assert_eq!(heap_getnextpagebatch(&mut scan).unwrap(), 1);
-    assert!(scan.rs_cbuf.is_some(), "mid-claim: the staged page is pinned");
+    assert!(
+        scan.rs_cbuf.is_some(),
+        "mid-claim: the staged page is pinned"
+    );
     heap_end_claim_release(&mut scan);
     assert!(scan.rs_cbuf.is_none(), "end_claim released the pin");
     assert!(!scan.rs_inited, "drained/un-inited state restored");
