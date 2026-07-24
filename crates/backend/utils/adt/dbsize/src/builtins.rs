@@ -569,13 +569,7 @@ pub fn fc_pg_relation_filepath(
         }
         types_core::RELPERSISTENCE_TEMP => {
             if namespace_seams::is_temp_or_temp_toast_namespace::call(relform.relnamespace) {
-                // ProcNumberForTempRelations() (procnumber.h).
-                let leader = init_small::globals::ParallelLeaderProcNumber();
-                if leader == types_core::INVALID_PROC_NUMBER {
-                    init_small::globals::MyProcNumber()
-                } else {
-                    leader
-                }
+                init_small::globals::ProcNumberForTempRelations()
             } else {
                 let backend = namespace_seams::get_temp_namespace_proc_number::call(
                     relform.relnamespace,
