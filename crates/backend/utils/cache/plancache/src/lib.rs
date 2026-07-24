@@ -48,7 +48,10 @@ pub struct CachedPlanSourceHandle(pub u64);
 /// tree, allocated in `qmcx`; analysis may scribble on it) into `qmcx`;
 /// `arg` is C's parserSetupArg. Install only when analysis needs parse hooks
 /// the fixedparams default cannot carry (C's parserSetup != NULL arm).
+/// `h` is our safe spelling of the rest of C's parserSetupArg: the owner
+/// resolves its own per-source state from the handle.
 pub type ReanalyzeFn = fn(
+    h: CachedPlanSourceHandle,
     qmcx: Mcx<'static>,
     raw: &'static RawStmt<'static>,
     query_string: &'static str,
@@ -59,6 +62,26 @@ pub type ReanalyzeFn = fn(
 
 pub fn SetCachedPlanReanalyze(h: CachedPlanSourceHandle, f: ReanalyzeFn, arg: i32) {
     with_source(h, |src| src.reanalyze = Some((f, arg)));
+}
+
+/// C's PostRewriteHook (plancache.h / SetPostRewriteHook): runs on the
+/// transient rewritten query list produced by the re-analysis arm, before the
+/// source adopts it — the owner's chance to re-apply whatever it did to the
+/// list at CompleteCachedPlan time (SQL functions re-run their statement
+/// checks and re-insert the result coercions). May rewrite the list in place,
+/// exactly as C's `List *querytree_list` hook does. `arg` is C's
+/// postRewriteArg, `h` identifies the source (see [`ReanalyzeFn`]).
+pub type PostRewriteFn = fn(
+    h: CachedPlanSourceHandle,
+    qmcx: Mcx<'static>,
+    query_list: &mut PgVec<'static, Query<'static>>,
+    arg: i32,
+) -> PgResult<()>;
+
+/// C SetPostRewriteHook (plancache.c:504-512). Must be called before the
+/// source is saved: the hook is part of how the source rebuilds itself.
+pub fn SetCachedPlanPostRewrite(h: CachedPlanSourceHandle, f: PostRewriteFn, arg: i32) {
+    with_source(h, |src| src.post_rewrite = Some((f, arg)));
 }
 
 struct CachedPlanSource {
@@ -74,7 +97,12 @@ struct CachedPlanSource {
     // Lives in source_ctx (C: copyObject into source_context); handed out
     // only as copies because analysis scribbles on its input.
     raw_parse_tree: Option<&'static RawStmt<'static>>,
+    // C's analyzed_parse_tree: the pre-rewrite Query a CreateCachedPlanForQuery
+    // source was built from, also copied into source_ctx. Exactly one of the
+    // two trees is retained (an empty statement retains neither).
+    analyzed_parse_tree: Option<&'static Query<'static>>,
     reanalyze: Option<(ReanalyzeFn, i32)>,
+    post_rewrite: Option<(PostRewriteFn, i32)>,
     query_list: &'static [Query<'static>],
     relation_oids: &'static [Oid],
     // extract_query_dependencies' invalItems (cacheId, hashValue): a matching
@@ -295,23 +323,27 @@ pub fn CreateCachedPlan(
         ),
         None => (false, false, false),
     };
-    create_cached_plan_flags(raw_parse_tree, flags, query_string, commandTag)
+    create_cached_plan_flags(raw_parse_tree, None, flags, query_string, commandTag)
 }
 
-// CreateCachedPlanForQuery (plancache.c): entry created from an analyzed
-// Query (SQL-function prosqlbody); revalidation/snapshot flags come from
-// query_requires_rewrite_plan, not the raw-tree probe.
+// CreateCachedPlanForQuery (plancache.c:255-277): entry created from an
+// analyzed Query (SQL-function prosqlbody); revalidation/snapshot flags come
+// from query_requires_rewrite_plan, not the raw-tree probe. C copies the tree
+// into the source context (`plansource->analyzed_parse_tree =
+// copyObject(...)`) because that copy is what the re-rewrite arm of
+// RevalidateCachedQuery works from.
 pub fn CreateCachedPlanForQuery(
     analyzed: &Query<'_>,
     query_string: &str,
     commandTag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
     let reval = parser_analyze::query_requires_rewrite_plan(analyzed);
-    create_cached_plan_flags(None, (reval, reval, false), query_string, commandTag)
+    create_cached_plan_flags(None, Some(analyzed), (reval, reval, false), query_string, commandTag)
 }
 
 fn create_cached_plan_flags(
     raw_parse_tree: Option<&RawStmt<'_>>,
+    analyzed_parse_tree: Option<&Query<'_>>,
     (requires_reval, requires_snapshot, is_xact_exit_stmt): (bool, bool, bool),
     query_string: &str,
     commandTag: CommandTag,
@@ -321,18 +353,23 @@ fn create_cached_plan_flags(
     let mcx = ctx_mcx(source_ctx);
     let qs = mcx::slice_borrow_in(mcx, query_string.as_bytes())?;
     let query_string: &'static str = core::str::from_utf8(qs).expect("query_string is UTF-8");
+    let mut bail = |e| {
+        reclaim_ctx(query_ctx);
+        reclaim_ctx(source_ctx);
+        e
+    };
     let raw_parse_tree = match raw_parse_tree {
-        Some(raw) => {
-            let copied = copy_raw_stmt_in(mcx, raw);
-            match copied {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    reclaim_ctx(query_ctx);
-                    reclaim_ctx(source_ctx);
-                    return Err(e);
-                }
-            }
-        }
+        Some(raw) => match copy_raw_stmt_in(mcx, raw) {
+            Ok(r) => Some(r),
+            Err(e) => return Err(bail(e)),
+        },
+        None => None,
+    };
+    let analyzed_parse_tree = match analyzed_parse_tree {
+        Some(q) => match copyfuncs::copy_query(mcx, q).and_then(|c| mcx::alloc_leak_in(mcx, c)) {
+            Ok(q) => Some(&*q),
+            Err(e) => return Err(bail(e)),
+        },
         None => None,
     };
 
@@ -349,7 +386,9 @@ fn create_cached_plan_flags(
             requires_snapshot,
             is_xact_exit_stmt,
             raw_parse_tree,
+            analyzed_parse_tree,
             reanalyze: None,
+            post_rewrite: None,
             query_list: &[],
             relation_oids: &[],
             inval_items: &[],
@@ -792,15 +831,9 @@ fn RevalidateCachedQuery(
         AcquirePlannerLocks(query_list, false)?;
     }
 
-    let (reanalyze, raw_parse_tree) =
-        with_source(h, |src| (src.reanalyze, src.raw_parse_tree));
-    let Some(raw_parse_tree) = raw_parse_tree else {
-        panic!(
-            "RevalidateCachedQuery (plancache.c): revalidatable source for {:?} retains no \
-             raw parse tree (CreateCachedPlanForQuery re-analysis is the sqlbody lane)",
-            with_source(h, |src| src.commandTag)
-        );
-    };
+    let (reanalyze, post_rewrite, raw_parse_tree, analyzed_parse_tree) = with_source(h, |src| {
+        (src.reanalyze, src.post_rewrite, src.raw_parse_tree, src.analyzed_parse_tree)
+    });
 
     // An analysis error below leaves the source invalid with empty lists
     // (retried on the next fetch), exactly as C's longjmp.
@@ -825,16 +858,26 @@ fn RevalidateCachedQuery(
         snapshot_set = true;
     }
     let new_qctx = leak_ctx("CachedPlanQuery");
-    // Per-attempt copy of the retained tree (C's copyObject): analysis
-    // scribbles on its input, and a failed attempt must not poison the
-    // retained original.
-    let analyzed = copy_raw_stmt_in(ctx_mcx(new_qctx), raw_parse_tree).and_then(|raw| {
-        match reanalyze {
-            Some((f, arg)) => f(ctx_mcx(new_qctx), raw, query_string, param_types, queryEnv, arg),
-            None => {
-                reanalyze_fixedparams(ctx_mcx(new_qctx), raw, query_string, param_types, queryEnv)
-            }
-        }
+    let qmcx = ctx_mcx(new_qctx);
+    // The three source shapes of C plancache.c:790-830, in C's order. Both
+    // retained-tree arms work from a per-attempt copy (C's copyObject):
+    // analysis and the rewriter both scribble on their input, and a failed
+    // attempt must not poison the retained original.
+    let analyzed = match (raw_parse_tree, analyzed_parse_tree) {
+        (Some(raw), _) => copy_raw_stmt_in(qmcx, raw).and_then(|raw| match reanalyze {
+            Some((f, arg)) => f(h, qmcx, raw, query_string, param_types, queryEnv, arg),
+            None => reanalyze_fixedparams(qmcx, raw, query_string, param_types, queryEnv),
+        }),
+        (None, Some(q)) => rewrite_analyzed(qmcx, q),
+        // Empty query: C leaves tlist NIL. Unreachable in practice, since an
+        // empty statement never requires revalidation.
+        (None, None) => Ok(PgVec::new_in(qmcx)),
+    }
+    // C plancache.c:834-836, before the snapshot is popped: the postRewrite
+    // hook may probe catalogs (SQL functions re-run check_sql_stmt_retval).
+    .and_then(|mut query_list| match post_rewrite {
+        Some((f, arg)) => f(h, qmcx, &mut query_list, arg).map(|()| query_list),
+        None => Ok(query_list),
     });
     if snapshot_set {
         if let Err(e) = snapmgr::PopActiveSnapshot() {
@@ -844,7 +887,6 @@ fn RevalidateCachedQuery(
         }
     }
     let rebuilt = analyzed.and_then(|query_list| {
-        let qmcx = ctx_mcx(new_qctx);
         let query_list: &'static [Query<'static>] = mcx::vec_borrow_in(qmcx, query_list)?;
         let mut oids: PgVec<'static, Oid> = PgVec::new_in(qmcx);
         let mut items: PgVec<'static, (i32, u32)> = PgVec::new_in(qmcx);
@@ -937,6 +979,28 @@ pub fn CachedPlanRawParseTreeCopy<'mcx>(
         Some(raw) => Ok(Some(copy_raw_stmt_in(mcx, raw)?)),
         None => Ok(None),
     }
+}
+
+// The analyzed_parse_tree revalidation arm (C plancache.c:816-827): the
+// source was built from a Query that is already parse-analyzed, so only the
+// rewrite is redone — preceded by the lock acquisition the rewriter needs,
+// which is what makes this arm safe to plan from afterwards.
+fn rewrite_analyzed(
+    qmcx: Mcx<'static>,
+    analyzed: &Query<'static>,
+) -> PgResult<PgVec<'static, Query<'static>>> {
+    // The rewriter scribbles on its input, so copy (C's copyObject).
+    let copied: Query<'static> = copyfuncs::copy_query(qmcx, analyzed)?;
+    rewrite_handler_seams::acquire_rewrite_locks::call(qmcx, &copied, true, false)?;
+    // pg_rewrite_query's own utility arm (a utility Query has an empty rtable,
+    // so the lock walk above is a no-op for it, exactly as in C).
+    if copied.commandType == CmdType::CMD_UTILITY {
+        let mut v = PgVec::new_in(qmcx);
+        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
+        v.push(copied);
+        return Ok(v);
+    }
+    rewrite_handler_seams::query_rewrite::call(qmcx, copied)
 }
 
 // pg_analyze_and_rewrite_fixedparams (tcop/postgres.c) via the seams, the

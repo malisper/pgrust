@@ -91,6 +91,10 @@ fn install() {
         catalog_seams::is_shared_relation::set(|_| false);
         analyze_seams::parse_analyze_fixedparams::set(stub_parse_analyze_fixedparams);
         rewrite_handler_seams::query_rewrite::set(stub_query_rewrite);
+        rewrite_handler_seams::acquire_rewrite_locks::set(|_, _, _, _| {
+            REWRITE_LOCK_CALLS.with(|c| c.set(c.get() + 1));
+            Ok(())
+        });
         {
             guc_tables::vars::plan_cache_mode.install_if_absent(guc_tables::GucVarAccessors {
                 get: || PLAN_CACHE_MODE_VAR.with(Cell::get),
@@ -319,12 +323,14 @@ fn reset_plan_cache_skips_non_revalidatable_sources() {
 }
 
 // A revalidatable source with no retained raw tree (the sqlbody-style
-// CreateCachedPlanForQuery shape) cannot re-analyze: loud.
+// CreateCachedPlanForQuery shape) re-analyzes through C's analyzed_parse_tree
+// arm: no re-parse, no parse analysis, just AcquireRewriteLocks + the rewrite
+// of a fresh copy of the retained tree (C plancache.c:816-827).
 #[test]
-#[should_panic(expected = "RevalidateCachedQuery (plancache.c)")]
-fn invalidated_source_without_raw_tree_is_loud() {
+fn invalidated_source_without_raw_tree_rewrites_analyzed_tree() {
     install();
     push_snapshot();
+    DEFAULT_ANALYZE_CALLS.with(|c| c.set(0));
     let scratch = test_mcx();
     let analyzed = select_query(scratch, false);
     let h = CreateCachedPlanForQuery(&analyzed, "SELECT 1", CommandTag::SELECT).unwrap();
@@ -333,9 +339,83 @@ fn invalidated_source_without_raw_tree_is_loud() {
     qlist.push(select_query(qmcx, false));
     CompleteCachedPlan(h, qlist, &[], types_portal::CURSOR_OPT_PARALLEL_OK, true).unwrap();
     SaveCachedPlan(h).unwrap();
+
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    ReleaseCachedPlan(p1);
     PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
     assert!(!CachedPlanIsValid(h));
-    let _ = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL);
+
+    let locks_before = REWRITE_LOCK_CALLS.with(Cell::get);
+    let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert!(CachedPlanIsValid(h));
+    // The analyzed arm never re-runs parse analysis, and it does take the
+    // rewriter's locks.
+    assert_eq!(DEFAULT_ANALYZE_CALLS.with(Cell::get), 0);
+    assert_eq!(REWRITE_LOCK_CALLS.with(Cell::get), locks_before + 1);
+    assert_eq!(CachedPlanStmtList(p2).len(), 1);
+    assert_eq!(SourceQueryList(h).len(), 1);
+    ReleaseCachedPlan(p2);
+    DropCachedPlan(h);
+}
+
+// The postRewrite hook (C SetPostRewriteHook) runs on the transient list of
+// whichever re-analysis arm produced it, and its error propagates as an error
+// rather than leaving the source half-rebuilt.
+#[test]
+fn post_rewrite_hook_runs_on_both_reanalysis_arms() {
+    install();
+    push_snapshot();
+
+    // raw-tree arm
+    POST_REWRITE_CALLS.with(|c| c.set(0));
+    let h = make_saved_source(false);
+    SetCachedPlanPostRewrite(h, stub_post_rewrite, 3);
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(POST_REWRITE_CALLS.with(Cell::get), 0);
+    ReleaseCachedPlan(p1);
+    PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
+    let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(POST_REWRITE_CALLS.with(Cell::get), 1);
+    ReleaseCachedPlan(p2);
+    DropCachedPlan(h);
+
+    // analyzed-tree arm
+    POST_REWRITE_CALLS.with(|c| c.set(0));
+    let scratch = test_mcx();
+    let analyzed = select_query(scratch, false);
+    let h2 = CreateCachedPlanForQuery(&analyzed, "SELECT 1", CommandTag::SELECT).unwrap();
+    let qmcx = SourceQueryMcx(h2);
+    let mut qlist = PgVec::new_in(qmcx);
+    qlist.push(select_query(qmcx, false));
+    CompleteCachedPlan(h2, qlist, &[], types_portal::CURSOR_OPT_PARALLEL_OK, true).unwrap();
+    SetCachedPlanPostRewrite(h2, stub_post_rewrite, 3);
+    SaveCachedPlan(h2).unwrap();
+    let p3 = GetCachedPlan(h2, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(POST_REWRITE_CALLS.with(Cell::get), 0);
+    ReleaseCachedPlan(p3);
+    PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
+    let p4 = GetCachedPlan(h2, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(POST_REWRITE_CALLS.with(Cell::get), 1);
+    ReleaseCachedPlan(p4);
+    DropCachedPlan(h2);
+}
+
+// A postRewrite hook that raises leaves the source invalid and the error at the
+// caller — the next fetch retries, exactly as an analysis error does.
+#[test]
+fn post_rewrite_hook_error_leaves_source_invalid() {
+    install();
+    push_snapshot();
+    let h = make_saved_source(false);
+    SetCachedPlanPostRewrite(h, stub_post_rewrite_fails, 0);
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    ReleaseCachedPlan(p1);
+    PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
+    let err = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL)
+        .expect_err("the hook's error must reach the caller");
+    assert!(err.message().contains("post-rewrite refusal"), "{:?}", err.message());
+    assert!(!CachedPlanIsValid(h));
+    DropCachedPlan(h);
 }
 
 // Sinval flushes the querytree; with no installed hook the next fetch
@@ -365,6 +445,30 @@ fn invalidated_source_reanalyzes_via_fixedparams_default() {
 thread_local! {
     static REANALYZE_CALLS: Cell<u32> = const { Cell::new(0) };
     static DEFAULT_ANALYZE_CALLS: Cell<u32> = const { Cell::new(0) };
+    static POST_REWRITE_CALLS: Cell<u32> = const { Cell::new(0) };
+    static REWRITE_LOCK_CALLS: Cell<u32> = const { Cell::new(0) };
+}
+
+fn stub_post_rewrite(
+    _h: CachedPlanSourceHandle,
+    _qmcx: mcx::Mcx<'static>,
+    query_list: &mut PgVec<'static, Query<'static>>,
+    arg: i32,
+) -> PgResult<()> {
+    assert_eq!(arg, 3);
+    // The hook sees the rewritten list, before the source adopts it.
+    assert_eq!(query_list.len(), 1);
+    POST_REWRITE_CALLS.with(|c| c.set(c.get() + 1));
+    Ok(())
+}
+
+fn stub_post_rewrite_fails(
+    _h: CachedPlanSourceHandle,
+    _qmcx: mcx::Mcx<'static>,
+    _query_list: &mut PgVec<'static, Query<'static>>,
+    _arg: i32,
+) -> PgResult<()> {
+    Err(ereport(ERROR).errmsg("post-rewrite refusal").into_error().into())
 }
 
 fn stub_parse_analyze_fixedparams<'a, 'mcx>(
@@ -390,6 +494,7 @@ fn stub_query_rewrite<'mcx>(
 }
 
 fn stub_reanalyze(
+    _h: CachedPlanSourceHandle,
     qmcx: mcx::Mcx<'static>,
     raw: &'static RawStmt<'static>,
     _query_string: &'static str,
