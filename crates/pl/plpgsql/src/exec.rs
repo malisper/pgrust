@@ -163,10 +163,11 @@ struct HookSnapshot {
 // (C: plpgsql_parser_setup with parserSetupArg = expr): re-analyze the
 // retained raw tree under the hook tables the plan was prepared with.
 fn reanalyze_plpgsql_expr(
+    _h: plancache::CachedPlanSourceHandle,
     qmcx: Mcx<'static>,
     raw: &'static types_nodes::rawnodes::RawStmt<'static>,
     query_string: &'static str,
-    _param_types: &[Oid],
+    _param_types: &'static [Oid],
     query_env: types_portal::QueryEnvHandle,
     arg: i32,
 ) -> PgResult<mcx::PgVec<'static, types_nodes::parsenodes::Query<'static>>> {

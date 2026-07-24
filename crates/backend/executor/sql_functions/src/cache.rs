@@ -2,14 +2,15 @@
 // (functions.c). DIVERGENCE: RECORD results resolved from an expectedDesc
 // bypass the map (C hashes the resolved tupdesc identity into the key).
 use core::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use datum::Datum;
 use mcx::{bind, Mcx, McxOwned, MemoryContext, PgString, PgVec};
 use rustc_hash::FxHashMap;
 use types_core::catalog::VOIDOID;
 use types_core::Oid;
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use elog::ereport;
+use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::Query;
 use types_nodes::{Node, NodeTag};
@@ -57,6 +58,11 @@ impl Drop for SqlFnEntry {
     fn drop(&mut self) {
         self.owned.with(|s| {
             for &h in s.plansources.borrow().iter() {
+                // The hooks installed on the source resolve their owner
+                // through this map; the source dies with the entry, so the
+                // registration must die with it too (C's parserSetupArg
+                // pointer is likewise only valid while the entry lives).
+                SQLFN_SOURCE_OWNER.with_borrow_mut(|m| m.remove(&h.0));
                 plancache::DropCachedPlan(h);
             }
         });
@@ -99,6 +105,15 @@ thread_local! {
     // registries, whose teardown order at thread exit is unspecified; the
     // map leaks with the backend, exactly like C's CacheMemoryContext.
     static SQL_FN_CACHE: RefCell<core::mem::ManuallyDrop<FxHashMap<FnKey, Rc<SqlFnEntry>>>> =
+        RefCell::new(core::mem::ManuallyDrop::new(FxHashMap::default()));
+
+    // Owner of each SQL-function CachedPlanSource, keyed by handle. This is
+    // our safe spelling of C's `void *parserSetupArg` / `postRewriteArg`: C
+    // hands plancache raw pointers into the hash entry (func->pinfo, func),
+    // and plancache hands them back when it re-analyzes. Weak, so a
+    // registration never keeps an evicted entry alive; unregistered by
+    // SqlFnEntry::drop alongside the DropCachedPlan it pairs with.
+    static SQLFN_SOURCE_OWNER: RefCell<core::mem::ManuallyDrop<FxHashMap<u64, Weak<SqlFnEntry>>>> =
         RefCell::new(core::mem::ManuallyDrop::new(FxHashMap::default()));
 }
 
@@ -439,38 +454,31 @@ pub(crate) fn check_sql_fn_statement(q: &Query<'_>) -> PgResult<()> {
 // prepare_next_query (functions.c:899): one CachedPlanSource per original
 // query, built lazily. The source is re-derived per index (raw re-parse or
 // prosqlbody re-read) so the entry keeps no mutable parse trees.
-pub(crate) fn prepare_next_query(entry: &SqlFnEntry) -> PgResult<()> {
+pub(crate) fn prepare_next_query(entry: &Rc<SqlFnEntry>) -> PgResult<()> {
+    let owner = Rc::downgrade(entry);
     entry.owned.with(|s| {
         let qindex = s.plansources.borrow().len();
         assert!(qindex < s.num_queries, "prepare_next_query past end");
-        let psrc = build_query_plansource(s, qindex)?;
+        let psrc = build_query_plansource(&owner, s, qindex)?;
         s.plansources.borrow_mut().push(psrc);
         Ok(())
     })
 }
 
-// RevalidateCachedQuery's re-analysis arm for SQL-function plans: C retains
-// the raw tree + sql_fn_parser_setup (functions.c/plancache.c:793-814); here
-// the source rebuilds from retained text under the same parse hooks. The old
-// source drops only after the rebuild succeeds (an analysis error leaves it
-// invalid and retried, as C's longjmp does).
-pub(crate) fn revalidate_query(
+/// The CachedPlanSource for one of the function's queries (C's
+/// `func->plansource_list` slot). No owner-side revalidation happens here: the
+/// source revalidates itself inside GetCachedPlan, through the parserSetup /
+/// postRewrite hooks installed when it was created — exactly as in C, where
+/// fmgr_sql reads plansource_list and calls GetCachedPlan directly.
+pub(crate) fn query_plansource(
     entry: &SqlFnEntry,
     qindex: usize,
-) -> PgResult<plancache::CachedPlanSourceHandle> {
-    entry.owned.with(|s| {
-        let old = s.plansources.borrow()[qindex];
-        if !plancache::CachedPlanSourceRequiresReanalysis(old)? {
-            return Ok(old);
-        }
-        let new = build_query_plansource(s, qindex)?;
-        s.plansources.borrow_mut()[qindex] = new;
-        plancache::DropCachedPlan(old);
-        Ok(new)
-    })
+) -> plancache::CachedPlanSourceHandle {
+    entry.owned.with(|s| s.plansources.borrow()[qindex])
 }
 
 fn build_query_plansource(
+    owner: &Weak<SqlFnEntry>,
     s: &SqlFnEntryState<'_>,
     qindex: usize,
 ) -> PgResult<plancache::CachedPlanSourceHandle> {
@@ -526,10 +534,12 @@ fn build_query_plansource(
                     CURSOR_OPT_PARALLEL_OK | CURSOR_OPT_NO_SCROLL,
                     false,
                 )?;
+                install_sqlfn_hooks(owner, psrc, qindex, false);
                 plancache::SaveCachedPlan(psrc)?;
                 Ok(())
             })();
             if let Err(e) = build {
+                unregister_sqlfn_source(psrc);
                 plancache::DropCachedPlan(psrc);
                 return Err(e);
             }
@@ -598,36 +608,145 @@ fn build_query_plansource(
                     CURSOR_OPT_PARALLEL_OK | CURSOR_OPT_NO_SCROLL,
                     false,
                 )?;
+                install_sqlfn_hooks(owner, psrc, qindex, true);
                 plancache::SaveCachedPlan(psrc)?;
                 Ok(())
             })();
             if let Err(e) = build {
+                unregister_sqlfn_source(psrc);
                 plancache::DropCachedPlan(psrc);
                 return Err(e);
             }
-            // Bar plancache's fixedparams default: it would skip the sql-fn
-            // parameter hooks and the last-query retval munging. Loud, and
-            // reachable only by an invalidation landing between the
-            // revalidate_query probe and GetCachedPlan.
-            plancache::SetCachedPlanReanalyze(psrc, reanalyze_sql_fn_unported, 0);
         }
         Ok(psrc)
     }
 }
 
-fn reanalyze_sql_fn_unported(
-    _qmcx: Mcx<'static>,
-    _raw: &'static types_nodes::rawnodes::RawStmt<'static>,
-    _query_string: &'static str,
+// C prepare_next_query's hook installation (functions.c:981-1000): the
+// parserSetup/parserSetupArg pair CompleteCachedPlan takes, then
+// SetPostRewriteHook. Both are what let plancache rebuild the source itself
+// when an invalidation lands, instead of the owner having to notice.
+//
+// `raw_source` distinguishes C's two source shapes. C passes
+// sql_fn_parser_setup to CompleteCachedPlan for both, but only the raw-tree
+// arm of RevalidateCachedQuery ever consults it — the analyzed-tree
+// (prosqlbody) arm just re-rewrites — so installing it there would be dead.
+// The postRewrite hook is installed for both, as in C.
+fn install_sqlfn_hooks(
+    owner: &Weak<SqlFnEntry>,
+    psrc: plancache::CachedPlanSourceHandle,
+    qindex: usize,
+    raw_source: bool,
+) {
+    SQLFN_SOURCE_OWNER.with_borrow_mut(|m| m.insert(psrc.0, owner.clone()));
+    if raw_source {
+        plancache::SetCachedPlanReanalyze(psrc, reanalyze_sql_fn, qindex as i32);
+    }
+    plancache::SetCachedPlanPostRewrite(psrc, sql_postrewrite_callback, qindex as i32);
+}
+
+fn unregister_sqlfn_source(psrc: plancache::CachedPlanSourceHandle) {
+    SQLFN_SOURCE_OWNER.with_borrow_mut(|m| m.remove(&psrc.0));
+}
+
+// The hash entry that owns `h` — C dereferences the pinfo/func pointer it
+// stashed in the source; we look the owner up by handle. A live source always
+// has a live owner (SqlFnEntry::drop drops its sources), so the miss arm is an
+// internal-consistency error, not a user-reachable one.
+fn sqlfn_source_owner(h: plancache::CachedPlanSourceHandle) -> PgResult<Rc<SqlFnEntry>> {
+    match SQLFN_SOURCE_OWNER.with_borrow(|m| m.get(&h.0).and_then(Weak::upgrade)) {
+        Some(e) => Ok(e),
+        None => Err(efn(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            "SQL function cached plan re-analysis: owning cache entry is gone".to_string(),
+        )),
+    }
+}
+
+// RevalidateCachedQuery's parserSetup arm for a SQL function (C plancache.c:
+// 800-809 dispatching to functions.c's sql_fn_parser_setup via
+// pg_analyze_and_rewrite_withcb): the retained raw parse tree is re-analyzed
+// under the function's own parameter hooks, then rewritten. The statement
+// checks and the last-query result munging are NOT done here — C does them in
+// the postRewrite hook, which also covers the prosqlbody arm.
+fn reanalyze_sql_fn(
+    h: plancache::CachedPlanSourceHandle,
+    qmcx: Mcx<'static>,
+    raw: &'static types_nodes::rawnodes::RawStmt<'static>,
+    query_string: &'static str,
     _param_types: &'static [Oid],
-    _query_env: QueryEnvHandle,
+    query_env: QueryEnvHandle,
     _arg: i32,
 ) -> PgResult<PgVec<'static, Query<'static>>> {
-    panic!(
-        "RevalidateCachedQuery (plancache.c): SQL-function source invalidated between the \
-         revalidate_query probe and GetCachedPlan; in-plancache sql_fn_parser_setup \
-         re-analysis is the sql_functions lane"
-    );
+    let entry = sqlfn_source_owner(h)?;
+    entry.owned.with(|s| {
+        let mut name_refs: PgVec<'_, &str> = PgVec::new_in(qmcx);
+        name_refs.try_reserve_exact(s.argnames.len()).map_err(|_| qmcx.oom(s.argnames.len()))?;
+        for n in s.argnames.iter() {
+            name_refs.push(n.as_str());
+        }
+        let query = analyze_seams::parse_analyze_sql_fn::call(
+            qmcx,
+            raw,
+            query_string,
+            s.fname.as_str(),
+            &s.argtypes,
+            &name_refs,
+            s.input_collation,
+            query_env,
+        )?;
+        if query.commandType == CmdType::CMD_UTILITY {
+            let mut v = PgVec::new_in(qmcx);
+            v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
+            v.push(query);
+            Ok(v)
+        } else {
+            rewrite_handler_seams::query_rewrite::call(qmcx, query)
+        }
+    })
+}
+
+// C sql_postrewrite_callback (functions.c:1242-1272). Runs on the freshly
+// rewritten query list of EITHER re-analysis arm, before the source adopts it:
+// re-check the statement kinds, and for the function's last query redo what
+// check_sql_stmt_retval did to the targetlist at creation time (it injects the
+// result coercions, so skipping it would leave the cached plan returning the
+// wrong type). returnsTuple must not have changed: C is cautious here because
+// the junkfilter built from it is not rebuilt by this path.
+fn sql_postrewrite_callback(
+    h: plancache::CachedPlanSourceHandle,
+    qmcx: Mcx<'static>,
+    query_list: &mut PgVec<'static, Query<'static>>,
+    arg: i32,
+) -> PgResult<()> {
+    let entry = sqlfn_source_owner(h)?;
+    entry.owned.with(|s| {
+        for q in query_list.iter() {
+            check_sql_fn_statement(q)?;
+        }
+        // C's postRewriteArg is the hash entry for the last statement and NULL
+        // otherwise; the query index carries the same one bit of information.
+        let islast = (arg as usize) + 1 >= s.num_queries;
+        if islast {
+            let returns_tuple = crate::retval::check_sql_stmt_retval(
+                qmcx,
+                query_list,
+                s.rettype,
+                s.rettupdesc.as_deref(),
+                s.prokind,
+                false,
+            )?;
+            if returns_tuple != s.returns_tuple.get() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("cached plan must not change result type")
+                    .into_error()
+                    .with_funcname("sql_postrewrite_callback")
+                    .into());
+            }
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

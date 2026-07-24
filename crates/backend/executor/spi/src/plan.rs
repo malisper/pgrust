@@ -95,6 +95,7 @@ pub(crate) fn complete_source(
 // on the retained raw tree (plancache.c:810-814), under _SPI_error_callback;
 // the transpose is the callback, `arg` (the statement index) is unused.
 fn reanalyze_spi_source(
+    _h: plancache::CachedPlanSourceHandle,
     qmcx: Mcx<'static>,
     raw: &'static types_nodes::rawnodes::RawStmt<'static>,
     query_string: &'static str,
