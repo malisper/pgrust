@@ -1355,25 +1355,36 @@ impl Drop for StmtJoinGuard {
         let payload = &self.payload;
         let rg = payload.rg.get().and_then(|w| w.upgrade());
         // Happy path (RG complete, board slot already taken by the wait
-        // loop's own cleanup): do nothing — the inc-1 hook's unconditional
-        // abort() here was a gratuitous herd wake of the whole pool per
-        // statement (witnessed by the unparks counter). Abort + demand
-        // close + join only when something is actually left to reap.
+        // loop's own cleanup): nothing to reap — the inc-1 hook's
+        // unconditional abort() here was a gratuitous herd wake of the
+        // whole pool per statement (witnessed by the unparks counter).
+        // Abort + demand close + join only when something is actually
+        // left to reap.
         let incomplete = rg.as_ref().is_some_and(|rg| rg.try_outcome().is_none());
         let slot_held =
             payload.standing.lock().unwrap_or_else(|p| p.into_inner()).is_some();
-        if !incomplete && !slot_held {
-            return;
+        if incomplete || slot_held {
+            if let Some(rg) = &rg {
+                rg.abort();
+            }
+            payload.funnel.close_demand();
+            super::standing_channel::shutdown_standing_join(
+                &payload.standing,
+                rg.as_ref(),
+                &|rg| drain_rg_stmt(payload.rt, &payload.funnel, rg),
+            );
         }
-        if let Some(rg) = &rg {
-            rg.abort();
+        // GL-SIMPLEWEDGE-1: sever the engagement's Arc back-edge
+        // UNCONDITIONALLY — `shared.private` holds this payload while
+        // `payload.pcxt_shared` holds the shared, a strong cycle that
+        // leaked the whole per-statement engagement graph (~1.2KB/query;
+        // the simple-protocol OLTP balloon -> OOM/eviction/thrash-wedge).
+        // This guard is the fast ceremony's DestroyParallelContext:
+        // in C the DSM segment dies here. Workers are joined above (or
+        // were never granted); their own Arc clones are unaffected.
+        if let Some(shared) = payload.pcxt_shared.get() {
+            parallel::clear_engagement_refs(shared);
         }
-        payload.funnel.close_demand();
-        super::standing_channel::shutdown_standing_join(
-            &payload.standing,
-            rg.as_ref(),
-            &|rg| drain_rg_stmt(payload.rt, &payload.funnel, rg),
-        );
     }
 }
 
