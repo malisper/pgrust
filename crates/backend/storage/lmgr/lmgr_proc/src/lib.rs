@@ -974,7 +974,36 @@ pub fn ProcKill(_code: i32, _arg: usize) {
             } else {
                 leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
             }
-        } else if leader_no != procno {
+        }
+        // GL-ASSERTMASK-1 row A2, folded into GL-GANGWEDGE-1 (letter §6.5).
+        // A MEMBER clears its own pointer in BOTH arms, not just the
+        // non-empty one. Previously the empty-transition arm above cleared
+        // only the LEADER's pointer, leaving ours set. That is harmless for a
+        // DYING caller (the slot is reinitialized by the next allocation) but
+        // not for a PARKING one: the `wretain::parking()` branch below returns
+        // with the PGPROC retained, so a stale pointer survives the park and
+        // `ReattachRetainedProc`'s group-clean precondition (its
+        // debug_assert_eq on lockGroupLeader) no longer holds — and in a
+        // release build, where that assert is compiled out, the reattached
+        // proc silently advertises membership in whatever the leader's slot has
+        // since been recycled into.
+        //
+        // This is exactly the rule LeaveLockGroup already states for a proc
+        // that lives on ("its own lockGroupLeader must clear in BOTH arms ... a
+        // stale pointer would advertise membership in a recycled PGPROC slot").
+        // ProcKill's parking branch is subject to that rule; this makes it hold
+        // at both doors instead of one. Idempotent — the non-empty arm used to
+        // do this store and every other path already leaves it INVALID.
+        //
+        // HARDENING BY CONSTRUCTION, not a witnessed fix: see §6.5 for the
+        // three repro shapes attempted and the reachability analysis (the
+        // leader's parallel-context teardown waits for its workers, so on the
+        // wpool path the leader's link is removed LAST and a member never sees
+        // the empty transition; on the standing path members leave via
+        // LeaveLockGroup, which already clears correctly). The leader case
+        // (leader_no == procno) is deliberately untouched: live members read
+        // the leader's pointer for the deferred-return arbitration above.
+        if leader_no != procno {
             proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
         }
         lwlock::LWLockRelease(leader_lwlock).expect("partition unlock in ProcKill");
