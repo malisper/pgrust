@@ -73,3 +73,18 @@ seam_core::seam!(
     // tablecmds.
     pub fn wait_for_older_snapshots(limit_xmin: types_core::TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // ChooseRelationName (indexcmds.c:2606, exported via defrem.h). C has
+    // exactly ONE of these and parse_utilcmd.c:476 calls it; our port grew a
+    // second, weaker copy in parse_utilcmd. It must be a seam rather than a
+    // direct call because indexcmds already depends on parse_utilcmd.
+    pub fn choose_relation_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        name1: &str,
+        name2: Option<&str>,
+        label: &str,
+        namespaceid: Oid,
+        isconstraint: bool,
+    ) -> PgResult<mcx::PgString<'mcx>>
+);

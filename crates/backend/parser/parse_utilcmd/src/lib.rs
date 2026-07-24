@@ -2891,65 +2891,22 @@ fn RangeVarGetAndCheckCreationNamespace<'mcx>(
     catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &rv, lockmode, want_existing)
 }
 
-// makeObjectName (indexcmds.c); names here are valid UTF-8, so pg_mbcliplen
-// is a char-boundary clip.
-fn makeObjectName<'mcx>(
-    mcx: Mcx<'mcx>,
-    name1: &str,
-    name2: Option<&str>,
-    label: &str,
-) -> PgResult<PgString<'mcx>> {
-    let mut overhead = label.len() + 1;
-    if name2.is_some() {
-        overhead += 1;
-    }
-    let availchars = NAMEDATALEN as usize - 1 - overhead;
-    let mut name1chars = name1.len();
-    let mut name2chars = name2.map_or(0, str::len);
-    while name1chars + name2chars > availchars {
-        if name1chars > name2chars {
-            name1chars -= 1;
-        } else {
-            name2chars -= 1;
-        }
-    }
-    let clip = |s: &str, mut n: usize| {
-        while !s.is_char_boundary(n) {
-            n -= 1;
-        }
-        n
-    };
-    let mut out = mcx::PgString::new_in(mcx);
-    out.try_push_str(&name1[..clip(name1, name1chars)])?;
-    if let Some(name2) = name2 {
-        out.try_push_str("_")?;
-        out.try_push_str(&name2[..clip(name2, name2chars)])?;
-    }
-    out.try_push_str("_")?;
-    out.try_push_str(label)?;
-    Ok(out)
-}
-
-// ChooseRelationName (indexcmds.c). DIVERGENCE: C probes pg_class under a
-// dirty snapshot; this uses the MVCC get_relname_relid probe (single-backend,
-// and DDL CCIs before the next probe can matter).
-pub fn ChooseRelationName<'mcx>(
+// C has exactly ONE ChooseRelationName (indexcmds.c:2606, exported via
+// defrem.h) and parse_utilcmd.c:476 calls it. This port had grown a second,
+// weaker copy here: it probed via the RELNAMENSP syscache instead of a
+// systable scan -- which can never be made dirty-snapshot, so it could not be
+// fixed in place -- and it dropped the isconstraint parameter entirely. Both
+// copies are now the one in indexcmds, reached through a seam because indexcmds
+// already depends on this crate. C passes isconstraint = false here
+// (parse_utilcmd.c:480).
+fn ChooseRelationName<'mcx>(
     mcx: Mcx<'mcx>,
     name1: &str,
     name2: Option<&str>,
     label: &str,
     namespaceid: Oid,
 ) -> PgResult<PgString<'mcx>> {
-    let mut pass = 0u32;
-    let mut modlabel = std::string::String::from(label);
-    loop {
-        let relname = makeObjectName(mcx, name1, name2, &modlabel)?;
-        if lsyscache::get_relname_relid(&relname, namespaceid)? == InvalidOid {
-            return Ok(relname);
-        }
-        pass += 1;
-        modlabel = format!("{label}{pass}");
-    }
+    indexcmds_seams::choose_relation_name::call(mcx, name1, name2, label, namespaceid, false)
 }
 
 // quote_identifier + quote_qualified_identifier (ruleutils.c).
@@ -3429,17 +3386,6 @@ mod tests {
 
     fn ctx() -> &'static mcx::MemoryContext {
         Box::leak(Box::new(mcx::MemoryContext::new("utilcmd-test")))
-    }
-
-    #[test]
-    fn make_object_name_matches_c() {
-        let mcx = ctx().mcx();
-        assert_eq!(makeObjectName(mcx, "st", Some("id"), "seq").unwrap().as_str(), "st_id_seq");
-        let long_a = "a".repeat(60);
-        let long_b = "b".repeat(60);
-        let n = makeObjectName(mcx, &long_a, Some(&long_b), "seq").unwrap();
-        assert_eq!(n.len(), NAMEDATALEN as usize - 1);
-        assert_eq!(n.as_str(), format!("{}_{}_seq", "a".repeat(29), "b".repeat(29)));
     }
 
     #[test]
