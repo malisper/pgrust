@@ -194,7 +194,15 @@ pub fn reindex_index<'mcx>(
             ),
         )));
     }
-    // RELATION_IS_OTHER_TEMP(iRel): const-false single-backend.
+    // index.c:3726 — their local buffer manager cannot cope. Without this the
+    // rebuild reaches storage and fails by trying to open the owning backend's
+    // per-backend temp file.
+    if iRel.is_other_temp() {
+        return Err(Box::new(
+            PgError::error("cannot reindex temporary tables of other sessions")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     if catalog::IsToastNamespace(iRel.namespace()) && !lsyscache::get_index_isvalid(indexId)? {
         return Err(Box::new(
             PgError::new(

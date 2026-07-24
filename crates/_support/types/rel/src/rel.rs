@@ -151,6 +151,17 @@ impl<'mcx> RelationData<'mcx> {
         self.rd_rel.relpersistence == RELPERSISTENCE_TEMP
     }
 
+    /// C's `RELATION_IS_OTHER_TEMP` (rel.h:669-671): a temporary relation
+    /// belonging to some *other* session. Its pages live in that backend's
+    /// local buffers, so this backend can neither read them coherently nor
+    /// write them safely. `resolve_backend` (relcache build) really does hand
+    /// back a foreign proc number with `rd_islocaltemp == false`, so this is
+    /// reachable-true — it is not a const-false predicate.
+    #[inline]
+    pub fn is_other_temp(&self) -> bool {
+        self.rd_rel.relpersistence == RELPERSISTENCE_TEMP && !self.rd_islocaltemp
+    }
+
     #[inline]
     pub fn is_mapped(&self) -> bool {
         RELKIND_HAS_STORAGE(self.rd_rel.relkind)

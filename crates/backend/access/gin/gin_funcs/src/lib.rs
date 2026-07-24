@@ -46,8 +46,7 @@ fn is_gin_index(indexRel: &Relation<'_>) -> bool {
     indexRel.rd_rel.relkind == RELKIND_INDEX && indexRel.rd_rel.relam == GIN_AM_OID
 }
 
-/// gin_clean_pending_list (ginfast.c). RELATION_IS_OTHER_TEMP is const-false
-/// in this single-backend model, so that C check is a no-op here.
+/// gin_clean_pending_list (ginfast.c:1030).
 pub fn fc_gin_clean_pending_list(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -65,10 +64,11 @@ pub fn fc_gin_clean_pending_list(
         return Err(not_a_gin_index(&indexRel));
     }
 
-    // RELATION_IS_OTHER_TEMP(indexRel): const-false single-backend; the
-    // ERRCODE_FEATURE_NOT_SUPPORTED arm above stays wired for the day that
-    // changes (cross-backend temp relation visibility) but never fires now.
-    let _ = other_temp_index;
+    // ginfast.c:1056 — we have no visibility into the owning session's local
+    // buffers, so reading its pending list would return wrong data.
+    if indexRel.is_other_temp() {
+        return Err(other_temp_index());
+    }
 
     if !aclchk::object_ownercheck(RELATION_RELATION_ID, indexoid, miscinit::GetUserId())? {
         aclchk::aclcheck_error(
