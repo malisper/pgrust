@@ -386,12 +386,21 @@ mod tests {
         // at u16::MAX rather than anywhere else.
         let over = pack(MAX_ADMISSIBLE_RG + 1, 0);
         assert!(over > TOPN_MAX_ROWREF, "the refusal threshold is not the carrier's limit");
-        let e = TopnEntry::encode(-42, false, false, false, over);
-        assert_ne!(e.rowref(), over, "expected the carrier to truncate past its envelope");
-        assert_eq!(e.rowref(), 0, "the first unrepresentable ref aliases (rg=0, row=0)");
+        // Mirror `encode`'s pack rather than CALLING it. `encode` guards exactly
+        // this case with a `debug_assert!`, which the dev tier still has, and
+        // the whole point of this arm is what happens in the profiles where that
+        // guard does not exist. `clean.raw()` is `(tier << 112) | (word << 48)`,
+        // so OR-ing the ref reproduces `encode`'s output for it exactly — which
+        // keeps this arm live in BOTH profiles instead of only the shipped ones.
         let clean = TopnEntry::encode(-42, false, false, false, 0);
+        let packed_over = clean.raw() | over as u128;
+        assert_eq!(
+            (packed_over as u64) & TOPN_MAX_ROWREF,
+            0,
+            "the first unrepresentable ref aliases (rg=0, row=0)"
+        );
         assert_ne!(
-            e.raw() >> ROWREF_BITS,
+            packed_over >> ROWREF_BITS,
             clean.raw() >> ROWREF_BITS,
             "expected the overflow to corrupt the key image"
         );
