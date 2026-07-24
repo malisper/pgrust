@@ -38,6 +38,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // object_ownercheck(classid, objectid, roleid) (aclchk.c).
+    pub fn object_ownercheck(
+        classid: types_core::Oid,
+        objectid: types_core::Oid,
+        roleid: types_core::Oid,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     // aclcheck_error(aclresult, objtype, objectname) (aclchk.c); objtype is
     // the parsenodes.h ObjectType discriminant. Always ereport(ERROR)s, so a
     // call only ever returns Err.

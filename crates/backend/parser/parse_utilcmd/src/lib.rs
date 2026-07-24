@@ -1539,17 +1539,22 @@ pub fn transformCreateStmt<'mcx>(
     let probe = relation.schemaname.is_some()
         || relation.relpersistence != types_core::RELPERSISTENCE_TEMP;
     let mut nspid = InvalidOid;
+    let mut existing_relid = InvalidOid;
     let mut adjusted_persistence = relation.relpersistence;
     if probe {
-        nspid = RangeVarGetCreationNamespace(mcx, relation).map_err(at_rel)?;
-        adjusted_persistence =
-            catalog_namespace::RangeVarAdjustRelationPersistence(relation.relpersistence, nspid)
-                .map_err(at_rel)?;
+        let (n, e, p) =
+            RangeVarGetAndCheckCreationNamespace(mcx, relation, types_rel::NoLock, true).map_err(at_rel)?;
+        nspid = n;
+        existing_relid = e;
+        adjusted_persistence = p;
     }
     if stmt.if_not_exists {
-        let nspid =
-            if probe { nspid } else { RangeVarGetCreationNamespace(mcx, relation)? };
-        if lsyscache::get_relname_relid(relname, nspid)? != InvalidOid {
+        let existing_relid = if probe {
+            existing_relid
+        } else {
+            RangeVarGetAndCheckCreationNamespace(mcx, relation, types_rel::NoLock, true)?.1
+        };
+        if existing_relid != InvalidOid {
             // unported: checkMembershipInCurrentExtension only bites inside
             // an extension script (needs getObjectDescription for its
             // report); clean 0A000 until that lane is ported.
@@ -2865,6 +2870,25 @@ fn RangeVarGetCreationNamespace<'mcx>(
         location: relation.location,
     };
     catalog_namespace::RangeVarGetCreationNamespace(mcx, &rv)
+}
+
+// RangeVarGetAndCheckCreationNamespace (namespace.c) over a primnodes RangeVar;
+// same marshal as the plain variant above.
+fn RangeVarGetAndCheckCreationNamespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &RangeVar<'_>,
+    lockmode: types_rel::LOCKMODE,
+    want_existing: bool,
+) -> PgResult<(Oid, Oid, u8)> {
+    let rv = rel_vocab::RangeVar {
+        catalogname: relation.catalogname,
+        schemaname: relation.schemaname,
+        relname: relation.relname.expect("RangeVar.relname"),
+        inh: relation.inh,
+        relpersistence: relation.relpersistence,
+        location: relation.location,
+    };
+    catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &rv, lockmode, want_existing)
 }
 
 // makeObjectName (indexcmds.c); names here are valid UTF-8, so pg_mbcliplen

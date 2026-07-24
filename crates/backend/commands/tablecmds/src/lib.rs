@@ -367,8 +367,10 @@ pub fn DefineRelation<'mcx>(
         }
     }
 
-    // RangeVarGetAndCheckCreationNamespace resolve-only: CREATE ACL check and
-    // oid-collision retry ride with the aclchk lane.
+    // Look up the namespace in which we are supposed to create the relation,
+    // check we have permission to create there, lock it against concurrent
+    // drop, and adjust the persistence if a temporary namespace is selected
+    // (tablecmds.c:829).
     let creation_rv = rel_vocab::RangeVar {
         catalogname: rv.catalogname,
         schemaname: rv.schemaname,
@@ -377,9 +379,8 @@ pub fn DefineRelation<'mcx>(
         relpersistence: rv.relpersistence,
         location: rv.location,
     };
-    let namespace_id = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
-    let relpersistence =
-        catalog_namespace::RangeVarAdjustRelationPersistence(rv.relpersistence, namespace_id)?;
+    let (namespace_id, _existing_relid, relpersistence) =
+        catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &creation_rv, types_rel::NoLock, false)?;
 
     if stmt.oncommit != OnCommitAction::ONCOMMIT_NOOP
         && relpersistence != types_core::RELPERSISTENCE_TEMP

@@ -19,6 +19,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // LockDatabaseObject(classid, objid, objsubid, lockmode) (lmgr.c).
+    pub fn lock_database_object(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // UnlockDatabaseObject(classid, objid, objsubid, lockmode) (lmgr.c).
+    pub fn unlock_database_object(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     // DescribeLockTag(&buf, tag) marshaled to the built text (lmgr.c).
     pub fn describe_lock_tag(tag: types_storage::lock::LOCKTAG) -> std::string::String
 );

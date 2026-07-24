@@ -72,9 +72,7 @@ pub fn AlterTableNamespace<'mcx>(
         }
     }
 
-    // RangeVarGetAndCheckCreationNamespace: creation-namespace resolve +
-    // schema ACL_CREATE check; concurrent-DDL retry loop and namespace lock
-    // ride the port's single-backend posture.
+    // Get and lock schema OID and check its permissions (tablecmds.c:18991).
     let newrv = rel_vocab::RangeVar {
         catalogname: None,
         schemaname: Some(stmt.newschema.expect("AlterObjectSchemaStmt.newschema")),
@@ -83,21 +81,8 @@ pub fn AlterTableNamespace<'mcx>(
         relpersistence: types_core::RELPERSISTENCE_PERMANENT,
         location: -1,
     };
-    let nsp_oid = catalog_namespace::RangeVarGetCreationNamespace(mcx, &newrv)?;
-    let aclresult = aclchk::object_aclcheck(
-        NamespaceRelationId,
-        nsp_oid,
-        miscinit::GetUserId(),
-        adt_acl::ACL_CREATE,
-    )?;
-    if aclresult != aclchk::ACLCHECK_OK {
-        let nspname = lsyscache::get_namespace_name(mcx, nsp_oid)?;
-        aclchk::aclcheck_error(
-            aclresult,
-            ObjectType::OBJECT_SCHEMA,
-            nspname.as_ref().map(|s| s.as_str()).unwrap_or(""),
-        )?;
-    }
+    let (nsp_oid, _existing_relid, _relpersistence) =
+        catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &newrv, types_rel::NoLock, false)?;
 
     catalog_namespace::CheckSetNamespace(old_nsp_oid, nsp_oid)?;
 

@@ -5,7 +5,7 @@ use std::cell::Cell;
 
 use mcx::{Mcx, MemoryContext};
 use types_core::{
-    InvalidSubTransactionId, Oid, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID,
+    InvalidOid, InvalidSubTransactionId, Oid, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID,
     NAMESPACE_RELATION_ID,
 };
 use types_error::{
@@ -22,6 +22,8 @@ use crate::{
 
 const ACL_CREATE_TEMP: u64 = 1 << 10;
 const ACLCHECK_OK: i32 = 0;
+// AclResult (acl.h); the only non-OK value this file raises.
+const ACLCHECK_NOT_OWNER: i32 = 2;
 const PERFORM_DELETION_INTERNAL: i32 = 0x0001;
 const PERFORM_DELETION_QUIETLY: i32 = 0x0004;
 const PERFORM_DELETION_SKIP_ORIGINAL: i32 = 0x0008;
@@ -183,6 +185,156 @@ pub fn RangeVarGetCreationNamespace(mcx: Mcx<'_>, rv: &rel_vocab::RangeVar<'_>) 
         ));
     }
     Ok(namespace_id)
+}
+
+/// `RangeVarGetAndCheckCreationNamespace` (namespace.c).
+///
+/// Resolves the creation namespace for a new relation named by `rv`, checks
+/// `ACL_CREATE` on it, and takes `AccessShareLock` on the namespace object so
+/// the namespace cannot be dropped before this transaction commits — without
+/// that lock a committed `pg_class` row can end up with `relnamespace` pointing
+/// at a no-longer-existent `pg_namespace` (C's comment at namespace.c:730-733).
+/// The whole body is C's `for(;;)`: any invalidation processed while looking
+/// names up and taking locks restarts the resolve, giving up the locks whose
+/// subject changed.
+///
+/// Returns `(namespace_oid, existing_relation_id, adjusted_relpersistence)`.
+/// C's out-parameters become returns because our `RangeVar` is immutable:
+/// `existing_relation_id` is `InvalidOid` unless `want_existing` (C's
+/// `existing_relation_id != NULL`), and the adjusted persistence is what C
+/// writes back into `relation->relpersistence` via
+/// `RangeVarAdjustRelationPersistence`.
+///
+/// `lockmode != NoLock` additionally ownerchecks and locks the pre-existing
+/// relation of that name, if any, exactly as C does.
+pub fn RangeVarGetAndCheckCreationNamespace(
+    mcx: Mcx<'_>,
+    rv: &rel_vocab::RangeVar<'_>,
+    lockmode: types_rel::LOCKMODE,
+    want_existing: bool,
+) -> PgResult<(Oid, Oid, u8)> {
+    // C checks the catalog name and then ignores it; RangeVarGetCreationNamespace
+    // repeats the same check inside the loop, as in C.
+    let mut relid;
+    let mut nspid;
+    let mut oldrelid = InvalidOid;
+    let mut oldnspid = InvalidOid;
+    let mut retry = false;
+
+    loop {
+        let inval_count = sinval::SharedInvalidMessageCounter();
+
+        // Look up creation namespace and check for existing relation.
+        nspid = RangeVarGetCreationNamespace(mcx, rv)?;
+        debug_assert!(OidIsValid(nspid));
+        relid = if want_existing {
+            lsyscache::get_relname_relid(rv.relname, nspid)?
+        } else {
+            InvalidOid
+        };
+
+        // In bootstrap processing mode C skips permissions and locking:
+        // permissions may not work yet and locking is unnecessary.
+        if miscinit_seams::is_bootstrap_processing_mode::call() {
+            break;
+        }
+
+        // Check namespace permissions.
+        let aclresult = aclchk_seams::object_aclcheck::call(
+            NAMESPACE_RELATION_ID,
+            nspid,
+            miscinit_seams::get_user_id::call(),
+            types_nodes::parsenodes::ACL_CREATE,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            let nspname = lsyscache::get_namespace_name(mcx, nspid)?;
+            aclchk_seams::aclcheck_error::call(
+                aclresult,
+                types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA as i32,
+                nspname.as_ref().map(|s| s.as_str()).unwrap_or(""),
+            )?;
+        }
+
+        if retry {
+            // If nothing changed, we're done.
+            if relid == oldrelid && nspid == oldnspid {
+                break;
+            }
+            // If creation namespace has changed, give up old lock.
+            if nspid != oldnspid {
+                lmgr_seams::unlock_database_object::call(
+                    NAMESPACE_RELATION_ID,
+                    oldnspid,
+                    0,
+                    types_rel::AccessShareLock,
+                )?;
+            }
+            // If name points to something different, give up old lock.
+            if relid != oldrelid && OidIsValid(oldrelid) && lockmode != types_rel::NoLock {
+                lmgr_seams::unlock_relation_oid::call(oldrelid, lockmode)?;
+            }
+        }
+
+        // Lock namespace.
+        if nspid != oldnspid {
+            lmgr_seams::lock_database_object::call(
+                NAMESPACE_RELATION_ID,
+                nspid,
+                0,
+                types_rel::AccessShareLock,
+            )?;
+        }
+
+        // Lock relation, if required and we have permission.
+        if lockmode != types_rel::NoLock && OidIsValid(relid) {
+            if !aclchk_seams::object_ownercheck::call(
+                types_core::RELATION_RELATION_ID,
+                relid,
+                miscinit_seams::get_user_id::call(),
+            )? {
+                let relkind = lsyscache::get_rel_relkind(relid)? as u8;
+                aclchk_seams::aclcheck_error::call(
+                    ACLCHECK_NOT_OWNER,
+                    get_relkind_objtype(relkind) as i32,
+                    rv.relname,
+                )?;
+            }
+            if relid != oldrelid {
+                lmgr_seams::lock_relation_oid::call(relid, lockmode)?;
+            }
+        }
+
+        // If no invalidation messages were processed, we're done!
+        if inval_count == sinval::SharedInvalidMessageCounter() {
+            break;
+        }
+
+        // Something may have changed, so recheck our work.
+        retry = true;
+        oldrelid = relid;
+        oldnspid = nspid;
+    }
+
+    let relpersistence = RangeVarAdjustRelationPersistence(rv.relpersistence, nspid)?;
+    Ok((nspid, relid, relpersistence))
+}
+
+// get_relkind_objtype (tablecmds.c). A pure relkind -> ObjectType mapping;
+// carried locally as the rest of the tree does (a dependency edge on the
+// commands layer would cycle).
+fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+    use types_nodes::parsenodes::ObjectType;
+    match relkind {
+        b'r' | b'p' => ObjectType::OBJECT_TABLE,
+        b'i' | b'I' => ObjectType::OBJECT_INDEX,
+        b'S' => ObjectType::OBJECT_SEQUENCE,
+        b'v' => ObjectType::OBJECT_VIEW,
+        b'm' => ObjectType::OBJECT_MATVIEW,
+        b'f' => ObjectType::OBJECT_FOREIGN_TABLE,
+        // C's default arm asserts and falls through to OBJECT_TABLE (a
+        // composite type's or toast relation's relkind can reach here).
+        _ => ObjectType::OBJECT_TABLE,
+    }
 }
 
 // QualifiedNameGetCreationNamespace + LookupCreationNamespace (namespace.c).
