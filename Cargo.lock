@@ -7692,6 +7692,7 @@ dependencies = [
  "types_rel",
  "types_relscan",
  "types_scan",
+ "types_snapshot",
  "types_storage",
  "types_tuple",
  "vars",

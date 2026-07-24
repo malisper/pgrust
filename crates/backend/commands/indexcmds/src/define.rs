@@ -1785,8 +1785,16 @@ fn ChooseIndexColumnNames<'mcx>(
     Ok(result)
 }
 
-// ChooseRelationName. C divergence: probes pg_class under the transaction
-// snapshot, not a dirty snapshot (single-backend lane).
+// ChooseRelationName (indexcmds.c:2578). The pg_class probe runs under a DIRTY
+// snapshot (indexcmds.c:2613/2617/2643), deliberately, so it can see another
+// backend's *uncommitted* claim on the generated name and skip to the next
+// suffix. Under an MVCC snapshot the collision is invisible and the loser of the
+// race aborts on pg_class_relname_nsp_index instead of taking `foo_i_idx1`.
+// C's header comment (indexcmds.c:2593-2601) is explicit that this only narrows
+// the window rather than closing it, and that a command choosing several names
+// must CommandCounterIncrement between them.
+// Note ConstraintNameExists stays MVCC: C passes a NULL snapshot there too
+// (pg_constraint.c), so that half is already correct.
 pub(crate) fn ChooseRelationName<'mcx>(
     mcx: Mcx<'mcx>,
     name1: &str,
@@ -1796,6 +1804,12 @@ pub(crate) fn ChooseRelationName<'mcx>(
     isconstraint: bool,
 ) -> PgResult<PgString<'mcx>> {
     let pgclassrel = table::table_open(mcx, RELATION_RELATION_ID, types_rel::AccessShareLock)?;
+    // indexcmds.c:2617 InitDirtySnapshot, held across the whole retry loop as
+    // C's stack SnapshotDirty is.
+    let dirty = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        mcx,
+        ::types_snapshot::SnapshotType::SNAPSHOT_DIRTY,
+    ));
     let mut pass = 0;
     let mut modlabel = PgString::from_str_in(label, mcx)?;
     let relname = loop {
@@ -1805,8 +1819,14 @@ pub(crate) fn ChooseRelationName<'mcx>(
             eq_key(Anum_pg_class_relname, F_NAMEEQ, Datum::from_usize(cname.as_ptr() as usize)),
             eq_key(Anum_pg_class_relnamespace, F_OIDEQ, Datum::from_oid(namespaceid)),
         ];
-        let mut scan =
-            genam::systable_beginscan(mcx, &pgclassrel, ClassNameNspIndexId, true, None, &keys)?;
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &pgclassrel,
+            ClassNameNspIndexId,
+            true,
+            Some(dirty.clone()),
+            &keys,
+        )?;
         let mut collides = genam::systable_getnext(mcx, &mut scan)?.is_some();
         genam::systable_endscan(mcx, scan)?;
         if !collides && isconstraint {
@@ -1905,6 +1925,36 @@ fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, u8>> {
 #[cfg(test)]
 mod tests {
     use types_relscan::IndexAmKind::*;
+
+    // Re-homed from parse_utilcmd, which carried a second, weaker copy of
+    // makeObjectName (a char-boundary clip closure rather than pg_mbcliplen).
+    // C has one makeObjectName (indexcmds.c:2517); so do we now, and this is it.
+    #[test]
+    fn make_object_name_matches_c() {
+        // pg_mbcliplen is a seam and unit tests install no seams; the stub is
+        // the same UTF-8 boundary clip pg_constraint's truncation_tests uses.
+        static SETUP: std::sync::Once = std::sync::Once::new();
+        SETUP.call_once(|| {
+            ::mbutils_seams::pg_mbcliplen::set(|s, len, limit| {
+                let mut l = (limit as usize).min(len as usize);
+                while l > 0 && l < s.len() && s[l] & 0xC0 == 0x80 {
+                    l -= 1;
+                }
+                l as i32
+            });
+        });
+        let cx = Box::leak(Box::new(::mcx::MemoryContext::new("indexcmds-objname-test")));
+        let mcx = cx.mcx();
+        assert_eq!(
+            super::make_object_name(mcx, "st", Some("id"), "seq").unwrap().as_str(),
+            "st_id_seq"
+        );
+        let long_a = "a".repeat(60);
+        let long_b = "b".repeat(60);
+        let n = super::make_object_name(mcx, &long_a, Some(&long_b), "seq").unwrap();
+        assert_eq!(n.len(), ::types_core::NAMEDATALEN as usize - 1);
+        assert_eq!(n.as_str(), format!("{}_{}_seq", "a".repeat(29), "b".repeat(29)));
+    }
 
     // Each AM handler's IndexAmRoutine flags (PG18): amcaninclude true for
     // btree/gist/spgist; amcanmulticol false for hash/spgist.

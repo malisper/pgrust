@@ -35,6 +35,7 @@ pub fn init_seams() {
     indexcmds_seams::index_set_parent_index::set(define::IndexSetParentIndex);
     indexcmds_seams::check_index_compatible::set(define::CheckIndexCompatible);
     indexcmds_seams::resolve_opclass::set(define::ResolveOpClass);
+    indexcmds_seams::choose_relation_name::set(define::ChooseRelationName);
 }
 
 // WaitForOlderSnapshots (indexcmds.c:431): wait out transactions that might
