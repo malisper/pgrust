@@ -718,8 +718,17 @@ pub fn DefineSequence<'mcx>(
             relpersistence: rv.relpersistence,
             location: rv.location,
         };
-        let nspid = catalog_namespace::RangeVarGetCreationNamespace(mcx, &rvv)?;
-        if lsyscache::get_relname_relid(rvv.relname, nspid)? != types_core::InvalidOid {
+        // RangeVarGetAndCheckCreationNamespace(seq->sequence, NoLock, &seqoid)
+        // (sequence.c:146): resolve + ACL_CREATE + namespace lock, and the
+        // existing-relation probe the IF NOT EXISTS test below reads.
+        let (_nspid, seqoid, _relpersistence) =
+            catalog_namespace::RangeVarGetAndCheckCreationNamespace(
+                mcx,
+                &rvv,
+                types_rel::NoLock,
+                true,
+            )?;
+        if seqoid != types_core::InvalidOid {
             // checkMembershipInCurrentExtension only bites inside an
             // extension script (parse_utilcmd CREATE TABLE INE precedent).
             if pg_depend::creating_extension() {

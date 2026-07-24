@@ -1548,8 +1548,16 @@ pub fn DefineCompositeType<'mcx>(
         relpersistence: typevar.relpersistence,
         location: typevar.location,
     };
-    let type_namespace = catalog_namespace::RangeVarGetCreationNamespace(mcx, &creation_rv)?;
-    catalog_namespace::RangeVarAdjustRelationPersistence(typevar.relpersistence, type_namespace)?;
+    // typecmds.c:2582: resolve + ACL_CREATE + namespace lock, then C's explicit
+    // (idempotent) RangeVarAdjustRelationPersistence call, which the helper
+    // already applied to the returned persistence.
+    let (type_namespace, _existing_relid, _relpersistence) =
+        catalog_namespace::RangeVarGetAndCheckCreationNamespace(
+            mcx,
+            &creation_rv,
+            types_rel::NoLock,
+            false,
+        )?;
     let old_type_oid =
         syscache_seams::lookup_pg_type_oid_by_name::call(relname, type_namespace)?;
     if old_type_oid != InvalidOid

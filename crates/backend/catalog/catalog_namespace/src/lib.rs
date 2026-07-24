@@ -31,7 +31,8 @@ mod visibility;
 
 pub use temp::{
     AccessTempTableNamespace, GetTempTableNamespace, QualifiedNameGetCreationNamespace,
-    RangeVarAdjustRelationPersistence, RangeVarGetCreationNamespace, ResetTempTableNamespace,
+    RangeVarAdjustRelationPersistence, RangeVarGetAndCheckCreationNamespace,
+    RangeVarGetCreationNamespace, ResetTempTableNamespace,
 };
 
 pub use lookup::{
