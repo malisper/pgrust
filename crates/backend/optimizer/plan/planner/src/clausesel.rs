@@ -490,10 +490,16 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
         NodeTag::T_RowCompareExpr => rowcomparesel(run, clause, varrelid, jointype, sjinfo),
         // C's catch-all default: no way to estimate, use 0.5.
         NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Param => Ok(0.5),
-        // C's final else: boolvarsel.
+        // C's final else: boolvarsel. NullIfExpr belongs here (GL-TESTFIX-1
+        // / GL-TESTRIGS-1 F-R3-1): its C node REPRESENTATION is OpExpr, but
+        // its tag is T_NullIfExpr, so C's `is_opclause(clause) ||
+        // IsA(clause, DistinctExpr)` arm rejects it and clausesel.c's final
+        // else takes it — a boolean NULLIF qual estimates via boolvarsel,
+        // never via the operator's restriction estimator.
         NodeTag::T_CaseExpr
         | NodeTag::T_CoalesceExpr
         | NodeTag::T_JsonIsPredicate
+        | NodeTag::T_NullIfExpr
         | NodeTag::T_PlaceHolderVar => {
             crate::selfuncs::boolvarsel(run, clause, varrelid)
         }
