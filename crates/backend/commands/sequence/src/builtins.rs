@@ -110,9 +110,12 @@ fn fc_pg_sequence_last_value(
 
     let mut is_called = false;
     let mut result = 0i64;
-    // RELATION_IS_OTHER_TEMP: const-false single-backend.
+    // sequence.c:1866-1869. The other-temp conjunct is why C returns NULL here
+    // rather than erroring: it is C's stated defense against a direct call on
+    // another session's temp sequence, whose pages we cannot read.
     if aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), ACL_SELECT | ACL_USAGE)?
         == aclchk::ACLCHECK_OK
+        && !seqrel.is_other_temp()
         && (seqrel.is_permanent() || !transam_xlog_seams::recovery_in_progress::call())
     {
         let (buf, seq) = read_seq_tuple(&seqrel)?;
@@ -148,11 +151,14 @@ fn fc_pg_get_sequence_data(
 
     let seqrel = relation::try_relation_open(mcx, relid, AccessShareLock)?;
     let mut filled = false;
-    // RELATION_IS_OTHER_TEMP: const-false single-backend.
+    // sequence.c:1811-1814: all-NULLs for missing sequences, ones we lack
+    // privileges on, OTHER SESSIONS' temporary sequences, and unlogged
+    // sequences on standbys.
     if let Some(rel) = &seqrel {
         if rel.rd_rel.relkind == RELKIND_SEQUENCE
             && aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), ACL_SELECT)?
                 == aclchk::ACLCHECK_OK
+            && !rel.is_other_temp()
             && (rel.is_permanent() || !transam_xlog_seams::recovery_in_progress::call())
         {
             let (buf, seq) = read_seq_tuple(rel)?;

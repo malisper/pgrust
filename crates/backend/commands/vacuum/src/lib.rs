@@ -703,7 +703,7 @@ fn vacuum_rel<'mcx>(
 
     // Other backends' temp tables are silently skipped — their contents are
     // not reliably on disk, and warning would be database-wide-VACUUM chatter.
-    if rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP && !rel.rd_islocaltemp {
+    if rel.is_other_temp() {
         rel.close(lmode)?;
         snapmgr::PopActiveSnapshot()?;
         xact::CommitTransactionCommand()?;

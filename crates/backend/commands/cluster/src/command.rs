@@ -73,7 +73,12 @@ pub fn cluster<'mcx>(
         )?;
         let rel = table::table_open(mcx, table_oid, NoLock)?;
 
-        // RELATION_IS_OTHER_TEMP: const-false single-backend.
+        // cluster.c:155 — the by-name gate. Their local buffer manager cannot
+        // cope; C's comment at cluster.c:369 relies on this catching every
+        // attempt to cluster a remote temp table by name.
+        if rel.is_other_temp() {
+            return Err(feature_err("cannot cluster temporary tables of other sessions"));
+        }
 
         let index_oid = if let Some(indexname) = stmt.indexname {
             let idx = lsyscache::get_relname_relid(indexname, rel.rd_rel.relnamespace)?;
@@ -203,7 +208,17 @@ pub fn cluster_rel<'mcx>(
         if index_oid != InvalidOid && old_heap.rd_rel.relisshared {
             return Err(feature_err("cannot cluster a shared catalog"));
         }
-        // RELATION_IS_OTHER_TEMP: const-false single-backend.
+        // cluster.c:412-425, the two-armed guard. Note the VACUUM arm is
+        // effectively dead: vacuum_rel skips other-session temp rels first
+        // (commands/vacuum lib.rs, porting vacuum.c:2158), so VACUUM never
+        // reaches here. Ported anyway to keep the site C-shaped.
+        if old_heap.is_other_temp() {
+            return Err(feature_err(if index_oid != InvalidOid {
+                "cannot cluster temporary tables of other sessions"
+            } else {
+                "cannot vacuum temporary tables of other sessions"
+            }));
+        }
         catalog_heap::CheckTableNotInUse(
             &old_heap,
             if index_oid != InvalidOid { "CLUSTER" } else { "VACUUM" },

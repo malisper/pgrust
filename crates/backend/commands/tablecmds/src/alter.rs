@@ -447,6 +447,25 @@ pub(crate) fn ATGetQueueEntry<'mcx>(
     wqueue.len() - 1
 }
 
+/// CheckAlterTableIsSafe (tablecmds.c:4449): `CheckTableNotInUse` plus a check
+/// that the relation is not another session's temp table. C splits the two
+/// because some `CheckTableNotInUse` callers must NOT reject other-session temp
+/// relations — notably DROP, which has to be able to clean out an orphaned temp
+/// schema. C's own comment points at `truncate_check_activity` as the model, and
+/// that is what this mirrors. Order matches C: temp check first.
+pub(crate) fn CheckAlterTableIsSafe(rel: &Relation<'_>) -> PgResult<()> {
+    // Their local buffer manager cannot cope if we change the table's
+    // contents, and optimizations may assume temp tables see no such
+    // interference.
+    if rel.is_other_temp() {
+        return Err(Box::new(
+            PgError::error("cannot alter temporary tables of other sessions")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    catalog_heap::CheckTableNotInUse(rel, "ALTER TABLE")
+}
+
 pub fn AlterTable<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
@@ -456,9 +475,7 @@ pub fn AlterTable<'mcx>(
     tag: types_core::CommandTag,
 ) -> PgResult<()> {
     let rel = relation_seams::relation_open::call(mcx, relid, NoLock)?;
-    // CheckAlterTableIsSafe: other-session temp tables are unreachable
-    // (temp relations unported).
-    catalog_heap::CheckTableNotInUse(&rel, "ALTER TABLE")?;
+    CheckAlterTableIsSafe(&rel)?;
     let recurse = stmt.relation.expect("AlterTableStmt.relation").inh;
     ATController(mcx, rel, &stmt.cmds, recurse, lockmode, query_string, Some(tag))
 }
@@ -4219,9 +4236,7 @@ fn set_attnotnull<'mcx>(
     attnum: AttrNumber,
     queue_validation: bool,
 ) -> PgResult<()> {
-    // CheckAlterTableIsSafe: other-session temp tables are unreachable
-    // (temp relations unported).
-    catalog_heap::CheckTableNotInUse(rel, "ALTER TABLE")?;
+    CheckAlterTableIsSafe(rel)?;
     let att = rel.rd_att.attr(attnum as usize - 1);
     if att.attisdropped {
         return Ok(());
@@ -4343,10 +4358,9 @@ fn dropconstraint_internal<'mcx>(
     }
     if con.contype == pg_constraint::CONSTRAINT_FOREIGN && con.confrelid != rel.rd_id {
         // Must match the lock RemoveTriggerById takes on the referenced rel.
-        // C CheckAlterTableIsSafe = CheckTableNotInUse + RELATION_IS_OTHER_TEMP
-        // (const-false single-backend).
+        // C calls CheckAlterTableIsSafe here (tablecmds.c:14209).
         let frel = table::table_open(mcx, con.confrelid, AccessExclusiveLock)?;
-        catalog_heap::CheckTableNotInUse(&frel, "ALTER TABLE")?;
+        CheckAlterTableIsSafe(&frel)?;
         frel.close(NoLock)?;
     }
     let object = pg_depend::ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, con.oid);
@@ -7028,7 +7042,13 @@ fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace_id: Oid) -> Pg
             .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
-    // RELATION_IS_OTHER_TEMP: temp relations unported.
+    // tablecmds.c:3723 — their local buffer manager cannot cope with a move.
+    if rel.is_other_temp() {
+        return Err(Box::new(
+            PgError::error("cannot move temporary tables of other sessions")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     Ok(true)
 }
 

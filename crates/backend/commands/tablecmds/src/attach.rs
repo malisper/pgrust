@@ -224,13 +224,13 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
             ERRCODE_WRONG_OBJECT_TYPE,
         ));
     }
-    if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP && !rel.rd_islocaltemp {
+    if rel.is_other_temp() {
         return Err(err(
             "cannot attach as partition of temporary relation of another session".into(),
             ERRCODE_WRONG_OBJECT_TYPE,
         ));
     }
-    if attachrel.rd_rel.relpersistence == RELPERSISTENCE_TEMP && !attachrel.rd_islocaltemp {
+    if attachrel.is_other_temp() {
         return Err(err(
             "cannot attach temporary relation of another session as partition".into(),
             ERRCODE_WRONG_OBJECT_TYPE,
