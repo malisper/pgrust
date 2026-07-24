@@ -398,8 +398,9 @@ pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
         st.id_cache.iter().map(|(k, e)| (*k, Rc::clone(&e.rel), e.nailed)).collect()
     });
 
-    let mut rebuild_first: Vec<(Oid, Rc<RelationData<'static>>, bool)> = Vec::new();
-    let mut rebuild: Vec<(Oid, Rc<RelationData<'static>>, bool)> = Vec::new();
+    // Oids, not entry clones: see the re-resolve note on the phase-2 loop.
+    let mut rebuild_first: Vec<Oid> = Vec::new();
+    let mut rebuild: Vec<Oid> = Vec::new();
 
     for (relid, rel, nailed) in snapshot {
         // New-in-transaction rels can't be targets of cross-backend inval.
@@ -418,13 +419,13 @@ pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
             build::RelationInitPhysicalAddr(&rel)?;
         }
         if relid == RELATION_RELATION_ID {
-            rebuild_first.insert(0, (relid, rel, nailed));
+            rebuild_first.insert(0, relid);
         } else if relid == CLASS_OID_INDEX_ID {
-            rebuild_first.push((relid, rel, nailed));
+            rebuild_first.push(relid);
         } else if nailed {
-            rebuild.insert(0, (relid, rel, nailed));
+            rebuild.insert(0, relid);
         } else {
-            rebuild.push((relid, rel, nailed));
+            rebuild.push(relid);
         }
     }
 
@@ -432,7 +433,20 @@ pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
     smgr::smgrreleaseall();
 
     let in_xact = xact_seams::is_transaction_state::call();
-    for (relid, rel, nailed) in rebuild_first.into_iter().chain(rebuild) {
+    for relid in rebuild_first.into_iter().chain(rebuild) {
+        // C's phase-2 list carries a pointer that is guaranteed to still BE the
+        // cache's entry when its turn comes: refcount > 0 forbids deletion and
+        // the rebuild is in place (relcache.c:2570-2582, 2971-2980). The list
+        // is also not itself a reference, so it does not perturb rd_refcnt.
+        // Our rebuild REPLACES the entry Rc, so a clone held across this loop
+        // would (a) be orphaned by a nested invalidation arriving during an
+        // earlier entry's catalog access, its strong count no longer counting
+        // the cache and so reading one below C's rd_refcnt in the arm test
+        // below, and (b) inflate what that nested arm test reads by one. Hold
+        // nothing; re-resolve, as the EOXact cleanups already do.
+        let Some((rel, nailed)) = store::lookup_ent(relid) else {
+            continue;
+        };
         if !in_xact || (nailed && store::refcount_zero(&rel, 1)) {
             RelationInvalidateRelation(&rel);
         } else {

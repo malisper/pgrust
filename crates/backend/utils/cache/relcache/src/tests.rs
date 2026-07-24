@@ -19,6 +19,10 @@ thread_local! {
     static ROWS: RefCell<HashMap<Oid, FakeRel>> = RefCell::new(HashMap::new());
     static SCAN_LOG: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
     static INVALIDATE_DURING_BUILD: Cell<Option<(Oid, u32)>> = const { Cell::new(None) };
+    // (trigger, victim, n): a catalog scan of `trigger` delivers an
+    // invalidation for a DIFFERENT relation, as C's LockRelationOid ->
+    // AcceptInvalidationMessages does inside a rebuild's catalog access.
+    static INVALIDATE_OTHER_DURING_BUILD: Cell<Option<(Oid, Oid, u32)>> = const { Cell::new(None) };
     static IN_XACT: Cell<bool> = const { Cell::new(true) };
     static CUR_SUBID: Cell<u32> = const { Cell::new(1) };
     static HAS_SYSCACHE: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
@@ -115,6 +119,12 @@ fn fake_scan(target: Oid, _index_ok: bool, _fnh: bool) -> PgResult<Option<relcac
         if oid == target && n > 0 {
             INVALIDATE_DURING_BUILD.with(|c| c.set(Some((oid, n - 1))));
             invalidate::RelationCacheInvalidateEntry(target)?;
+        }
+    }
+    if let Some((trigger, victim, n)) = INVALIDATE_OTHER_DURING_BUILD.with(|c| c.get()) {
+        if trigger == target && n > 0 {
+            INVALIDATE_OTHER_DURING_BUILD.with(|c| c.set(Some((trigger, victim, n - 1))));
+            invalidate::RelationCacheInvalidateEntry(victim)?;
         }
     }
     Ok(ROWS.with(|r| {
@@ -402,6 +412,125 @@ fn cache_invalidate_defers_unused_nailed() {
     assert!(!rel.rd_isvalid.get());
     assert!(SCAN_LOG.with(|l| l.borrow().is_empty()));
     drop(rel);
+}
+
+// C's phase-2 rebuild list holds pointers to entries that cannot be deleted
+// (rd_refcnt > 0) and that are rebuilt IN PLACE (relcache.c:2570-2582,
+// 2971-2980), so a pointer is still the cache's entry when its turn comes, and
+// nothing the list holds contributes to rd_refcnt. Our rebuild replaces the
+// entry Rc, so a nested invalidation arriving during an earlier entry's
+// catalog access must not leave a later list slot pointing at an orphan, and
+// the list must not inflate the refcount that nested arm-selection reads.
+#[test]
+fn cache_invalidate_phase2_reresolves_across_nested_reload() {
+    install();
+    seed(types_core::RELATION_RELATION_ID, "pg_class", RELKIND_RELATION);
+    seed(CLASS_OID_INDEX_ID, "pg_class_oid_index", RELKIND_INDEX);
+    seed(16460, "nailed_unused_later", RELKIND_RELATION);
+
+    // pg_class + its index are held, so phase 2 rebuilds them (first, and in
+    // that order). 16460 is nailed and unreferenced: C defers it, never
+    // rebuilds it, and it sorts to the front of the second list, i.e. last.
+    let pc = get(types_core::RELATION_RELATION_ID);
+    let ci = get(CLASS_OID_INDEX_ID);
+    drop(get(16460));
+    for oid in [types_core::RELATION_RELATION_ID, CLASS_OID_INDEX_ID, 16460] {
+        with_state(|st| st.id_cache.get_mut(&oid).unwrap().nailed = true);
+    }
+    with_state(|st| st.critical_relcaches_built = true);
+    INVALIDATE_OTHER_DURING_BUILD
+        .with(|c| c.set(Some((types_core::RELATION_RELATION_ID, 16460, 1))));
+    SCAN_LOG.with(|l| l.borrow_mut().clear());
+
+    let r = invalidate::RelationCacheInvalidate(false);
+    INVALIDATE_OTHER_DURING_BUILD.with(|c| c.set(None));
+    r.unwrap();
+
+    // The unused nailed entry is deferred by both the nested arm and phase 2,
+    // so it is never scanned: C RelationFlushRelation relcache.c:2876-2883 and
+    // RelationCacheInvalidate relcache.c:3090-3091.
+    assert_eq!(SCAN_LOG.with(|l| l.borrow().iter().filter(|&&o| o == 16460).count()), 0);
+    // C rd_refcnt for an unused nailed entry is exactly 1, i.e. zero user refs
+    // and one live allocation: nothing was rebuilt off an orphan and written
+    // back over the cache's entry. Measured before taking a probe clone.
+    assert_eq!(crate::RelationUserRefcount(16460), 0);
+    let (rel, nailed) = store::lookup_ent(16460).unwrap();
+    assert!(nailed);
+    assert!(!rel.rd_isvalid.get());
+    drop(rel);
+    drop((pc, ci));
+}
+
+// Same class, widened: a nailed-unused entry invalidated three times from
+// inside one rebuild's catalog access, a SECOND nailed-unused entry that is
+// never a nested victim, and a REFERENCED non-nailed entry, all in one phase-2
+// list. Checks that the re-resolve holds up under repeated replacement of one
+// list member and does not perturb its neighbours.
+//
+// The referenced entry is a NO-REGRESSION companion, not a second born-RED:
+// measured, a referenced entry that IS a nested victim gets rebuilt twice at
+// base -- and C rebuilds it twice too (nested RelationFlushRelation, then its
+// phase-2 turn), so the scan count is not a divergence there. Our port's extra
+// residue on that arm -- the outer rebuild deriving copy_preserved state from
+// the orphan rather than from the entry the nested rebuild installed -- is
+// unobservable unless something writes a preserved field inside the window
+// (e.g. RelationAssumeNewRelfilelocator), which this fixture does not do. So
+// what is pinned here is only that the referenced arm still behaves as C does:
+// rebuilt exactly once by phase 2, one user reference, valid at the end.
+#[test]
+fn cache_invalidate_phase2_reresolves_multi_entry_and_referenced() {
+    install();
+    seed(types_core::RELATION_RELATION_ID, "pg_class", RELKIND_RELATION);
+    seed(CLASS_OID_INDEX_ID, "pg_class_oid_index", RELKIND_INDEX);
+    for (oid, name) in [(16470, "nailed_unused_a"), (16471, "nailed_unused_b")] {
+        seed(oid, name, RELKIND_RELATION);
+    }
+    seed(16472, "plain_referenced", RELKIND_RELATION);
+
+    let pc = get(types_core::RELATION_RELATION_ID);
+    let ci = get(CLASS_OID_INDEX_ID);
+    drop(get(16470));
+    drop(get(16471));
+    let held_ref = get(16472); // one real reference, C rd_refcnt == 1
+    for oid in [types_core::RELATION_RELATION_ID, CLASS_OID_INDEX_ID, 16470, 16471] {
+        with_state(|st| st.id_cache.get_mut(&oid).unwrap().nailed = true);
+    }
+    with_state(|st| st.critical_relcaches_built = true);
+    // Three deliveries out of pg_class's rebuild scan, all for 16470 (the seam
+    // decrements its repeat count; it does not rotate victims), so 16470 is
+    // replaced repeatedly while the outer list still names it.
+    INVALIDATE_OTHER_DURING_BUILD
+        .with(|c| c.set(Some((types_core::RELATION_RELATION_ID, 16470, 3))));
+    SCAN_LOG.with(|l| l.borrow_mut().clear());
+
+    let r = invalidate::RelationCacheInvalidate(false);
+    INVALIDATE_OTHER_DURING_BUILD.with(|c| c.set(None));
+    r.unwrap();
+
+    // Both unused nailed entries deferred, never scanned, one allocation each.
+    for oid in [16470u32, 16471] {
+        assert_eq!(
+            SCAN_LOG.with(|l| l.borrow().iter().filter(|&&o| o == oid).count()),
+            0,
+            "unused nailed {oid} was rebuilt; C defers it"
+        );
+        assert_eq!(crate::RelationUserRefcount(oid), 0, "stale lineage for {oid}");
+        let (rel, nailed) = store::lookup_ent(oid).unwrap();
+        assert!(nailed);
+        assert!(!rel.rd_isvalid.get());
+    }
+    // The referenced entry IS rebuilt (C relcache.c:3093), exactly once, and
+    // the cache's entry is the rebuild's own output -- not something
+    // reconstructed from an orphaned predecessor.
+    assert_eq!(SCAN_LOG.with(|l| l.borrow().iter().filter(|&&o| o == 16472).count()), 1);
+    let (fresh, _) = store::lookup_ent(16472).unwrap();
+    assert!(fresh.rd_isvalid.get());
+    assert!(!Rc::ptr_eq(&fresh, &held_ref), "rebuild must replace the entry Rc");
+    // C rd_refcnt == 1: the pre-rebuild holder, counted through stale_refs.
+    drop(fresh);
+    assert_eq!(crate::RelationUserRefcount(16472), 1);
+    drop(held_ref);
+    drop((pc, ci));
 }
 
 #[test]
