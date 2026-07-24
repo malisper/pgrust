@@ -10,7 +10,7 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::{DropBehavior, RenameStmt};
-use types_rel::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock, RELKIND_RELATION};
+use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock, RELKIND_RELATION};
 
 use crate::alter::{
     check_for_column_name_collision, update_pg_attribute, Anum_pg_attribute_attname,
@@ -506,6 +506,12 @@ pub fn RenameRelationInternal<'mcx>(
     )?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {myrelid}"));
+    // C: SearchSysCacheLockedCopy1 (tablecmds.c:4297) / UnlockTuple (:4326).
+    // The lock precedes every content read that feeds the replacement image,
+    // so a concurrent inplace writer's relfrozenxid/relminmxid advance is
+    // either serialized behind us or visible in what we copy.
+    let otid = reltup.t_self;
+    lmgr::LockTuple(&relrelation, &otid, InplaceUpdateTupleLock)?;
     let desc = relrelation.descr();
     let n = desc.natts as usize;
     let namebuf = name_datum(mcx, newrelname)?;
@@ -519,9 +525,9 @@ pub fn RenameRelationInternal<'mcx>(
     replace[2 - 1] = true;
     let mut newtup =
         heaptuple::heap_modify_tuple(mcx, reltup, desc, &values, &nulls, &replace)?;
-    let otid = reltup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &relrelation, &otid, &mut newtup)?;
+    lmgr::UnlockTuple(&relrelation, &otid, InplaceUpdateTupleLock)?;
     relrelation.close(RowExclusiveLock)?;
 
     if targetrelation.rd_rel.reltype != InvalidOid {

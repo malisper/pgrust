@@ -3,7 +3,7 @@ use mcx::Mcx;
 use types_core::{InvalidOid, Oid, INDEX_RELATION_ID, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, WARNING};
 use types_rel::{
-    AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, ShareLock,
+    AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock, ShareLock,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
 };
 
@@ -20,11 +20,13 @@ const Anum_pg_class_relfrozenxid: usize = 30;
 const Anum_pg_class_relminmxid: usize = 31;
 
 // RelationSetNewRelfilenumber (relcache.c), hosted here: relcache cannot dep
-// catalog_storage/tableam/catalog_indexing without cycling. The catalog write
-// is the unlocked-tuple shape every catalog updater here uses (no
-// InplaceUpdateTupleLock; that divergence rides repo-wide). The subid Cells
-// are set before CommandCounterIncrement so the inval rebuild's
-// copy_preserved carries them onto the rebuilt entry.
+// catalog_storage/tableam/catalog_indexing without cycling. The pg_class write
+// takes LOCKTAG_TUPLE at InplaceUpdateTupleLock, as C's
+// SearchSysCacheLockedCopy1 does (relcache.c:3820/:3949) -- see
+// scripts/inplace-lockcheck.sh for the standing enumeration of pg_class's
+// transactional updaters and which of them C locks. The subid Cells are set
+// before CommandCounterIncrement so the inval rebuild's copy_preserved
+// carries them onto the rebuilt entry.
 pub fn RelationSetNewRelfilenumber<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -73,6 +75,14 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
             genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
         let reltup = genam::systable_getnext(mcx, &mut scan)?
             .unwrap_or_else(|| panic!("could not find tuple for relation {}", rel.rd_id));
+        // C: SearchSysCacheLockedCopy1 (relcache.c:3820) / UnlockTuple
+        // (relcache.c:3949). Before the content read that feeds the
+        // replacement image, so a concurrent inplace writer is either
+        // serialized behind us or visible in what we copy -- losing
+        // relfrozenxid/relminmxid here is a durable wraparound-safety
+        // regression, and this function writes both.
+        let otid = reltup.t_self;
+        lmgr::LockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
         let mut values = [Datum::null(); Natts_pg_class];
         let isnull = [false; Natts_pg_class];
         let mut replace = [false; Natts_pg_class];
@@ -98,9 +108,9 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
             &isnull,
             &replace,
         )?;
-        let otid = reltup.t_self;
         genam::systable_endscan(mcx, scan)?;
         catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+        lmgr::UnlockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
         pg_class.close(RowExclusiveLock)?;
     }
 
@@ -335,6 +345,11 @@ fn SetRelationTableSpacePgClass<'mcx>(
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {}", rel.rd_id));
+    // C: SearchSysCacheLockedCopy1 (tablecmds.c:3765) / UnlockTuple (:3777) --
+    // reindex_index reaches SetRelationTableSpace through index.c:3774, so this
+    // second copy of the function needs the same tuple lock as the first.
+    let otid = tup.t_self;
+    lmgr::LockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
     let desc = pg_class.descr();
     let natts = desc.natts as usize;
     let store = if new_tablespace == init_small::globals::MyDatabaseTableSpace() {
@@ -350,10 +365,10 @@ fn SetRelationTableSpacePgClass<'mcx>(
     replace.resize(natts, false);
     values[ANUM_PG_CLASS_RELTABLESPACE - 1] = Datum::from_oid(store);
     replace[ANUM_PG_CLASS_RELTABLESPACE - 1] = true;
-    let otid = tup.t_self;
     let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    lmgr::UnlockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
     pg_class.close(RowExclusiveLock)
 }
 
