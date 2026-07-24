@@ -843,12 +843,44 @@ pub fn ProcReleaseLocks(isCommit: bool) -> PgResult<()> {
 /// remains; running full ProcKill here would double the latch switch-back.
 /// Ownership is structural (same thread, MY_PROC TLS retained); MyProcPid may
 /// already be the NEXT task's pid when a claim dies before reattach.
+///
+/// GL-GANGWEDGE-1 §6.3: that "the park arm already ran it" precondition holds
+/// for the path this was written for — a worker retiring while PARKED, having
+/// completed its engagement and left its group on the serve tail. It does NOT
+/// hold when the thread is KILLED mid-engagement: every serve tail in the
+/// standing/pool paths is explicitly skipped on unwind, deferring the release
+/// to "the thread-exit callbacks" — and this IS that callback, so it has to own
+/// the lock-group detach rather than assume it already happened. It did not,
+/// and a cold SIGQUIT (immediate shutdown with no preceding stop request, so
+/// the leader and its workers die mid-flight instead of after the SIGTERM
+/// sweep) reproducibly freelisted a PGPROC while the leader's
+/// `lockGroupMembers` list still linked it — 3/3 reps, multiple threads,
+/// `scripts/lockgroup-kill-e2e.sh`. The debug_assert below caught it; in a
+/// RELEASE build that assert is compiled out and the corruption is SILENT,
+/// leaving a dangling member link into a slot that is immediately eligible for
+/// reuse by another backend.
+///
+/// C-parity: C's ProcKill detaches UNCONDITIONALLY ("Detach from any lock group
+/// of which we are a member") and never assumes the caller already left. Doing
+/// the same here is C-exact, and `LeaveLockGroup` is precisely that block of
+/// ProcKill extracted, including the leader-exited-first deferred-return
+/// arbitration. It is a no-op when not in a group, so the healthy parked path
+/// is unchanged.
 pub fn KillRetainedProc() {
     let hdr = ProcGlobal();
     let procno = my_proc_required();
     let proc = GetPGProcByNumber(procno);
     if proc.pid.load(Relaxed) == 0 {
         panic!("KillRetainedProc: PGPROC already released");
+    }
+    // Kill-path detach (see above). Ordered BEFORE the MY_PROC clear because
+    // LeaveLockGroup re-reads MyProc. A group LEADER cannot reach here with
+    // members (a live leader is always on its own members list, which the
+    // second assert below covers), so the members-only guard is exact.
+    if proc.lockGroupLeader.load(Relaxed) != INVALID_PROC_NUMBER
+        && proc.lockGroupLeader.load(Relaxed) != procno
+    {
+        LeaveLockGroup();
     }
     debug_assert_eq!(proc.lockGroupLeader.load(Relaxed), INVALID_PROC_NUMBER);
     debug_assert!(plist_is_empty(&proc.lockGroupMembers));
