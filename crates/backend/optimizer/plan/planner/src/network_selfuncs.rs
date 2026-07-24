@@ -431,3 +431,66 @@ fn inet_hist_match_divider(
     }
     -1
 }
+
+// GL-STATSLOT-1: a torn MCV slot (values from one pg_statistic row
+// generation, numbers image from a later one, so the arrays disagree) must
+// degrade softly. C reads a pinned tuple copy and can never see the
+// mismatch; the lazy slot re-probe can.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn side_stats_tolerates_torn_mcv_slot() {
+        let cx = mcx::MemoryContext::new_bump("torn-mcv");
+        let mcx = cx.mcx();
+        let mut mcv_values = mcx::PgVec::new_in(mcx);
+        mcv_values.extend([Datum::from_i32(1), Datum::from_i32(2)]);
+        let mut slots = mcx::PgVec::new_in(mcx);
+        slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+            STATISTIC_KIND_MCV,
+            96,
+            0,
+            23,
+            mcv_values,
+            mcx::PgVec::new_in(mcx),
+            mcx::PgVec::new_in(mcx),
+        ));
+        let bundle = crate::selfuncs::leak_bundle(
+            mcx,
+            syscache_seams::PgStatisticBundle {
+                stanullfrac: 0.0,
+                stawidth: 4,
+                stadistinct: 10.0,
+                slots,
+            },
+        )
+        .unwrap();
+        let vardata = VariableStatData {
+            var: None,
+            rel: None,
+            vartype: 869,
+            isunique: false,
+            stats: Some(bundle),
+            acl_ok: true,
+        };
+        // Zero (value, frequency) pairs are considerable: the torn tail of
+        // the values array has no frequencies to sum or join against.
+        let s = side_stats(&vardata).expect("no panic on torn slot");
+        assert_eq!(s.mcv_length, 0);
+        assert_eq!(s.sumcommon, 0.0);
+    }
+
+    #[test]
+    fn inet_mcv_join_sel_tolerates_torn_numbers() {
+        // int4eq stands in for the inet op: the helper is operator-agnostic
+        // and the torn shape is about array pairing, not address semantics.
+        crate::tests::install_fixtures();
+        let v1 = [Datum::from_i32(1), Datum::from_i32(2)];
+        let n1: [f32; 0] = [];
+        let v2 = [Datum::from_i32(1)];
+        let n2: [f32; 0] = [];
+        let selec = inet_mcv_join_sel(&v1, &n1, &v2, &n2, 96).expect("no panic on torn slot");
+        assert_eq!(selec, 0.0);
+    }
+}
