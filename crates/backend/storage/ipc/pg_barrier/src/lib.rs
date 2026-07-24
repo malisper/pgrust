@@ -261,12 +261,21 @@ impl Barrier {
     }
 
     /// Re-run `BarrierInit` in place (C reinitializes barriers embedded in
-    /// reused shared memory, e.g. ExecHashJoinReInitializeDSM). The caller
-    /// must guarantee no participant is attached.
+    /// reused shared memory, e.g. `ExecHashJoinReInitializeDSM`).
+    ///
+    /// **Clearing leftover state is the job, not a precondition.** C's
+    /// `BarrierInit` asserts nothing here and unconditionally zeroes
+    /// `participants`/`arrived`/`phase`/`elected` plus the condition variable —
+    /// and C's own rescan path reaches it with a non-zero `participants`
+    /// whenever `ExecHashJoinReInitializeDSM` takes the
+    /// `hj_HashTable == NULL` branch and so skips the detach in
+    /// `ExecHashTableDetach`. A pair of asserts demanding a zero count here was
+    /// therefore a constraint this port invented, not one C imposes; measured
+    /// on a shipped profile it fired on stale bookkeeping only — a leftover
+    /// count at the terminal build phase with **no** parked waiter
+    /// (GL-ASSERTMASK-1 §4). They are gone rather than re-graded.
     pub fn reset(&self) {
         let mut b = self.lock();
-        debug_assert!(b.participants == 0 && b.arrived == 0);
-        debug_assert!(b.waiters.is_empty());
         b.phase = 0;
         b.participants = 0;
         b.arrived = 0;

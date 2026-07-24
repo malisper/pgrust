@@ -125,8 +125,18 @@ pub(crate) fn PinBuffer(desc: &BufferDesc, strategy: &BufferAccessStrategy) -> b
 }
 
 /// PinBuffer_Locked (bufmgr.c): pin while holding the header lock; the
-/// refcount bump and the unlock are one release store. Caller guarantees no
-/// preexisting local pin and has reserved a private refcount entry.
+/// refcount bump and the unlock are one release store. Caller has reserved a
+/// private refcount entry.
+///
+/// C asserts there is no preexisting local pin, and so do we — but the
+/// assertion is not what keeps the accounting straight, in C or here. The
+/// shared bump below is unconditional (it is fused into the header unlock, so
+/// unlike `PinBuffer` this function cannot branch on the private entry), so the
+/// private entry it takes must be a fresh one that can be dropped on its own:
+/// `privref::new_pin_entry`, C's `NewPrivateRefCountEntry` + `refcount++`,
+/// which deliberately does not look for an existing entry. That is what makes
+/// two shared bumps produce two shared drops even in a build where the
+/// assertion does not exist. See `new_pin_entry`'s note.
 #[inline]
 pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
     let b = BufferDescriptorGetBuffer(desc);
@@ -134,8 +144,7 @@ pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
     let old_state = desc.state.load(Ordering::Relaxed);
     debug_assert!(old_state & BM_LOCKED != 0);
     UnlockBufHdr(desc, old_state + BUF_REFCOUNT_ONE);
-    let prev = privref::track_pin(b);
-    debug_assert!(prev == 0);
+    privref::new_pin_entry(b);
     RememberBufferPin(b);
 }
 
