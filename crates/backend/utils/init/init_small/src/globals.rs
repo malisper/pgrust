@@ -352,3 +352,33 @@ pub fn process_id() -> u32 {
         1
     }
 }
+
+/// C's `ProcNumberForTempRelations()` macro (procnumber.h:52-54), verbatim:
+///
+/// ```c
+/// (ParallelLeaderProcNumber == INVALID_PROC_NUMBER ? MyProcNumber : ParallelLeaderProcNumber)
+/// ```
+///
+/// The proc number to use for OUR SESSION's temp relations is normally our own,
+/// but a parallel worker must use its LEADER's — a temp relation's storage is
+/// keyed by proc number (`t<procno>_<relnode>`) and lives in the leader's local
+/// buffers, so a worker resolving against its own slot would look in the wrong
+/// place entirely.
+///
+/// Today this returns `MyProcNumber()` on every call, because
+/// `SetParallelLeaderProcNumber` has no callers: the global is never populated.
+/// That is *why* the two relcache sites that open-coded `MyProcNumber()` were
+/// not a live defect — but the equivalence rested on that accident plus four
+/// independent guards keeping workers away from temp relations, not on the
+/// expression being right. Spelled out here so the sites stop asserting a macro
+/// they did not implement, and so wiring the setter is the only remaining step
+/// rather than one of two. See notes/GL-VACGUARD-1-letter.md §10.
+#[inline]
+pub fn ProcNumberForTempRelations() -> ProcNumber {
+    let leader = ParallelLeaderProcNumber();
+    if leader == INVALID_PROC_NUMBER {
+        MyProcNumber()
+    } else {
+        leader
+    }
+}

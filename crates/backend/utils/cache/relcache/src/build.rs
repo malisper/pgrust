@@ -129,8 +129,7 @@ fn resolve_backend(form: &FormData_pg_class) -> PgResult<(ProcNumber, bool)> {
         RELPERSISTENCE_UNLOGGED | RELPERSISTENCE_PERMANENT => Ok((INVALID_PROC_NUMBER, false)),
         RELPERSISTENCE_TEMP => {
             if namespace_seams::is_temp_or_temp_toast_namespace::call(form.relnamespace) {
-                // ProcNumberForTempRelations()
-                Ok((init_small::globals::MyProcNumber(), true))
+                Ok((init_small::globals::ProcNumberForTempRelations(), true))
             } else {
                 let backend =
                     namespace_seams::get_temp_namespace_proc_number::call(form.relnamespace)?;

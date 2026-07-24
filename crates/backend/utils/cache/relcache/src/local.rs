@@ -73,8 +73,7 @@ pub fn RelationBuildLocalRelation(
         RELPERSISTENCE_UNLOGGED | RELPERSISTENCE_PERMANENT => (INVALID_PROC_NUMBER, false),
         RELPERSISTENCE_TEMP => {
             debug_assert!(namespace_seams::is_temp_or_temp_toast_namespace::call(relnamespace));
-            // ProcNumberForTempRelations()
-            (init_small::globals::MyProcNumber(), true)
+            (init_small::globals::ProcNumberForTempRelations(), true)
         }
         _ => panic!(
             "RelationBuildLocalRelation (relcache.c): relpersistence {:?} invalid",
