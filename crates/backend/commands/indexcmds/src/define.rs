@@ -20,7 +20,7 @@ use types_error::{
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::rawnodes::{IndexElem, IndexStmt, SortByDir, SortByNulls};
-use types_rel::{Relation, ShareLock, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
+use types_rel::{InplaceUpdateTupleLock, Relation, ShareLock, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use crate::GetDefaultOpClass;
@@ -1359,6 +1359,10 @@ fn update_relispartition<'mcx>(mcx: Mcx<'mcx>, relationId: Oid, newval: bool) ->
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {relationId}"));
+    // C: SearchSysCacheLockedCopy1 (indexcmds.c:4582) / UnlockTuple (:4589).
+    // Ahead of the relispartition read below, which is C's Assert input.
+    let otid = tup.t_self;
+    lmgr::LockTuple(&class_rel, &otid, InplaceUpdateTupleLock)?;
     {
         let mut isnull = false;
         // SAFETY: relispartition is a fixed NOT NULL pg_class column.
@@ -1379,9 +1383,9 @@ fn update_relispartition<'mcx>(mcx: Mcx<'mcx>, relationId: Oid, newval: bool) ->
     values[Anum_pg_class_relispartition - 1] = Datum::from_bool(newval);
     replace[Anum_pg_class_relispartition - 1] = true;
     let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
-    let otid = tup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &class_rel, &otid, &mut newtup)?;
+    lmgr::UnlockTuple(&class_rel, &otid, InplaceUpdateTupleLock)?;
     class_rel.close(types_rel::RowExclusiveLock)
 }
 

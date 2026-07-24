@@ -8,7 +8,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::{AlterObjectSchemaStmt, ObjectType};
-use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, LOCKMODE};
+use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock, LOCKMODE};
 
 use crate::alter::{oid_scankey, AlterRelationStmtKind, AlterTableLookupRangeVar, NamespaceRelationId};
 
@@ -170,6 +170,10 @@ pub fn AlterRelationNamespaceInternal<'mcx>(
         )?;
         let classtup = genam::systable_getnext(mcx, &mut scan)?
             .unwrap_or_else(|| panic!("cache lookup failed for relation {rel_oid}"));
+        // C: SearchSysCacheLockedCopy1 (tablecmds.c:19065) / UnlockTuple
+        // (:19099, and :19113 on the already-in-that-schema early exit).
+        let otid = classtup.t_self;
+        lmgr::LockTuple(class_rel, &otid, InplaceUpdateTupleLock)?;
         let desc = class_rel.descr();
         let n = desc.natts as usize;
         let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
@@ -182,9 +186,9 @@ pub fn AlterRelationNamespaceInternal<'mcx>(
         replace[Anum_pg_class_relnamespace - 1] = true;
         let mut newtup =
             heaptuple::heap_modify_tuple(mcx, classtup, desc, &values, &nulls, &replace)?;
-        let otid = classtup.t_self;
         genam::systable_endscan(mcx, scan)?;
         catalog_indexing::CatalogTupleUpdate(mcx, class_rel, &otid, &mut newtup)?;
+        lmgr::UnlockTuple(class_rel, &otid, InplaceUpdateTupleLock)?;
 
         if has_depend_entry
             && pg_depend::changeDependencyFor(

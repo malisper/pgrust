@@ -14,7 +14,7 @@ use types_error::{
 use types_nodes::parsenodes::{AlterTableCmd, AlterTableStmt, AlterTableType, ObjectType};
 use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, TypeName};
 use types_nodes::{Node, NodeList};
-use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE, RELKIND_RELATION};
+use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE, RELKIND_RELATION};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{MaxHeapAttributeNumber, TupleDescData, ATTNULLABLE_VALID};
 
@@ -7372,6 +7372,10 @@ fn SetRelationTableSpace<'mcx>(
         genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {reloid}"));
+    // C: SearchSysCacheLockedCopy1 (tablecmds.c:3765) / UnlockTuple (:3777).
+    // Taken before the content read that feeds the replacement image.
+    let otid = tup.t_self;
+    lmgr::LockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
     let desc = pg_class.descr();
     let natts = desc.natts as usize;
     let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -7392,9 +7396,9 @@ fn SetRelationTableSpace<'mcx>(
         replace[Anum_pg_class_relfilenode - 1] = true;
     }
     let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
-    let otid = tup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    lmgr::UnlockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
     // Tablespace dependency is only recorded for storage-less relations
     // (tablecmds.c:3782).
     if !types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind) {

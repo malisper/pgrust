@@ -8,8 +8,9 @@ use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_
 use types_nodes::parsenodes::AlterTableType;
 use types_nodes::NodeList;
 use types_rel::{
-    Relation, LOCKMODE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
-    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW, RowExclusiveLock,
+    InplaceUpdateTupleLock, Relation, LOCKMODE, RELKIND_INDEX, RELKIND_MATVIEW,
+    RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
+    RowExclusiveLock,
 };
 
 use crate::alter::oid_scankey;
@@ -30,12 +31,16 @@ pub(crate) fn ATExecSetRelOptions<'mcx>(
 
     let pgclass = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
-    update_one(mcx, &pgclass, rel, None, def_list, operation)?;
+    // locktup mirrors C exactly: the main relation's row is fetched with
+    // SearchSysCacheLocked1 (tablecmds.c:16666) and released with
+    // UnlockTuple (:16773); the toast arm uses the plain, unlocked
+    // SearchSysCache1 (:16790). Do not "tidy" that asymmetry away.
+    update_one(mcx, &pgclass, rel, None, def_list, operation, true)?;
 
     if rel.rd_rel.reltoastrelid != InvalidOid {
         let toastid = rel.rd_rel.reltoastrelid;
         let toastrel = table::table_open(mcx, toastid, lockmode)?;
-        update_one(mcx, &pgclass, &toastrel, Some("toast"), def_list, operation)?;
+        update_one(mcx, &pgclass, &toastrel, Some("toast"), def_list, operation, false)?;
         toastrel.close(types_rel::NoLock)?;
     }
 
@@ -49,6 +54,7 @@ fn update_one<'mcx>(
     namspace: Option<&str>,
     def_list: &NodeList<'mcx>,
     operation: AlterTableType,
+    locktup: bool,
 ) -> PgResult<()> {
     let relid = rel.rd_id;
     let relkind = rel.rd_rel.relkind;
@@ -64,6 +70,16 @@ fn update_one<'mcx>(
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    // LOCKTAG_TUPLE at InplaceUpdateTupleLock, before any content read that
+    // feeds the replacement image: the tuple bytes alias the pinned page, so
+    // reading them after the lock is what makes a concurrent inplace writer's
+    // relfrozenxid/relminmxid advance visible instead of silently discarded.
+    // Same ordering as C's systable arm (objectaddress.c:2846 LockTuple then
+    // heap_copytuple). Released after CatalogTupleUpdate.
+    let otid = tup.t_self;
+    if locktup {
+        lmgr::LockTuple(pgclass, &otid, InplaceUpdateTupleLock)?;
+    }
     let desc = pgclass.descr();
 
     let old_image;
@@ -165,8 +181,10 @@ fn update_one<'mcx>(
 
     let mut newtuple =
         heaptuple::heap_modify_tuple(mcx, tup, desc, &repl_val, &repl_null, &repl_repl)?;
-    let otid = tup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, pgclass, &otid, &mut newtuple)?;
+    if locktup {
+        lmgr::UnlockTuple(pgclass, &otid, InplaceUpdateTupleLock)?;
+    }
     Ok(())
 }

@@ -1064,6 +1064,44 @@ pub fn vac_update_relstats(
     let relid = relation.rd_id;
     let cx = ::mcx::MemoryContext::new("vac_update_relstats");
     let mcx = cx.mcx();
+
+    // The DDL-flag inputs are gathered BEFORE the inplace window opens, and
+    // that placement is load-bearing rather than stylistic.
+    //
+    // C (vacuum.c:1515, :1520) tests `relation->rd_rules == NULL` and
+    // `relation->trigdesc == NULL` -- two pointers RelationBuildDesc filled in
+    // when the relation was opened, so C's window is pure arithmetic. Ours
+    // builds both lazily, so the equivalent read is a catalog scan:
+    // table_open(pg_rewrite/pg_trigger) plus a systable index scan, which
+    // takes heavyweight relation locks, buffer content locks on those
+    // catalogs, and AcceptInvalidationMessages.
+    //
+    // Inside the window that is a hang, not a slowdown: the window holds
+    // pg_class's buffer content lock EXCLUSIVE, and building a cold catalog's
+    // relcache entry index-scans pg_class -- so if the scanned row shares a
+    // page with this relation's own pg_class row, the scan waits on an LWLock
+    // this very thread already holds. No deadlock detector sees an LWLock and
+    // no CHECK_FOR_INTERRUPTS breaks that wait. heap_inplace_lock's own
+    // comment (heapam.c) rules the shape out for exactly this reason:
+    // registering invals "might reach a CatalogCacheInitializeCache() that
+    // locks \"buffer\" ... would hang indefinitely if running after our own
+    // LockBuffer()".
+    //
+    // Hoisting is value-identical to C, not merely safe: C's two pointers were
+    // themselves computed at relation-open time, strictly earlier than this
+    // point, and the tuple-side test (`relhasrules`/`relhastriggers` on the
+    // freshly read pg_class row) still happens inside the window as in C.
+    // Gated on !in_outer_xact so the ANALYZE-in-a-transaction-block path does
+    // no work C does not do (C's own gate, vacuum.c:1501).
+    let (rules_empty, trigdesc_none) = if in_outer_xact {
+        (false, false)
+    } else {
+        (
+            relcache_seams::relation_get_rules::call(relid)?.is_empty(),
+            relcache_seams::relation_get_trigger_desc::call(relid)?.is_none(),
+        )
+    };
+
     let rd = table::table_open(mcx, RelationRelationId, RowExclusiveLock)?;
 
     let mut key = ::types_scan::scankey::ScanKeyData::empty();
@@ -1114,15 +1152,13 @@ pub fn vac_update_relstats(
             set(Anum_pg_class_relhasindex, ::datum::Datum::from_bool(false), &mut values, &mut replaces, &mut dirty);
         }
         // C clears relhasrules/relhastriggers off rd_rules/trigdesc; the
-        // relcache seams stand in for the open relcache entry.
-        if getattr(old, Anum_pg_class_relhasrules, desc).as_bool()
-            && relcache_seams::relation_get_rules::call(relid)?.is_empty()
-        {
+        // relcache seams stand in for the open relcache entry, and are read
+        // before the window opens (see the note at the top of this function --
+        // a catalog scan in here self-deadlocks on the pg_class page).
+        if getattr(old, Anum_pg_class_relhasrules, desc).as_bool() && rules_empty {
             set(Anum_pg_class_relhasrules, ::datum::Datum::from_bool(false), &mut values, &mut replaces, &mut dirty);
         }
-        if getattr(old, Anum_pg_class_relhastriggers, desc).as_bool()
-            && relcache_seams::relation_get_trigger_desc::call(relid)?.is_none()
-        {
+        if getattr(old, Anum_pg_class_relhastriggers, desc).as_bool() && trigdesc_none {
             set(Anum_pg_class_relhastriggers, ::datum::Datum::from_bool(false), &mut values, &mut replaces, &mut dirty);
         }
     }
