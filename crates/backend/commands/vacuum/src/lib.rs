@@ -640,9 +640,16 @@ fn vacuum_rel<'mcx>(
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<bool> {
     xact::StartTransactionCommand()?;
-    // C divergence (recorded): PROC_IN_VACUUM/PROC_VACUUM_FOR_WRAPAROUND
-    // statusFlags are not set (single-backend milestone; they only shape how
-    // concurrent backends compute their horizons).
+
+    // vacuum.c:2041-2072. Lazy vacuum only: a FULL vacuum may run user-defined
+    // functions for functional indexes, and those may read other tables through
+    // the snapshot taken below, so C deliberately keeps its xmin visible to
+    // other backends' horizons rather than breaking transaction semantics.
+    // Must precede GetTransactionSnapshot (see the setter's own note).
+    if params.options & VACOPT_FULL == 0 {
+        procarray::ProcSetStatusFlagInVacuum(params.is_wraparound)?;
+    }
+
     let snapshot = snapmgr::GetTransactionSnapshot()?;
     snapmgr::PushActiveSnapshot(&snapshot)?;
 

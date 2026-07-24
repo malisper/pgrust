@@ -19,7 +19,7 @@ use types_snapshot::SnapshotData;
 use types_storage::storage::{
     SyncCell, NUM_AUXILIARY_PROCS, PGPROC, PGPROC_MAX_CACHED_SUBXIDS,
     PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM,
-    PROC_VACUUM_STATE_MASK, PROC_XMIN_FLAGS,
+    PROC_VACUUM_FOR_WRAPAROUND, PROC_VACUUM_STATE_MASK, PROC_XMIN_FLAGS,
 };
 
 mod known_assigned;
@@ -157,6 +157,36 @@ pub fn ProcSetStatusFlagAffectsAllHorizons() -> PgResult<()> {
 
     LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, my_procno)?;
     let flags = me.statusFlags.load(Relaxed) | PROC_AFFECTS_ALL_HORIZONS;
+    me.statusFlags.store(flags, Relaxed);
+    ProcGlobal().statusFlags[me.pgxactoff.load(Relaxed) as usize].store(flags, Relaxed);
+    LWLockRelease(ProcArrayLock())?;
+    Ok(())
+}
+
+/// vacuum_rel's lazy-vacuum arm (vacuum.c:2066): announce this backend as a
+/// lazy VACUUM so other backends may exclude our xmin when computing their
+/// removable-XID horizons — without this, the process whose job is to advance
+/// the cluster's horizon instead pins it for the whole vacuum. The wraparound
+/// bit is what keeps an emergency anti-wraparound autovacuum from being
+/// cancelled by a conflicting lock request (read at lock's waitqueue).
+///
+/// Two ordering rules, both C's, both load-bearing:
+///  * call this BEFORE taking our own snapshot, so our xmin never becomes
+///    visible to `ComputeXidHorizons` ahead of the flag that tells it to skip
+///    us (C: vacuum.c:2062-2064);
+///  * do NOT clear it here. Both flags are in `PROC_VACUUM_STATE_MASK` and are
+///    reset with xid/xmin at end of transaction (`ProcArrayEndTransaction`,
+///    already ported); clearing earlier could make
+///    `GetOldestNonRemovableTransactionId` appear to go backwards.
+pub fn ProcSetStatusFlagInVacuum(is_wraparound: bool) -> PgResult<()> {
+    let my_procno = MyProc().expect("ProcSetStatusFlagInVacuum without MyProc");
+    let me = GetPGProcByNumber(my_procno);
+
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, my_procno)?;
+    let mut flags = me.statusFlags.load(Relaxed) | PROC_IN_VACUUM;
+    if is_wraparound {
+        flags |= PROC_VACUUM_FOR_WRAPAROUND;
+    }
     me.statusFlags.store(flags, Relaxed);
     ProcGlobal().statusFlags[me.pgxactoff.load(Relaxed) as usize].store(flags, Relaxed);
     LWLockRelease(ProcArrayLock())?;
