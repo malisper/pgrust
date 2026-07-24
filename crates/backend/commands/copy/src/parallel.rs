@@ -247,6 +247,47 @@ fn memruns_knob() -> MemRuns {
     })
 }
 
+/// GL-LOADDET-1: PGRUST_PARALLEL_COPY_SORT_DETERMINISTIC — make the loaded
+/// bytes a function of the INPUT ALONE. **DEFAULT ON**; `0`/`off`/`false` is
+/// the kill switch back to the legacy bytes.
+///
+/// Two independent races decided the output byte image before this:
+///
+///  1. **Run boundaries.** A worker's sort batch carried ACROSS the morsels it
+///     won from the shared claim cursor and was cut when accumulated bytes
+///     crossed the run budget — so which rows shared a run was a function of
+///     which morsels that worker happened to win, i.e. of wall-clock. Armed,
+///     a run never spans a morsel: batches are flushed at every morsel
+///     boundary, so a run's content is exactly (a deterministic prefix split
+///     of) one morsel's rows, whatever the worker count or the claim order.
+///  2. **Registry order = the merge's tiebreak index.** Runs were appended to
+///     a shared Vec as each worker finished one. Armed, the merge sorts the
+///     registry by the run's input coordinate `(morsel, sub)` instead, which
+///     is input-major (a strict strengthening of worker-major: worker-major is
+///     only reproducible at a FIXED worker count, because the worker->morsel
+///     map is not).
+///
+/// With the batch sort made stable on arrival order (`SortBatch::sort`), the
+/// three together make the emitted row order the stable sort of the input by
+/// the presort key — reproducible across repeats, worker counts, run-home
+/// (memory/file) postures, encoder counts and node timing. Rows that are NOT
+/// key-tied were never at risk: a tie-free key pins the permutation by itself,
+/// which is why every pre-existing byte-identity gate is tie-free and stayed
+/// green through the whole non-deterministic era.
+fn sort_deterministic() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_PARALLEL_COPY_SORT_DETERMINISTIC")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    })
+}
+
 /// Memory headroom for the auto-sized mem-run budget: the container-aware
 /// cgroup-hierarchy walk in memheadroom.rs (GL-COPYFAST-1 §3 defect fix —
 /// a leaf reading "max" no longer falls through to node meminfo when an
@@ -838,10 +879,19 @@ pub(crate) struct ParCopyShared {
     /// sorted (key,row) runs instead of encoding RGs; the leader merges
     /// after the RG completes. None = the landed encode pipeline verbatim.
     sort: Option<ParCopySort>,
-    /// Registered runs, in merge-index order (file paths pushed BEFORE
-    /// their spill starts so every file is cleanup-tracked; memory runs
-    /// free on drop); leader takes them for the merge.
-    sort_runs: Mutex<Vec<RunLoc>>,
+    /// Registered runs (file paths pushed BEFORE their spill starts so every
+    /// file is cleanup-tracked; memory runs free on drop); leader takes them
+    /// for the merge.
+    ///
+    /// GL-LOADDET-1: each entry carries its INPUT COORDINATE `(task, sub)` —
+    /// the morsel index the run was cut from and the run's ordinal within
+    /// that morsel. The merge sorts on it, so the merge's tiebreak index is a
+    /// function of the input alone. Push order (which is worker-race order:
+    /// "finished compressing" for memory runs, "started writing" for file
+    /// runs, interleaved under a partly-exhausted memstore) is no longer the
+    /// merge order. Under `PGRUST_PARALLEL_COPY_SORT_DETERMINISTIC=0` the
+    /// coordinates are still recorded but the merge keeps push order.
+    sort_runs: Mutex<Vec<(u64, u32, RunLoc)>>,
     sort_run_seq: AtomicU64,
     /// GL-PARQUET-1 inc-2: Some = the morsels are parquet ROW GROUPS
     /// (workers decode columns and feed the sort pipeline); the text
@@ -986,6 +1036,11 @@ struct WorkerSortState {
     /// frame bytes at keep time.
     mem_runs: u32,
     mem_bytes: u64,
+    /// GL-LOADDET-1: the input coordinate this worker is currently filling —
+    /// the morsel index it claimed and the next run ordinal within it. Every
+    /// registered run is stamped with it, and the merge orders on it.
+    cur_task: u64,
+    cur_sub: u32,
 }
 
 thread_local! {
@@ -1016,8 +1071,13 @@ impl ParCopyShared {
             if g > self.error_floor.load(Ordering::SeqCst) {
                 return Ok(());
             }
+            self.begin_task(wcx, g);
             match self.parquet_decode_rg(wcx, g) {
                 Ok(()) => {
+                    // GL-LOADDET-1: cut BEFORE publishing `done` — the run is
+                    // the morsel's own, and the leader must never see a task
+                    // complete while part of its rows are still in a batch.
+                    self.cut_run_at_task_end(wcx)?;
                     self.done.lock().unwrap_or_else(|p| p.into_inner()).insert(g, None);
                     self.wake_leader();
                 }
@@ -1044,8 +1104,10 @@ impl ParCopyShared {
         } else {
             self.eol.lock().unwrap_or_else(|p| p.into_inner()).later
         };
+        self.begin_task(wcx, g);
         match self.parse_encode_chunk(wcx, chunk, eol) {
             Ok(enc) => {
+                self.cut_run_at_task_end(wcx)?;
                 self.done.lock().unwrap_or_else(|p| p.into_inner()).insert(g, enc);
                 self.wake_leader();
             }
@@ -1184,6 +1246,12 @@ impl ParCopyShared {
             return Ok(());
         }
         let sort = self.sort.as_ref().expect("spill without sort mode");
+        // GL-LOADDET-1: this run's input coordinate, consumed here so every
+        // registration path (memory keep, memory-refused overflow, plain file
+        // spill) stamps the same one and the sub ordinal advances exactly once
+        // per run.
+        let (task, sub) = (st.cur_task, st.cur_sub);
+        st.cur_sub += 1;
         // copyfast lever 1: the in-memory home. Compress first (identical
         // frames either way), reserve the ACTUAL byte count; a refusal
         // flushes the already-built frames to the run file verbatim.
@@ -1195,31 +1263,62 @@ impl ParCopyShared {
             if store.try_reserve(bytes) {
                 let mem = mem.attach(Arc::clone(store));
                 let seq = self.sort_run_seq.fetch_add(1, Ordering::SeqCst);
-                self.sort_runs.lock().unwrap_or_else(|p| p.into_inner()).push(RunLoc::Mem(mem));
+                self.sort_runs
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((task, sub, RunLoc::Mem(mem)));
                 st.t_spill += t0.elapsed();
                 st.runs += 1;
                 st.mem_runs += 1;
                 st.mem_bytes += bytes;
                 st.spill_bytes += bytes;
-                ptrace(&format!("sort run kept in memory seq={seq} bytes={bytes}"));
+                ptrace(&format!(
+                    "sort run kept in memory seq={seq} task={task}.{sub} bytes={bytes}"
+                ));
                 return Ok(());
             }
-            let (seq, path) = self.register_run_file(sort)?;
+            let (seq, path) = self.register_run_file(sort, task, sub)?;
             let written = mem.write_to_file(&path)?;
             st.spill_bytes += written;
             st.t_spill += t0.elapsed();
             st.runs += 1;
-            ptrace(&format!("sort run spilled seq={seq} (mem budget exhausted)"));
+            ptrace(&format!(
+                "sort run spilled seq={seq} task={task}.{sub} (mem budget exhausted)"
+            ));
             return Ok(());
         }
-        let (seq, path) = self.register_run_file(sort)?;
+        let (seq, path) = self.register_run_file(sort, task, sub)?;
         let t0 = std::time::Instant::now();
         st.batch.sort();
         st.spill_bytes += st.batch.spill_run_opts(&path, run_lz4_effective())?;
         st.t_spill += t0.elapsed();
         st.runs += 1;
-        ptrace(&format!("sort run spilled seq={seq}"));
+        ptrace(&format!("sort run spilled seq={seq} task={task}.{sub}"));
         Ok(())
+    }
+
+    /// GL-LOADDET-1: cut the current run at a morsel boundary. Called once per
+    /// SUCCESSFULLY processed morsel in sort mode, so a run never spans two
+    /// morsels and its content is input-determined. Disarmed, the batch simply
+    /// carries into the next morsel (the legacy byte image).
+    fn cut_run_at_task_end(&self, wcx: &mut ParCopyWorkerCx<'_, '_>) -> PgResult<()> {
+        if !sort_deterministic() {
+            return Ok(());
+        }
+        let Some(st) = wcx.sort_state.as_mut() else { return Ok(()) };
+        if st.batch.is_empty() {
+            return Ok(());
+        }
+        self.spill_worker_batch(st)
+    }
+
+    /// GL-LOADDET-1: bind the worker's sort state to the morsel it just
+    /// claimed. Every run cut while this is in force carries `(task, sub)`.
+    fn begin_task(&self, wcx: &mut ParCopyWorkerCx<'_, '_>, g: u64) {
+        if let Some(st) = wcx.sort_state.as_mut() {
+            st.cur_task = g;
+            st.cur_sub = 0;
+        }
     }
 
     /// Mint + REGISTER the next run file path (cleanup-tracked before any
@@ -1227,6 +1326,8 @@ impl ParCopyShared {
     fn register_run_file(
         &self,
         sort: &ParCopySort,
+        task: u64,
+        sub: u32,
     ) -> PgResult<(u64, std::path::PathBuf)> {
         // MakePGDirectory, EEXIST-tolerant: "base" always exists, so the one
         // missing component is pgsql_tmp itself (DST P1 inc-4 fence). EEXIST
@@ -1256,7 +1357,7 @@ impl ParCopyShared {
         self.sort_runs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push(RunLoc::File(path.clone()));
+            .push((task, sub, RunLoc::File(path.clone())));
         Ok((seq, path))
     }
 
@@ -1524,7 +1625,14 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
         };
         let slot = tableam::table_slot_create(mcx, &rel)?;
         let sort_state = shared.sort.as_ref().map(|sp| WorkerSortState {
-            batch: pgrcolumnar::loadsort::SortBatch::new(sp.key_w),
+            // GL-LOADDET-1: arrival-order tie break inside the run, under the
+            // same knob as the boundary/registry mechanisms — all three must
+            // move together or the guarantee is partial.
+            batch: if sort_deterministic() {
+                pgrcolumnar::loadsort::SortBatch::new_stable(sp.key_w)
+            } else {
+                pgrcolumnar::loadsort::SortBatch::new(sp.key_w)
+            },
             codec: pgrcolumnar::loadsort::RowCodec::new(shared.plan.coltypes.clone()),
             keybuf: Vec::with_capacity(sp.key_w),
             rowbuf: Vec::new(),
@@ -1536,6 +1644,8 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             runs: 0,
             mem_runs: 0,
             mem_bytes: 0,
+            cur_task: 0,
+            cur_sub: 0,
         });
         Ok(ParCopyWorkerCx {
             mcx,
@@ -1580,6 +1690,13 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
     // Sort mode: flush this worker's final batch as its last run. Skipped
     // when the statement is already failing (hard error or any recorded
     // data error — the COPY raises regardless; the leader never merges).
+    //
+    // GL-LOADDET-1: armed, every morsel already cut its own run, so this is a
+    // no-op on the success path (`spill_worker_batch` returns immediately on an
+    // empty batch). It stays as the disarmed path's tail flush AND as the
+    // belt-and-braces path for any future morsel exit that skips the cut — the
+    // stamp it would carry, `(cur_task, cur_sub)`, is still the correct
+    // coordinate for whatever remains.
     if let Some(st) = wcx.sort_state.as_mut() {
         if !shared.failed_hard.load(Ordering::SeqCst)
             && shared.error_floor.load(Ordering::SeqCst) == u64::MAX
@@ -1642,8 +1759,17 @@ fn merge_sorted_runs(
     shared: &Arc<ParCopyShared>,
 ) -> PgResult<(u64, Option<Vec<Vec<u8>>>)> {
     let sort = shared.sort.as_ref().expect("merge without sort mode");
-    let runs =
+    let mut stamped =
         std::mem::take(&mut *shared.sort_runs.lock().unwrap_or_else(|p| p.into_inner()));
+    // GL-LOADDET-1: the merge's run index IS its tiebreak for key-equal rows,
+    // so order the inputs by input coordinate, not by the worker race that
+    // appended them. `(task, sub)` is unique (one worker owns a morsel) and
+    // input-major, so this is a total, dop-independent order.
+    let det = sort_deterministic();
+    if det {
+        stamped.sort_by_key(|(task, sub, _)| (*task, *sub));
+    }
+    let runs: Vec<RunLoc> = stamped.into_iter().map(|(_, _, r)| r).collect();
     let n_runs = runs.len();
     let n_mem = runs.iter().filter(|r| matches!(r, RunLoc::Mem(_))).count();
     let mem_bytes: u64 = runs
@@ -1725,7 +1851,8 @@ fn merge_sorted_runs(
     }
     let nenc = sort_encoders(shared.rt);
     ptrace(&format!(
-        "sort merge over {n_runs} runs encoders={nenc} fill={} fadv_mb={} prefetch={prefetch} runlz4={} memruns={n_mem} membytes={mem_bytes}",
+        "sort merge over {n_runs} runs encoders={nenc} det={} fill={} fadv_mb={} prefetch={prefetch} runlz4={} memruns={n_mem} membytes={mem_bytes}",
+        det as u8,
         match &merge {
             MergeKind::V1(_) => "v1",
             MergeKind::V2(_) => "v2",
@@ -2354,7 +2481,7 @@ pub(crate) fn copy_from_parallel<'mcx>(
             let runs = std::mem::take(
                 &mut *self.0.sort_runs.lock().unwrap_or_else(|p| p.into_inner()),
             );
-            for r in runs {
+            for (_, _, r) in runs {
                 match r {
                     RunLoc::File(p) => {
                         let _ = fd::pg_unlink(&p.to_string_lossy());
