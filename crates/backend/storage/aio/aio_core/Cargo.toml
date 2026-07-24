@@ -21,6 +21,11 @@ aio_seams = { path = "../aio_seams" }
 bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
 ipc_seams = { path = "../../ipc/ipc_seams" }
+# Plain cargo dep on the DST P1 VFS leaf crate (fd's idiom): the synchronous
+# executor's preadv/pwritev must route through the provider — product builds
+# monomorphize to the same single libc syscall (P1 zero-cost law), and the
+# sim world's fds are foreign to the kernel (raw libc there is EBADF).
+vfs = { path = "../../file/vfs" }
 miscinit = { path = "../../../utils/init/miscinit" }
 init_small = { path = "../../../utils/init/init_small" }
 lmgr_proc = { path = "../../lmgr/lmgr_proc" }

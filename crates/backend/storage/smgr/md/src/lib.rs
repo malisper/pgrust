@@ -1527,6 +1527,47 @@ mod tests {
     }
 
     #[test]
+    fn md_relpath_forwards_locator_backend_and_fork_to_relpathbackend() {
+        // Regression pin (GL-TESTFIX-1 F-R2-2 adjudication): the old
+        // hand-rolled mint dropped spcOid (shared catalogs printed as
+        // "base/0/NNNN") and stamped numeric fork suffixes. C parity =
+        // relpathbackend(rlocator, is_temp ? MyProcNumber : INVALID, fork);
+        // the stub renders all three inputs so forwarding is fully pinned.
+        // Seams are install-once per process: this is the ONLY md unit test
+        // that installs relpathbackend, so both arms are covered here.
+        relpath_seams::relpathbackend::set(|l, b, f| {
+            format!("{}|{}|{}|{}|{}", l.spcOid, l.dbOid, l.relNumber, b, f as i32)
+        });
+        let shared = types_storage::aio::PgAioTargetData {
+            smgr: types_storage::aio::PgAioTargetSmgr {
+                rlocator: RelFileLocator { spcOid: 1664, dbOid: 0, relNumber: 1260 },
+                blockNum: 0,
+                nblocks: 1,
+                forkNum: ForkNumber::MAIN_FORKNUM,
+                is_temp: false,
+                ..Default::default()
+            },
+        };
+        assert_eq!(md_relpath(&shared), format!("1664|0|1260|{INVALID_PROC_NUMBER}|0"));
+
+        let temp = types_storage::aio::PgAioTargetData {
+            smgr: types_storage::aio::PgAioTargetSmgr {
+                rlocator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: 16384 },
+                blockNum: 0,
+                nblocks: 1,
+                forkNum: ForkNumber::FSM_FORKNUM,
+                is_temp: true,
+                ..Default::default()
+            },
+        };
+        let me = init_small::globals::MyProcNumber();
+        assert_eq!(
+            md_relpath(&temp),
+            format!("1663|5|16384|{me}|{}", ForkNumber::FSM_FORKNUM as i32)
+        );
+    }
+
+    #[test]
     fn extension_flags_and_geometry_match_c() {
         assert_eq!(EXTENSION_FAIL, 1);
         assert_eq!(EXTENSION_RETURN_NULL, 2);
@@ -1718,17 +1759,19 @@ pub fn md_aio_reopen_fd(
     Ok(raw)
 }
 
+// C md_readv_report's path mint: relpathbackend with MyProcNumber only for
+// temp relations. The previous hand-rolled "base/{dbOid}/..." spelling
+// ignored the tablespace (shared catalogs printed as "base/0/NNNN" instead
+// of "global/NNNN", non-default tablespaces as base/), and stamped numeric
+// fork suffixes ("_1") where C prints fork names ("_fsm") — wrong paths in
+// every AIO read-error report (GL-TESTFIX-1 F-R2-2 adjudication).
 fn md_relpath(td: &types_storage::aio::PgAioTargetData) -> String {
-    let l = td.smgr.rlocator;
-    format!(
-        "base/{}/{}{}",
-        l.dbOid,
-        l.relNumber,
-        match td.smgr.forkNum {
-            ForkNumber::MAIN_FORKNUM => String::new(),
-            f => format!("_{}", f as i32),
-        }
-    )
+    let backend = if td.smgr.is_temp {
+        init_small::globals::MyProcNumber()
+    } else {
+        INVALID_PROC_NUMBER
+    };
+    relpath_seams::relpathbackend::call(td.smgr.rlocator, backend, td.smgr.forkNum)
 }
 
 /// md_readv_complete: distill the raw byte result into blocks; encode hard

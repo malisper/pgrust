@@ -1264,6 +1264,7 @@ dependencies = [
  "types_guc",
  "types_resowner",
  "types_storage",
+ "vfs",
  "waitevent_seams",
 ]
 
