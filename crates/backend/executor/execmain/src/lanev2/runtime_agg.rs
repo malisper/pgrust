@@ -1022,9 +1022,17 @@ impl AggSink {
     /// FullDrain HERE, before the first combine claim.
     fn resolve_topn_at_seal(&self, locals: &[AggSinkLocal]) {
         if self.topn.is_some() {
+            // Keying-class term (GL-SINKSHAPE-1): a Local whose table
+            // representation refuses the pass-through emit takes the merge
+            // arm at combine, so it is NOT a pass-through shape here — the
+            // predicate must match the combine's actual arm choice.
             let passthrough = matches!(
                 locals,
-                [l] if l.runs.is_empty() && l.spill.is_none() && l.table.is_some()
+                [l] if l.runs.is_empty()
+                    && l.spill.is_none()
+                    && l.table.as_ref().is_some_and(|t| {
+                        ::nodeagg::sink::sink_passthrough_admits(&self.emit, t.table())
+                    })
             );
             let mode = resolve_topn_mode_seal(self.topn_mode(), passthrough);
             self.topn_mode.store(mode.encode(), Ordering::Release);
@@ -1375,42 +1383,54 @@ impl AggSink {
             // carry pre-freeze stragglers — the pass-through emits verbatim
             // and cannot filter, so it stands down (the merge arm below
             // runs the member filter; frozen tables are tiny).
+            // Keying-class composition (GL-SINKSHAPE-1): the pass-through
+            // emits from the Local's OWN table, so the table's key
+            // representation must serve the emit plan — an INTERN-ARMED
+            // canonical table (word-keyed; canonical bytes only through
+            // the intern chase) REFUSES to the merge arm below, whose
+            // remainder face runs that chase. Reachable exactly when a
+            // concurrent-saturated pool (the QPS window) collapses a
+            // dop-N engagement to one sealed Local (fork-on-first-touch).
             let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
             if let [l] = locals {
                 if l.runs.is_empty() && l.spill.is_none() && !frozen {
                     if let (Some(t), Some(p)) = (&l.table, &l.part) {
-                        // Top-N composition (m3-sort-b car 1) selects on the
-                        // MERGED table; the pass-through never builds one, so
-                        // an armed spec degrades globally to the full drain
-                        // (decision 1: winners are a drain filter — a miss
-                        // must never drop groups). Winners-only inc-2: this
-                        // shape is resolved to FullDrain at SEAL (§3.2 step
-                        // 2), so the mid-claim store below only ever runs in
-                        // FullDrain mode — a WinnersOnly sighting here would
-                        // mean partial compact bufs elsewhere.
-                        if self.topn.is_some() {
-                            debug_assert_eq!(
-                                self.topn_mode(),
-                                TopnMode::FullDrain,
-                                "pass-through shape must resolve FullDrain at SEAL"
-                            );
-                            self.topn_degraded.store(true, Ordering::Release);
+                        if ::nodeagg::sink::sink_passthrough_admits(&self.emit, t.table()) {
+                            // Top-N composition (m3-sort-b car 1) selects on the
+                            // MERGED table; the pass-through never builds one, so
+                            // an armed spec degrades globally to the full drain
+                            // (decision 1: winners are a drain filter — a miss
+                            // must never drop groups). Winners-only inc-2: this
+                            // shape is resolved to FullDrain at SEAL (§3.2 step
+                            // 2), so the mid-claim store below only ever runs in
+                            // FullDrain mode — a WinnersOnly sighting here would
+                            // mean partial compact bufs elsewhere.
+                            if self.topn.is_some() {
+                                debug_assert_eq!(
+                                    self.topn_mode(),
+                                    TopnMode::FullDrain,
+                                    "pass-through shape must resolve FullDrain at SEAL"
+                                );
+                                self.topn_degraded.store(true, Ordering::Release);
+                            }
+                            let t0 = self.topn.is_some().then(std::time::Instant::now);
+                            let buf = ::nodeagg::sink::sink_emit_bucket_passthrough(
+                                &self.emit,
+                                t.table(),
+                                p,
+                                b,
+                            )?;
+                            if let Some(t0) = t0 {
+                                self.topn_ctr
+                                    .emit_ns
+                                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                                self.topn_ctr
+                                    .mat_rows
+                                    .fetch_add(buf.nrows as u64, Ordering::Relaxed);
+                            }
+                            self.retain_bucket(b as u64, buf, locals.len())?;
+                            return Ok(CombineOutcome::Done);
                         }
-                        let t0 = self.topn.is_some().then(std::time::Instant::now);
-                        let buf = ::nodeagg::sink::sink_emit_bucket_passthrough(
-                            &self.emit,
-                            t.table(),
-                            p,
-                            b,
-                        )?;
-                        if let Some(t0) = t0 {
-                            self.topn_ctr
-                                .emit_ns
-                                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                            self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
-                        }
-                        self.retain_bucket(b as u64, buf, locals.len())?;
-                        return Ok(CombineOutcome::Done);
                     }
                 }
             }
