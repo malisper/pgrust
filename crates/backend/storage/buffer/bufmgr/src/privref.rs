@@ -81,6 +81,40 @@ pub fn ReservePrivateRefCountEntry() {
     with(reserve_slot);
 }
 
+/// `NewPrivateRefCountEntry` + `refcount++` (bufmgr.c), WITHOUT the lookup:
+/// fill the reserved array slot with a **fresh** entry at refcount 1 even if
+/// this buffer already has one.
+///
+/// C does not search here either, and that is load-bearing rather than an
+/// optimisation. `PinBuffer_Locked` adds a shared refcount **unconditionally**
+/// — it fuses the bump into the header unlock, so it cannot first consult a
+/// private entry the way `PinBuffer` does — therefore its private entry must
+/// be a *second, independently droppable* one. Merging into an existing entry
+/// instead pairs two shared bumps with a single shared drop, because the
+/// shared refcount is released only on the transition to zero: the buffer then
+/// keeps a shared pin forever, never becomes replaceable again, and
+/// `InvalidateBuffer` spins on it without bound.
+///
+/// `GetPrivateRefCount` reports the first matching entry, so it reads 1 rather
+/// than 2 while both are live — which is also what C reports, for the same
+/// reason.
+#[inline(always)]
+pub(crate) fn new_pin_entry(buffer: Buffer) {
+    debug_assert!(buffer != InvalidBuffer);
+    with(|p| {
+        let slot = p.reserved;
+        // Hard assert, as in track_pin: C's counterpart is
+        // `Assert(ReservedRefCountEntry != NULL)`, but a missing reservation
+        // here would silently overwrite entry 0 and drop a live pin.
+        assert!(slot >= 0, "no reserved private refcount entry");
+        p.reserved = -1;
+        p.entries[slot as usize] = PrivateRefCountEntry {
+            buffer,
+            refcount: 1,
+        };
+    })
+}
+
 /// GetPrivateRefCountEntry(do_move=true) + NewPrivateRefCountEntry + refcount++
 /// fused to one TLS access; returns the pre-increment refcount.
 #[inline(always)]

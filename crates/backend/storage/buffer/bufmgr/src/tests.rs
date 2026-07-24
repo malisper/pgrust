@@ -401,6 +401,50 @@ fn read_miss_then_warm_hit() {
 }
 
 #[test]
+fn pin_buffer_locked_pairs_each_shared_bump_with_its_own_drop() {
+    // GL-ASSERTMASK-1 A1 — born-RED for the assertion-masked shared-refcount
+    // leak. `PinBuffer_Locked` adds a shared refcount UNCONDITIONALLY (the
+    // bump is fused into the header unlock), and its `debug_assert!` that no
+    // local pin preexists is stripped from every shipped profile. With the
+    // assertion gone, the private entry it takes must still be independently
+    // droppable, or the two shared bumps pair with a single shared drop.
+    //
+    // Bars are real assert_eq!s on the SHARED refcount, so this is
+    // release-effective. Arms differ: pre-fix the final shared refcount reads
+    // 1 (leaked), post-fix 0.
+    let _g = setup();
+    let b = read_blk(9405, 0);
+    let desc = GetBufferDescriptor(b - 1);
+    let shared = |d: &BufferDesc| d.state.load(Ordering::Relaxed) & BUF_REFCOUNT_MASK;
+
+    assert_eq!(shared(desc), 1, "one pin, one shared refcount");
+    assert_eq!(GetPrivateRefCount(b), 1);
+
+    // Drive PinBuffer_Locked's own contract: a reserved private entry, resowner
+    // room, and the header lock held. This is the state its assertion forbids
+    // and that a prefetch-pinned buffer reaching SyncOneBuffer produces.
+    privref::ReservePrivateRefCountEntry();
+    pin::resowner_enlarge_for_pin().unwrap();
+    LockBufHdr(desc);
+    pin::PinBuffer_Locked(desc);
+    assert_eq!(shared(desc), 2, "PinBuffer_Locked bumps the shared refcount");
+
+    // Both pins released => the shared refcount must be back to zero. Pre-fix
+    // the merged private entry only reaches zero once, so only one of the two
+    // shared bumps is ever dropped.
+    ReleaseBuffer(b).unwrap();
+    ReleaseBuffer(b).unwrap();
+    assert_eq!(GetPrivateRefCount(b), 0, "no local pin should remain");
+    assert_eq!(
+        shared(desc),
+        0,
+        "shared refcount leaked: the buffer can never be replaced again and \
+         InvalidateBuffer would spin on it without bound"
+    );
+    AtEOXact_Buffers(true);
+}
+
+#[test]
 fn privref_array_overflow() {
     let _g = setup();
     let mut pinned = Vec::new();
