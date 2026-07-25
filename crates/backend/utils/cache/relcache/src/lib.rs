@@ -44,10 +44,14 @@ pub use store::RelationIdGetRelation;
 pub const MAX_EOXACT_LIST: usize = 32;
 const INITRELCACHESIZE: usize = 400;
 
-// C rd_refcnt maps onto the entry Rc: user refs = strong_count - 1 (the cache
-// itself holds one), and a nailed entry's permanent rd_refcnt=1 is the
-// `nailed` flag. RelationHasReferenceCountZero(rel) == strong_count is 1 plus
-// the probe clones the caller currently holds.
+// C rd_refcnt does NOT map onto the entry Rc: a rebuild replaces this Rc, so
+// one oid can have several live allocations and strong_count on the current one
+// counts only holders whose snapshot is current. C's question -- "does the
+// session have this relation open at all" -- is RelationUserRefcount, which
+// sums the current lineage and the still-held predecessors in `stale_refs`. A
+// nailed entry's permanent rd_refcnt=1 is the `nailed` flag, so
+// RelationUserRefcount == rd_refcnt - (nailed ? 1 : 0). See
+// scratchpad/night/relcache-invariant-contract.md for the per-site table.
 pub(crate) struct RelCacheEnt {
     pub(crate) rel: Rc<RelationData<'static>>,
     pub(crate) nailed: bool,

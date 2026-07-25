@@ -337,7 +337,10 @@ pub fn RelationForgetRelation(rid: Oid) -> PgResult<()> {
     let Some((rel, _nailed)) = store::lookup_ent(rid) else {
         return Ok(());
     };
-    if !store::refcount_zero(&rel, 1) {
+    // relcache.c:2903. The session must not have this relation open on ANY
+    // lineage: refcount_zero would miss a handle taken before a rebuild and
+    // let the drop through. Our lookup_ent clone is C's temporary bump.
+    if !store::user_refcount_zero(rid, 1) {
         return Err(Box::new(
             PgError::error(format!("relation {rid} is still open"))
                 .with_sqlstate(ERRCODE_INTERNAL_ERROR),
@@ -512,8 +515,11 @@ fn AtEOXact_cleanup(relid: Oid, isCommit: bool) -> PgResult<()> {
     let _ = nailed;
     #[cfg(debug_assertions)]
     if !miscinit_seams::is_bootstrap_processing_mode::call() {
-        // C: rd_refcnt == (rd_isnailed ? 1 : 0); the nail lives in the flag.
-        debug_assert!(store::refcount_zero(&rel, 1), "relcache reference leak at EOXact");
+        // relcache.c:3319-3320: rd_refcnt == (rd_isnailed ? 1 : 0), the nail
+        // living in the flag here. All lineages: the leak shape this cache
+        // makes possible is a handle taken before a rebuild and never dropped,
+        // which no count on the current entry can see.
+        debug_assert!(store::user_refcount_zero(relid, 1), "relcache reference leak at EOXact");
     }
 
     let clear_relcache = if isCommit {
@@ -528,7 +534,10 @@ fn AtEOXact_cleanup(relid: Oid, isCommit: bool) -> PgResult<()> {
     rel.rd_droppedSubid.set(InvalidSubTransactionId);
 
     if clear_relcache {
-        if store::refcount_zero(&rel, 1) {
+        // relcache.c:3348-3366. The WARNING is a leak diagnostic, so it has to
+        // see holders of superseded lineages too or it is silently suppressed
+        // in exactly the case this cache adds.
+        if store::user_refcount_zero(relid, 1) {
             return RelationClearRelation(relid, &rel);
         }
         elog::elog(
@@ -576,7 +585,10 @@ fn AtEOSubXact_cleanup(
         );
         if isCommit && rel.rd_droppedSubid.get() == InvalidSubTransactionId {
             rel.rd_createSubid.set(parentSubid);
-        } else if store::refcount_zero(&rel, 1) {
+        } else if store::user_refcount_zero(relid, 1) {
+            // relcache.c:3452-3475, matched pair with AtEOXact_cleanup: same
+            // diagnostic, and the else arm additionally transfers the entry to
+            // the parent subxact so cleanup can retry.
             rel.rd_createSubid.set(InvalidSubTransactionId);
             rel.rd_newRelfilelocatorSubid.set(InvalidSubTransactionId);
             rel.rd_firstRelfilelocatorSubid.set(InvalidSubTransactionId);

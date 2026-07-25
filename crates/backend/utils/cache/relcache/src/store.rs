@@ -39,10 +39,24 @@ pub(crate) fn is_nailed(relation_id: Oid) -> bool {
     with_state(|st| st.id_cache.get(&relation_id).is_some_and(|e| e.nailed))
 }
 
-// RelationHasReferenceCountZero, with `held` = probe clones the caller holds.
+// NOT RelationHasReferenceCountZero. A rebuild replaces the entry Rc, so this
+// counts holders of the CURRENT lineage only: it answers "if I replace this
+// entry now, does anybody get orphaned?" -- the right question at the
+// arm-selection sites, and it reads BELOW C's rd_refcnt whenever a holder of a
+// superseded lineage exists. `held` = probe clones the caller holds, per frame.
 #[inline]
 pub(crate) fn refcount_zero(rel: &Rc<RelationData<'static>>, held: usize) -> bool {
     Rc::strong_count(rel) == 1 + held
+}
+
+// RelationHasReferenceCountZero (rel.h:500) for real: all lineages of `relid`,
+// which is what C's rd_refcnt counts. Required at every leak-detection and
+// user-visible-semantics site -- those ask "does the session still have this
+// relation open anywhere", and refcount_zero cannot answer it. `held` = probe
+// clones the caller holds on the current entry, same per-frame convention.
+#[inline]
+pub(crate) fn user_refcount_zero(relid: Oid, held: usize) -> bool {
+    crate::RelationUserRefcount(relid) == held
 }
 
 pub fn RelationIdGetRelation(relationId: Oid) -> PgResult<Option<Rc<RelationData<'static>>>> {
