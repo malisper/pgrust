@@ -24,6 +24,7 @@ thread_local! {
     // AcceptInvalidationMessages does inside a rebuild's catalog access.
     static INVALIDATE_OTHER_DURING_BUILD: Cell<Option<(Oid, Oid, u32)>> = const { Cell::new(None) };
     static IN_XACT: Cell<bool> = const { Cell::new(true) };
+    static IS_BOOTSTRAP: Cell<bool> = const { Cell::new(false) };
     static CUR_SUBID: Cell<u32> = const { Cell::new(1) };
     static HAS_SYSCACHE: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
     static PG_INDEX_ROWS: RefCell<Vec<(Oid, FakeIndexRow)>> = const { RefCell::new(Vec::new()) };
@@ -206,7 +207,7 @@ fn install() {
         relcache_build_seams::relation_init_index_access_info::set(fake_index_info);
         relcache_build_seams::scan_pg_index_shapes::set(fake_index_scan);
         catalog_seams::is_catalog_relation_oid::set(|_| false);
-        miscinit_seams::is_bootstrap_processing_mode::set(|| false);
+        miscinit_seams::is_bootstrap_processing_mode::set(|| IS_BOOTSTRAP.with(|c| c.get()));
         xact_seams::is_transaction_state::set(|| IN_XACT.with(|c| c.get()));
         xact_seams::get_current_sub_transaction_id::set(|| CUR_SUBID.with(|c| c.get()));
         relmapper_seams::relation_map_invalidate_all::set(|| Ok(()));
@@ -630,6 +631,111 @@ fn forget_relation_clears_or_marks_dropped() {
     let held = get(16418);
     assert!(invalidate::RelationForgetRelation(16418).is_err());
     drop(held);
+}
+
+// ---------------------------------------------------------------------------
+// The superseded-lineage divergence class.
+//
+// A rebuild REPLACES the entry Rc, so a handle taken before the rebuild is a
+// holder of a lineage the cache no longer points at. C has no such state: it
+// rebuilds contents in place, one entry per oid forever, and rd_refcnt counts
+// every holder. Rc::strong_count on the CURRENT entry therefore reads BELOW
+// C's rd_refcnt exactly when such a holder exists, and every leak-detection
+// (J3) / user-semantics (J4) site that keyed off it was silently permissive.
+// The four sites below are the ones the module contract names as unsound;
+// each test exhibits the disagreement directly.
+// ---------------------------------------------------------------------------
+
+// Leave exactly one holder on a superseded lineage. C rd_refcnt == 1 after
+// this; strong_count on the current entry is 1 (the cache's own reference).
+fn stale_holder(oid: Oid) -> Rc<RelationData<'static>> {
+    let held = get(oid);
+    held.rd_isvalid.set(false);
+    // Rebuild: installs a new lineage as the cache entry, notes `held` stale.
+    let fresh = get(oid);
+    assert!(!Rc::ptr_eq(&held, &fresh), "rebuild must replace the entry Rc");
+    drop(fresh);
+    assert_eq!(strong_count_in_cache(oid), 1, "no handles on the current lineage");
+    assert_eq!(crate::RelationUserRefcount(oid), 1, "one handle, on a stale lineage");
+    held
+}
+
+// C relcache.c:2903 elog(ERROR, "relation %u is still open", rid). The drop
+// path must refuse while ANY lineage is held, not just the current one.
+#[test]
+fn forget_relation_refuses_holder_of_superseded_lineage() {
+    install();
+    seed(16480, "forget_stale", RELKIND_RELATION);
+    let stale = stale_holder(16480);
+
+    let err = invalidate::RelationForgetRelation(16480).expect_err("C elog(ERROR) here");
+    assert!(err.message().contains("relation 16480 is still open"), "{}", err.message());
+    assert!(with_state(|st| st.id_cache.contains_key(&16480)), "entry must survive");
+    drop(stale);
+}
+
+// C relcache.c:3319-3320 Assert(rd_refcnt == (rd_isnailed ? 1 : 0)) -- the
+// tree's only systematic "somebody never closed this relation" detector. The
+// leak shape this port newly introduces (hold, get rebuilt away, leak the old
+// handle) was invisible to it.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "relcache reference leak at EOXact")]
+fn eoxact_leak_assert_sees_superseded_lineage() {
+    install();
+    seed(16481, "eoxact_stale", RELKIND_RELATION);
+    let stale = stale_holder(16481);
+    store::eoxact_list_add(16481);
+
+    let r = invalidate::AtEOXact_RelationCache(true);
+    drop(stale);
+    r.unwrap();
+}
+
+// C relcache.c:3348-3366: nonzero rd_refcnt => WARNING and keep the entry.
+// Reachable only where the leak Assert above is skipped, which in C is the
+// non-assert build or bootstrap mode (relcache.c:3315); bootstrap is the arm a
+// unit test can take.
+#[test]
+fn eoxact_abort_keeps_entry_when_superseded_lineage_held() {
+    install();
+    seed(16483, "eoxact_keep", RELKIND_RELATION);
+    let stale = stale_holder(16483);
+    let (cur, _) = store::lookup_ent(16483).unwrap();
+    cur.rd_createSubid.set(1);
+    drop(cur);
+    store::eoxact_list_add(16483);
+
+    IS_BOOTSTRAP.with(|c| c.set(true));
+    let r = invalidate::AtEOXact_RelationCache(false);
+    IS_BOOTSTRAP.with(|c| c.set(false));
+    r.unwrap();
+
+    let (cur, _) = store::lookup_ent(16483).expect("C daren't remove it; entry must survive");
+    assert_eq!(cur.rd_createSubid.get(), InvalidSubTransactionId);
+    drop(cur);
+    drop(stale);
+}
+
+// C relcache.c:3452-3475: same predicate on the subxact path, whose else arm
+// additionally transfers rd_createSubid to the parent so cleanup can retry.
+// No leak Assert guards this one, so it is reachable in every build.
+#[test]
+fn eosubxact_abort_keeps_entry_when_superseded_lineage_held() {
+    install();
+    seed(16482, "eosubxact_stale", RELKIND_RELATION);
+    let stale = stale_holder(16482);
+    let (cur, _) = store::lookup_ent(16482).unwrap();
+    cur.rd_createSubid.set(7);
+    drop(cur);
+    store::eoxact_list_add(16482);
+
+    invalidate::AtEOSubXact_RelationCache(false, 7, 3).unwrap();
+
+    let (cur, _) = store::lookup_ent(16482).expect("C daren't remove it; entry must survive");
+    assert_eq!(cur.rd_createSubid.get(), 3, "transferred to the parent subxact");
+    drop(cur);
+    drop(stale);
 }
 
 #[test]
