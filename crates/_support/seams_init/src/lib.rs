@@ -295,6 +295,10 @@ pub fn init_all_with_transport(transport: Transport) {
     procarray::init_seams();
     procsignal::init_seams();
     shmem::init_seams();
+    // The foreign-segment probe CreateLockFile needs when the data directory
+    // was last held by C PostgreSQL (GL-SHMSEAM-1). pgrust creates no SysV
+    // segment of its own, so this is a read-only install.
+    sysv_shmem::init_seams();
     sinval::init_seams();
     standby::init_seams();
     waiteventset::init_seams();

@@ -156,6 +156,7 @@ members = [
     "crates/backend/storage/file/fd",
     "crates/backend/port/pg_sema_seams",
     "crates/backend/port/pg_sema",
+    "crates/backend/port/sysv_shmem",
     "crates/backend/storage/ipc/pg_barrier",
     "crates/backend/storage/ipc/pmsignal_seams",
     "crates/backend/storage/ipc/procarray_seams",

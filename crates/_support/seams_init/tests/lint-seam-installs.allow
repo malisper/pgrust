@@ -52,7 +52,11 @@ proc_array_apply_xid_assignment	INTENTIONAL	behind standby_state() >= STANDBY_IN
 # --- F7 ---------------------------------------------------------------------
 
 # --- F8 ---------------------------------------------------------------------
-pg_shared_memory_is_in_use	INTENTIONAL	reached only via a foreign lockfile line-7 shmem key pgrust never writes; panic backstop
+# pg_shared_memory_is_in_use: row REMOVED 2026-07-26 (GL-SHMSEAM-1). Its
+# "INTENTIONAL / panic backstop" classification was wrong: the seam is on the
+# migrate-from-C boot path, which every data directory a C postmaster ever held
+# reaches, and the backstop was a panic rather than a FATAL. The probe now ships
+# in crate sysv_shmem, installed by seams_init::init_all.
 
 # --- F9 ---------------------------------------------------------------------
 get_xlog_receipt_time	INTENTIONAL	hot-standby conflict path already loud for other unported pieces; decl comment says stays loud until that lane lands

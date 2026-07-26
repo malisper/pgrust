@@ -792,7 +792,24 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      between calls, let alone session identity — pure per-thread
     //      scratch that dies with the thread, never captured or restored by
     //      an envelope.
-    assert_eq!(count_tree(crates), 543, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-SHMSEAM-1 delta (+1), TEST-ONLY and NOT session state — not a
+    // SESSION_ENVELOPE_MANIFEST member:
+    //   utils/init/miscinit/src/tests.rs — EMITTED, the datadir-first-contact
+    //   tests' capture buffer for what `elog::set_emit_log_hook` reported.
+    //   Per-thread because the emit hook itself is per-thread and the tests that
+    //   install it run concurrently on separate harness threads, so a
+    //   process-global buffer would let one test read another's FATAL. Spelled as
+    //   ONE `thread_local!` block. `cfg(test)` only, therefore absent from every
+    //   shipped profile; counted only because the census counter is textual.
+    //   Non-session on the substance too: scratch output for the duration of one
+    //   call, no session identity, nothing an envelope could capture or restore.
+    //   The new row touches no file on the `session_sources` tripwire below,
+    //   which is correct: that list covers SESSION TLS files and
+    //   miscinit/src/tests.rs is not one.
+    // NOTE for whoever merges this to main: the same one declaration lands on a
+    // DIFFERENT absolute total there (562 -> 563 at t56). Re-derive the pin at
+    // the tip it will be enforced against; do not carry this number across.
+    assert_eq!(count_tree(crates), 544, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
