@@ -690,48 +690,64 @@ pub fn XLogFlush(record: XLogRecPtr) -> PgResult<()> {
     let insert_tli = ctl.InsertTimeLineID.load(Relaxed);
     init_small::globals::StartCriticalSection();
 
+    // GL-ERRFIX-1 E-2: every fallible step below sits INSIDE the critical
+    // section opened above. Propagating with `?` from here skipped
+    // EndCriticalSection and LEAKED CritSectionCount onto the calling thread
+    // — and the caller can be a pool worker, whose Fatal arm never resets it,
+    // so an innocent later statement on that thread would begin inside a
+    // phantom critical section. The loop moves into a closure so the section
+    // is always balanced; the error is carried out and re-raised after
+    // EndCriticalSection. Control flow is otherwise line-for-line identical.
     let mut write_rqst_ptr = record;
-    loop {
-        RefreshXLogWriteResult();
-        if record <= LOGWRT_RESULT.get().1 {
-            break;
-        }
-
-        ctl.info_lck.with(|| {
-            let w = ctl.LogwrtRqstWrite.load(Relaxed);
-            if write_rqst_ptr < w {
-                write_rqst_ptr = w;
+    let loop_result: PgResult<()> = (|| {
+        loop {
+            RefreshXLogWriteResult();
+            if record <= LOGWRT_RESULT.get().1 {
+                break;
             }
-        });
-        let mut insertpos = WaitXLogInsertionsToFinish(write_rqst_ptr);
 
-        if !LWLockAcquireOrWait(WALWriteLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())? {
-            continue;
-        }
-        RefreshXLogWriteResult();
-        if record <= LOGWRT_RESULT.get().1 {
+            ctl.info_lck.with(|| {
+                let w = ctl.LogwrtRqstWrite.load(Relaxed);
+                if write_rqst_ptr < w {
+                    write_rqst_ptr = w;
+                }
+            });
+            let mut insertpos = WaitXLogInsertionsToFinish(write_rqst_ptr);
+
+            if !LWLockAcquireOrWait(
+                WALWriteLock(),
+                LW_EXCLUSIVE,
+                init_small::globals::MyProcNumber(),
+            )? {
+                continue;
+            }
+            RefreshXLogWriteResult();
+            if record <= LOGWRT_RESULT.get().1 {
+                LWLockRelease(WALWriteLock())?;
+                break;
+            }
+
+            let commit_delay = guc_tables::vars::CommitDelay.read();
+            if commit_delay > 0
+                && init_small::globals::enableFsync()
+                && procarray_seams::minimum_active_backends::is_installed()
+                && procarray_seams::minimum_active_backends::call(
+                    guc_tables::vars::CommitSiblings.read(),
+                )
+            {
+                std::thread::sleep(std::time::Duration::from_micros(commit_delay as u64));
+                insertpos = WaitXLogInsertionsToFinish(insertpos);
+            }
+
+            XLogWrite((insertpos, insertpos), insert_tli, false)?;
             LWLockRelease(WALWriteLock())?;
             break;
         }
-
-        let commit_delay = guc_tables::vars::CommitDelay.read();
-        if commit_delay > 0
-            && init_small::globals::enableFsync()
-            && procarray_seams::minimum_active_backends::is_installed()
-            && procarray_seams::minimum_active_backends::call(
-                guc_tables::vars::CommitSiblings.read(),
-            )
-        {
-            std::thread::sleep(std::time::Duration::from_micros(commit_delay as u64));
-            insertpos = WaitXLogInsertionsToFinish(insertpos);
-        }
-
-        XLogWrite((insertpos, insertpos), insert_tli, false)?;
-        LWLockRelease(WALWriteLock())?;
-        break;
-    }
+        Ok(())
+    })();
 
     init_small::globals::EndCriticalSection();
+    loop_result?;
 
     if LOGWRT_RESULT.get().1 < record {
         return Err(Box::new(PgError::new(
