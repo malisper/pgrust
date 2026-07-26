@@ -779,7 +779,20 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      thread's writer map, and any writer present there at a
     //      transaction end is abandoned by construction (statement-end
     //      flush removed every published one).
-    assert_eq!(count_tree(crates), 542, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-VACGUARD-1 delta (RC: 542 -> 543 net, see the pair above), deliberately NON-SESSION TLS:
+    //   85. access/heap/heapam/src/freeze.rs — FREEZE_MEMBER_SCRATCH: the
+    //      reset-per-call bump context for FreezeMultiXactId's multixact
+    //      member arrays, standing in for C's palloc into
+    //      CurrentMemoryContext (C imposes no cap on member counts; the
+    //      fixed 256-element stack array it replaces was enforced by a
+    //      reachable release `assert!`). Same class and same rationale as
+    //      this crate's own KEY_TEST_SCRATCH: there is no per-tuple mcx
+    //      reachable that deep in the freeze path. Reset at entry to every
+    //      call and never read across one, so it carries no state at all
+    //      between calls, let alone session identity — pure per-thread
+    //      scratch that dies with the thread, never captured or restored by
+    //      an envelope.
+    assert_eq!(count_tree(crates), 543, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
