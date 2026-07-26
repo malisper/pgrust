@@ -415,6 +415,19 @@ impl ParkLot {
         }
     }
 
+    /// Leave the SEARCH phase because this worker is about to BLOCK on
+    /// something that is not the park (the loop-top permit acquire): a
+    /// blocked thread is NOT searching, and a submission that elides its
+    /// wake against this mark would strand work behind the block (the
+    /// flip-battery pooldb-spinner client-kill catch). Same last-spinner
+    /// chain as spin_found_work: hand the searcher duty to a parked worker.
+    pub fn spin_abandon(&self) {
+        self.spinners.fetch_sub(1, atomic::Ordering::SeqCst);
+        if self.spinners.load(atomic::Ordering::SeqCst) == 0 {
+            self.wake_one_idle();
+        }
+    }
+
     /// Park on the directed LIFO stack (pool worker loop). `spinning` =
     /// caller holds a spin_enter mark; it is consumed here (decremented
     /// UNDER the idle lock, before the epoch recheck — the elision

@@ -1067,6 +1067,17 @@ impl Runtime {
         local.spinning = true;
     }
 
+    /// GL-STMTTASK flip fix: drop the searcher mark before a BLOCKING
+    /// loop-top permit acquire (a blocked thread is not searching — an
+    /// elided wake against it strands work behind the block). Pairs with a
+    /// spin_enter_worker re-arm after the acquire.
+    pub fn spin_abandon_worker(&self, local: &mut WorkerLocal) {
+        if local.spinning {
+            local.spinning = false;
+            self.sched.park.spin_abandon();
+        }
+    }
+
     /// GL-STMTTASK-2 (wake elision): directed park for the step-v2 pool
     /// loop — registers on the LIFO idle stack and consumes the worker's
     /// search-phase mark; on return the worker re-enters the search phase
