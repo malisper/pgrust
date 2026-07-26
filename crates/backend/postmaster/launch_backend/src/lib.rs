@@ -320,6 +320,102 @@ inherited! {
     transaction_buffers: i32 = transaction_buffers / set_transaction_buffers;
 }
 
+/// Connection-setup fault injection, for tests that must reach the
+/// out-of-descriptors path without exhausting the machine's descriptor table.
+/// `PGRUST_TEST_FAIL_CONN_SETUP=N` fails every Nth external connection's
+/// child init exactly as an EMFILE wake pipe would (N=2: every other one), so
+/// one server proves both the clean refusal AND that it kept serving.
+/// Unset or 0 (the default) costs one relaxed load per connection.
+fn fault_or_init_postmaster_child(
+    child_type: BackendType,
+    child_pid: pid_t,
+) -> types_error::PgResult<()> {
+    static PERIOD: AtomicI32 = AtomicI32::new(-1);
+    static SEEN: AtomicI32 = AtomicI32::new(0);
+    if is_external_connection_backend(child_type) {
+        let mut period = PERIOD.load(Ordering::Relaxed);
+        if period < 0 {
+            period = std::env::var("PGRUST_TEST_FAIL_CONN_SETUP")
+                .ok()
+                .and_then(|v| v.parse::<i32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(0);
+            PERIOD.store(period, Ordering::Relaxed);
+        }
+        if period > 0 && (SEEN.fetch_add(1, Ordering::Relaxed) + 1) % period == 0 {
+            return Err(Box::new(types_error::PgError::new(
+                types_error::FATAL,
+                "waiter wake pipe creation failed: errno 24".to_string(),
+            )));
+        }
+    }
+    miscinit::InitPostmasterChild(child_pid)
+}
+
+/// A child that could not finish its own bring-up: report to the client,
+/// close the socket, hand the slot back. Never panics and never leaves the
+/// peer waiting — the two halves of the GL-FDLIMIT-1 defect.
+fn fail_child_startup(
+    child_type: BackendType,
+    child_pid: pid_t,
+    client_sock: Option<ClientSocket>,
+    e: &types_error::PgError,
+) {
+    // The child's own error reporting is not up yet (that is what failed),
+    // so log the cause from here.
+    let _ = elog::elog(
+        types_error::LOG,
+        format!(
+            "could not start {}: {}",
+            miscinit::GetBackendTypeDesc(child_type),
+            e.message
+        ),
+    );
+    if let Some(cs) = client_sock {
+        report_startup_failure_to_client(cs.sock, &e.message);
+    }
+    // Exit status 1 = C's FATAL exit: the postmaster releases the child slot
+    // and keeps running (a crash status would restart the whole server).
+    if postmaster_seams::announce_child_exit::is_installed() {
+        postmaster_seams::announce_child_exit::call(child_pid, 1 << 8);
+    }
+}
+
+/// Send one error message to a client whose session will never exist, then
+/// close the socket.
+///
+/// Message form is C's `report_fork_failure_to_client` (postmaster.c): the
+/// bare pre-3.0 `'E'` + text + NUL, which libpq accepts whatever protocol
+/// version it asked for (it sniffs the length word). Send errors are ignored
+/// by design — the socket is going away either way, and the close is what
+/// guarantees the client stops waiting.
+pub fn report_startup_failure_to_client(sock: i32, msg: &str) {
+    if sock < 0 {
+        return;
+    }
+    let mut buf = Vec::with_capacity(msg.len() + 3);
+    buf.push(b'E');
+    buf.extend_from_slice(msg.as_bytes());
+    buf.push(b'\n');
+    buf.push(0);
+    // SAFETY: fcntl/send/close on the accepted fd we own; the nonblocking
+    // flip keeps a wedged client from blocking this thread's exit.
+    unsafe {
+        let flags = libc::fcntl(sock, libc::F_GETFL);
+        if flags >= 0 && libc::fcntl(sock, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0 {
+            loop {
+                let rc = libc::send(sock, buf.as_ptr() as *const libc::c_void, buf.len(), 0);
+                if rc >= 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    break;
+                }
+            }
+        }
+        libc::close(sock);
+    }
+}
+
 // The per-task half of the child thread body (InitPostmasterChild through the
 // exit announce): the spawn closure runs it after the thread prelude; a wpool
 // standby runs it on claim with the prelude already paid.
@@ -366,8 +462,17 @@ fn run_child_task(
         miscinit::InitProcessGlobals(child_pid);
         waiteventset_seams::rekey_wakeup_registry::call();
     } else {
-        miscinit::InitPostmasterChild(child_pid)
-            .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
+        // Everything InitPostmasterChild acquires is a kernel resource that
+        // can legitimately run out: the wake pipe and the latch wait set are
+        // descriptors, and this whole server is ONE process with ONE
+        // descriptor table. Running out must fail THIS connection, not the
+        // server: a panic here left the accepted socket open with nobody
+        // owning it and no exit announce, so the client waited forever and
+        // the child slot never came back (GL-FDLIMIT-1).
+        if let Err(e) = fault_or_init_postmaster_child(child_type, child_pid) {
+            fail_child_startup(child_type, child_pid, client_sock, &e);
+            return;
+        }
         // InitPostmasterChild's SIGQUIT default; miscinit can't reach interrupt.
         procsignal::pqsignal_thread(
             procsignal::signums::SIGQUIT,
@@ -589,14 +694,19 @@ pub fn postmaster_child_launch(
             // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
 
-            if guc::layers::base_share_enabled() {
+            let guc_result = if guc::layers::base_share_enabled() {
                 guc::store::initialize_guc_options_for_child_base(&guc_base)
                     .and_then(|()| guc::layers::bind_base(&guc_base))
-                    .unwrap_or_else(|e| panic!("child GUC base bind failed: {e:?}"));
             } else {
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
                     .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
-                    .unwrap_or_else(|e| panic!("child GUC restore failed: {e:?}"));
+            };
+            // Same rule as the child-init failure below: a connection whose
+            // bring-up fails is refused, not panicked (a panic here left the
+            // accepted socket open forever — GL-FDLIMIT-1).
+            if let Err(e) = guc_result {
+                fail_child_startup(child_type, child_pid, client_sock, &e);
+                return;
             }
 
             run_child_task(child_type, child_pid, child_slot, startup_data, client_sock);

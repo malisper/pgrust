@@ -227,6 +227,27 @@ pub struct FdBudgetProbe {
     pub stop_errno: i32,
 }
 
+/// Outcome of the boot-time RLIMIT_NOFILE raise ([`raise_fd_soft_limit_to_hard`]).
+/// `soft_after` is the descriptor ceiling the whole server process has to
+/// live inside — in the one-process/thread-per-session model that is the
+/// budget every session shares, which is why fd's budget arithmetic needs it.
+#[derive(Clone, Copy, Debug)]
+pub struct FdSoftLimitRaise {
+    pub soft_before: u64,
+    /// Soft limit in force after the raise (== `soft_before` when no raise
+    /// was needed or none was accepted).
+    pub soft_after: u64,
+    /// Hard limit; `u64::MAX` when the platform reports RLIM_INFINITY.
+    pub hard: u64,
+    /// getrlimit(RLIMIT_NOFILE) failed — the process ceiling is unknown and
+    /// callers must fall back to the probed budget.
+    pub getrlimit_failed: bool,
+    pub getrlimit_errno: i32,
+    /// Errno of the last rejected setrlimit (0 = no raise attempted, or the
+    /// raise succeeded).
+    pub setrlimit_errno: i32,
+}
+
 // ---------------------------------------------------------------------------
 // The Vfs trait — the contract surface (signatures binding, names normative).
 // FROZEN at tag vfs-trait-v1; any op-set or signature change after that tag is
@@ -507,6 +528,26 @@ pub fn fd_budget_probe_report(max_to_probe: usize) -> FdBudgetProbe {
         getrlimit_failed: false,
         getrlimit_errno: 0,
         stop_errno: 0,
+    }
+}
+
+/// Boot-time RLIMIT_NOFILE raise (soft → hard). Sim arm: the simulated
+/// process has a pinned budget and no rlimits, reported as "no getrlimit" so
+/// fd keeps its probe-only arithmetic (deterministic across replays).
+#[cfg(not(pgrust_sim))]
+#[inline]
+pub fn raise_fd_soft_limit_to_hard() -> FdSoftLimitRaise {
+    ACTIVE.raise_fd_soft_limit_to_hard()
+}
+#[cfg(pgrust_sim)]
+pub fn raise_fd_soft_limit_to_hard() -> FdSoftLimitRaise {
+    FdSoftLimitRaise {
+        soft_before: 0,
+        soft_after: 0,
+        hard: 0,
+        getrlimit_failed: true,
+        getrlimit_errno: libc::ENOSYS,
+        setrlimit_errno: 0,
     }
 }
 

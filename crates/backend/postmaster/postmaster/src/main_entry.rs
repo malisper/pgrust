@@ -424,7 +424,15 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     ipci_seams::create_shared_memory_and_semaphores::call(fastpath_groups)?;
 
-    fd::set_max_safe_fds()?;
+    // C sizes the fd budget for ONE backend process; every child gets its own
+    // copy by fork. Here every child is a thread in the postmaster's own fd
+    // table, so the budget is shared and has to be divided: live children
+    // (each holds a socket, a wake pipe and its wait sets) and the backends
+    // among them that also hold a file-descriptor cache.
+    fd::set_max_safe_fds(
+        pmchild_seams::max_live_postmaster_children::call(),
+        init_small::globals::MaxBackends(),
+    )?;
 
     // InitPostmasterDeathWatchHandle: one address space — children observing
     // postmaster death is the pmchild/waiteventset redesign (WL_POSTMASTER_DEATH

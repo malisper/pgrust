@@ -121,7 +121,9 @@ pub(crate) fn stdio_wire_boot_half(argv: &[String], username: &str) -> PgResult<
 
     ipci_seams::create_shared_memory_and_semaphores::call(fastpath_groups)?;
 
-    fd::set_max_safe_fds()?;
+    // One process, one thread of execution: the whole descriptor budget is
+    // this thread's (C's per-backend arithmetic, unshared).
+    fd::set_max_safe_fds(1, 1)?;
 
     postmaster_seams::set_pg_start_time::call(timestamp_seams::get_current_timestamp::call());
     Ok(())

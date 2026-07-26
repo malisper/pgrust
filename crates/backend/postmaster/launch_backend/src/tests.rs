@@ -185,3 +185,46 @@ fn null_main_fn_kind_panics_loudly() {
     init_small::globals::SetIsUnderPostmaster(false);
     postmaster_child_launch(BackendType::StandaloneBackend, 1, StartupData::None, None);
 }
+
+// ---------------------------------------------------------------------------
+// GL-FDLIMIT-1: a connection whose child thread cannot start must be REFUSED
+// on the wire and its socket closed. Before this, child-init failure panicked
+// the thread: the accepted socket stayed open with no owner, so the client sat
+// waiting forever (it deadlocked a benchmark driver for 55 minutes).
+// ---------------------------------------------------------------------------
+#[test]
+fn startup_failure_reaches_the_client_and_closes_the_socket() {
+    let mut sv = [0i32; 2];
+    // SAFETY: socketpair writes two fds into the array.
+    let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) };
+    assert_eq!(rc, 0, "socketpair failed");
+    let (server, client) = (sv[0], sv[1]);
+
+    report_startup_failure_to_client(server, "waiter wake pipe creation failed: errno 24");
+
+    // The client sees the error text...
+    let mut buf = [0u8; 256];
+    // SAFETY: read into a local buffer on the peer end we own.
+    let n = unsafe { libc::read(client, buf.as_mut_ptr().cast(), buf.len()) };
+    assert!(n > 0, "client got no error message (read returned {n})");
+    let got = &buf[..n as usize];
+    assert_eq!(got[0], b'E', "message must be an error frame: {got:?}");
+    let text = String::from_utf8_lossy(&got[1..]);
+    assert!(text.starts_with("waiter wake pipe creation failed: errno 24"), "{text}");
+    assert_eq!(got[got.len() - 1], 0, "message must be NUL-terminated");
+
+    // ...and then EOF, because the server closed the socket. Without the
+    // close this read blocks forever, which is the hang being fixed.
+    // SAFETY: same peer fd; a closed peer returns 0.
+    let n = unsafe { libc::read(client, buf.as_mut_ptr().cast(), buf.len()) };
+    assert_eq!(n, 0, "socket was left open: the client would wait forever");
+
+    // SAFETY: closing the peer end we own.
+    unsafe { libc::close(client) };
+}
+
+// An invalid socket (no client — an auxiliary child) is a no-op, not a crash.
+#[test]
+fn startup_failure_with_no_client_socket_is_inert() {
+    report_startup_failure_to_client(types_core::PGINVALID_SOCKET, "no client here");
+}
