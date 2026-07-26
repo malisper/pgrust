@@ -418,3 +418,58 @@ fn serial_kill_switch_covers_claim_channel() {
     assert_eq!(scan.rgs_readahead, 0);
     std::fs::remove_file(&path).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// GL-Q4142: the morsel-range tripwire's cbstore leg.
+//
+// `heapam::heap_set_block_range` refuses block-range positioning on a scan
+// that carries a shared parallel scan descriptor: a private range drive
+// abandons the shared `phs_nallocated` cursor, so every participant would
+// walk the WHOLE relation and each partial aggregate would be the global
+// answer — a silent result inflated by the participant count. The cbstore
+// leg of the same dispatch (`table_scan_set_morsel_range`) carried no such
+// check, so the columnar side of that tripwire fail-OPENED where the heap
+// side fail-CLOSES. Release-effective (an `Err`, not a `debug_assert`) —
+// the check has to hold in the profile the fleet actually runs.
+#[test]
+fn granule_range_refuses_a_parallel_scan() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, _n_rows) = write_part("rangeparallel");
+    let part = open_part(&path);
+    assert!(part.rgs.len() >= 3, "fixture must span row groups");
+    let ctx = MemoryContext::new("cbrange-parallel");
+    let mcx = ctx.mcx();
+
+    // Serial control: the same claim positions fine (the runtime morsel
+    // drive's ordinary path — the refusal must be about the SHARED cursor,
+    // not about range positioning as such).
+    let mut serial = CbScanDescData::new_with_part(
+        scan_base(mcx, 41030, None),
+        Some(part.clone()),
+        vec![ColType::I64, ColType::Text],
+    );
+    serial
+        .set_granule_range(0, 1)
+        .expect("serial granule-range positioning stays admitted");
+    drop(serial);
+
+    // Parallel: the scan rides a shared descriptor, so range positioning
+    // must be refused outright.
+    let mut pdesc = Box::new(::tableam_vocab::ParallelBlockTableScanDescData::default());
+    let pptr = std::ptr::NonNull::from(pdesc.as_mut());
+    let mut par = CbScanDescData::new_with_part(
+        scan_base(mcx, 41031, Some(pptr)),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    let err = par
+        .set_granule_range(0, 1)
+        .expect_err("granule-range positioning on a parallel scan must be refused");
+    assert!(
+        format!("{err:?}").contains("parallel"),
+        "the refusal must name the parallel scan: {err:?}"
+    );
+    drop(par);
+    drop(pdesc);
+    std::fs::remove_file(&path).unwrap();
+}

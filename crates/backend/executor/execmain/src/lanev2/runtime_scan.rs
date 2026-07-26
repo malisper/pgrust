@@ -2296,7 +2296,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // Not from within parallel machinery: helpers of helpers don't exist,
     // and a leader already in parallel mode (Gather in flight) must not
     // stack a second context here.
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_machinery(ss) {
         return ea_refused(estate, ea, node_id, "in-parallel-mode");
     }
     // No params, either kind (the binder refuses Params; the worker pstmt

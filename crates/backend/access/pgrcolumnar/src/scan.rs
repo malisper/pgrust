@@ -745,6 +745,20 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// pure predicates; re-checking would only repeat work).
     pub fn set_granule_range(&mut self, g0: u64, g1: u64) -> PgResult<()> {
         debug_assert!(self.adaptive.is_none(), "granule-range drive vs adaptive drive");
+        // GL-Q4142 — the tripwire's cbstore leg (heapam::heap_set_block_range
+        // is the heap one, verbatim in shape). A scan carrying a SHARED
+        // parallel descriptor divides its work through `phs_nallocated`
+        // (claim_next_rg); a private granule range abandons that cursor, so
+        // every participant would walk the whole part and every partial
+        // aggregate would be the GLOBAL answer — a result silently inflated
+        // by the participant count, with no error anywhere. Release-effective
+        // by construction (an Err, never a debug_assert): the profile the
+        // fleet runs is the profile that has to fail closed.
+        if self.rs_base.rs_parallel.is_some() {
+            return Err(Box::new(PgError::error(
+                "cbstore: granule-range positioning on a parallel scan".to_string(),
+            )));
+        }
         let Some(part) = self.part.as_ref() else {
             return Err(Box::new(PgError::error(
                 "cbstore: granule range on an empty part".to_string(),

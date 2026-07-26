@@ -152,6 +152,36 @@ pub fn enabled() -> bool {
     ::guc_tables::backing::pgrust_lane_executor()
 }
 
+/// GL-Q4142 — the runtime morsel arms' parallel gate, fail-closed on the
+/// SCAN rather than only on the process role.
+///
+/// Every runtime arm must refuse inside parallel machinery, because its
+/// morsel source is a PRIVATE part-global granule map: engaging under a
+/// classic Gather makes each participant walk the whole relation, so every
+/// partial aggregate is the global answer and the result comes back inflated
+/// by the participant count (see the hazard note at
+/// `runtime_passthrough::…` — "every participant emits the complete result").
+///
+/// The historical gate was `IsParallelWorker() || IsInParallelMode()` — two
+/// PROCESS-ROLE predicates. Neither is a property of the plan:
+/// `ParallelWorkerNumber` is a bare thread-local with no adoption path (any
+/// thread other than the one `ParallelWorkerMain` stamped reads -1), and a
+/// Gather worker's serialized plan clears `parallelModeNeeded`, so
+/// `IsInParallelMode()` is false there too. A single misread of either one
+/// turns into a wrong answer.
+///
+/// `ss.is_parallel()` (`parallel_aware || pstate.is_some()`) is the
+/// structural fact the arm actually needs: this scan divides its work
+/// through the shared `phs_nallocated` cursor, so a private range drive over
+/// it is never sound. It is the same posture the refsort gate
+/// (`IsParallelWorker() || ss.is_parallel()`) and the bitmap gate
+/// (`parallel_aware || pstate.is_some()`) already take. Widening a refusal
+/// is always byte-safe: the classic parallel arm owns the shape.
+#[inline]
+pub(crate) fn runtime_in_parallel_machinery(ss: &::nodeseqscan::SeqScanState<'_>) -> bool {
+    ::parallel::IsParallelWorker() || ::xact::IsInParallelMode() || ss.is_parallel()
+}
+
 /// Combined gate for the wave-2 row-mode TAIL dispatch hooks in procnode
 /// (se2-cost-fix): the process-static, default-OFF `PGRUST_LANE_V2_ROWMODE`
 /// knob FIRST — one relaxed byte load + compare that short-circuits at
