@@ -483,6 +483,90 @@ fn lock_free_reuse_keeps_older_valid_xmin() {
     set_transaction_xmin(InvalidTransactionId);
 }
 
+/// GL-OLTPREG-1. A reuse attempt that CANNOT succeed must not touch
+/// MyProc->xmin and must not execute the SeqCst fence. Born red at
+/// 2216f2261e: publish-then-verify wrote and retracted the xmin, and paid a
+/// full barrier between them, on EVERY miss — and in a write-heavy workload
+/// at high client counts the completion counter moves between essentially
+/// every pair of snapshots, so the miss is the common case, not the rare one.
+///
+/// The counter is the only observable: the write half is retracted before the
+/// function returns, so no caller-visible state distinguishes the two shapes.
+#[test]
+fn doomed_reuse_does_not_speculatively_publish_xmin() {
+    let _g = test_lock();
+    let me = my_backend();
+    let mcx = leaked_mcx();
+    let proc = GetPGProcByNumber(me);
+
+    let mut snap = fresh_snapshot(mcx);
+    take_snapshot(&mut snap, mcx);
+
+    // Arm the miss: a write transaction completes, so the reuse counter check
+    // is guaranteed to fail on the next take.
+    let other = claim_other();
+    other_proc_running(other, snap.xmax);
+    other_proc_end(other, snap.xmax);
+
+    // Arm the publish arm: an INVALID proc xmin is what makes
+    // publish-then-verify want to write (the statement-boundary shape of
+    // lock_free_reuse_republishes_xmin_at_statement_boundary).
+    proc.xmin.value.store(InvalidTransactionId, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+
+    let hits0 = snapshot_reuse_hits();
+    let builds0 = snapshot_full_builds();
+    let pubs0 = snapshot_reuse_speculative_publishes();
+
+    take_snapshot(&mut snap, mcx);
+
+    // The reuse really did miss (otherwise the assertion below is vacuous).
+    assert_eq!(snapshot_reuse_hits(), hits0, "reuse hit; the miss was not armed");
+    assert_eq!(snapshot_full_builds(), builds0 + 1, "no full build happened");
+    assert_eq!(
+        snapshot_reuse_speculative_publishes(),
+        pubs0,
+        "a doomed reuse still published MyProc->xmin and fenced"
+    );
+    // The full build under the lock still published the fresh xmin.
+    assert_eq!(proc.xmin.read(), snap.xmin);
+
+    proc.xmin.value.store(0, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+}
+
+/// The pre-check must not cost the HIT its publish: a reachable reuse still
+/// runs the full publish-then-verify triple (constraint 1 unchanged).
+#[test]
+fn reachable_reuse_still_publishes_xmin() {
+    let _g = test_lock();
+    let me = my_backend();
+    let mcx = leaked_mcx();
+    let proc = GetPGProcByNumber(me);
+
+    let mut snap = fresh_snapshot(mcx);
+    take_snapshot(&mut snap, mcx);
+
+    proc.xmin.value.store(InvalidTransactionId, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+
+    let hits0 = snapshot_reuse_hits();
+    let pubs0 = snapshot_reuse_speculative_publishes();
+
+    take_snapshot(&mut snap, mcx);
+
+    assert_eq!(snapshot_reuse_hits(), hits0 + 1, "reuse did not fire");
+    assert_eq!(
+        snapshot_reuse_speculative_publishes(),
+        pubs0 + 1,
+        "the reachable reuse skipped the publish half"
+    );
+    assert_eq!(proc.xmin.read(), snap.xmin);
+
+    proc.xmin.value.store(0, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+}
+
 use crate::known_assigned::{self, test_support as kax};
 
 fn kax_add(from: TransactionId, to: TransactionId) {
