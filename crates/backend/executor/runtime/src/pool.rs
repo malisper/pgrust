@@ -66,9 +66,20 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
         loop {
             let epoch = rt.park_epoch();
             if !held {
+                // Flip fix: the loop-top acquire can BLOCK (permits held
+                // by inline statements / suspended bodies) — a blocked
+                // thread is not a searcher; drop the mark for the wait and
+                // re-arm after (submissions during the wait then wake a
+                // parked worker instead of eliding against us).
+                if spinner_mode {
+                    rt.spin_abandon_worker(&mut local);
+                }
                 rt.execution_permits().acquire();
                 crate::io::note_permit(true);
                 held = true;
+                if spinner_mode && !local.spinning() {
+                    rt.spin_enter_worker(&mut local);
+                }
             }
             let step = rt.worker_step(&mut local);
             // Task boundary (§2.9): drain this worker's CQEs non-blockingly.
