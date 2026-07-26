@@ -9001,6 +9001,7 @@ dependencies = [
  "procarray_seams",
  "shmem_seams",
  "syscache_seams",
+ "sysv_shmem",
  "timestamp_seams",
  "types_core",
  "types_error",
@@ -15871,6 +15872,7 @@ dependencies = [
  "syncrep",
  "syncscan",
  "syslogger",
+ "sysv_shmem",
  "table",
  "tableam",
  "tablecmds",
@@ -17527,6 +17529,20 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_startup",
+]
+
+[[package]]
+name = "sysv_shmem"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "fd",
+ "init_small",
+ "libc",
+ "shmem_seams",
+ "types_error",
+ "types_storage",
+ "vfs",
 ]
 
 [[package]]

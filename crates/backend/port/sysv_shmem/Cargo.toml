@@ -1,0 +1,21 @@
+[package]
+name = "sysv_shmem"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sysv_shmem"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+elog = { path = "../../utils/error/elog" }
+init_small = { path = "../../utils/init/init_small" }
+# The sanctioned stat route (DST P1 Vfs choke, docs/design/dst-and-wasm.md
+# #2.1): C stats DataDir with raw stat(2), we go through fd::pg_stat.
+fd = { path = "../../storage/file/fd" }
+vfs = { path = "../../storage/file/vfs" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
+libc = "0.2"

@@ -92,7 +92,10 @@ fn scan_shmem_key_line(buffer: &str) -> Option<(u64, u64)> {
     Some((id1, id2))
 }
 
-fn CreateLockFile(
+// pub(crate) so the datadir-first-contact tests can drive the data-directory
+// arm (is_dd_lock = true) at an absolute path, without the process-global cwd
+// change CreateDataDirLockFile's relative path would force on them.
+pub(crate) fn CreateLockFile(
     filename: &str,
     am_postmaster: bool,
     socket_dir: &str,
