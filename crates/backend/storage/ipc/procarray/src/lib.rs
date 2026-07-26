@@ -106,6 +106,11 @@ thread_local! {
 thread_local! {
     static SNAPSHOT_REUSE_HITS: Cell<u64> = const { Cell::new(0) };
     static SNAPSHOT_FULL_BUILDS: Cell<u64> = const { Cell::new(0) };
+    // How many times GetSnapshotDataReuse SPECULATIVELY published MyProc->xmin
+    // (store + SeqCst fence) — the publish-then-verify write half. Counted so
+    // the pre-check that keeps a doomed reuse attempt off that path is
+    // testable; the write half is invisible in the function's return value.
+    static SNAPSHOT_REUSE_SPECULATIVE_PUBLISHES: Cell<u64> = const { Cell::new(0) };
 }
 
 // PGRUST_SNAPSHOT_REUSE_TRACE=1 (debug builds): one stderr line per snapshot
@@ -133,6 +138,11 @@ pub fn snapshot_reuse_hits() -> u64 {
 #[cfg(debug_assertions)]
 pub fn snapshot_full_builds() -> u64 {
     SNAPSHOT_FULL_BUILDS.get()
+}
+
+#[cfg(debug_assertions)]
+pub fn snapshot_reuse_speculative_publishes() -> u64 {
+    SNAPSHOT_REUSE_SPECULATIVE_PUBLISHES.get()
 }
 
 pub fn TransactionXmin() -> TransactionId {
@@ -891,6 +901,10 @@ fn MaintainLatestCompletedXid(latestXid: TransactionId) {
 //    older), so the horizon was never past snapshot.xmin — no publish needed.
 // 3. On verify failure a speculative publish is retracted; a transiently
 //    published too-old xmin only makes concurrent horizons conservative.
+// 4. The counter PRE-CHECK below constraint 1's publish is a filter, not the
+//    verify-load: it can only turn a would-be reuse into a full build, never
+//    the other way round, so it cannot weaken constraint 1. Constraint 1's
+//    store/fence/verify triple is entirely unchanged behind it.
 fn GetSnapshotDataReuse(
     snapshot: &mut SnapshotData<'_>,
     my_proc: &PGPROC,
@@ -900,12 +914,35 @@ fn GetSnapshotDataReuse(
         return false;
     }
 
+    // PRE-CHECK (constraint 4). Publish-then-verify is only needed for a
+    // reuse that can still SUCCEED. This load is not the verify-load: it is a
+    // pure filter whose only possible error is a false NEGATIVE (a counter
+    // that changes between here and the verify-load), and a false negative
+    // just builds the snapshot the hard way — always sound. What it buys is
+    // the whole write half: a reuse that is already doomed no longer stores
+    // MyProc->xmin, no longer executes a full barrier, and no longer retracts
+    // the store. In a write-heavy workload at high client counts the global
+    // completion counter moves between essentially every pair of snapshots,
+    // so the doomed case IS the common case, and the store lands on a line
+    // that ComputeXidHorizons sweeps out of this core's cache — making the
+    // barrier pay a coherence round trip for a result that is discarded two
+    // instructions later. C takes neither the store nor the fence here at all
+    // (procarray.c:2095 GetSnapshotDataReuse checks the counter first, under
+    // ProcArrayLock); this restores C's ordering for the miss while keeping
+    // the lock-free hit.
+    if tv.xactCompletionCount.load(Relaxed) != snapshot.snapXactCompletionCount {
+        return false;
+    }
+
     // The fence is only needed when publishing: with xmin already valid (and
     // <= snapshot.xmin, constraint 2) the horizon can never pass snapshot.xmin
     // regardless of what the verify-load observes.
     let published = if !TransactionIdIsValid(my_proc.xmin.read()) {
         my_proc.xmin.value.store(snapshot.xmin, Relaxed);
         fence(Ordering::SeqCst);
+        #[cfg(debug_assertions)]
+        SNAPSHOT_REUSE_SPECULATIVE_PUBLISHES
+            .set(SNAPSHOT_REUSE_SPECULATIVE_PUBLISHES.get() + 1);
         true
     } else {
         false
