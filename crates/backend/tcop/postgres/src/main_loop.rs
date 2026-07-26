@@ -224,7 +224,11 @@ pub(crate) struct LoopState {
     pub(crate) idle_session_timeout_enabled: bool,
 }
 
-pub(crate) fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<()> {
+pub(crate) fn error_recovery(
+    err: &PgError,
+    state: &mut LoopState,
+    first_attempt: bool,
+) -> PgResult<()> {
     use init_small::globals as g;
 
     /* error_context_stack = NULL: the ambient callback chain is Err-carried. */
@@ -236,6 +240,23 @@ pub(crate) fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<(
     g::SetQueryCancelHoldoffCount(0);
     g::SetCritSectionCount(0);
 
+    // GL-ERRFIX-1 (E-4 + E-5) — EMIT THE REPORT ONCE, BEFORE ANY FALLIBLE STEP.
+    // Two defects, one placement fixes both:
+    //   E-4: the report used to sit AFTER `disable_all_timeouts` (the first
+    //        fallible `?`). If that step failed, the original error reached
+    //        neither the client nor the log — the connection then died after 16
+    //        silent retries with a generic "failed to settle" FATAL and nothing
+    //        anywhere said why. Emitting ahead of every `?` means no recovery
+    //        step can swallow the original error.
+    //   E-5: the keeper retries recovery up to MAX_RECOVERY_ATTEMPTS times, and
+    //        on each retry the pending error is the recovery-step failure, so
+    //        the client collected up to 16 reports for one original error.
+    //        `first_attempt` is false on every retry, so the report is emitted
+    //        at most once per original error.
+    if first_attempt {
+        elog::emit_error_report_for(err);
+    }
+
     timeout_seams::disable_all_timeouts::call(false)?; /* do first to avoid race */
     g::SetQueryCancelPending(false);
     state.idle_in_transaction_timeout_enabled = false;
@@ -245,7 +266,7 @@ pub(crate) fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<(
 
     pqcomm::pq_comm_reset();
 
-    elog::emit_error_report_for(err);
+    // (the report emission moved to the top of this function — GL-ERRFIX-1 E-4/E-5.)
 
 
     xact::AbortCurrentTransaction()?;
@@ -814,9 +835,12 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
                 let mut pending = err;
                 const MAX_RECOVERY_ATTEMPTS: u32 = 16;
                 let mut settled = false;
+                let mut first_attempt = true;
                 for _ in 0..MAX_RECOVERY_ATTEMPTS {
+                    let attempt_is_first = first_attempt;
+                    first_attempt = false;
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        error_recovery(&pending, &mut state)
+                        error_recovery(&pending, &mut state, attempt_is_first)
                     })) {
                         Ok(Ok(())) => {
                             settled = true;
