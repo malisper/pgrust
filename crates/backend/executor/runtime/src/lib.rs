@@ -119,6 +119,8 @@ pub use rg::{
     TaskSetSpec, TaskSetWork, WeakRgHandle,
 };
 pub use sched::{DriveLocal, Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
+#[cfg(not(loom))]
+pub use sched::install_qos_mem_probe;
 pub use sink::{
     sealed_sink_tasksets, sink_tasksets, ParallelSink, SealedParallelSink, SealedSinkTaskSets,
     SinkProbe, SinkTaskSets,
@@ -827,20 +829,31 @@ impl Runtime {
                 Step::Ran => {
                     retries = 0;
                     if !interactive {
-                        // Move 3: yield the serve toward live interactive
-                        // demand (board grant = the last-active guard).
-                        if self.sched.qos_demand_live() && should_yield() {
-                            stats::RuntimeStats::tick(&self.sched.stats.qos_yields);
-                            self.sched.stat_flush_all(local);
-                            local.wfin_flush_all();
-                            break None;
-                        }
-                        // Move 2: hand the permit through the priority
-                        // lane's deferral window, then take one back.
-                        if self.execution_permits().priority_waiting() > 0 {
-                            stats::RuntimeStats::tick(&self.sched.stats.qos_permit_defers);
-                            self.execution_permits().release();
-                            self.execution_permits().acquire();
+                        // Memory governor (GL-CONCMEM-1): both QoS moves
+                        // below multiply concurrently-live engagement
+                        // working sets (round-robin progress keeps every
+                        // partial state resident). Over the bar, hold them
+                        // — this serve runs to completion (the pre-QoS
+                        // shape, and the fastest shed) and the interleave
+                        // resumes under the bar.
+                        if crate::sched::qos_mem_over_bar() {
+                            stats::RuntimeStats::tick(&self.sched.stats.qos_mem_holds);
+                        } else {
+                            // Move 3: yield the serve toward live interactive
+                            // demand (board grant = the last-active guard).
+                            if self.sched.qos_demand_live() && should_yield() {
+                                stats::RuntimeStats::tick(&self.sched.stats.qos_yields);
+                                self.sched.stat_flush_all(local);
+                                local.wfin_flush_all();
+                                break None;
+                            }
+                            // Move 2: hand the permit through the priority
+                            // lane's deferral window, then take one back.
+                            if self.execution_permits().priority_waiting() > 0 {
+                                stats::RuntimeStats::tick(&self.sched.stats.qos_permit_defers);
+                                self.execution_permits().release();
+                                self.execution_permits().acquire();
+                            }
                         }
                     }
                 }

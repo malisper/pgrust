@@ -1222,8 +1222,12 @@ fn global_footprint_tracks_context_block_bytes() {
         let v: PgVec<'_, u8> = vec_with_capacity_in(ctx.mcx(), BIG).unwrap();
         let held = global_footprint::bytes();
         drop(v);
+        // NOISE rides BOTH directions: concurrent tests FREE between the
+        // two samples of the process-global counter too (the lower bound
+        // without the allowance was a latent flake — adjudicated by the
+        // logdec lane, GL-CONCMEM-1 pays it in passing).
         assert!(
-            held >= base + BIG,
+            held + NOISE >= base + BIG,
             "global footprint {held} did not grow by the dedicated {BIG} over base {base}"
         );
         drop(ctx);

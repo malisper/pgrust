@@ -4437,6 +4437,22 @@ mod bound_gate {
     /// submission charges its width at publish; the slot release at RG
     /// completion flushes the unmet remainder (leak-free pairing).
     #[test]
+    /// POOL-QOS memory governor (GL-CONCMEM-1): the bar spelling is
+    /// unit-pinned — `0`/`off` DISARM (Some(0)), a positive integer arms at
+    /// that many KB, anything else falls through to the auto (cgroup) arm.
+    #[test]
+    fn qos_mem_bar_spelling() {
+        use crate::sched::qos_governor_bar_from_env as bar;
+        assert_eq!(bar(Some("0")), Some(0), "0 disarms");
+        assert_eq!(bar(Some("off")), Some(0), "off disarms");
+        assert_eq!(bar(Some(" off ")), Some(0), "trimmed");
+        assert_eq!(bar(Some("1024")), Some(1024 * 1024), "KB unit");
+        assert_eq!(bar(Some("abc")), None, "garbage falls to auto");
+        assert_eq!(bar(Some("-5")), None, "negative falls to auto");
+        assert_eq!(bar(None), None, "unset falls to auto");
+    }
+
+    #[test]
     fn qos_demand_charges_and_flushes() {
         let rt = Runtime::new(RuntimeConfig {
             workers: 1,

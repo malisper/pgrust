@@ -80,6 +80,11 @@ counters!(RuntimeStats, RuntimeStatsSnapshot;
     /// POOL-QOS: demoted holders that released/re-acquired their permit at
     /// a step boundary because priority waiters were parked.
     qos_permit_defers,
+    /// POOL-QOS memory governor (GL-CONCMEM-1): step boundaries where the
+    /// QoS moves (yield/defer) were HELD because the process was over the
+    /// memory bar — the serve ran on toward completion instead of
+    /// interleaving.
+    qos_mem_holds,
     /// M5+1 pipeline-DAG dispatch: dependency-satisfied pipelines published
     /// into ADDITIONAL slots (beyond the RG's first/reused slot) — the
     /// independent-subtree overlap the increment buys.
