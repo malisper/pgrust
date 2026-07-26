@@ -23,7 +23,16 @@ pub fn UpdatePMState(new_state: PMState) {
         3277,
         "UpdatePMState",
     );
-    with_pm(|pm| pm.pm_state = new_state);
+    with_pm(|pm| {
+        pm.pm_state = new_state;
+        // GL-GANGWEDGE-1: the shutdown-stall watchdog's progress stamp. Any
+        // state change is progress, so re-stamping here (rather than on entry
+        // to one named state) is what makes the watchdog measure "stuck"
+        // instead of "slow".
+        if old != new_state {
+            pm.pm_state_since = now_secs();
+        }
+    });
 }
 
 fn pm_signame(signal: i32) -> &'static str {

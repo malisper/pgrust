@@ -1085,6 +1085,8 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
         }
     }
     super::PARALLEL_WORKER_NUMBER.with(|c| c.set(-1));
+    // GL-GANGWEDGE-1 deterministic wedge injection (inert in production).
+    maybe_inject_pool_stall();
     // Park invisibility (see the fn doc): leave the procarray (parked
     // workers must be invisible to CountOtherDBBackends) AND release the
     // ProcSignal slot (a live slot whose owner never drains signals
@@ -1231,6 +1233,95 @@ impl Drop for PoolShmBusyGuard {
             }
         }
     }
+}
+
+/// GL-GANGWEDGE-1 RUNTIME-GANG STALL INJECTION (`PGRUST_TEST_POOL_STALL_
+/// INJECT_MS`; env-gated, inert in production). The runtime-gang analog of
+/// execparallel's `PGRUST_TEST_MQ_STALL_INJECT_MS`, which
+/// GL-DISCONNECT-WEDGE-1 §7 named as owed ("the e2e's victim shapes and the
+/// injection knob need a runtime-gang analog").
+///
+/// Called at the TAIL of a serve — the query is finished, but the thread takes
+/// a `pool_shm_busy_guard` charge and then sleeps FENCE-DEAF: no
+/// `shutting_down()` poll, no latch, no condvar. That is precisely the field
+/// wedge's mechanism, made deterministic:
+/// * the charge is the term `rtgang_live` (runtime_shm_busy_threads) feeds to
+///   the postmaster's PM_WAIT_BACKENDS quiescence gate, so the gate cannot
+///   pass while this thread sleeps;
+/// * the sleep is off every fence-poll point, so `retire_for_shutdown`'s
+///   one-way flag and its `notify_all` cannot reach it — a registry-invisible
+///   thread carries no pmchild slot, so no signal can reach it either.
+///
+/// Pre-fix, a fast/smart shutdown hangs here for the whole sleep with no
+/// backstop of any kind. Post-fix, the shutdown-stall watchdog escalates to
+/// immediate and the forced-exit floor lands within a bounded window.
+/// Drives `scripts/gangwedge-shutdown-e2e.sh`.
+///
+/// One-shot per process: a repeating stall would wedge every serve, and the
+/// repro must be able to establish that the server was healthy first.
+fn maybe_inject_pool_stall() {
+    let Some(ms) = std::env::var("PGRUST_TEST_POOL_STALL_INJECT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+    else {
+        return;
+    };
+    static INJECTED: AtomicBool = AtomicBool::new(false);
+    if INJECTED.swap(true, SeqCst) {
+        return;
+    }
+    let _busy = pool_shm_busy_guard();
+    let _ = elog::elog(
+        WARNING,
+        format!(
+            "GL-GANGWEDGE-1 test injection: runtime executor stalling {ms}ms fence-deaf \
+             while holding the shm-busy charge"
+        ),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// GL-GANGWEDGE-1 QUIESCENCE-TERM FAULT INJECTOR
+/// (`PGRUST_TEST_WEDGE_SHM_BUSY_MS`; env-gated, inert in production).
+///
+/// Spawns one thread that takes the `POOL_SHM_BUSY` charge and then sleeps
+/// FENCE-DEAF for the given duration — no `shutting_down()` poll, no latch, no
+/// condvar, and (being registry-invisible) no pmchild slot to signal.
+///
+/// This synthesizes the WEDGE STATE directly rather than reaching it through a
+/// query, and it is the right shape for the shutdown-backstop gate: the thing
+/// under test is the postmaster's behaviour when the quiescence term it waits
+/// on cannot be cleared, and `runtime_shm_busy_threads` (the `rtgang_live`
+/// seam) sums exactly this counter into the PM_WAIT_BACKENDS gate. Driving it
+/// through an engagement instead would make the gate depend on which query
+/// shapes the runtime router currently covers — i.e. it would silently go
+/// VACUOUS whenever engagement coverage moved, which is precisely how the
+/// earlier lane's battery missed this class.
+///
+/// The serve-path injector (`maybe_inject_pool_stall`) remains the vehicle for
+/// testing fence-poll coverage on real serves; this one tests the backstop.
+pub fn install_wedge_shm_busy_injection() {
+    let Some(ms) = std::env::var("PGRUST_TEST_WEDGE_SHM_BUSY_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+    else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("gangwedge-inject".into())
+        .spawn(move || {
+            let _busy = pool_shm_busy_guard();
+            let _ = elog::elog(
+                WARNING,
+                format!(
+                    "GL-GANGWEDGE-1 test injection: holding the runtime quiescence term \
+                     (shm-busy) fence-deaf for {ms}ms"
+                ),
+            );
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        });
 }
 
 /// Panic payload: a pool-db thread must exit RAW — the rtpool spawn glue

@@ -672,6 +672,14 @@ pub fn init_seams() {
     });
 }
 
+/// GL-GANGWEDGE-1 shutdown-backstop fault injector, re-exported for the
+/// postmaster (which cannot name `parallel` — the seam package-cycle rule).
+/// Inert unless `PGRUST_TEST_WEDGE_SHM_BUSY_MS` is set; see
+/// `parallel::standing::install_wedge_shm_busy_injection`.
+pub fn install_wedge_shm_busy_injection() {
+    parallel::standing::install_wedge_shm_busy_injection();
+}
+
 /// The PM_WAIT_BACKENDS quiescence term for registry-invisible runtime
 /// threads (rtgang_live seam): live gang threads PLUS pool-db threads
 /// inside a shared-memory-touching span (deferred identity bring-up /

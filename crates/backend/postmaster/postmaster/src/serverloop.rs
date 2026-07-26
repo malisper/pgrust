@@ -12,7 +12,7 @@ use types_storage::waiteventset::{WaitEvent, WL_LATCH_SET, WL_SOCKET_ACCEPT};
 
 use crate::statemachine::{signal_child, ExitPostmaster, StartChildProcess, TerminateChildren};
 use crate::{
-    btmask_all_except, loc, report, report_internal, with_pm, PMState, FastShutdown,
+    btmask_all_except, loc, pmstate_name, report, report_internal, with_pm, PMState, FastShutdown,
     ImmediateShutdown, NoShutdown, FORCED_EXIT_AFTER_LETHAL_SECS, MAXLISTEN,
     SIGKILL_CHILDREN_AFTER_SECS,
 };
@@ -60,6 +60,16 @@ pub fn DetermineSleepTime() -> i64 {
             let seconds = FORCED_EXIT_AFTER_LETHAL_SECS - (now_secs() - lethal_time);
             return (seconds * 1000).max(0);
         }
+        // GL-GANGWEDGE-1: wake in time for the shutdown-stall watchdog. A
+        // wedged shutdown produces no events at all, so without this the
+        // postmaster would sleep on its latch for the full 60s tick and the
+        // bound would be quantized to it.
+        let stall_bound = crate::pm_shutdown_stall_secs();
+        let state_since = with_pm(|pm| pm.pm_state_since);
+        if stall_bound != 0 && state_since != 0 && !with_pm(|pm| pm.stall_escalated) {
+            let seconds = stall_bound - (now_secs() - state_since);
+            return (seconds * 1000).max(0).min(60 * 1000);
+        }
         return 60 * 1000;
     }
 
@@ -100,6 +110,46 @@ fn now_secs() -> i64 {
     pg_clock::wall_secs()
 }
 
+/// GL-GANGWEDGE-1 shutdown-stall predicate — the pure half, unit-pinned.
+///
+/// True when a NON-immediate shutdown has sat in one shutdown state, without
+/// advancing, for at least `bound` seconds. Deliberately excluded:
+/// * `bound == 0` — the watchdog is disabled (rig escape hatch).
+/// * immediate shutdown / fatal_error — already owned by the SIGKILL +
+///   forced-exit ladder, which this predicate escalates INTO.
+/// * `escalated` — fires at most once per shutdown.
+/// * states before PM_STOP_BACKENDS — nothing has been asked to stop yet, and
+///   smart shutdown's legitimate indefinite wait for idle clients to
+///   disconnect happens in PM_RUN.
+/// * PM_WAIT_XLOG_SHUTDOWN — the shutdown checkpoint is doing work, not
+///   waiting on a child to notice a stop request; it may legitimately take
+///   minutes on a large buffer pool.
+/// * PM_NO_CHILDREN — the ceremony is over; ExitPostmaster runs from there.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shutdown_stall_due(
+    shutdown: i32,
+    fatal_error: bool,
+    escalated: bool,
+    state: PMState,
+    state_since: i64,
+    now: i64,
+    bound: i64,
+) -> bool {
+    if bound == 0 || escalated || fatal_error || state_since == 0 {
+        return false;
+    }
+    if shutdown <= NoShutdown || shutdown >= ImmediateShutdown {
+        return false;
+    }
+    if state < PMState::PM_STOP_BACKENDS
+        || state >= PMState::PM_NO_CHILDREN
+        || state == PMState::PM_WAIT_XLOG_SHUTDOWN
+    {
+        return false;
+    }
+    (now - state_since) >= bound
+}
+
 pub fn ServerLoop() -> PgResult<i32> {
     // M1: spawn the morsel-runtime worker pool at postmaster start. DEFAULT ON
     // since the M5 boarding flip (runtime::runtime_enabled: `PGRUST_RUNTIME=0`
@@ -118,6 +168,11 @@ pub fn ServerLoop() -> PgResult<i32> {
     // engagement). No-op unless PGRUST_RUNTIME=1, with PGRUST_RUNTIME_
     // POOLBIND=0 as the increment kill — the pool's layering above.
     launch_backend::rtgang::install_if_enabled();
+    // GL-GANGWEDGE-1: test-only fault injector for the shutdown backstop
+    // (PGRUST_TEST_WEDGE_SHM_BUSY_MS). Inert unless the env var is set; routed
+    // through launch_backend because tcop/postmaster cannot name parallel
+    // (the seam package-cycle rule).
+    launch_backend::install_wedge_shm_busy_injection();
     ConfigurePostmasterWaitSet(true)?;
     let mut last_lockfile_recheck_time = now_secs();
     let mut last_touch_time = last_lockfile_recheck_time;
@@ -174,6 +229,61 @@ pub fn ServerLoop() -> PgResult<i32> {
         }
 
         let now = now_secs();
+
+        // GL-GANGWEDGE-1 SHUTDOWN-STALL WATCHDOG. A fast/smart shutdown that
+        // stops advancing through the shutdown states is a WEDGE, not a slow
+        // shutdown: every gate past PM_STOP_BACKENDS waits only on children
+        // that have already been told to stop. C can wait forever there
+        // because its stop vector (a signal to a process) cannot be missed;
+        // ours can (see PM_SHUTDOWN_STALL_SECS). Escalate to immediate
+        // shutdown — the operator action C assumes — and let the audited kill
+        // ladder below finish the job. Loud, bounded, crash-recovery-safe.
+        if with_pm(|pm| {
+            shutdown_stall_due(
+                pm.shutdown,
+                pm.fatal_error,
+                pm.stall_escalated,
+                pm.pm_state,
+                pm.pm_state_since,
+                now,
+                crate::pm_shutdown_stall_secs(),
+            )
+        }) {
+            let state = with_pm(|pm| pm.pm_state);
+            let stalled = now - with_pm(|pm| pm.pm_state_since);
+            let remaining =
+                pmchild_seams::count_children::call(btmask_all_except(&[BackendType::Logger]));
+            let gang = if postmaster_seams::rtgang_live::is_installed() {
+                postmaster_seams::rtgang_live::call()
+            } else {
+                0
+            };
+            // The marker a scored run greps for. One line, unmistakable,
+            // carries everything needed to attribute the stall offline.
+            report(
+                LOG,
+                format!(
+                    "{}: shutdown made no progress in {} for {stalled}s \
+                     ({remaining} child thread(s), {gang} standing runtime executor(s) \
+                     still live); escalating to immediate shutdown. A registry-invisible \
+                     runtime thread that missed its stop fence is the known cause; the \
+                     next start will run crash recovery.",
+                    crate::WEDGE_MARKER,
+                    pmstate_name(state)
+                ),
+                1758,
+                "ServerLoop",
+            );
+            with_pm(|pm| pm.stall_escalated = true);
+            // Re-enter the shutdown request path as an immediate request
+            // rather than open-coding the escalation: that keeps exactly one
+            // implementation of "become an immediate shutdown" (SIGQUIT
+            // reason, gang fence, TerminateChildren, PM_WAIT_BACKENDS,
+            // abort_start_time) and inherits any future fix to it.
+            crate::PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST.store(true, Ordering::Release);
+            crate::PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
+            crate::statemachine::process_pm_shutdown_request()?;
+        }
 
         if with_pm(|pm| {
             (pm.shutdown >= ImmediateShutdown || pm.fatal_error)
