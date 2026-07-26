@@ -761,3 +761,61 @@ fn uring_wait_backstop_races_live_completer() {
         reaper.join().unwrap();
     });
 }
+
+// ---------------------------------------------------------------------------
+// 9. LWLock wakeup flag handoff (GL-TESTFIX-1 F-R1-5).
+//
+// Mirror of lwlock's LWLockWakeup drain vs a woken waiter's re-enqueue: the
+// waker proclist_delete's the waiter's NON-ATOMIC wait-link node, then
+// publishes lwWaiting = LW_WS_NOT_WAITING; the waiter re-queues (push_tail
+// writes the same node) as soon as it OBSERVES the flag. The subtlety this
+// model pins: the waiter can reach that observation WITHOUT a semaphore
+// edge — extraWaits reposts leave stale counts on its semaphore, so the
+// sem-lock it consumes may pair with an OLD post, not this waker's. The
+// flag itself must therefore carry the ordering: seam store Release, seam
+// load Acquire (lmgr_proc::init_seams). C is sound with a plain store
+// (pg_write_barrier + the sem syscall barrier + control dependency); the
+// Rust model is not, for non-atomic link cells.
+//
+// Sensitivity (verified during F-R1-5 development, not encoded): modeling
+// the PRE-fix shape — fence(Release) + Relaxed flag store on the waker,
+// Relaxed flag load on the waiter — reds this model with loom's
+// "Causality violation: Concurrent write accesses to `UnsafeCell`" in the
+// first interleavings explored.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lwlock_wakeup_flag_handoff_orders_link_writes() {
+    loom::model(|| {
+        // The waiter's proclist node (prev/next packed): non-atomic, exactly
+        // SyncCell<proclist_node>.
+        let link = Arc::new(loom::cell::UnsafeCell::new(0u64));
+        // lwWaiting: LW_WS_PENDING_WAKEUP = 2 -> LW_WS_NOT_WAITING = 0.
+        let flag = Arc::new(AtomicI32::new(2));
+
+        let waker = {
+            let link = Arc::clone(&link);
+            let flag = Arc::clone(&flag);
+            thread::spawn(move || {
+                // LWLockWakeup drain: proclist_delete(&mut wakeup, cur) —
+                // off-list marks written into the waiter's node...
+                link.with_mut(|p| unsafe { *p = u64::MAX });
+                // ...then the flag publication. Release = the seam store
+                // (set_proc_lw_waiting); the sem unlock that follows in
+                // production is deliberately NOT modeled — the waiter's
+                // stale-count path does not synchronize through it.
+                flag.store(0, Ordering::Release);
+            })
+        };
+
+        // Waiter: consumed a STALE semaphore count (no edge with the waker),
+        // now checks lwWaiting — the seam load (Acquire) — and re-queues.
+        while flag.load(Ordering::Acquire) != 0 {
+            loom::thread::yield_now();
+        }
+        // LWLockQueueSelf -> proclist_push_tail: writes its own node.
+        link.with_mut(|p| unsafe { *p = 0x1 });
+
+        waker.join().unwrap();
+    });
+}

@@ -1216,9 +1216,19 @@ pub fn init_seams() {
     use lmgr_proc_seams as s;
 
     s::proc_latch::set(|procno| &GetPGProcByNumber(procno).procLatch);
-    s::proc_lw_waiting::set(|procno| GetPGProcByNumber(procno).lwWaiting.load(Relaxed));
+    // Acquire/Release on lwWaiting (GL-TESTFIX-1 F-R1-5): the wake handshake
+    // can complete WITHOUT a semaphore edge — a wakee may consume a STALE
+    // count (the extraWaits repost machinery seeds them), observe
+    // LW_WS_NOT_WAITING, and immediately re-queue, touching its non-atomic
+    // proclist link while the waker's proclist_delete writes are still
+    // un-ordered with it. C is sound there via pg_write_barrier + the sem
+    // syscall barrier + control dependency; the Rust model needs the flag
+    // itself to carry the edge (TSan: 4 races on SyncCell<proclist_node>,
+    // LWLockQueueSelf push_tail vs LWLockWakeup drain delete). Loom mirror:
+    // waiter/tests/loom.rs lwlock_wakeup_flag_handoff.
+    s::proc_lw_waiting::set(|procno| GetPGProcByNumber(procno).lwWaiting.load(Acquire));
     s::set_proc_lw_waiting::set(|procno, state| {
-        GetPGProcByNumber(procno).lwWaiting.store(state, Relaxed)
+        GetPGProcByNumber(procno).lwWaiting.store(state, Release)
     });
     s::proc_lw_wait_mode::set(|procno| GetPGProcByNumber(procno).lwWaitMode.load(Relaxed));
     s::set_proc_lw_wait_mode::set(|procno, mode| {
