@@ -630,7 +630,7 @@ fn run_session(input: Vec<u8>) -> Vec<u8> {
                     "session died: {}",
                     err.message
                 );
-                error_recovery(&err, &mut state).expect("error recovery settles");
+                error_recovery(&err, &mut state, true).expect("error recovery settles");
                 if !crate::ignore_till_sync() {
                     state.send_ready_for_query = true;
                 }
