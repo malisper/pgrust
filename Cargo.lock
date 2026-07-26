@@ -10764,6 +10764,7 @@ dependencies = [
  "types_startup",
  "types_storage",
  "varsup",
+ "waitevent",
  "waitevent_seams",
  "waiteventset",
  "xact",

@@ -74,6 +74,7 @@ pgstat = { path = "../../../utils/activity/pgstat" }
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waitevent = { path = "../../../utils/activity/waitevent" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
 pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
