@@ -2228,7 +2228,7 @@ pub(super) fn try_own_sort<'mcx>(
         refused("randomAccess (adopted emit face cannot serve random-access reads)");
         return Ok(false);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_machinery(ss) {
         refused("already in parallel machinery");
         return Ok(false);
     }

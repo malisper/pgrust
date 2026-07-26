@@ -2169,7 +2169,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused(estate, true, node_id, runtime_instr::ea_mode_refuse_reason(estate));
         return Ok(None);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_machinery(ss) {
         refused(estate, ea, node_id, "already in parallel machinery");
         return Ok(None);
     }

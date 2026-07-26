@@ -5339,7 +5339,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     }
     // --- Session/binder gates (the M1 set, verbatim).
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_machinery(ss) {
         refuse(estate, ea, node_id, "in parallel mode");
         return Ok(false);
     }

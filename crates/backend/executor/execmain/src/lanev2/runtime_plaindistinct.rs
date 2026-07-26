@@ -810,7 +810,7 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
     if estate.es_epq_active {
         return Ok(None);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_machinery(ss) {
         refused(estate, ea, node_id, "already in parallel machinery");
         return Ok(None);
     }
@@ -943,7 +943,7 @@ pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
     if estate.es_epq_active {
         return Ok(false);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_machinery(ss) {
         refused(estate, ea, node_id, "already in parallel machinery");
         return Ok(false);
     }

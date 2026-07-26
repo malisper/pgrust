@@ -1112,7 +1112,7 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         return Ok(false);
     }
     // --- Session/binder gates (the M1 set, verbatim).
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_machinery(ss) {
         refuse("in parallel mode");
         return Ok(false);
     }
