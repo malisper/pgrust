@@ -111,3 +111,120 @@ fn shutdown_request_reaches_named_pmchild_seam() {
     with_pm(|pm| *pm = PostmasterState::new_for_tests());
     std::sync::atomic::AtomicBool::store(&PENDING_PM_SHUTDOWN_REQUEST, false, std::sync::atomic::Ordering::Release);
 }
+
+// ---------------------------------------------------------------------------
+// GL-GANGWEDGE-1: the shutdown-stall watchdog predicate.
+// ---------------------------------------------------------------------------
+
+/// Every shutdown state the watchdog is responsible for, i.e. every state a
+/// fast/smart shutdown can sit in while waiting for a child that has already
+/// been told to stop. PM_WAIT_XLOG_SHUTDOWN is excluded on purpose (the
+/// shutdown checkpoint does work there).
+const WATCHED_STATES: &[PMState] = &[
+    PMState::PM_STOP_BACKENDS,
+    PMState::PM_WAIT_BACKENDS,
+    PMState::PM_WAIT_XLOG_ARCHIVAL,
+    PMState::PM_WAIT_IO_WORKERS,
+    PMState::PM_WAIT_DEAD_END,
+    PMState::PM_WAIT_CHECKPOINTER,
+];
+
+fn due(state: PMState, elapsed: i64) -> bool {
+    crate::serverloop::shutdown_stall_due(
+        FastShutdown,
+        false,
+        false,
+        state,
+        1_000,
+        1_000 + elapsed,
+        PM_SHUTDOWN_STALL_SECS,
+    )
+}
+
+#[test]
+fn stall_watchdog_fires_in_every_shutdown_wait_state() {
+    // The two field shapes: PM_WAIT_BACKENDS (disconnect-side sighting) and
+    // the post-checkpoint tail (both shutdown-side sightings). Neither may be
+    // able to hang forever.
+    for &s in WATCHED_STATES {
+        assert!(
+            due(s, PM_SHUTDOWN_STALL_SECS),
+            "watchdog must fire in {} — an unbounded wait there is an outage",
+            pmstate_name(s)
+        );
+        assert!(!due(s, PM_SHUTDOWN_STALL_SECS - 1), "must not fire early in {}", pmstate_name(s));
+    }
+}
+
+#[test]
+fn stall_watchdog_never_bounds_the_shutdown_checkpoint() {
+    // A shutdown checkpoint on a large buffer pool legitimately runs for
+    // minutes; escalating there would forfeit a checkpoint that was about to
+    // succeed.
+    assert!(!due(PMState::PM_WAIT_XLOG_SHUTDOWN, 100 * PM_SHUTDOWN_STALL_SECS));
+}
+
+#[test]
+fn stall_watchdog_ignores_pre_stop_and_terminal_states() {
+    // Smart shutdown waits in PM_RUN for idle clients to leave, which is
+    // legitimate and unbounded; PM_NO_CHILDREN exits on its own.
+    for &s in &[
+        PMState::PM_INIT,
+        PMState::PM_STARTUP,
+        PMState::PM_RECOVERY,
+        PMState::PM_HOT_STANDBY,
+        PMState::PM_RUN,
+        PMState::PM_NO_CHILDREN,
+    ] {
+        assert!(!due(s, 100 * PM_SHUTDOWN_STALL_SECS), "must not fire in {}", pmstate_name(s));
+    }
+}
+
+#[test]
+fn stall_watchdog_yields_to_the_immediate_ladder_and_fires_once() {
+    let long = 100 * PM_SHUTDOWN_STALL_SECS;
+    let p = |shutdown, fatal, escalated, since| {
+        crate::serverloop::shutdown_stall_due(
+            shutdown,
+            fatal,
+            escalated,
+            PMState::PM_WAIT_BACKENDS,
+            since,
+            1_000 + long,
+            PM_SHUTDOWN_STALL_SECS,
+        )
+    };
+    // Immediate shutdown and the crash cycle are already owned by the
+    // SIGKILL + FORCED_EXIT_AFTER_LETHAL_SECS ladder this escalates into.
+    assert!(!p(ImmediateShutdown, false, false, 1_000));
+    assert!(!p(FastShutdown, true, false, 1_000));
+    // No shutdown in progress at all.
+    assert!(!p(NoShutdown, false, false, 1_000));
+    // Fires at most once per shutdown.
+    assert!(!p(FastShutdown, false, true, 1_000));
+    // Never stamped => no measurement to make.
+    assert!(!p(FastShutdown, false, false, 0));
+    // Smart shutdown gets the same protection as fast.
+    assert!(p(SmartShutdown, false, false, 1_000));
+    assert!(p(FastShutdown, false, false, 1_000));
+}
+
+#[test]
+fn stall_watchdog_bound_zero_restores_the_unbounded_wait() {
+    assert!(!crate::serverloop::shutdown_stall_due(
+        FastShutdown,
+        false,
+        false,
+        PMState::PM_WAIT_BACKENDS,
+        1_000,
+        1_000 + 100 * PM_SHUTDOWN_STALL_SECS,
+        0,
+    ));
+}
+
+#[test]
+fn wedge_marker_is_greppable_and_stable() {
+    // Scored runs and the coldopen rig belt grep for this exact token; it is
+    // part of the lane's contract with the harness.
+    assert_eq!(WEDGE_MARKER, "PGRUST-SHUTDOWN-WEDGE");
+}

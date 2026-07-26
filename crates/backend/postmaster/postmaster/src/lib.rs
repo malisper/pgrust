@@ -59,6 +59,70 @@ pub const SIGKILL_CHILDREN_AFTER_SECS: i64 = 5;
 /// crash-equivalent, so the next start runs crash recovery exactly as if
 /// the OS had killed us.
 pub const FORCED_EXIT_AFTER_LETHAL_SECS: i64 = 8;
+
+/// GL-GANGWEDGE-1: bound on a NON-immediate shutdown that stops making
+/// progress through the shutdown states.
+///
+/// C's fast/smart shutdown waits forever by design at every shutdown gate,
+/// and that is sound in C because every child is a PROCESS in the
+/// postmaster's registry: SIGTERM/SIGQUIT delivery is unconditional and the
+/// child dies at its next CHECK_FOR_INTERRUPTS. This port has a second child
+/// population C does not — the registry-invisible standing runtime executors
+/// (rtgang/pool threads, folded into the PM_WAIT_BACKENDS quiescence gate
+/// through the `rtgang_live` seam). They carry no pmchild slot, so NO SIGNAL
+/// CAN REACH THEM; their only stop vector is the cooperative
+/// `retire_for_shutdown` fence plus a condvar wake, which a thread wedged off
+/// its fence-poll points never takes. C's unbounded wait grafted onto a
+/// cooperative-only stop vector is not C parity — it is an unbounded outage,
+/// and the operator escalation C relies on ("just send SIGQUIT") is not
+/// available to an automated harness: the cold benchmark protocol issues 43
+/// `pg_ctl stop` cycles per run and a single stall loses the run.
+///
+/// The bound is deliberately on STATE PROGRESS rather than on one named gate,
+/// because the field sightings did not all wedge at the same gate: the
+/// disconnect-side sighting wedged in PM_WAIT_BACKENDS, while the two
+/// shutdown-side sightings wedged AFTER the shutdown checkpoint completed
+/// (server log stops between "checkpoint complete" and the postmaster's
+/// lock-file unlink), i.e. somewhere in the PM_WAIT_XLOG_ARCHIVAL ..
+/// PM_WAIT_DEAD_END tail. A progress bound covers all of them, and covers the
+/// next gate too.
+///
+/// On firing, the postmaster SELF-ESCALATES to immediate shutdown — exactly
+/// the operator action C assumes — which flows into the already-audited kill
+/// ladder (SIGKILL_CHILDREN_AFTER_SECS, then the GL-DISCONNECT-WEDGE-1
+/// FORCED_EXIT_AFTER_LETHAL_SECS floor). The worst case becomes bounded and
+/// loud instead of infinite and silent. Escalation forfeits the shutdown
+/// checkpoint, so the next start runs crash recovery — strictly better than
+/// never stopping at all, and exactly what an operator's kill -9 would have
+/// cost anyway.
+///
+/// NOT bounded: PM_WAIT_XLOG_SHUTDOWN, where the shutdown checkpoint runs. A
+/// large buffer pool can legitimately take minutes there, and unlike every
+/// other shutdown gate it is doing work rather than waiting for a child to
+/// notice a stop request.
+pub const PM_SHUTDOWN_STALL_SECS: i64 = 60;
+
+/// Escape hatch for the bound above (`PGRUST_PM_SHUTDOWN_STALL_SECS`), for
+/// rigs that must hold a wedge open for a stack capture, and for an operator
+/// who would rather keep a stalled shutdown alive for diagnosis than let it
+/// escalate. `0` disables the watchdog and restores the unbounded pre-fix
+/// wait. Not a product tuning knob: hanging forever is never correct, so the
+/// default is the shipped behaviour.
+pub fn pm_shutdown_stall_secs() -> i64 {
+    static SECS: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *SECS.get_or_init(|| {
+        std::env::var("PGRUST_PM_SHUTDOWN_STALL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|v| *v >= 0)
+            .unwrap_or(PM_SHUTDOWN_STALL_SECS)
+    })
+}
+
+/// The unmistakable log marker a scored run greps for. Emitted at LOG when
+/// the watchdog above fires. Fail fast and visibly beats hanging silently.
+pub const WEDGE_MARKER: &str = "PGRUST-SHUTDOWN-WEDGE";
+
 pub const MAXLISTEN: usize = 64;
 
 // miscadmin.h lock-file line numbers + pg_ctl status strings.
@@ -158,6 +222,12 @@ pub struct PostmasterState {
     /// forced-exit floor (serverloop) fires FORCED_EXIT_AFTER_LETHAL_SECS
     /// after it if children still have not drained. 0 = not sent.
     pub lethal_time: i64,
+    /// GL-GANGWEDGE-1: wall-clock second of the last PMState change, and
+    /// whether the shutdown-stall watchdog has already escalated for this
+    /// shutdown (it fires once — after that the immediate-shutdown ladder
+    /// owns the outcome). 0 = never stamped.
+    pub pm_state_since: i64,
+    pub stall_escalated: bool,
     pub reached_consistency: bool,
     pub startup_status: StartupStatusEnum,
     pub start_autovac_launcher: bool,
@@ -190,6 +260,8 @@ impl PostmasterState {
             fatal_error: false,
             abort_start_time: 0,
             lethal_time: 0,
+            pm_state_since: 0,
+            stall_escalated: false,
             reached_consistency: false,
             startup_status: StartupStatusEnum::NotRunning,
             start_autovac_launcher: false,
@@ -393,6 +465,7 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
             pm.fatal_error = false;
             pm.abort_start_time = 0;
             pm.lethal_time = 0;
+            pm.stall_escalated = false;
             pm.reached_consistency = false;
         });
 
@@ -626,6 +699,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                 pm.fatal_error = false;
                 pm.abort_start_time = 0;
                 pm.lethal_time = 0;
+                pm.stall_escalated = false;
             });
             statemachine::UpdatePMState(PMState::PM_RUN);
             with_pm(|pm| pm.conns_allowed = true);
