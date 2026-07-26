@@ -479,30 +479,149 @@ pub(crate) fn count_usable_fds(max_to_probe: i32) -> PgResult<(i32, i32)> {
     Ok((probe.used, probe.highest_fd + 1 - probe.used))
 }
 
-pub fn set_max_safe_fds() -> PgResult<()> {
+/// Descriptors one session thread holds outside the file-descriptor
+/// cache, counted from the code that creates them:
+///   1  client socket           (postmaster `AcceptConnection`, closed at
+///                               child-thread exit)
+///   2  waiter wake pipe        (`waiter::ensure_wake_pipe`, one pipe(2))
+///   1  latch wait set          (`latch::InitializeLatchWaitSet`, epoll/kqueue)
+///   1  FeBeWaitSet             (`pqcomm::pq_init`, epoll/kqueue)
+/// The last three are also counted per thread by `num_external_fds`, so this
+/// constant is the floor the budget hands out before any file is opened.
+pub const PER_SESSION_SETUP_FDS: i32 = 5;
+
+/// Descriptors the supervisor half keeps open for the life of the server:
+/// listen sockets (MAXLISTEN = 64), the lock files, the control file, the
+/// log-collector pipe. A flat allowance — it is paid once, not per session.
+pub const POSTMASTER_RESERVED_FDS: i32 = 96;
+
+/// The one-process fd budget (see `set_max_safe_fds`), factored out so the
+/// arithmetic is testable without touching the real limits.
+///
+/// `process_ceiling` = RLIMIT_NOFILE soft limit in force (None = unknown,
+/// which drops the sharing arm and reproduces C's per-process formula).
+/// Returns the max_safe_fds to install.
+pub fn compute_max_safe_fds(
+    usable_fds: i32,
+    max_files_per_process: i32,
+    process_ceiling: Option<i32>,
+    max_child_threads: i32,
+    max_session_threads: i32,
+) -> i32 {
+    // C: Min(usable_fds, max_files_per_process) - NUM_RESERVED_FDS.
+    let c_shaped = usable_fds.min(max_files_per_process);
+    let Some(ceiling) = process_ceiling else {
+        return c_shaped - NUM_RESERVED_FDS;
+    };
+    // One process, one fd table: every live child is a thread inside this
+    // ceiling, so the file-descriptor cache each session may fill is the
+    // ceiling MINUS every session's setup descriptors, divided by the
+    // sessions that can hold a cache at once.
+    let sessions = max_session_threads.max(1);
+    let setup = PER_SESSION_SETUP_FDS.saturating_mul(max_child_threads.max(1));
+    let for_caches = ceiling
+        .saturating_sub(setup)
+        .saturating_sub(POSTMASTER_RESERVED_FDS);
+    let share = for_caches / sessions;
+    // The share only ever LOWERS the answer: where the limit is generous
+    // (containers, `nofile` raised to the hard limit) max_files_per_process
+    // still binds and the result is byte-identical to C's.
+    c_shaped.min(share) - NUM_RESERVED_FDS
+}
+
+/// set_max_safe_fds (fd.c), adapted to the one-process topology.
+///
+/// `max_child_threads` = every live postmaster child (each is a thread in
+/// this fd table); `max_session_threads` = the children that hold a
+/// file-descriptor cache. Both are 1 for single-user/wire boots.
+pub fn set_max_safe_fds(max_child_threads: i32, max_session_threads: i32) -> PgResult<()> {
+    // Raise the soft limit to the hard limit BEFORE probing: in C the soft
+    // limit is a per-backend budget, here it is the whole server's.
+    let limits = vfs::raise_fd_soft_limit_to_hard();
+    if limits.getrlimit_failed {
+        ereport(WARNING)
+            .with_saved_errno(limits.getrlimit_errno)
+            .errmsg("getrlimit failed: %m")
+            .finish(loc("set_max_safe_fds"))?;
+    } else if limits.soft_after > limits.soft_before {
+        ::elog::elog(
+            LOG,
+            format!(
+                "raised open file limit from {} to {} (hard limit {})",
+                limits.soft_before,
+                limits.soft_after,
+                hard_limit_text(limits.hard)
+            ),
+        )?;
+    } else if limits.setrlimit_errno != 0 {
+        ereport(WARNING)
+            .with_saved_errno(limits.setrlimit_errno)
+            .errmsg("setrlimit(RLIMIT_NOFILE) failed: %m")
+            .finish(loc("set_max_safe_fds"))?;
+    }
+
     let mfp = max_files_per_process();
     let (usable_fds, already_open) = count_usable_fds(mfp)?;
 
-    let new_max = usable_fds.min(mfp) - NUM_RESERVED_FDS;
+    let ceiling: Option<i32> = if limits.getrlimit_failed {
+        None
+    } else {
+        Some(limits.soft_after.min(i32::MAX as u64) as i32)
+    };
+
+    let new_max =
+        compute_max_safe_fds(usable_fds, mfp, ceiling, max_child_threads, max_session_threads);
     set_max_safe_fds_value(new_max);
 
     if new_max < FD_MINFREE {
+        // Never boot a server whose sessions would die at connection setup:
+        // C refuses the same way when one backend cannot get enough
+        // descriptors, and here the shortage is the whole server's.
+        let needed_per_session = FD_MINFREE + NUM_RESERVED_FDS;
+        let needed_total = (needed_per_session as i64)
+            * (max_session_threads.max(1) as i64)
+            + (PER_SESSION_SETUP_FDS as i64) * (max_child_threads.max(1) as i64)
+            + POSTMASTER_RESERVED_FDS as i64;
         return ereport(FATAL)
             .errcode(ERRCODE_INSUFFICIENT_RESOURCES)
             .errmsg("insufficient file descriptors available to start server process")
             .errdetail(format!(
-                "System allows {}, server needs at least {}, {} files are already open.",
-                new_max + NUM_RESERVED_FDS,
-                FD_MINFREE + NUM_RESERVED_FDS,
-                already_open
+                "The whole server runs in one process: {} concurrent sessions \
+                 (max_connections and friends) need at least {} open file \
+                 descriptors, but the limit in force allows {} ({} already open, \
+                 hard limit {}). Each session needs {} descriptors for its file \
+                 cache plus {} for its socket, wake pipe and wait sets.",
+                max_session_threads.max(1),
+                needed_total,
+                ceiling.map(|c| c.to_string()).unwrap_or_else(|| usable_fds.to_string()),
+                already_open,
+                hard_limit_text(limits.hard),
+                needed_per_session,
+                PER_SESSION_SETUP_FDS,
             ))
+            .errhint(
+                "Raise the open file limit (ulimit -n / LimitNOFILE), or lower \
+                 max_connections."
+                    .to_string(),
+            )
             .finish(loc("set_max_safe_fds"));
     }
 
     ::elog::elog(
         DEBUG2,
-        format!("max_safe_fds = {new_max}, usable_fds = {usable_fds}, already_open = {already_open}"),
+        format!(
+            "max_safe_fds = {new_max}, usable_fds = {usable_fds}, already_open = {already_open}, \
+             sessions = {max_session_threads}, child threads = {max_child_threads}"
+        ),
     )
+}
+
+fn hard_limit_text(hard: u64) -> String {
+    if hard == u64::MAX {
+        "unlimited".to_string()
+    } else {
+        hard.to_string()
+    }
 }
 
 pub fn BasicOpenFile(file_name: &str, file_flags: i32) -> PgResult<i32> {

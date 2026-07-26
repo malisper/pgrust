@@ -1008,6 +1008,81 @@ fn dst_p1_spill_crates_have_zero_raw_fs_sites() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// GL-FDLIMIT-1: the one-process descriptor budget.
+//
+// C sizes max_safe_fds for ONE backend process. pgrust runs every session as a
+// thread in a single process with a single descriptor table, so the same
+// arithmetic hands the whole limit to every session at once — which is how a
+// 64-connection run exhausted an 8192-descriptor table and killed connection
+// setup. These pin the adapted arithmetic.
+// ---------------------------------------------------------------------------
+
+// A generous limit must still produce C's answer, to the descriptor: the
+// sharing arm may only ever lower the number.
+#[test]
+fn generous_limit_reproduces_c_arithmetic() {
+    let c_answer = 1000i32.min(1000) - ::types_storage::NUM_RESERVED_FDS;
+    // 1M descriptors, 300 live children, 120 sessions: max_files_per_process
+    // still binds.
+    assert_eq!(
+        vfd::compute_max_safe_fds(1000, 1000, Some(1_048_576), 300, 120),
+        c_answer
+    );
+    // Unknown ceiling (no getrlimit — the sim/wasm arm) falls back to C's.
+    assert_eq!(vfd::compute_max_safe_fds(1000, 1000, None, 300, 120), c_answer);
+    // Single-user boot: one thread, whole budget, C's answer.
+    assert_eq!(
+        vfd::compute_max_safe_fds(1000, 1000, Some(1_048_576), 1, 1),
+        c_answer
+    );
+}
+
+// A tight limit must be divided, not handed out whole: 120 sessions inside
+// 16384 descriptors get a share each, and the total stays inside the limit.
+#[test]
+fn tight_limit_is_shared_between_sessions() {
+    let ceiling = 16_384;
+    let children = 300;
+    let sessions = 120;
+    let got = vfd::compute_max_safe_fds(1000, 1000, Some(ceiling), children, sessions);
+    let c_answer = 1000 - ::types_storage::NUM_RESERVED_FDS;
+    assert!(got < c_answer, "sharing must lower the budget: {got} vs {c_answer}");
+    assert!(got >= ::types_storage::FD_MINFREE, "{got} should still be workable");
+
+    // The whole server has to fit: every session filling its cache, plus every
+    // live child's setup descriptors, plus the supervisor's.
+    let worst_case = (got + ::types_storage::NUM_RESERVED_FDS) as i64 * sessions as i64
+        + vfd::PER_SESSION_SETUP_FDS as i64 * children as i64
+        + vfd::POSTMASTER_RESERVED_FDS as i64;
+    assert!(
+        worst_case <= ceiling as i64,
+        "budget oversubscribes the descriptor table: {worst_case} > {ceiling}"
+    );
+}
+
+// The 8192-descriptor case that broke on raw hardware: the budget must come
+// out too small to run, so the server refuses at boot instead of dying at
+// connection setup (set_max_safe_fds turns this into the FATAL).
+#[test]
+fn insufficient_limit_reports_below_the_floor() {
+    let got = vfd::compute_max_safe_fds(1000, 1000, Some(8192), 300, 120);
+    assert!(
+        got < ::types_storage::FD_MINFREE,
+        "8192 descriptors cannot serve 120 sessions; got {got}"
+    );
+}
+
+// The probe still bounds the answer: a machine that cannot even hand out
+// max_files_per_process descriptors gets the probed number, not the limit.
+#[test]
+fn probe_still_bounds_the_budget() {
+    assert_eq!(
+        vfd::compute_max_safe_fds(200, 1000, Some(1_048_576), 4, 2),
+        200 - ::types_storage::NUM_RESERVED_FDS
+    );
+}
+
 // DST P4 inc-1: crash-recovery property sweep + red battery (sim-only).
 #[cfg(pgrust_sim)]
 mod crash_sweep;

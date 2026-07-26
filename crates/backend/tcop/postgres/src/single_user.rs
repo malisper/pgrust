@@ -139,7 +139,9 @@ fn single_user_main_inner(argv: &[String], username: &str) -> PgResult<core::con
      * Estimate number of openable files.  This must happen after setting up
      * semaphores, because on some platforms semaphores count as open files.
      */
-    fd::set_max_safe_fds()?;
+    // One process, one thread of execution: the whole descriptor budget is
+    // this thread's (C's per-backend arithmetic, unshared).
+    fd::set_max_safe_fds(1, 1)?;
 
     /*
      * Remember stand-alone backend startup time, roughly at the same point

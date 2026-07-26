@@ -458,28 +458,16 @@ pub fn BackendStartup(client_sock: ClientSocket) -> i32 {
     STATUS_OK
 }
 
+// C's report_fork_failure_to_client, plus the close C gets for free: there
+// the postmaster still owns its fork copy of the accepted socket and closes
+// it on the way out of BackendStartup. Here the socket was handed to a child
+// that never started, so nobody else will ever close it — and an unclosed
+// socket is a client that waits forever (GL-FDLIMIT-1).
 fn report_fork_failure_to_client(client_sock: &ClientSocket) {
-    let msg = b"Ecould not fork new process for connection\n\0";
-    // SAFETY: fcntl/send on the accepted fd we own; failure is ignored by design.
-    unsafe {
-        let flags = libc::fcntl(client_sock.sock, libc::F_GETFL);
-        if flags < 0
-            || libc::fcntl(client_sock.sock, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
-        {
-            return;
-        }
-        loop {
-            let rc = libc::send(
-                client_sock.sock,
-                msg.as_ptr() as *const libc::c_void,
-                msg.len(),
-                0,
-            );
-            if rc >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                break;
-            }
-        }
-    }
+    launch_backend::report_startup_failure_to_client(
+        client_sock.sock,
+        "could not fork new process for connection",
+    );
 }
 
 /// maybe_adjust_io_workers: close the gap between running and configured IO

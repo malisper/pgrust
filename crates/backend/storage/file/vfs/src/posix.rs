@@ -6,8 +6,8 @@
 use core::ffi::CStr;
 
 use crate::{
-    c_int, mode_t, off_t, set_errno, FdBudgetProbe, FileInfo, Vfs, VfsDirIter, VfsResult,
-    PG_O_DIRECT,
+    c_int, mode_t, off_t, set_errno, FdBudgetProbe, FdSoftLimitRaise, FileInfo, Vfs, VfsDirIter,
+    VfsResult, PG_O_DIRECT,
 };
 // wasm32: only the (not-wasm) probe + macOS open path read errno directly.
 #[cfg(not(target_family = "wasm"))]
@@ -106,6 +106,90 @@ impl PosixVfs {
             getrlimit_errno,
             stop_errno,
         }
+    }
+
+    /// Raise this process's RLIMIT_NOFILE soft limit to the hard limit.
+    ///
+    /// C never needs this: one backend = one process = one fd table, so the
+    /// stock soft limit is a per-backend budget. pgrust is ONE process with a
+    /// thread per session, so the soft limit is the budget for the WHOLE
+    /// server and the stock value (8192 on AL2023) runs out mid-workload.
+    /// Raising soft to hard is what every server that keeps many descriptors
+    /// open does, and it needs no privilege.
+    ///
+    /// An unlimited or unreachable hard limit is walked down: some kernels
+    /// (macOS: `kern.maxfilesperproc`) refuse a soft limit the process can
+    /// never actually use, so each rejected target is halved until one is
+    /// accepted or we are back at the starting soft limit.
+    ///
+    /// wasm32: WASI p1 has no rlimits — reported as "no getrlimit".
+    #[cfg(target_family = "wasm")]
+    pub fn raise_fd_soft_limit_to_hard(&self) -> FdSoftLimitRaise {
+        FdSoftLimitRaise {
+            soft_before: 0,
+            soft_after: 0,
+            hard: 0,
+            getrlimit_failed: true,
+            getrlimit_errno: libc::ENOSYS,
+            setrlimit_errno: 0,
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn raise_fd_soft_limit_to_hard(&self) -> FdSoftLimitRaise {
+        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: getrlimit writes the out-param struct.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
+            return FdSoftLimitRaise {
+                soft_before: 0,
+                soft_after: 0,
+                hard: 0,
+                getrlimit_failed: true,
+                getrlimit_errno: get_errno(),
+                setrlimit_errno: 0,
+            };
+        }
+        let soft_before = rlim.rlim_cur;
+        let hard = rlim.rlim_max;
+        let mut report = FdSoftLimitRaise {
+            soft_before: soft_before as u64,
+            soft_after: soft_before as u64,
+            hard: if hard == libc::RLIM_INFINITY { u64::MAX } else { hard as u64 },
+            getrlimit_failed: false,
+            getrlimit_errno: 0,
+            setrlimit_errno: 0,
+        };
+        if hard != libc::RLIM_INFINITY && soft_before >= hard {
+            return report;
+        }
+
+        // An infinite hard limit is not a number the kernel will accept as a
+        // soft limit everywhere; start from a ceiling no realistic server
+        // exceeds and walk down.
+        const UNLIMITED_TARGET: u64 = 1 << 20;
+        let mut target: u64 = if hard == libc::RLIM_INFINITY {
+            UNLIMITED_TARGET.max(soft_before as u64)
+        } else {
+            hard as u64
+        };
+
+        let mut last_errno = 0;
+        while target > soft_before as u64 {
+            let want = libc::rlimit {
+                rlim_cur: target as libc::rlim_t,
+                rlim_max: hard,
+            };
+            // SAFETY: setrlimit reads the struct; failure leaves limits as-is.
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &want) } == 0 {
+                report.soft_after = target;
+                report.setrlimit_errno = 0;
+                return report;
+            }
+            last_errno = get_errno();
+            target /= 2;
+        }
+        report.setrlimit_errno = last_errno;
+        report
     }
 }
 
