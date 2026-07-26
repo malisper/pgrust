@@ -244,6 +244,18 @@ thread_local! {
     static NEXT_PCXT_ID: Cell<u64> = const { Cell::new(1) };
     static MY_WORKER_SHARED: RefCell<Option<Arc<ParallelShared>>> =
         const { RefCell::new(None) };
+    // GL-SYNCWEDGE-1: the leader park loop's stall clock, kept across quanta
+    // (see wait_on_my_latch). NON-SESSION TLS, and declared inside this block
+    // rather than as its own so the TLS census gains no new row — the
+    // eoxact_parts.rs/lanetable precedent recorded in session/src/tests.rs.
+    // It is a pure diagnostic timer over THIS THREAD's current park episode:
+    // a session cannot migrate off a thread while that thread is parked, it
+    // carries no session identity, an envelope would have nothing to capture,
+    // and the worst consequence of a stale value is one spurious or one
+    // missed LOG line. Taken out of the cell for the duration of the sleep so
+    // a re-entrant park cannot double-borrow.
+    static PARK_STALL: RefCell<Option<shm_mq::stall::ParkStallClock>> =
+        const { RefCell::new(None) };
 }
 
 // The dsm-handle analog: bgw_main_arg keys the leader's Arc for the worker.
@@ -942,15 +954,6 @@ const WAIT_EVENT_BGWORKER_STARTUP: u32 = PG_WAIT_IPC + 6;
 // publish itself in pg_stat_activity as a logical-replication sync wait
 // (GL-SYNCWEDGE-1). scripts/lint-waitevent-tags.sh pins the whole family.
 pub const WAIT_EVENT_PARALLEL_FINISH: u32 = PG_WAIT_IPC + 40;
-
-// The leader park loop's stall clock, kept across quanta. Taken out for the
-// duration of the sleep so a re-entrant park (interrupt service inside
-// WaitLatch) cannot hit a double borrow; a re-entrant lap just runs on a
-// fresh clock and puts the outer one back.
-thread_local! {
-    static PARK_STALL: RefCell<Option<shm_mq::stall::ParkStallClock>> =
-        const { RefCell::new(None) };
-}
 
 /// One LOG line describing why this leader is still parked: the same evidence
 /// the Gather leader's report carries, for the parallel-finish/attach loops.
