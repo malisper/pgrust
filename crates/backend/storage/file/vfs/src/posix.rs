@@ -149,12 +149,14 @@ impl PosixVfs {
                 setrlimit_errno: 0,
             };
         }
+        // rlim_t is u64 on every platform this builds for (Linux, macOS), so
+        // the report's u64 fields take these directly.
         let soft_before = rlim.rlim_cur;
         let hard = rlim.rlim_max;
         let mut report = FdSoftLimitRaise {
-            soft_before: soft_before as u64,
-            soft_after: soft_before as u64,
-            hard: if hard == libc::RLIM_INFINITY { u64::MAX } else { hard as u64 },
+            soft_before,
+            soft_after: soft_before,
+            hard: if hard == libc::RLIM_INFINITY { u64::MAX } else { hard },
             getrlimit_failed: false,
             getrlimit_errno: 0,
             setrlimit_errno: 0,
@@ -168,17 +170,14 @@ impl PosixVfs {
         // exceeds and walk down.
         const UNLIMITED_TARGET: u64 = 1 << 20;
         let mut target: u64 = if hard == libc::RLIM_INFINITY {
-            UNLIMITED_TARGET.max(soft_before as u64)
+            UNLIMITED_TARGET.max(soft_before)
         } else {
-            hard as u64
+            hard
         };
 
         let mut last_errno = 0;
-        while target > soft_before as u64 {
-            let want = libc::rlimit {
-                rlim_cur: target as libc::rlim_t,
-                rlim_max: hard,
-            };
+        while target > soft_before {
+            let want = libc::rlimit { rlim_cur: target, rlim_max: hard };
             // SAFETY: setrlimit reads the struct; failure leaves limits as-is.
             if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &want) } == 0 {
                 report.soft_after = target;
