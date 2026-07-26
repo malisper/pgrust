@@ -239,6 +239,27 @@ fn main() {
         }
         memwatchdog::AllocatorStats { current_rss: rss, current_commit: commit }
     });
+    // GL-CONCMEM-1: the POOL-QOS memory governor's fallback usage basis for
+    // hosts without /proc (the primary basis is RssAnon) — the allocator's
+    // process RSS, the same cheap mi_process_info read as above.
+    #[cfg(not(target_family = "wasm"))]
+    runtime::install_qos_mem_probe(|| {
+        let mut rss = 0usize;
+        // SAFETY: nullable out-params per the mi_process_info contract.
+        unsafe {
+            libmimalloc_sys::mi_process_info(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut rss,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+        rss
+    });
     // FPBUDGET-1 debug instrument: process-global live-context census
     // (name -> count), dumped at each backend exit. Diagnostic only.
     if std::env::var_os("PGRUST_MCXT_CENSUS").is_some() {

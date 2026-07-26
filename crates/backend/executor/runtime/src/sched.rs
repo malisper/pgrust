@@ -259,6 +259,143 @@ pub(crate) fn pool_qos_enabled() -> bool {
     })
 }
 
+// ---------------------------------------------------------------------------
+// POOL-QOS memory governor (GL-CONCMEM-1): the interleave the QoS tier buys
+// (demoted serves yielding threads / deferring permits toward interactive
+// arrivals) multiplies CONCURRENTLY-LIVE engagement working sets — N clients'
+// engagements progress round-robin with all their partial states resident,
+// where a run-to-completion serve holds few big states at a time. At a
+// bounded-memory posture that envelope is a container kill (the concurrent-
+// window OOM class). The governor holds the QoS moves while the process is
+// over a memory bar: demoted serves run to completion (the pre-QoS shape —
+// also the fastest way to shed memory), and the interleave resumes as soon
+// as the process drops back under the bar. Advisory scheduling only —
+// results are unaffected; interactive first-permit latency degrades toward
+// the pre-QoS posture exactly and only while memory is scarce.
+//
+// Basis: anonymous RSS from /proc/self/status (the OOM-class growth; shared
+// memory excluded) when available, else the installed accounted-bytes probe
+// (mcx global block bytes — boot glue installs it; this crate stays
+// mcx-free). Bar: `PGRUST_RUNTIME_QOS_MEM_BAR_KB` (>0 arms at that many KB;
+// `0`/`off` DISARMS the governor — the t35 kill spelling), else 80% of the
+// cgroup v2 memory.max when bounded, else disarmed (an unbounded host never
+// pays a read). The verdict is cached and refreshed at most every
+// GOVERNOR_REFRESH_MS — the yield gate costs one Relaxed load between
+// refreshes.
+// ---------------------------------------------------------------------------
+
+const GOVERNOR_REFRESH_MS: u64 = 64;
+const GOVERNOR_AUTO_BAR_PCT: u64 = 80;
+
+#[cfg(not(loom))]
+mod qos_governor {
+    use super::{GOVERNOR_AUTO_BAR_PCT, GOVERNOR_REFRESH_MS};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+
+    /// Accounted-bytes fallback probe (installed by the pool boot glue).
+    static PROBE: crate::sync::OnceLock<fn() -> usize> = crate::sync::OnceLock::new();
+    /// Resolved bar in bytes; 0 = disarmed.
+    static BAR: crate::sync::OnceLock<u64> = crate::sync::OnceLock::new();
+    /// Cached verdict + last refresh (ms since the epoch Instant).
+    static OVER: AtomicBool = AtomicBool::new(false);
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn epoch() -> &'static std::time::Instant {
+        static T0: crate::sync::OnceLock<std::time::Instant> = crate::sync::OnceLock::new();
+        T0.get_or_init(std::time::Instant::now)
+    }
+
+    /// `PGRUST_RUNTIME_QOS_MEM_BAR_KB` spelling (unit-pinned): `0`/`off`
+    /// disarm; a positive integer arms at that many KB; unset/other = auto.
+    pub(crate) fn bar_from_env(v: Option<&str>) -> Option<u64> {
+        match v.map(str::trim) {
+            Some("0") | Some("off") => Some(0),
+            Some(s) => s.parse::<u64>().ok().filter(|&n| n > 0).map(|n| n * 1024),
+            None => None,
+        }
+    }
+
+    // The cgroup v2 memory limit for this process, if bounded (the
+    // memwatchdog parse, self-contained: dep direction forbids importing
+    // the postmaster crate here).
+    fn cgroup_mem_max() -> Option<u64> {
+        let s = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+        let rel = s.lines().find_map(|l| l.strip_prefix("0::"))?.trim();
+        let dir = std::path::Path::new("/sys/fs/cgroup").join(rel.trim_start_matches('/'));
+        let read = |d: &std::path::Path| -> Option<u64> {
+            let s = std::fs::read_to_string(d.join("memory.max")).ok()?;
+            s.trim().parse().ok() // "max" (unbounded) parses Err -> None
+        };
+        read(&dir).or_else(|| read(std::path::Path::new("/sys/fs/cgroup")))
+    }
+
+    fn resolve_bar() -> u64 {
+        if let Some(b) = bar_from_env(std::env::var("PGRUST_RUNTIME_QOS_MEM_BAR_KB").ok().as_deref())
+        {
+            return b;
+        }
+        cgroup_mem_max().map_or(0, |m| m / 100 * GOVERNOR_AUTO_BAR_PCT)
+    }
+
+    /// Anonymous RSS (kB) from /proc/self/status; None off-Linux.
+    fn proc_anon_kb() -> Option<u64> {
+        let s = std::fs::read_to_string("/proc/self/status").ok()?;
+        s.lines()
+            .find_map(|l| l.strip_prefix("RssAnon:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+    }
+
+    pub(crate) fn install(probe: fn() -> usize) {
+        let _ = PROBE.set(probe);
+        BAR.get_or_init(resolve_bar);
+    }
+
+    /// One Relaxed load between refreshes; a refresh is one /proc read (or
+    /// one probe call off-Linux). Disarmed = one OnceLock read, always false.
+    pub(crate) fn over_bar() -> bool {
+        let bar = *BAR.get_or_init(resolve_bar);
+        if bar == 0 {
+            return false;
+        }
+        let now_ms = epoch().elapsed().as_millis() as u64;
+        let last = LAST_MS.load(Relaxed);
+        if now_ms.wrapping_sub(last) >= GOVERNOR_REFRESH_MS
+            && LAST_MS.compare_exchange(last, now_ms, Relaxed, Relaxed).is_ok()
+        {
+            let usage = match proc_anon_kb() {
+                Some(kb) => kb * 1024,
+                None => PROBE.get().map_or(0, |p| p() as u64),
+            };
+            OVER.store(usage > bar, Relaxed);
+        }
+        OVER.load(Relaxed)
+    }
+
+}
+
+/// Test face for the bar spelling (the tests module lives outside sched).
+#[cfg(all(test, not(loom)))]
+pub(crate) fn qos_governor_bar_from_env(v: Option<&str>) -> Option<u64> {
+    qos_governor::bar_from_env(v)
+}
+
+/// Boot-glue install of the governor's accounted-bytes fallback probe (the
+/// anon-RSS basis needs no install; off-Linux the probe is the basis).
+/// Idempotent; also resolves the bar once so the first yield gate pays no
+/// env/cgroup read.
+#[cfg(not(loom))]
+pub fn install_qos_mem_probe(probe: fn() -> usize) {
+    qos_governor::install(probe);
+}
+
+/// The governor verdict consumed by the pool serve drive's QoS moves: hold
+/// the interleave (yield/defer) while over the bar. Loom builds have no
+/// governor (the yieldable drive is cfg(not(loom)) too).
+#[cfg(not(loom))]
+pub(crate) fn qos_mem_over_bar() -> bool {
+    qos_governor::over_bar()
+}
+
 /// POOL-QOS interactive threshold: an RG whose CURRENT priority is at or
 /// above this is INTERACTIVE-class (fresh / undecayed — the ratified M5-5
 /// decay constants make this "consumed less than one 50ms-CPU quantum").
@@ -2846,7 +2983,7 @@ impl Scheduler {
         if pool_qos_enabled() {
             let s = self.stats.snapshot();
             eprintln!(
-                "MORSEL|QOS|qid={}|rg={}|demand_live={}|demand_published={}|yields={}|prio_acquires={}|permit_defers={}",
+                "MORSEL|QOS|qid={}|rg={}|demand_live={}|demand_published={}|yields={}|prio_acquires={}|permit_defers={}|mem_holds={}",
                 rg.query_id,
                 rg.rg_id,
                 self.qos_demand.load(Ordering::Relaxed),
@@ -2854,6 +2991,7 @@ impl Scheduler {
                 s.qos_yields,
                 s.qos_priority_acquires,
                 s.qos_permit_defers,
+                s.qos_mem_holds,
             );
         }
         // MORSEL|LEDGER| — the WS-B admission-ledger snapshot (the letter
