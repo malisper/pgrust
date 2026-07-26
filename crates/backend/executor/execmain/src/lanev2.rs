@@ -179,7 +179,28 @@ pub fn enabled() -> bool {
 /// is always byte-safe: the classic parallel arm owns the shape.
 #[inline]
 pub(crate) fn runtime_in_parallel_machinery(ss: &::nodeseqscan::SeqScanState<'_>) -> bool {
-    ::parallel::IsParallelWorker() || ::xact::IsInParallelMode() || ss.is_parallel()
+    runtime_in_parallel_role() || ss.is_parallel()
+}
+
+/// The ROLE half of the gate above, on its own — for the runtime arms whose
+/// input is not a `SeqScan` (bitmap heap scan, index feeds, partitionwise
+/// children), so `runtime_in_parallel_machinery` has no node to read.
+///
+/// NAMED, not open-coded, precisely because it is NOT sufficient on its own
+/// (GL-Q4142): both predicates are process-role facts, not plan facts —
+/// `ParallelWorkerNumber` is a bare thread-local with no adoption path, and a
+/// Gather worker's serialized plan clears `parallelModeNeeded`. Every caller
+/// must ALSO carry a structural refusal on its own input:
+///   * `runtime_bitmap` — `scan.parallel_aware || scan.pstate.is_some()`,
+///     checked immediately before this gate;
+///   * `runtime_nlindex` / the index feeds — `iss_ParallelAware` /
+///     `ioss_ParallelAware` in the `index_*_refuse_reason_ex` ladders;
+///   * every `SeqScan`-fed arm — `seq_scan_cb_granule_geometry` /
+///     `seq_scan_heap_block_geometry` refuse a parallel scan outright, so a
+///     private morsel map cannot be built for one at all.
+#[inline]
+pub(crate) fn runtime_in_parallel_role() -> bool {
+    ::parallel::IsParallelWorker() || ::xact::IsInParallelMode()
 }
 
 /// Combined gate for the wave-2 row-mode TAIL dispatch hooks in procnode

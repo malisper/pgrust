@@ -722,7 +722,7 @@ pub(crate) fn try_own_plain_agg_runtime_nl_index<'mcx>(
     if estate.es_epq_active {
         return refused("epq", RefuseReason::Epq);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_role() {
         return refused("in-parallel-mode", RefuseReason::ParallelGate);
     }
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {

@@ -3894,7 +3894,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         refuse("instrumented-or-epq");
         return Ok(None);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_role() {
         refuse("in-parallel-mode");
         return Ok(None);
     }
@@ -4223,7 +4223,7 @@ fn try_own_multibuild<'mcx>(
         refuse("instrumented-or-epq");
         return Ok(None);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_role() {
         refuse("in-parallel-mode");
         return Ok(None);
     }

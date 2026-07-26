@@ -577,6 +577,24 @@ impl<'mcx> BatchGranuleSource<'mcx> for SeqScanSource<'_, 'mcx> {
         &mut self,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<runtime::GranuleMap>> {
+        // GL-Q4142 — the PRIMARY structural gate (the AM refusals in
+        // `heap_set_block_range` / `set_granule_range` are the backstop).
+        // This map is a PRIVATE, whole-relation claim space: pgrcolumnar's
+        // part-global granule prefix sums, heap's `0..nblocks`. A scan that
+        // carries parallel wiring divides its work through the SHARED cursor
+        // instead (`phs_nallocated`, claimed inside the AM by
+        // `claim_next_rg` / `parallel_next_block`), so handing a private map
+        // to a participant of a classic-parallel scan makes EVERY
+        // participant walk the whole relation — each partial aggregate is
+        // then the global answer and the finalize sums them, returning a
+        // result inflated by the participant count. `None` = the arm refuses
+        // and the classic parallel arm owns the shape, which is always
+        // byte-safe. Fail-closed on the SCAN, never on the process role: the
+        // role predicates (`IsParallelWorker` / `IsInParallelMode`) are
+        // thread-local and clearable and cannot carry this invariant.
+        if ::nodeseqscan::seq_scan_is_parallel(self.ss) {
+            return Ok(None);
+        }
         if ::nodeseqscan::seq_scan_is_pgrcolumnar(self.ss) {
             let Some((_, starts)) =
                 ::nodeseqscan::seq_scan_cb_granule_geometry(self.ss, estate)?
@@ -745,6 +763,12 @@ impl<'mcx> BatchGranuleSource<'mcx> for HeapBatchSource<'_, 'mcx> {
     ) -> PgResult<Option<runtime::GranuleMap>> {
         if !::nodeseqscan::seq_scan_is_heap(self.ss) {
             return Ok(None); // fail-closed: this source expresses heap only
+        }
+        // GL-Q4142: same structural gate as SeqScanSource above — a private
+        // `0..nblocks` claim space must never drive a scan that divides its
+        // work through the shared parallel block cursor.
+        if ::nodeseqscan::seq_scan_is_parallel(self.ss) {
+            return Ok(None);
         }
         let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(self.ss, estate)?
         else {

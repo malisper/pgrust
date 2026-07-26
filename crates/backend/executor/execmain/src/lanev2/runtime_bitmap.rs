@@ -454,7 +454,7 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
     if !agg_runtime_partial_admissible(agg) {
         return Ok(None);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_role() {
         return Ok(None);
     }
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
