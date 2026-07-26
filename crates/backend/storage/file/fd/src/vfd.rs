@@ -538,11 +538,11 @@ pub fn set_max_safe_fds(max_child_threads: i32, max_session_threads: i32) -> PgR
     // Raise the soft limit to the hard limit BEFORE probing: in C the soft
     // limit is a per-backend budget, here it is the whole server's.
     let limits = vfs::raise_fd_soft_limit_to_hard();
+    // A failed getrlimit is not reported here: count_usable_fds below carries
+    // C's "getrlimit failed" WARNING, and platforms without rlimits at all
+    // (the simulated and wasm filesystems) must boot silently.
     if limits.getrlimit_failed {
-        ereport(WARNING)
-            .with_saved_errno(limits.getrlimit_errno)
-            .errmsg("getrlimit failed: %m")
-            .finish(loc("set_max_safe_fds"))?;
+        // Ceiling unknown; the sharing arm is dropped below.
     } else if limits.soft_after > limits.soft_before {
         ::elog::elog(
             LOG,
