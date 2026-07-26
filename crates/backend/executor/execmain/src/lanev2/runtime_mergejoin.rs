@@ -339,7 +339,7 @@ fn probe_and_engage<'mcx>(
         refused("rewind/backward/mark eflags (adopted emit is forward-once)");
         return Ok(false);
     }
-    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+    if super::runtime_in_parallel_role() {
         refused("already in parallel machinery");
         return Ok(false);
     }

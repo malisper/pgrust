@@ -1108,7 +1108,7 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     // BecomeLockGroupLeader corrupts the in-flight lock-group membership
     // (debug builds assert at the stale lockGroupLeader). A leader already
     // in parallel mode must equally not stack a second context.
-    if parallel::IsParallelWorker() || ::xact::IsInParallelMode() {
+    if super::runtime_in_parallel_role() {
         return Ok(false);
     }
     // The runtime pool must be live.

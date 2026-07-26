@@ -3749,6 +3749,19 @@ pub fn seq_scan_cb_granule_geometry<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<(u64, Vec<u64>)>> {
+    // GL-Q4142 — THE morsel-geometry chokepoint. This geometry is a PRIVATE,
+    // PART-GLOBAL claim space; a scan carrying parallel wiring divides its
+    // work through the shared in-AM cursor (`phs_nallocated`, claimed by
+    // `claim_next_rg`) instead. Handing the part-global map to a participant
+    // of a classic-parallel scan makes EVERY participant walk the whole
+    // part, so each partial aggregate is the global answer and the finalize
+    // sums them — a result silently inflated by the participant count.
+    // `None` is every caller's fail-closed refusal (the arm falls back to
+    // the classic parallel drive, always byte-safe), so one gate here covers
+    // all of them instead of five open-coded conjuncts.
+    if node.is_parallel() {
+        return Ok(None);
+    }
     node.ensure_scandesc(estate)?;
     Ok(::tableam::table_scan_cb_granule_geometry(
         node.ss.ss_currentScanDesc.as_ref().unwrap(),
@@ -3761,6 +3774,16 @@ pub fn seq_scan_cb_granule_geometry<'mcx>(
 /// prune fold takes it at claim end (docs/design/ea-morsels.md §2).
 pub fn seq_scan_cb_ea_counters(node: &SeqScanState<'_>) -> Option<[u64; 7]> {
     ::tableam::table_scan_cb_ea_counters(node.ss.ss_currentScanDesc.as_ref()?)
+}
+
+/// This scan carries parallel wiring — the plan node is `parallel_aware`
+/// and/or a shared `ParallelTableScanDescShared` is attached (GL-Q4142
+/// morsel-source gate). Such a scan divides its work through the SHARED
+/// in-AM cursor, so a private whole-relation morsel map must never drive it.
+/// Free function mirror of `SeqScanState::is_parallel` for the lane's
+/// morsel-source gates, which hold the node behind the crate boundary.
+pub fn seq_scan_is_parallel(node: &SeqScanState<'_>) -> bool {
+    node.is_parallel()
 }
 
 /// A plain heap relation drives this scan (runtime heap morsel source gate,
@@ -3780,6 +3803,13 @@ pub fn seq_scan_heap_block_geometry<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<u64>> {
+    // GL-Q4142: same gate as the columnar geometry above — a private
+    // `0..nblocks` claim space must never drive a scan that divides its work
+    // through the shared parallel block cursor. (`heap_set_block_range` is
+    // the AM backstop; this is the fail-closed refusal.)
+    if node.is_parallel() {
+        return Ok(None);
+    }
     node.ensure_scandesc(estate)?;
     Ok(::tableam::table_scan_heap_block_geometry(
         node.ss.ss_currentScanDesc.as_ref().unwrap(),

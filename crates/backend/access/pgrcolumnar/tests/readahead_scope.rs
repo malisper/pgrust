@@ -473,3 +473,76 @@ fn granule_range_refuses_a_parallel_scan() {
     drop(pdesc);
     std::fs::remove_file(&path).unwrap();
 }
+
+// GL-Q4142 granule-sum witness: the invariant the tripwire above protects.
+//
+// Two participants sharing ONE parallel scan descriptor claim row groups
+// through `phs_nallocated`, so their staged rows SUM to the part exactly —
+// every row once, no gaps, no overlaps. That is why a classic-parallel
+// partial aggregate is a true partial.
+//
+// The broken mode is the arithmetic complement of this test: give each
+// participant a PRIVATE part-global granule map instead and each one stages
+// the whole part, so the sum is participants x n_rows and every partial
+// aggregate is the GLOBAL answer — which the finalize then sums, returning
+// count x participants. This test fails the moment the shared cursor stops
+// dividing the work, whatever the cause.
+#[test]
+fn shared_cursor_partitions_participants_exactly_once() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("sharedcursor");
+    let part = open_part(&path);
+    let nrgs = part.rgs.len();
+    assert!(nrgs >= 3, "fixture must span row groups");
+    let ctx = MemoryContext::new("cbshared-cursor");
+    let mcx = ctx.mcx();
+
+    // ONE shared descriptor, three participants (leader + two helpers).
+    let mut pdesc = Box::new(::tableam_vocab::ParallelBlockTableScanDescData::default());
+    let pptr = std::ptr::NonNull::from(pdesc.as_mut());
+    let mut scans: Vec<CbScanDescData<'_>> = [41040u32, 41041, 41042]
+        .into_iter()
+        .map(|oid| {
+            CbScanDescData::new_with_part(
+                scan_base(mcx, Oid::from(oid), Some(pptr)),
+                Some(part.clone()),
+                vec![ColType::I64, ColType::Text],
+            )
+        })
+        .collect();
+    // ROUND-ROBIN, one window each: a sequential drive would let the first
+    // participant drain the cursor before the others ever claimed, which is a
+    // property of the harness and not of the mechanism under test.
+    let mut staged_each = vec![0usize; scans.len()];
+    let mut live = vec![true; scans.len()];
+    while live.iter().any(|&l| l) {
+        for (i, scan) in scans.iter_mut().enumerate() {
+            if !live[i] {
+                continue;
+            }
+            let n = scan.next_window().unwrap();
+            if n == 0 {
+                live[i] = false;
+            } else {
+                staged_each[i] += n as usize;
+            }
+        }
+    }
+    drop(scans);
+    let total: usize = staged_each.iter().sum();
+    assert_eq!(
+        total, n_rows,
+        "participants sharing one cursor must stage the part EXACTLY once \
+         (got {staged_each:?} = {total}, part is {n_rows}); a per-participant \
+         total of {n_rows} each would be the (participants)x inflation"
+    );
+    // And the division must be real: no single participant swallowed
+    // everything (that would make the sum right only by luck of a
+    // zero-staging sibling, and it is the shape the private-map bug takes).
+    assert!(
+        staged_each.iter().all(|&n| n < n_rows),
+        "no participant may stage the whole part: {staged_each:?}"
+    );
+    drop(pdesc);
+    std::fs::remove_file(&path).unwrap();
+}

@@ -1810,7 +1810,7 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
     {
         return refuse(StmtTaskRefusal::ExecutorCadence);
     }
-    if parallel::IsParallelWorker() || ::xact::IsInParallelMode() {
+    if super::runtime_in_parallel_role() {
         return refuse(StmtTaskRefusal::InParallel);
     }
     let Some(rt) = runtime::global() else {
