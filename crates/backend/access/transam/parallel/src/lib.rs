@@ -937,7 +937,60 @@ pub fn WaitForParallelWorkersToAttach(id: ParallelContextId) -> PgResult<()> {
 
 const PG_WAIT_IPC: u32 = 0x0800_0000;
 const WAIT_EVENT_BGWORKER_STARTUP: u32 = PG_WAIT_IPC + 6;
-const WAIT_EVENT_PARALLEL_FINISH: u32 = PG_WAIT_IPC + 32;
+// PARALLEL_FINISH's index in wait_event_names.txt's IPC section. It is 40:
+// index 32 is LOGICAL_SYNC_STATE_CHANGE, and every leader parked here used to
+// publish itself in pg_stat_activity as a logical-replication sync wait
+// (GL-SYNCWEDGE-1). scripts/lint-waitevent-tags.sh pins the whole family.
+pub const WAIT_EVENT_PARALLEL_FINISH: u32 = PG_WAIT_IPC + 40;
+
+// The leader park loop's stall clock, kept across quanta. Taken out for the
+// duration of the sleep so a re-entrant park (interrupt service inside
+// WaitLatch) cannot hit a double borrow; a re-entrant lap just runs on a
+// fresh clock and puts the outer one back.
+thread_local! {
+    static PARK_STALL: RefCell<Option<shm_mq::stall::ParkStallClock>> =
+        const { RefCell::new(None) };
+}
+
+/// One LOG line describing why this leader is still parked: the same evidence
+/// the Gather leader's report carries, for the parallel-finish/attach loops.
+/// The 12m53s production wedge (GL-SYNCWEDGE-1) produced none of this.
+fn report_park_stall(wait_event: u32, waited_ms: i64) {
+    let mut msg = format!(
+        "parallel leader park stall self-report: wait_event={} waited_ms={waited_ms} \
+         my_pid={} my_procno={}",
+        if wait_event == WAIT_EVENT_PARALLEL_FINISH { "ParallelFinish" } else { "BgworkerStartup" },
+        g::MyProcPid(),
+        g::MyProcNumber(),
+    );
+    // PCXT_LIST is never borrowed across a park (every caller drops the
+    // borrow before waiting), so this walk is safe here.
+    PCXT_LIST.with(|l| {
+        for p in l.borrow().iter() {
+            msg.push_str(&format!(
+                " pcxt[{}]={{launched={} known_attached={}",
+                p.id, p.nworkers_launched, p.nknown_attached_workers
+            ));
+            for (i, w) in p.workers.iter().enumerate() {
+                let status = match w.bgwhandle {
+                    Some(h) => format!("{:?}", bgworker::GetBackgroundWorkerPid(&h).0),
+                    None => "no-handle".to_string(),
+                };
+                let attached = p
+                    .shared
+                    .as_ref()
+                    .map(|s| s.worker_attached[i].load(SeqCst))
+                    .unwrap_or(false);
+                msg.push_str(&format!(
+                    " w[{i}]={{live_queue={} attached={attached} bgw={status}}}",
+                    w.error_receiver.is_some()
+                ));
+            }
+            msg.push('}');
+        }
+    });
+    shm_mq::stall::log_stall_report(msg);
+}
 
 fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     let latch = g::MyLatch().expect("parallel leader without MyLatch");
@@ -957,8 +1010,25 @@ fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     // became uncancellable. On Err the latch is deliberately NOT reset: the
     // raise aborts the ceremony, and a leftover set latch only costs one
     // spurious wake on the next wait.
-    let mut d = shm_mq::stall::StallDetector::new();
-    shm_mq::stall::wait_latch_reporting(latch, wait_event, &mut d, &mut |_| {})?;
+    //
+    // GL-SYNCWEDGE-1: the clock is kept ACROSS quanta and the report closure
+    // actually says something. Building a fresh StallDetector here re-armed
+    // its 60 s deadline once per 1000 ms recheck, so the deadline could never
+    // mature; the closure was `|_| {}`, so nothing would have been printed if
+    // it had. Both holes together are why a 12m53s production park left zero
+    // log evidence.
+    let mut clock = PARK_STALL
+        .with(|c| c.borrow_mut().take())
+        .unwrap_or_else(shm_mq::stall::ParkStallClock::new);
+    clock.enter(shm_mq::stall::park_now_ms());
+    let waited = shm_mq::stall::wait_latch_reporting(
+        latch,
+        wait_event,
+        clock.detector(),
+        &mut |waited_ms| report_park_stall(wait_event, waited_ms),
+    );
+    PARK_STALL.with(|c| *c.borrow_mut() = Some(clock));
+    waited?;
     latch::ResetLatch(latch);
     Ok(())
 }

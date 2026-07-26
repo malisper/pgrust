@@ -37,7 +37,10 @@ const DEFAULT_NAPTIME_PER_CYCLE: i64 = 180_000;
 const PG_WAIT_IPC: u32 = 0x0800_0000;
 const WAIT_EVENT_BGWORKER_STARTUP: u32 = PG_WAIT_IPC + 6;
 const WAIT_EVENT_BGWORKER_SHUTDOWN: u32 = PG_WAIT_IPC + 5;
-const WAIT_EVENT_LOGICAL_LAUNCHER_MAIN: u32 = 0x0500_0000 | 5;
+// LOGICAL_LAUNCHER_MAIN's index in wait_event_names.txt's Activity section is
+// 8, not 5 — 5 is CHECKPOINTER_SHUTDOWN. GL-SYNCWEDGE-1 (second instance of
+// the same class); scripts/lint-waitevent-tags.sh pins it.
+const WAIT_EVENT_LOGICAL_LAUNCHER_MAIN: u32 = 0x0500_0000 | 8;
 
 fn loc(line: i32, func: &'static str) -> ErrorLocation {
     ErrorLocation::new(SRC, line, func)
