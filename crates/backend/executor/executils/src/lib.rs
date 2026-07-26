@@ -891,6 +891,21 @@ pub struct EStateData<'mcx> {
     es_per_tuple_exprcontext: Option<EcxtId>,
     pub es_sourceText: Option<&'mcx str>,
     pub es_use_parallel_mode: bool,
+    /// GL-FIXCOUNT-2: this execution's plan tree HAS been parallel-wired —
+    /// some scan node received its shared `ParallelTableScanDescShared`
+    /// through `ExecParallelInitializeDSM` (leader) or
+    /// `ExecParallelInitializeWorker` (worker). Published by the scan-node
+    /// initializers, read by the scan-descriptor-open chokepoint
+    /// (`nodeseqscan::open_scandesc`): once wiring has happened, a scan
+    /// state over a `parallel_aware` plan node that holds NO wiring is a
+    /// SECOND, private, whole-relation scan of a relation this participant
+    /// is already dividing through the shared cursor — every participant
+    /// would then produce the global aggregate and the finalize would sum
+    /// them. Distinguishes that from the legitimate un-wired case (a Gather
+    /// that never initialized a DSM because `es_use_parallel_mode` was
+    /// false, where the leader is the only participant and a private serial
+    /// descriptor is correct).
+    pub es_parallel_scan_wired: bool,
     pub es_parallel_workers_to_launch: i32,
     pub es_parallel_workers_launched: i32,
     pub es_jit_flags: i32,
@@ -1256,6 +1271,7 @@ impl<'mcx> EStateData<'mcx> {
             es_per_tuple_exprcontext: None,
             es_sourceText: None,
             es_use_parallel_mode: false,
+            es_parallel_scan_wired: false,
             es_parallel_workers_to_launch: 0,
             es_parallel_workers_launched: 0,
             es_jit_flags: 0,
@@ -1727,7 +1743,8 @@ mcx::forget_safe_struct!(
         es_total_processed,
         es_top_eflags, es_instrument, es_finished, es_subplanstates,
         es_param_subplans, es_per_tuple_exprcontext,
-        es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
+        es_sourceText, es_use_parallel_mode, es_parallel_scan_wired,
+        es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
         es_epq_active, es_lane_leaf_fast, es_lane_trace_owned, es_cursor_run_budget,
         es_lane_cursor_parked,
