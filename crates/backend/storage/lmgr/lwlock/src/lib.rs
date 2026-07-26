@@ -3,7 +3,7 @@
 
 use core::cell::UnsafeCell;
 use core::ops::ControlFlow;
-use core::sync::atomic::{fence, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use lmgr_proc_seams as proc_s;
 use lmgr_proc_seams::{proclist_head, proclist_node};
@@ -749,8 +749,12 @@ fn LWLockWakeup(lock: &LWLock) {
     proclist_foreach_modify(wakeup.head, |cur| {
         proclist_delete(&mut wakeup, cur);
         // lwWaiting may only appear unset after the unlink (pg_write_barrier
-        // in C); pairs with LWLockWaitListLock on re-enqueue.
-        fence(Ordering::Release);
+        // in C). The seam's store is Release and every wait-loop read is
+        // Acquire (F-R1-5): the wakee may reach this flag WITHOUT a
+        // semaphore edge (stale extraWaits counts), so the flag itself must
+        // order the unlink writes before the wakee's re-enqueue link
+        // accesses — C leans on the sem syscall barrier + control
+        // dependency, which non-atomic Rust cells cannot.
         proc_s::set_proc_lw_waiting::call(cur, LW_WS_NOT_WAITING);
         proc_s::pg_semaphore_unlock::call(cur);
         ControlFlow::Continue(())
@@ -1078,8 +1082,8 @@ pub fn LWLockUpdateVar(lock: &LWLock, valptr: &AtomicU64, val: u64) {
 
     proclist_foreach_modify(wakeup.head, |cur| {
         proclist_delete(&mut wakeup, cur);
-        // See LWLockWakeup on this barrier.
-        fence(Ordering::Release);
+        // See LWLockWakeup: the seam's Release store carries the
+        // unlink-before-flag edge (F-R1-5).
         proc_s::set_proc_lw_waiting::call(cur, LW_WS_NOT_WAITING);
         proc_s::pg_semaphore_unlock::call(cur);
         ControlFlow::Continue(())
