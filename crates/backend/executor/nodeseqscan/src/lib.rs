@@ -562,6 +562,48 @@ impl<'mcx> SeqScanState<'mcx> {
 
     #[inline(never)]
     fn open_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        // GL-FIXCOUNT-2 — THE SCAN-DESCRIPTOR-OPEN CHOKEPOINT. This is the
+        // only place a SeqScanState opens a PRIVATE (non-parallel) scan
+        // descriptor: `table_beginscan` with no shared
+        // `ParallelTableScanDescShared`, so the drive walks the WHOLE
+        // relation instead of claiming through the shared cursor
+        // (`phs_nallocated` / `claim_next_rg`).
+        //
+        // Doing that for a plan node the planner marked `parallel_aware`,
+        // in an execution whose plan tree HAS been parallel-wired, means
+        // every participant of a classic-parallel scan walks the whole
+        // relation: each partial aggregate becomes the GLOBAL answer and
+        // the finalize sums them — a result silently inflated by the
+        // participant count, with no error anywhere. That is what a lane
+        // arm which synthesizes a TWIN executor over the real scan plan
+        // node produces (the twin's scan state never passes through
+        // `exec_seq_scan_initialize_dsm`/`_worker`, so it holds no wiring
+        // and lands here), and it is the route the GL-FIXCOUNT-1 morsel
+        // gates cannot see: they gate the private MORSEL MAP, and this
+        // route never asks for one.
+        //
+        // Refuse at CONSTRUCTION rather than detect at completion: a route
+        // that cannot open the descriptor cannot produce numbers.
+        // Release-effective by construction (an `Err`, never a
+        // `debug_assert` — the profile the fleet runs is the profile that
+        // has to fail closed; cf. the debug-assert masking law).
+        //
+        // `es_parallel_scan_wired` is what makes this precise rather than
+        // merely conservative: an un-wired `parallel_aware` scan in an
+        // execution where NO wiring ever happened is the legitimate
+        // single-participant case (`gather_startup` skips
+        // `exec_init_parallel_plan` when `es_use_parallel_mode` is false),
+        // and a private descriptor is correct there. EPQ builds its own
+        // scan states and never reaches a real drive.
+        if self.parallel_aware
+            && self.parallel.is_none()
+            && estate.es_parallel_scan_wired
+            && !matches!(self.variant, SeqScanVariant::Epq)
+        {
+            return Err(Box::new(::types_error::PgError::error(
+                "private scan descriptor on a parallel-aware scan node".to_string(),
+            )));
+        }
         let mcx = estate.es_query_cxt;
         let snapshot = estate.es_snapshot.clone();
         self.ss.ss_currentScanDesc = Some(table_beginscan(
@@ -4497,6 +4539,10 @@ pub fn exec_seq_scan_initialize_dsm<'mcx>(
     node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(std::sync::Arc::clone(&shared));
+    // GL-FIXCOUNT-2: publish that this execution's plan tree is now
+    // parallel-wired, so `open_scandesc` can refuse a SECOND, private,
+    // whole-relation descriptor over a `parallel_aware` plan node.
+    estate.es_parallel_scan_wired = true;
     Ok(shared)
 }
 
@@ -4520,6 +4566,8 @@ pub fn exec_seq_scan_initialize_worker<'mcx>(
     node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(shared);
+    // GL-FIXCOUNT-2: see `exec_seq_scan_initialize_dsm`.
+    estate.es_parallel_scan_wired = true;
     Ok(())
 }
 
