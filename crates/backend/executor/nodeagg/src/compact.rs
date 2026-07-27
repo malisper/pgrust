@@ -2032,14 +2032,39 @@ fn compact_migrate<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
+    // A SINK build must NEVER migrate. This used to be asserted in prose ("the
+    // backstop errors on `sink_cap` before reaching here") and backed only by
+    // the debug_assert below — and the prose was false: `scan_mk_batch`'s
+    // numeric-pack demote calls `agg_hash_compact_disarm` directly, so an Mk
+    // sink drain reached this function with the backstop never consulted.
+    //
+    // Migrating a sink table copies its state blocks WORD FOR WORD into the C
+    // tuplehash and then drops the `CompactHash` — including the table-owned
+    // `str_arena` that owns every `min/max(text)` transvalue those words point
+    // at. The migrated entries would hold pointers into released slabs.
+    // avgpack has the same shape of problem: a packed inline state slot the C
+    // tuplehash cannot read.
+    //
+    // So refuse, in RELEASE, before anything is taken from the node. The error
+    // propagates to the drain, the RG aborts and the serial arm reruns the
+    // statement — which is what every sink caller of this path was going to end
+    // up doing anyway (they discard the migration and return a demote), so this
+    // costs nothing and removes a use-after-free shape. Per the debug-assert
+    // masking law an invariant this load-bearing cannot be enforced by a check
+    // that compiles out.
+    if node.perhash.as_ref().is_some_and(|ph| ph.sink_cap.is_some()) {
+        return Err(crate::sink::sink_shape_error(
+            "compact table migration on a sink build (state blocks are not self-contained)",
+        ));
+    }
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.take().expect("migration requires an armed table");
-    // avgpack: packed inline states exist only on SINK builds, which never
-    // migrate (the backstop errors on `sink_cap` before reaching here) —
-    // the C tuplehash copy below would carry a packed slot it cannot read.
+    // Now guaranteed by the release refusal above (kept as a tripwire in case
+    // the two ever drift): packed inline states exist only on sink builds.
     debug_assert_eq!(ch.avgpack_mask, 0, "packed avgpack states in a compact migration");
+    debug_assert!(ch.str_arena.is_none(), "table-owned str store in a compact migration");
     {
         // Same switch as lanev2's trace helpers (observability only).
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
