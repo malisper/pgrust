@@ -3315,6 +3315,18 @@ impl StrStateArena {
         new
     }
 
+    /// Whether `p` is a chunk address THIS store handed out — the
+    /// allocator-exactness precondition of [`Self::replace`], queryable so
+    /// callers can assert their store-ownership invariant instead of
+    /// asserting it in prose. O(slabs); debug/test use only.
+    pub fn owns(&self, p: usize) -> bool {
+        self.big.contains_key(&p)
+            || self.slabs.iter().any(|s| {
+                let base = s.as_ptr() as usize;
+                p >= base && p < base + s.len() * 8
+            })
+    }
+
     /// Retained bytes (the drain's byref budget accounting term).
     pub fn bytes(&self) -> usize {
         self.bytes

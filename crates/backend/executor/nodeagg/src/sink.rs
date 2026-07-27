@@ -42,6 +42,7 @@
 
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::AggPerGroup;
+pub use ::lanefold::StrStateArena;
 use ::lanetable::{EntryLayout, HashKind, KeyRepr};
 // Re-exported for the runtime combine-split's leaf emit (execmain names the
 // fragment table type without a direct lanetable dependency).
@@ -467,8 +468,11 @@ pub fn sink_flush_table(t: &mut LaneAggTable) -> SinkRun {
 /// Handles all three key reprs; the NULL group (word modes,
 /// `b == SINK_NULL_BUCKET` only — the two-level arm routes the NULL bucket
 /// flat, but the conversion stays total) rides out-of-band as every run's
-/// NULL face does. State blocks are copied VERBATIM — callers hold the
-/// all-byval gate (a byref block would dangle past the pass-A claim).
+/// NULL face does. State blocks are copied VERBATIM, so a byref transvalue
+/// stays a pointer into whatever `t` was pointing at: the caller must keep
+/// that memory alive for the run's whole life — for a min/max(text) shape
+/// that is the source [`CombinedBucket`]'s own store, which therefore
+/// travels with the partial.
 /// Bytes-mode rows re-derive [`sink_hash_bytes`] from their canonical image
 /// (bit-identical to the flush-side hash — same function, same bytes); GID
 /// words are dropped (`keys` empty ⇒ the final merge always bytes-probes,
@@ -2067,9 +2071,11 @@ const SINK_TEXTOID: Oid = 25;
 /// or non-whitelist combinefn, DISTINCT/ORDER BY qualifiers) — the caller
 /// falls back to the serial arm. Never errors on shape; only on catalog
 /// access. Admitted classes: byval whitelist, PolyInt128 (avg/sum int8),
-/// AvgInt8 (avg int2/int4) — the two byref classes finalize at emit
-/// ([`sink_emit_bucket`]), so nothing pointer-shaped ever reaches the
-/// leader.
+/// AvgInt8 (avg int2/int4), VarlenaMinMax (min/max(text)) — the three byref
+/// classes finalize at emit ([`sink_emit_bucket`]), so nothing pointer-shaped
+/// ever reaches the leader. PolyInt128/AvgInt8 transvalues stay owned by the
+/// drive-pinned worker aggcontexts; VarlenaMinMax transvalues are re-homed
+/// into the destination bucket's own store ([`CombinedBucket`]).
 pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<SinkCombineFn>>> {
     let numtrans = node.numtrans;
     let mut out: Vec<Option<SinkCombineFn>> = vec![None; numtrans];
@@ -2145,9 +2151,10 @@ pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<Sin
     Ok(Some(combines))
 }
 
-/// Whether any transno's state is byref (PolyInt128 / AvgInt8): the worker
-/// drain adds the aggcontext subtree to its budget accounting exactly when
-/// this holds (byref states live there, not in the table rows).
+/// Whether any transno's state is byref (PolyInt128 / AvgInt8 /
+/// VarlenaMinMax): the worker drain adds the aggcontext subtree to its
+/// budget accounting exactly when this holds (byref states live there, not
+/// in the table rows).
 pub fn sink_combines_byref(combines: &[SinkCombineFn]) -> bool {
     combines.iter().any(|c| {
         // avgpack: packed states live INSIDE the table rows (self-contained
@@ -2161,22 +2168,30 @@ pub fn sink_combines_byref(combines: &[SinkCombineFn]) -> bool {
 
 /// C advance_combine over two state blocks (`combine_one_par`'s thread-
 /// native discipline): strict adopt-or-skip, then — Byval — one bare
-/// fn-pointer call, or — the byref classes — the combinefn's exact
-/// arithmetic core run natively (the fmgr fns demand an agg context to
+/// fn-pointer call, or — the aggcontext byref classes — the combinefn's
+/// exact arithmetic core run natively (the fmgr fns demand an agg context to
 /// allocate their NULL-dst state; the sink adopts the src pointer instead,
-/// identical field values, consumed exactly once). `dst` is the bucket
-/// table's block (single writer — the claimed partition); `src` feeds
-/// exactly once.
+/// identical field values, consumed exactly once). VarlenaMinMax is the
+/// exception: its sources are owned by a SOURCE Local, so C's copy
+/// discipline is followed literally — `datumCopy` into the destination store
+/// on the no-value branch (advance_combine_function's `noTransValue` arm),
+/// copy-new-then-free-old when the source wins (`ExecAggCopyTransValue`).
+/// `dst` is the bucket table's block (single writer — the claimed
+/// partition); `src` feeds exactly once.
 ///
 /// # Safety
-/// Both blocks hold `combines.len()` live `AggPerGroup`s; non-null byref
-/// transvalues are live states (worker aggcontexts, alive through the
-/// combine — `drive_pinned` holds every helper to RG settlement), uniquely
-/// reachable through their one feeding source.
+/// Both blocks hold `combines.len()` live `AggPerGroup`s; non-null
+/// PolyInt128/AvgInt8 transvalues are live states in worker aggcontexts
+/// (alive through the combine — `drive_pinned` holds every helper to RG
+/// settlement), uniquely reachable through their one feeding source. Every
+/// non-null VarlenaMinMax transvalue in `dst` was allocated by `sa` (the
+/// bucket-store invariant — [`sink_own_new_varlena`] establishes it at every
+/// insertion); `sa` is `Some` whenever `combines` carries a VarlenaMinMax.
 pub unsafe fn sink_combine_states(
     combines: &[SinkCombineFn],
     dst: *mut AggPerGroup,
     src: *const AggPerGroup,
+    mut sa: Option<&mut StrStateArena>,
 ) -> PgResult<()> {
     for (transno, c) in combines.iter().enumerate() {
         // avgpack: packed slots carry the inline [count, sum] image, no
@@ -2202,7 +2217,25 @@ pub unsafe fn sink_combine_states(
                 continue;
             }
             if d.trans_value_is_null {
-                d.trans_value = s.trans_value;
+                // C's advance_combine_function noTransValue arm: datumCopy
+                // into curaggcontext, never an adopt. Only VarlenaMinMax has
+                // a source the destination does not already outlive.
+                if matches!(c.kind, SinkCombineKind::VarlenaMinMax { .. }) {
+                    let Some(sa) = sa.as_deref_mut() else {
+                        return Err(sink_shape_error(
+                            "text min/max sink combine without a destination transvalue store",
+                        ));
+                    };
+                    // SAFETY: caller contract — `s.trans_value` is a live
+                    // varlena image; the header class is validated before
+                    // the copy reads VARSIZE_ANY.
+                    unsafe {
+                        text_trans_payload(s.trans_value)?;
+                        d.trans_value = sa.copy(s.trans_value);
+                    }
+                } else {
+                    d.trans_value = s.trans_value;
+                }
                 d.trans_value_is_null = false;
                 d.no_trans_value = false;
                 continue;
@@ -2245,16 +2278,16 @@ pub unsafe fn sink_combine_states(
             // collation (SE-T2AGG CAR B; the merge.rs VarlenaMinMax kernel
             // verbatim): memcmp + length tiebreak. C returns arg1 (dst) only
             // on a STRICT win, so ties take the src datum — ties are
-            // byte-equal under the admitted collations, so either pointer is
+            // byte-equal under the admitted collations, so either side gives
             // byte-identical output.
             SinkCombineKind::VarlenaMinMax { larger } => unsafe {
-                // SAFETY: non-null text transvalues are live varlena images
-                // in worker aggcontexts (caller contract; every source
-                // outlives the combine — drive_pinned holds every helper to
-                // RG settlement). The payload reader validates the header
-                // class (plain short / 4B-uncompressed) and errors on
-                // anything else — transitions store detoasted plain images
-                // on the admitted cbstore feeds.
+                // SAFETY: `d.trans_value` is a live plain varlena THIS `sa`
+                // allocated (the bucket-store invariant); `s.trans_value` is
+                // a live plain varlena owned by a SOURCE Local — readable for
+                // the compare, never adopted. The payload reader validates
+                // the header class (plain short / 4B-uncompressed) and errors
+                // on anything else, so the store only ever copies images the
+                // emit can re-read.
                 let (dp, dl) = text_trans_payload(d.trans_value)?;
                 let (sp, sl) = text_trans_payload(s.trans_value)?;
                 let cmp = ::varlena::varstrfastcmp_c(
@@ -2263,7 +2296,19 @@ pub unsafe fn sink_combine_states(
                 );
                 let keep_dst = if larger { cmp > 0 } else { cmp < 0 };
                 if !keep_dst {
-                    d.trans_value = s.trans_value;
+                    // C's post-combine ExecAggCopyTransValue: datumCopy the
+                    // winner into the aggregate's own memory and pfree the
+                    // superseded copy.
+                    let Some(sa) = sa.as_deref_mut() else {
+                        return Err(sink_shape_error(
+                            "text min/max sink combine without a destination transvalue store",
+                        ));
+                    };
+                    debug_assert!(
+                        sa.owns(d.trans_value.as_usize()),
+                        "bucket-store invariant: the superseded copy must be store-allocated"
+                    );
+                    d.trans_value = sa.replace(d.trans_value, s.trans_value);
                 }
                 d.no_trans_value = false;
             },
@@ -2277,6 +2322,49 @@ pub unsafe fn sink_combine_states(
                 *dd += sc;
                 *dd.add(1) += ss;
             },
+        }
+    }
+    Ok(())
+}
+
+/// Re-home a JUST-INSERTED state block's VarlenaMinMax transvalues into the
+/// bucket table's own store. The block arrived as a verbatim image of a
+/// source Local's block, so its text pointers belong to that Local; this is
+/// C's `datumCopy` into `curaggcontext` at group creation.
+///
+/// THE BUCKET-STORE INVARIANT: every non-null VarlenaMinMax transvalue
+/// reachable from a bucket table was allocated by that table's store. It
+/// holds because this runs at every one of the table's insertion points, and
+/// [`sink_combine_states`] only ever writes store copies afterwards. Emit and
+/// the replace-free both depend on it.
+///
+/// All-byval shapes pay one `None` test (the store is armed only when
+/// `combines` carries a VarlenaMinMax).
+///
+/// # Safety
+/// `dst` holds `combines.len()` live `AggPerGroup`s; non-null text
+/// transvalues point at live varlena images.
+#[inline]
+unsafe fn sink_own_new_varlena(
+    combines: &[SinkCombineFn],
+    sa: &mut Option<StrStateArena>,
+    dst: *mut AggPerGroup,
+) -> PgResult<()> {
+    let Some(sa) = sa.as_mut() else { return Ok(()) };
+    for (transno, c) in combines.iter().enumerate() {
+        if !matches!(c.kind, SinkCombineKind::VarlenaMinMax { .. }) {
+            continue;
+        }
+        // SAFETY: caller contract.
+        let d = unsafe { &mut *dst.add(transno) };
+        if d.trans_value_is_null {
+            continue;
+        }
+        // SAFETY: a non-null text transvalue is a live varlena image; the
+        // header class is validated before the copy reads VARSIZE_ANY.
+        unsafe {
+            text_trans_payload(d.trans_value)?;
+            d.trans_value = sa.copy(d.trans_value);
         }
     }
     Ok(())
@@ -2504,13 +2592,49 @@ impl GidMap {
     }
 }
 
+/// One combined bucket: the merged table plus the store that owns its
+/// by-ref min/max(text) transvalues. The store MUST outlive every read of
+/// the table's state blocks — emit included — so the two are one value and
+/// Drop releases the strings only once the table itself is gone.
+///
+/// `str_store` is armed only for shapes whose `combines` carry a
+/// `VarlenaMinMax` transno; all-byval buckets keep the allocation-free
+/// `None`.
+pub struct CombinedBucket {
+    pub table: LaneAggTable,
+    str_store: Option<StrStateArena>,
+}
+
+impl CombinedBucket {
+    /// Detach the store, for a caller that hands the table's state blocks
+    /// onward as a run and must keep their backing alive independently (the
+    /// two-level pass-A partial).
+    pub fn into_str_store(self) -> Option<StrStateArena> {
+        self.str_store
+    }
+
+    /// Retained store bytes — 0 when unarmed (the partial's byref budget
+    /// accounting term).
+    pub fn str_store_bytes(&self) -> usize {
+        self.str_store.as_ref().map_or(0, StrStateArena::bytes)
+    }
+}
+
+impl core::ops::Deref for CombinedBucket {
+    type Target = LaneAggTable;
+    #[inline]
+    fn deref(&self) -> &LaneAggTable {
+        &self.table
+    }
+}
+
 pub fn sink_combine_bucket(
     b: usize,
     key_words: usize,
     state_bytes: usize,
     locals: &[SinkLocalView<'_>],
     combines: &[SinkCombineFn],
-) -> PgResult<LaneAggTable> {
+) -> PgResult<CombinedBucket> {
     sink_combine_bucket_impl(
         b,
         key_words,
@@ -2533,7 +2657,7 @@ fn sink_combine_bucket_impl(
     combines: &[SinkCombineFn],
     gid_enabled: bool,
     flat: bool,
-) -> PgResult<LaneAggTable> {
+) -> PgResult<CombinedBucket> {
     debug_assert!(b < SINK_NBUCKETS);
     let mut total = 0usize;
     // Bytes mode (combine16): the runs' key-byte volume for this bucket, an
@@ -2585,17 +2709,30 @@ fn sink_combine_bucket_impl(
         )
     };
     let state_words = state_bytes / 8;
+    // The destination-owned text store, armed only for min/max(text) shapes
+    // (all-byval buckets stay allocation-free). Every VarlenaMinMax
+    // transvalue this table ends up holding is a copy IT allocated — the
+    // bucket-store invariant, see [`sink_own_new_varlena`].
+    let mut sa: Option<StrStateArena> = combines
+        .iter()
+        .any(|c| matches!(c.kind, SinkCombineKind::VarlenaMinMax { .. }))
+        .then(StrStateArena::default);
 
     // Shared merge tail: seed a new group's block or combine into the
     // existing one.
-    let merge_states = |pr: ::lanetable::Probe, src: *const u64| -> PgResult<()> {
+    let merge_states = |pr: ::lanetable::Probe,
+                        src: *const u64,
+                        sa: &mut Option<StrStateArena>|
+     -> PgResult<()> {
         if pr.is_new {
             // SAFETY: fresh zeroed state block of state_words u64s; src is a
-            // live block of the same layout (one worker plan).
+            // live block of the same layout (one worker plan). The copy takes
+            // the source's text POINTERS, so the block is immediately
+            // re-homed into this table's store.
             unsafe {
                 core::ptr::copy_nonoverlapping(src, pr.states.cast::<u64>(), state_words);
+                return sink_own_new_varlena(combines, sa, pr.states.cast::<AggPerGroup>());
             }
-            return Ok(());
         }
         // SAFETY: both blocks hold numtrans pergroups (combines.len() ==
         // numtrans); dst is uniquely reachable through this claimed bucket.
@@ -2604,13 +2741,15 @@ fn sink_combine_bucket_impl(
                 combines,
                 pr.states.cast::<AggPerGroup>(),
                 src.cast::<AggPerGroup>(),
+                sa.as_mut(),
             )
         }
     };
 
     let absorb = |t: &mut LaneAggTable,
-                      kw: Option<[u64; 2]>,
-                      src: *const u64|
+                  sa: &mut Option<StrStateArena>,
+                  kw: Option<[u64; 2]>,
+                  src: *const u64|
      -> PgResult<()> {
         let pr = match kw {
             None => t.probe_null(),
@@ -2622,7 +2761,7 @@ fn sink_combine_bucket_impl(
                 }
             }
         };
-        merge_states(pr, src)
+        merge_states(pr, src, sa)
     };
     // Bytes-mode probes reuse the flush/SEAL-computed sink hash (carried in
     // the run / part) instead of re-hashing every arrival's byte image —
@@ -2630,13 +2769,17 @@ fn sink_combine_bucket_impl(
     // (salt), so the sink hash's constant-per-bucket top byte never hurts,
     // and one hash per (row, table) stays consistent across all probes.
     // Returns the row's merged state block for the GID map below.
-    let absorb_bytes =
-        |t: &mut LaneAggTable, key: &[u8], h: u64, src: *const u64| -> PgResult<*mut u8> {
-            let pr = t.probe_bytes(key, h);
-            let states = pr.states;
-            merge_states(pr, src)?;
-            Ok(states)
-        };
+    let absorb_bytes = |t: &mut LaneAggTable,
+                        sa: &mut Option<StrStateArena>,
+                        key: &[u8],
+                        h: u64,
+                        src: *const u64|
+     -> PgResult<*mut u8> {
+        let pr = t.probe_bytes(key, h);
+        let states = pr.states;
+        merge_states(pr, src, sa)?;
+        Ok(states)
+    };
 
     // GID MERGE (canon-sink car 2): repeat arrivals of one (worker,
     // generation, packed-words) triple resolve through a per-Local word map
@@ -2681,25 +2824,27 @@ fn sink_combine_bucket_impl(
                                     combines,
                                     dst.cast::<AggPerGroup>(),
                                     src.cast::<AggPerGroup>(),
+                                    sa.as_mut(),
                                 )?;
                             }
                             continue;
                         }
-                        let dst = absorb_bytes(&mut t, r.key_slice(i), r.hashes[i], src)?;
+                        let dst =
+                            absorb_bytes(&mut t, &mut sa, r.key_slice(i), r.hashes[i], src)?;
                         gmap.insert(w, dst);
                         continue;
                     }
-                    absorb_bytes(&mut t, r.key_slice(i), r.hashes[i], src)?;
+                    absorb_bytes(&mut t, &mut sa, r.key_slice(i), r.hashes[i], src)?;
                 } else {
                     let w0 = r.keys[i * key_words];
                     let w1 = if key_words == 2 { r.keys[i * key_words + 1] } else { 0 };
-                    absorb(&mut t, Some([w0, w1]), src)?;
+                    absorb(&mut t, &mut sa, Some([w0, w1]), src)?;
                 }
             }
             if b == SINK_NULL_BUCKET {
                 if let Some(block) = &r.null_states {
                     debug_assert_ne!(key_words, 0, "bytes-mode runs never carry NULL blocks");
-                    absorb(&mut t, None, block.as_ptr())?;
+                    absorb(&mut t, &mut sa, None, block.as_ptr())?;
                 }
             }
         }
@@ -2729,7 +2874,7 @@ fn sink_combine_bucket_impl(
                         spk_rows += 1;
                         spk_bytes += img.len() as u64;
                     }
-                    absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
+                    absorb_bytes(&mut t, &mut sa, img, part.hashes[lo + slot], src)?;
                 }
                 debug_assert!(!part.has_null, "direct shapes are non-nullable");
             } else if key_words == 0 {
@@ -2758,6 +2903,7 @@ fn sink_combine_bucket_impl(
                                     combines,
                                     dst.cast::<AggPerGroup>(),
                                     src.cast::<AggPerGroup>(),
+                                    sa.as_mut(),
                                 )?;
                             }
                             continue;
@@ -2775,7 +2921,8 @@ fn sink_combine_bucket_impl(
                             spk_rows += 1;
                             spk_bytes += img.len() as u64;
                         }
-                        let dst = absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
+                        let dst =
+                            absorb_bytes(&mut t, &mut sa, img, part.hashes[lo + slot], src)?;
                         gmap.insert(w, dst);
                         continue;
                     }
@@ -2792,7 +2939,7 @@ fn sink_combine_bucket_impl(
                         spk_rows += 1;
                         spk_bytes += img.len() as u64;
                     }
-                    absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
+                    absorb_bytes(&mut t, &mut sa, img, part.hashes[lo + slot], src)?;
                 }
                 debug_assert!(!part.has_null, "canonical shapes are non-nullable");
             } else {
@@ -2800,14 +2947,24 @@ fn sink_combine_bucket_impl(
                 for &row in &part.idx[lo..hi] {
                     let kw = row_key_words(rt, row as usize)
                         .expect("partition indexes only non-NULL rows");
-                    absorb(&mut t, Some(kw), rt.row_states(row as usize).cast_const().cast())?;
+                    absorb(
+                        &mut t,
+                        &mut sa,
+                        Some(kw),
+                        rt.row_states(row as usize).cast_const().cast(),
+                    )?;
                 }
                 if b == SINK_NULL_BUCKET && part.has_null {
                     // The remainder's NULL row: find it through the table's
                     // own out-of-band accessor path (row scan — one row max).
                     for row in 0..rt.nrows() {
                         if row_key_words(rt, row).is_none() {
-                            absorb(&mut t, None, rt.row_states(row).cast_const().cast())?;
+                            absorb(
+                                &mut t,
+                                &mut sa,
+                                None,
+                                rt.row_states(row).cast_const().cast(),
+                            )?;
                             break;
                         }
                     }
@@ -2821,7 +2978,7 @@ fn sink_combine_bucket_impl(
             spankey_lap(&S.combine_rem_ns, spk_t0);
         }
     }
-    Ok(t)
+    Ok(CombinedBucket { table: t, str_store: sa })
 }
 
 // ---------------------------------------------------------------------------
@@ -3398,12 +3555,19 @@ fn emit_row(
                 values.push(pg.trans_value);
                 nulls.push(pg.trans_value_is_null);
             },
-            // min/max(text) survivor (SE-T2AGG CAR B): deep-copy the live
-            // worker-aggcontext varlena image verbatim into the buf arena
-            // (header form included — representation, not identity).
+            // min/max(text) survivor (SE-T2AGG CAR B): deep-copy the varlena
+            // image verbatim into the buf arena (header form included —
+            // representation, not identity).
             // SAFETY: as `Agg`; a non-null text transvalue is a live plain
-            // varlena image (combine contract; the payload check errored
-            // on any other header class during the combine).
+            // varlena image whose owner outlives this emit, and whose header
+            // class was checked when it was stored. Merge arm: the
+            // bucket-store invariant ([`sink_own_new_varlena`]) — every
+            // transvalue is a copy the bucket's own store allocated, entered
+            // through `text_trans_payload`, and `CombinedBucket` keeps the
+            // store alive. Pass-through arm ([`sink_emit_bucket_passthrough`]):
+            // the rows are the live Local's own, whose transition path
+            // (lanefold `str_advance`) copied detoasted plain images into the
+            // Local's aggcontext or its handle's `StrStateArena`.
             SinkEmitCol::VarlenaTrans { transno } => unsafe {
                 let pg = &*states.add(transno as usize);
                 if pg.trans_value_is_null {
@@ -3767,15 +3931,20 @@ pub struct SinkTableHandle(pub(crate) crate::compact::CompactHash);
 // PolyInt128/AvgInt8 pointers into the worker aggcontext (drive-pinned
 // through combine) and — GL-DICTDRAIN-3 — str min/max transvalue pointers
 // into the handle's OWN `str_arena` (they travel together; the arena is
-// Send with &mut-serialized mutation, its struct doc).
+// Send with &mut-serialized mutation, its struct doc). A combine never
+// stores a pointer INTO this handle: text transvalues are copied into the
+// destination bucket's own store (the bucket-store invariant), so the
+// handle's memory has no reader once its Local is dropped.
 unsafe impl Send for SinkTableHandle {}
 // SAFETY: combine tasks read `&SinkTableHandle` (the table's rows) from many
 // threads; the table is plain owned Vec storage, byref state pointers
-// target drive-pinned worker aggcontexts or the handle's own str arena
-// (whose RefCell is never borrowed outside morsel drains — combine reads
-// value BYTES through the state pointers only), and the batch scratch is
-// never dereferenced outside the owning worker's own morsel (see the Send
-// justification).
+// target drive-pinned worker aggcontexts or the handle's own str arena, and
+// the batch scratch is never dereferenced outside the owning worker's own
+// morsel (see the Send justification). The combine only READS this handle:
+// PolyInt128/AvgInt8 sources are read field-wise and their pointers adopted
+// into the merged table (the aggcontext outlives it), while text sources are
+// read as value BYTES and deep-copied — nothing here is mutated and no
+// pointer to it survives the merge.
 unsafe impl Sync for SinkTableHandle {}
 
 impl SinkTableHandle {
@@ -5727,7 +5896,7 @@ mod tests {
             SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0, direct: false }) },
         ];
         let combines = test_combines();
-        let mut merged: Vec<LaneAggTable> = Vec::with_capacity(SINK_NBUCKETS);
+        let mut merged: Vec<CombinedBucket> = Vec::with_capacity(SINK_NBUCKETS);
         for b in 0..SINK_NBUCKETS {
             merged.push(
                 sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap(),
@@ -6212,7 +6381,7 @@ mod tests {
             },
         ];
         unsafe {
-            sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr()).unwrap();
+            sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr(), None).unwrap();
         }
         assert_eq!(d_poly.n, 5);
         assert_eq!(d_poly.sum_x, 42);
@@ -6232,7 +6401,7 @@ mod tests {
             },
         ];
         unsafe {
-            sink_combine_states(&combines, dst2.as_mut_ptr(), src.as_ptr()).unwrap();
+            sink_combine_states(&combines, dst2.as_mut_ptr(), src.as_ptr(), None).unwrap();
         }
         assert_eq!(dst2[0].trans_value.as_usize(), &s_poly as *const _ as usize);
         assert!(!dst2[0].trans_value_is_null);
@@ -6299,12 +6468,21 @@ mod tests {
         }
     }
 
-    /// SE-T2AGG CAR B: the VarlenaMinMax combine is the merge.rs kernel
-    /// verbatim — memcmp + length tiebreak pick-pointer, keep-dst only on a
-    /// STRICT win (ties take src; byte-equal under the admitted collations,
-    /// so unobservable), strict NULL adopt-pointer — and the emit deep-copies
-    /// the survivor image into the buf's own arena (byref discipline: never
-    /// table-adopted).
+    /// Content bytes behind a text transvalue datum.
+    fn text_payload(d: Datum) -> Vec<u8> {
+        unsafe {
+            let (p, l) = text_trans_payload(d).expect("plain varlena");
+            core::slice::from_raw_parts(p, l).to_vec()
+        }
+    }
+
+    /// SE-T2AGG CAR B: the VarlenaMinMax combine is the merge.rs kernel's
+    /// pick — memcmp + length tiebreak, keep-dst only on a STRICT win (ties
+    /// take src; byte-equal under the admitted collations, so unobservable) —
+    /// but the winner is materialized C's way: the source is never adopted,
+    /// it is datumCopied into the DESTINATION store and the superseded copy
+    /// freed back to it. Emit then deep-copies the survivor image into the
+    /// buf's own arena (byref discipline: never table-adopted).
     #[test]
     fn varlena_minmax_combine_and_emit() {
         let combines = vec![
@@ -6337,41 +6515,67 @@ mod tests {
         let app = mk_text(b"app");
         let apple2 = mk_text(b"apple");
 
-        // min keeps "apple" vs "pear"; max adopts "pear".
-        let mut dst = [pg_of(&apple), pg_of(&apple)];
+        // The destination store, and destination transvalues built through it
+        // (the bucket-store invariant: `sink_combine_states` may only free a
+        // superseded copy its own store allocated).
+        let mut sa = StrStateArena::default();
+        let owned = |sa: &mut StrStateArena, img: &TextImage| AggPerGroup {
+            trans_value: unsafe { sa.copy(Datum::from_usize(img as *const _ as usize)) },
+            trans_value_is_null: false,
+            no_trans_value: false,
+        };
+
+        // min keeps "apple" vs "pear"; max takes a COPY of "pear".
+        let mut dst = [owned(&mut sa, &apple), owned(&mut sa, &apple)];
+        let keep = dst[0].trans_value.as_usize();
         let src = [pg_of(&pear), pg_of(&pear)];
-        unsafe { sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr()).unwrap() };
-        assert_eq!(dst[0].trans_value.as_usize(), &*apple as *const _ as usize, "min keeps dst");
-        assert_eq!(dst[1].trans_value.as_usize(), &*pear as *const _ as usize, "max adopts src");
+        unsafe {
+            sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr(), Some(&mut sa)).unwrap()
+        };
+        assert_eq!(dst[0].trans_value.as_usize(), keep, "min keeps dst, untouched");
+        assert_eq!(text_payload(dst[0].trans_value), b"apple");
+        assert_eq!(text_payload(dst[1].trans_value), b"pear", "max takes src's value");
+        assert_ne!(
+            dst[1].trans_value.as_usize(),
+            &*pear as *const _ as usize,
+            "the source pointer is never adopted"
+        );
+        assert!(sa.owns(dst[1].trans_value.as_usize()), "the winner is store-allocated");
 
         // Length tiebreak on a shared prefix: "app" < "apple".
-        let mut dst_len = [pg_of(&apple), pg_of(&apple)];
+        let mut dst_len = [owned(&mut sa, &apple), owned(&mut sa, &apple)];
+        let keep_len = dst_len[1].trans_value.as_usize();
         let src_len = [pg_of(&app), pg_of(&app)];
         unsafe {
-            sink_combine_states(&combines, dst_len.as_mut_ptr(), src_len.as_ptr()).unwrap()
+            sink_combine_states(&combines, dst_len.as_mut_ptr(), src_len.as_ptr(), Some(&mut sa))
+                .unwrap()
         };
-        assert_eq!(dst_len[0].trans_value.as_usize(), &*app as *const _ as usize, "min: shorter");
-        assert_eq!(dst_len[1].trans_value.as_usize(), &*apple as *const _ as usize, "max: longer");
+        assert_eq!(text_payload(dst_len[0].trans_value), b"app", "min: shorter");
+        assert!(sa.owns(dst_len[0].trans_value.as_usize()));
+        assert_eq!(dst_len[1].trans_value.as_usize(), keep_len, "max: longer, untouched");
 
-        // Byte-equal tie: C returns arg1 only on a STRICT win → src adopted
-        // (unobservable — the images are byte-identical).
-        let mut dst_tie = [pg_of(&apple), pg_of(&apple)];
+        // Byte-equal tie: C returns arg1 only on a STRICT win → the src value
+        // is copied in (unobservable — the images are byte-identical).
+        let mut dst_tie = [owned(&mut sa, &apple), owned(&mut sa, &apple)];
         let src_tie = [pg_of(&apple2), pg_of(&apple2)];
         unsafe {
-            sink_combine_states(&combines, dst_tie.as_mut_ptr(), src_tie.as_ptr()).unwrap()
+            sink_combine_states(&combines, dst_tie.as_mut_ptr(), src_tie.as_ptr(), Some(&mut sa))
+                .unwrap()
         };
-        assert_eq!(dst_tie[0].trans_value.as_usize(), &*apple2 as *const _ as usize);
+        assert_eq!(text_payload(dst_tie[0].trans_value), b"apple");
+        assert_ne!(dst_tie[0].trans_value.as_usize(), &*apple2 as *const _ as usize);
 
-        // Strict NULL handling: NULL dst adopts the src pointer; NULL src is
-        // a skip.
+        // Strict NULL handling: a no-value dst COPIES the src (C's
+        // noTransValue datumCopy); NULL src is a skip.
         let mut dst_null = [
             AggPerGroup {
                 trans_value: Datum::null(),
                 trans_value_is_null: true,
                 no_trans_value: true,
             },
-            pg_of(&apple),
+            owned(&mut sa, &apple),
         ];
+        let keep_null = dst_null[1].trans_value.as_usize();
         let src_null = [
             pg_of(&pear),
             AggPerGroup {
@@ -6381,11 +6585,24 @@ mod tests {
             },
         ];
         unsafe {
-            sink_combine_states(&combines, dst_null.as_mut_ptr(), src_null.as_ptr()).unwrap()
+            sink_combine_states(&combines, dst_null.as_mut_ptr(), src_null.as_ptr(), Some(&mut sa))
+                .unwrap()
         };
-        assert_eq!(dst_null[0].trans_value.as_usize(), &*pear as *const _ as usize);
+        assert_eq!(text_payload(dst_null[0].trans_value), b"pear");
+        assert_ne!(dst_null[0].trans_value.as_usize(), &*pear as *const _ as usize);
+        assert!(sa.owns(dst_null[0].trans_value.as_usize()));
         assert!(!dst_null[0].trans_value_is_null);
-        assert_eq!(dst_null[1].trans_value.as_usize(), &*apple as *const _ as usize);
+        assert_eq!(dst_null[1].trans_value.as_usize(), keep_null, "null src is a skip");
+
+        // Fail-closed: a text combine with no destination store never adopts.
+        let mut dst_nostore = [owned(&mut sa, &apple), owned(&mut sa, &apple)];
+        assert!(
+            unsafe {
+                sink_combine_states(&combines, dst_nostore.as_mut_ptr(), src.as_ptr(), None)
+            }
+            .is_err(),
+            "no store ⇒ error, never a borrowed pointer"
+        );
 
         // Emit: the survivor image lands in the buf's OWN arena, verbatim.
         let mut t = mk_table(4);
@@ -6428,6 +6645,200 @@ mod tests {
         }
         let buf2 = sink_emit_bucket(&plan, &t2).unwrap();
         assert!(buf2.nulls[1], "all-NULL-input group finalizes to NULL");
+    }
+
+    /// Overwrite a source image in place with a same-shaped plain varlena
+    /// (as `mk_text`) — a destination still pointing at it reads THIS value.
+    fn overwrite_text(img: &mut TextImage, payload: &[u8]) {
+        assert!(payload.len() <= 28);
+        img.buf = [0; 32];
+        let size = (4 + payload.len()) as u32;
+        img.buf[0..4].copy_from_slice(&(size << 2).to_le_bytes());
+        img.buf[4..4 + payload.len()].copy_from_slice(payload);
+    }
+
+    /// Seed key `k`'s pergroup pair (min, max) with one text image.
+    fn put_text(t: &mut LaneAggTable, imgs: &mut Vec<Box<TextImage>>, k: i64, payload: &[u8]) {
+        let img = mk_text(payload);
+        let d = Datum::from_usize(&*img as *const TextImage as usize);
+        imgs.push(img);
+        let pr = t.probe_int(k, t.hash_key_int(k as u64));
+        let pg = AggPerGroup { trans_value: d, trans_value_is_null: false, no_trans_value: false };
+        // SAFETY: a fresh row's block is 2 pergroups (STATE_BYTES).
+        unsafe {
+            let p = pr.states.cast::<AggPerGroup>();
+            *p = pg;
+            *p.add(1) = pg;
+        }
+    }
+
+    /// GL-SINKCRASH-1 (release blocker): a combined bucket OWNS its
+    /// min/max(text) transvalues. Both legs emit only after every source
+    /// image has been overwritten, so a destination that kept a source
+    /// pointer emits the overwritten bytes instead of the survivor — the
+    /// combine that adopted pointers fails here. (The sources are overwritten
+    /// rather than freed so the failure is a value mismatch, not whatever the
+    /// allocator left behind.)
+    #[test]
+    fn varlena_minmax_transvalues_survive_source_teardown() {
+        let vmm = |larger: bool| SinkCombineFn {
+            func: test_combines()[0].func, // never called by this kind
+            strict: true,
+            collation: Oid::from(0u8),
+            kind: SinkCombineKind::VarlenaMinMax { larger },
+        };
+        let combines = vec![vmm(false), vmm(true)];
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: None,
+            ntails: 0,
+            filter: None,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::VarlenaTrans { transno: 0 },
+                SinkEmitCol::VarlenaTrans { transno: 1 },
+            ],
+        };
+
+        // Face A holds "a<k>", face B "b<k>". Keys 0..30 are in both (min
+        // from A, max from B — the pairwise combine), 30..40 in A only and
+        // 40..50 in B only (SINGLE-FACE groups: they only ever pass through
+        // the new-row block copy).
+        let text = |face: u8, k: i64| {
+            let mut v = vec![face];
+            v.extend_from_slice(format!("{k:04}").as_bytes());
+            v
+        };
+        let mut expect: std::collections::HashMap<i64, (Vec<u8>, Vec<u8>)> =
+            std::collections::HashMap::new();
+        for k in 0..30i64 {
+            expect.insert(k, (text(b'a', k), text(b'b', k)));
+        }
+        for k in 30..40i64 {
+            expect.insert(k, (text(b'a', k), text(b'a', k)));
+        }
+        for k in 40..50i64 {
+            expect.insert(k, (text(b'b', k), text(b'b', k)));
+        }
+
+        let build = || {
+            let mut imgs: Vec<Box<TextImage>> = Vec::new();
+            let mut ta = mk_table(64);
+            for k in 0..40i64 {
+                put_text(&mut ta, &mut imgs, k, &text(b'a', k));
+            }
+            let mut tb = mk_table(64);
+            for k in 0..30i64 {
+                put_text(&mut tb, &mut imgs, k, &text(b'b', k));
+            }
+            for k in 40..50i64 {
+                put_text(&mut tb, &mut imgs, k, &text(b'b', k));
+            }
+            (ta, tb, imgs)
+        };
+        let poison = |imgs: &mut Vec<Box<TextImage>>| {
+            for img in imgs.iter_mut() {
+                overwrite_text(img, b"XXXXX");
+            }
+        };
+        let check = |buf: &SinkEmitBuf, seen: &mut std::collections::HashMap<i64, ()>| {
+            for row in 0..buf.nrows {
+                let k = buf.values[row * 3].as_i64();
+                let (lo, hi) = &expect[&k];
+                assert_eq!(&emit_text(buf, buf.values[row * 3 + 1]), lo, "min of key {k}");
+                assert_eq!(&emit_text(buf, buf.values[row * 3 + 2]), hi, "max of key {k}");
+                assert!(seen.insert(k, ()).is_none(), "key {k} emitted twice");
+            }
+        };
+
+        // Leg 1 — the flat combine: two remainder faces, one bucket table.
+        {
+            let (ta, tb, mut imgs) = build();
+            let (pa, pb) = (sink_partition_remainder(&ta), sink_partition_remainder(&tb));
+            let locals = [
+                SinkLocalView {
+                    spilled: &[],
+                    runs: &[],
+                    remainder: Some(SinkRemainder {
+                        table: &ta,
+                        part: &pa,
+                        canon: None,
+                        canon_store: None,
+                        gid_gen: 0,
+                        direct: false,
+                    }),
+                },
+                SinkLocalView {
+                    spilled: &[],
+                    runs: &[],
+                    remainder: Some(SinkRemainder {
+                        table: &tb,
+                        part: &pb,
+                        canon: None,
+                        canon_store: None,
+                        gid_gen: 0,
+                        direct: false,
+                    }),
+                },
+            ];
+            let merged: Vec<CombinedBucket> = (0..SINK_NBUCKETS)
+                .map(|b| sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap())
+                .collect();
+            poison(&mut imgs);
+            let mut seen = std::collections::HashMap::new();
+            for m in &merged {
+                check(&sink_emit_bucket(&plan, m).unwrap(), &mut seen);
+            }
+            assert_eq!(seen.len(), expect.len(), "every group emitted");
+        }
+
+        // Leg 2 — the two-level pass: each half becomes a partial RUN whose
+        // state blocks are its combined table's blocks VERBATIM, so the
+        // half's store has to travel with the run and the final stage has to
+        // copy out of it before that store is released.
+        {
+            let (ta, tb, mut imgs) = build();
+            let (pa, pb) = (sink_partition_remainder(&ta), sink_partition_remainder(&tb));
+            let half = |t: &LaneAggTable, p: &SinkPart, b: usize| {
+                let locals = [SinkLocalView {
+                    spilled: &[],
+                    runs: &[],
+                    remainder: Some(SinkRemainder {
+                        table: t,
+                        part: p,
+                        canon: None,
+                        canon_store: None,
+                        gid_gen: 0,
+                        direct: false,
+                    }),
+                }];
+                let m = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+                let run = sink_run_from_bucket_table(b, &m);
+                (run, m.into_str_store())
+            };
+            let partials: Vec<((SinkRun, Option<StrStateArena>), (SinkRun, Option<StrStateArena>))> =
+                (0..SINK_NBUCKETS).map(|b| (half(&ta, &pa, b), half(&tb, &pb, b))).collect();
+            poison(&mut imgs);
+            let mut seen = std::collections::HashMap::new();
+            for (b, ((r0, s0), (r1, s1))) in partials.into_iter().enumerate() {
+                let views = [
+                    SinkLocalView {
+                        spilled: &[],
+                        runs: core::slice::from_ref(&r0),
+                        remainder: None,
+                    },
+                    SinkLocalView {
+                        spilled: &[],
+                        runs: core::slice::from_ref(&r1),
+                        remainder: None,
+                    },
+                ];
+                let fin = sink_combine_bucket(b, 1, STATE_BYTES, &views, &combines).unwrap();
+                drop((r0, r1, s0, s1));
+                check(&sink_emit_bucket(&plan, &fin).unwrap(), &mut seen);
+            }
+            assert_eq!(seen.len(), expect.len(), "every group emitted");
+        }
     }
 
     /// SE-T2AGG CAR B knob: default OFF in a kill-free process (the probe /
@@ -6493,7 +6904,7 @@ mod tests {
             },
             mk_packed(6, 44),
         ];
-        unsafe { sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr()).unwrap() };
+        unsafe { sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr(), None).unwrap() };
         assert_eq!(dst[0].trans_value.as_i64(), 10);
         assert_eq!(read_packed(&dst[1]), [10, 144]);
 
@@ -6514,7 +6925,7 @@ mod tests {
             },
             mk_packed(0, 0),
         ];
-        unsafe { sink_combine_states(&combines, dz.as_mut_ptr(), sz.as_ptr()).unwrap() };
+        unsafe { sink_combine_states(&combines, dz.as_mut_ptr(), sz.as_ptr(), None).unwrap() };
         assert_eq!(read_packed(&dz[1]), [0, 0]);
     }
 
@@ -7808,7 +8219,7 @@ mod tests {
         // Reference: in-memory combine over [run_a, run_b].
         let runs = [run_a, run_b];
         let locals_mem = [SinkLocalView { spilled: &runs, runs: &[], remainder: None }];
-        let mut reference: Vec<LaneAggTable> = Vec::with_capacity(SINK_NBUCKETS);
+        let mut reference: Vec<CombinedBucket> = Vec::with_capacity(SINK_NBUCKETS);
         for b in 0..SINK_NBUCKETS {
             reference.push(sink_combine_bucket(b, 1, STATE_BYTES, &locals_mem, &combines).unwrap());
         }
