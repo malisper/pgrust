@@ -109,7 +109,7 @@ fs	crates/backend/access/transam/xlogreader/src/lib.rs	1
 fs	crates/backend/access/transam/xlogutils/src/lib.rs	1
 # --- crates/backend/commands/copy (5 sites) ---
 fs	crates/backend/commands/copy/src/from.rs	1
-fs	crates/backend/commands/copy/src/parallel.rs	1
+fs	crates/backend/commands/copy/src/parallel.rs	2	DST-REVIEW(t46 compose, night/parquet-reader): +1 = try_clone_file for the shared positioned-read parquet handle (workers read whole row groups; P1 Vfs choke routing rides the crate-wide migration)
 fs	crates/backend/commands/copy/src/to.rs	3
 # --- crates/backend/commands/dbcommands (11 sites) ---
 fs	crates/backend/commands/dbcommands/src/alterdb.rs	2
@@ -253,7 +253,7 @@ time	crates/backend/access/pgrcolumnar/src/reader.rs	2	INFRA-telemetry: phase co
 time	crates/backend/access/pgrcolumnar/src/writer.rs	8	INFRA-telemetry: phase counters
 time	crates/backend/access/transam/parallel/src/lib.rs	2	TRACE-ONLY-gtrace
 time	crates/backend/commands/analyze/src/lib.rs	9	INFRA-telemetry
-time	crates/backend/commands/copy/src/parallel.rs	23	INFRA-telemetry: load-phase spans
+time	crates/backend/commands/copy/src/parallel.rs	32	INFRA-telemetry: load-phase spans; DST-REVIEW(night/copyfast): +5 = lever-1 memruns spill walls + lever-3 inline-analyze wall (ptrace-gated Instant spans, trace-off cost is one branch; pg_clock routing rides the telemetry family); DST-REVIEW(t46 compose, night/parquet-reader): +4 = parquet RG-decode phase telemetry spans (INFRA-telemetry class; paid at compose)
 time	crates/backend/commands/explain/src/lib.rs	3	BOUNDARY-masked, routable: planning-duration fields (smoke field allowlist)
 time	crates/backend/commands/prepare/src/lib.rs	2	BOUNDARY-masked, routable
 time	crates/backend/executor/execexpr/src/jit.rs	2	INFRA-telemetry
@@ -319,7 +319,7 @@ env	crates/backend/access/transam/parallel/src/standing.rs	5	DST-REVIEW(m2-inc2)
 env	crates/backend/postmaster/postmaster/src/lib.rs	1	DST-REVIEW(gangwedge): 1 = PGRUST_PM_SHUTDOWN_STALL_SECS, the shutdown-stall watchdog's bound (GL-GANGWEDGE-1). Process-constant lane-knob class, read once and OnceLock-cached — the R-KNOBS idiom. Not a product tuning knob: the default IS the shipped behaviour (hanging forever is never correct); 0 restores the pre-fix unbounded wait so a rig can hold a wedge open for a stack capture. Knobs-registry routing rides the chartered SE/DST migration
 env	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 env	crates/backend/commands/analyze/src/lib.rs	2
-env	crates/backend/commands/copy/src/parallel.rs	14
+env	crates/backend/commands/copy/src/parallel.rs	19	DST-REVIEW(night/copyfast): +2 = PGRUST_PARALLEL_COPY_SORT_MEMRUNS (lever 1) + PGRUST_COPY_ANALYZE_INLINE (lever 3) — default-OFF load-vehicle knobs, read once per process via OnceLock, same class as the file's existing knob rows; knobs-registry routing rides the file-wide migration + DST-REVIEW(t46 compose, night/parquet-reader): +2 = PGRUST_PARQUET_PARALLEL + PGRUST_PARQUET_BUDGET_MB (inc-2 knobs, OnceLock env-read-once; the branch never paid its ledger — no standard CONFIRM ran there; paid at compose) + DST-REVIEW(GL-LOADDET-1): +1 = PGRUST_PARALLEL_COPY_SORT_DETERMINISTIC — the load-determinism knob (DEFAULT ON, disarms only on 0|off|false|no; read ONCE per process via OnceLock). Same process-constant load-vehicle knob class as the file's existing rows; knobs-registry routing rides the file-wide migration. NOTE for the DST program: this knob makes the load's OUTPUT BYTES independent of thread interleaving, so under sim it REMOVES a nondeterminism source rather than adding one.
 env	crates/backend/commands/extension/src/control.rs	1
 env	crates/backend/commands/seclabel/src/lib.rs	1
 env	crates/backend/executor/execexpr/src/compile.rs	1
@@ -509,7 +509,7 @@ once	crates/backend/access/transam/parallel/src/standing.rs	4	P3 row 19 (design-
 once	crates/backend/postmaster/postmaster/src/lib.rs	1	DST-REVIEW(gangwedge): 1 = pm_shutdown_stall_secs's OnceLock (pure env-read init closure, the R-KNOBS idiom — no choke crossing)
 once	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 once	crates/backend/catalog/pg_constraint/src/lib.rs	1
-once	crates/backend/commands/copy/src/parallel.rs	15
+once	crates/backend/commands/copy/src/parallel.rs	20	DST-REVIEW(night/copyfast): +2 = the memruns + analyze-inline knob OnceLocks — pure env-read init closures (P3 row-19 pure/env-read class), no choke crossing + DST-REVIEW(t46 compose, night/parquet-reader): +2 = the parquet knob OnceLocks (pure env-read closures, P3 row-19 class; paid at compose) + DST-REVIEW(GL-LOADDET-1): +1 = the sort-determinism knob OnceLock — a pure env-read init closure (P3 row-19 pure/env-read class), no choke crossing.
 once	crates/backend/executor/execexpr/src/jit.rs	3
 once	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t27-train): budget 1->2 — spi-compile-residual car (PROCPERF P2) OnceLock knob memo landed post-census; P3 row-19 once-ledger classification chartered to the DST program (t28)
 once	crates/backend/executor/execmain/src/slease.rs	7	DST-REVIEW(GL-SLEASE-2): P3 row-19 classes — 2 pure env-read knob memos (armed/floor, proof-row class) + 1 pure container init (the slot registry) + 1 spawn-once guard for the sweeper (boot cannot host it: the sweeper exists only in the armed posture and only once a runtime exists — first-armed-enter is the natural hoist point); DST-REVIEW(GL-SLEASE-3): +3 pure env-read knob memos (sweeper/donation attribution arms + the wallage A/B posture, proof-row class)
@@ -868,3 +868,5 @@ once	crates/backend/storage/smgr/md/src/nblocks_cache.rs	1	DST-REVIEW(t44-train 
 rawsync	crates/backend/executor/execmain/src/lanev2/stmt_task.rs	1	DST-REVIEW(night/stmt-as-task-2 folds in): the yield slots' atomics + registry Mutex ride the same import line; DST-REVIEW(night/stmt-as-task): std::sync import line (Arc/Mutex/OnceLock — the payload's error + board-slot Mutexes, rg/pcxt OnceLocks) + atomic engagement counters — the pre-existing lanev2 rawsync class (runtime_passthrough's row verbatim); pgsync routing chartered to the DST program
 rawsync	crates/backend/tcop/postgres_seams/src/lib.rs	2	DST-REVIEW(night/stmt-as-task-2): +1 = the stmt_yield HOOK OnceLock (fn-pointer registration cell, write-once at first arm) + the ARMED span Cell (thread-local, no cross-thread sync); DST-REVIEW(night/stmt-as-task): std::sync::OnceLock knob cell + the statement-scoped arm TLS Cell in stmt_task_arm (thread-local, no cross-thread sync); pgsync routing chartered to the DST program
 spawn	crates/backend/executor/execmain/src/lanev2/stmt_task.rs	1	DST-REVIEW(night/stmt-as-task-2): the quantum-yield sweeper thread (pgsync::thread::Builder, spawned once on the first armed span under the DEFAULT-OFF PGRUST_STMT_TASK_YIELD; a pure timer/observer on the waiter timed-park surface — the slease-v2 pg-slease-sweeper precedent verbatim; wasm arm cannot exist and the spawn is cfg'd out)
+fs	crates/backend/access/parquet_read/src/lib.rs	5	DST-REVIEW(t46 compose, night/parquet-reader): the reader crate's footer/dictionary/page positioned reads (File::open + pread class, read-only COPY FORMAT parquet source; the branch never paid its ledger — no standard CONFIRM ran there); P1 Vfs choke routing rides the crate-wide migration
+fs	crates/backend/commands/copy/src/memheadroom.rs	2	DST-REVIEW(night/copyfast): kernel pseudo-file probes (/proc/self/cgroup + the /sys/fs/cgroup hierarchy walk + /proc/meminfo) for the memruns auto budget — read-only host-posture introspection on the load-vehicle knob path, never data-file I/O; Vfs choke routing rides the crate-wide migration
