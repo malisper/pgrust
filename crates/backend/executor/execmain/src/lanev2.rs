@@ -6691,12 +6691,33 @@ unsafe fn agg_fold_staged_mm<'mcx>(
     // builds (the armed table's creation-time mask; representation state
     // travels WITH the table that holds the states).
     let avgpack_mask = ::nodeagg::sink::agg_sink_avgpack_mask(agg);
-    // Byref str transvalue copies: the TABLE-OWNED state store when armed
-    // (the dict-coded sink drain's migrating tables — GL-DICTDRAIN-3;
-    // `StrStateArena` doc), else the bump aggcontext (classic builds
-    // byte-identical). Borrowed for exactly this fold call — mutation is
+    // Byref str transvalue copies: the TABLE-OWNED state store on a SINK build
+    // (the table migrates across pool threads with the morsel lend/reclaim, so
+    // the store must travel with it — `StrStateArena` doc), else the bump
+    // aggcontext. Borrowed for exactly this fold call — mutation is
     // morsel-serialized and the combine phase never reaches here.
+    //
+    // The aggcontext arm is correct ONLY for a build whose table and context
+    // die together, i.e. a serial (non-sink) build — which is C's own
+    // one-allocator-per-table invariant. Sink builds MUST have the store.
     let mut sa = ::nodeagg::sink::agg_sink_str_arena(agg).map(|c| c.borrow_mut());
+    // GL-SINKCRASH-2 — the fail-closed half of the class fix. `arm_sink_build`
+    // arms the store for every drain whose plan carries a by-ref str
+    // transvalue; this refuses if a sink build ever reaches a str advance
+    // without one, instead of silently copying into the serving thread's
+    // aggcontext. That silent fall-back is the whole defect: it cost this class
+    // five incidents because nothing ever made an unarmed sink build LOUD.
+    // A shape error aborts the RG and the serial arm reruns the statement, so
+    // the failure mode of a future missed arming is a slow correct answer, not
+    // a freed pointer in a live pergroup.
+    if sa.is_none()
+        && ::nodeagg::sink::agg_sink_state_bytes(agg).is_some()
+        && ::lanefold::plan_has_str_trans(plan)
+    {
+        return Err(::nodeagg::sink::sink_shape_error(
+            "byref str transvalue folded on a sink build with no table-owned state store",
+        ));
+    }
     // SAFETY: caller contract (above) is exactly fold_rows_grouped_mm's.
     unsafe {
         ::lanefold::fold_rows_grouped_mm(

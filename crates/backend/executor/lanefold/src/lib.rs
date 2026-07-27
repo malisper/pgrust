@@ -3904,6 +3904,33 @@ pub unsafe fn fold_rows_grouped_mm(
 // Everything else refuses at plan_code_hostable.
 // ===========================================================================
 
+/// Whether this plan carries a BY-REF str transvalue — a `min/max(text)` or
+/// `min/max(varchar)` lane whose transvalue is a plain varlena that
+/// [`str_advance`] must COPY on install and copy-then-free on replace.
+///
+/// GL-SINKCRASH-2: this is the class predicate for the byref-str transvalue
+/// discipline, and it exists as ONE function precisely because the discipline
+/// was previously enforced case by case, per feature gate, with no shared
+/// predicate — which is how a sink drain came to copy these transvalues into a
+/// per-(thread, query) memory context while the table holding the pointers
+/// migrated across pool threads. Both the ARMING of the table-owned
+/// [`StrStateArena`] and the fail-closed check that it was armed must read
+/// this same expression, or they can disagree.
+///
+/// `BpMin`/`BpMax` are deliberately INCLUDED: `fold_rows_grouped_mm` routes
+/// them through `str_advance` exactly like the text kinds, so they are the same
+/// allocator-home hazard even though the sink's combine whitelist does not (yet)
+/// admit a bpchar transvalue. A future oid added to that whitelist must not
+/// silently inherit an unarmed store.
+pub fn plan_has_str_trans(plan: &LanePlan<'_>) -> bool {
+    plan.trans.iter().any(|t| {
+        matches!(
+            t.kind,
+            LaneKind::StrMin | LaneKind::StrMax | LaneKind::BpMin | LaneKind::BpMax
+        )
+    })
+}
+
 /// Code-hostable plan shape: no residual transitions, no integer guard
 /// intervals, and every transition either reads no column (`CountStar`) or
 /// reads ONE common column with a multiplicity-legal kind (table above).
