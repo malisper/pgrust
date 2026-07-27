@@ -171,6 +171,10 @@ CbHashJoinPlainAgg	wout_leg	0.0	legacy-row-equiv/outrow	-1bff/-72b0/-4fba + -66c
 # friendly anchors (flip-sanity jobs -1784633628/-632/-634272 @ 34b23fdf2).
 # SerialTsTruncFold = the GL-OPENROWS car-3 two-scale record (jobs
 # -0c51/-2e14/-70ed/-66f5, scratchpad/night/open-rows-letters.md).
+# SerialTopnSelQual = the carve flip's ENFORCING model (GL-RESIDUAL-2
+# re-adjudication of the GL-TOPNNI-1 selective-qual carve): the star-wide
+# selective cells of the born-RED red legs -31c8/-0156 @ t44 main plus the
+# stock-posture green legs -2f77/-671f.
 # SerialScanFoldMeta = the L4 named serial-dominance cell (job
 # …-1784634348-6239 @ 45f07dd71) — single-cell anchor, L7 owns the grid.
 SerialTopnNonInt	granule_rows	8192	rows/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	footer geometry (1221 granules @ 10M, the band diagnosis)	witnessed-ab
@@ -225,6 +229,10 @@ SerialTsTruncFold	s_row_serial	1.0100e-6	ms/row	-0c51/-2e14/-70ed/-66f5	cd271d72
 SerialTsTruncFold	leg_setup	37.33	ms	-0c51/-2e14/-70ed/-66f5	cd271d726	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_EXPRKEY_TOPN	ordered partial-agg exchange, dop-flat over the witnessed cells	witnessed-ab
 SerialTsTruncFold	leg_rate	6.6667e-8	ms/row	-0c51/-2e14/-70ed/-66f5	cd271d726	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_EXPRKEY_TOPN	-	witnessed-ab
 SerialTsTruncFold	n_min_fit	1e7	rows	-0c51/-2e14/-70ed/-66f5	cd271d726	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_EXPRKEY_TOPN	below support the term ABSTAINS	witnessed-ab
+SerialTopnSelQual	ser_flat_ms	126.2	ms	-31c8/-0156	0cb3ab3f2	2026-07-22	scratchpad/night/residual-bornred-rig	PGRUST_LANE_V2_TOPN_NONINT	starved serial zone walk, star-wide class, flat at its WORST witnessed wall (improves toward census scale — conservative)	witnessed-ab
+SerialTopnSelQual	gm_setup	24.7721	ms	-31c8/-0156/-2f77/-671f	d0f6104ac	2026-07-22	scratchpad/night/residual-bornred-rig	PGRUST_LANE_V2_TOPN_NONINT	kept Gather (Merge), width-blind wide projection; both scale cells from the stock-posture legs of record (147.8 @1e7 / 1255.4 @1e8 fresh-stats)	witnessed-ab
+SerialTopnSelQual	gm_rate	1.2306e-5	ms/row	-31c8/-0156/-2f77/-671f	d0f6104ac	2026-07-22	scratchpad/night/residual-bornred-rig	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnSelQual	n_min_fit	1e7	rows	-31c8/-0156	0cb3ab3f2	2026-07-22	scratchpad/night/residual-bornred-rig	PGRUST_LANE_V2_TOPN_NONINT	below support the ENFORCED verdict stays keep-Gather (incumbent)	witnessed-ab
 SerialScanFoldMeta	s_meta	7.3728e-4	ms/granule	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	footer META answer per granule (zone-provable qual posture); SINGLE-CELL anchor — ladder spec L7 owns the grid	witnessed-ab
 SerialScanFoldMeta	ser_setup_ms	0.2	ms	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-ab
 SerialScanFoldMeta	par_rate	9.7200e-6	ms/row	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	both parallel engines at parity on the anchor cell; one curve until L7 splits them	witnessed-ab
