@@ -506,8 +506,11 @@ struct NumaCombine {
     /// Per-bucket completion counters; 1→2 elects the FINAL claim.
     done: Vec<AtomicU8>,
     /// `2 × SINK_NBUCKETS` partial slots (h-major); single writer per slot
-    /// (the popping claim), single consumer (the elected final).
-    partials: Vec<UnsafeCell<Option<SinkRun>>>,
+    /// (the popping claim), single consumer (the elected final). The run's
+    /// state blocks are copied VERBATIM out of the pass-A table, so a
+    /// min/max(text) shape's text pointers reference that table's own store —
+    /// which therefore rides in the slot and is released by the final.
+    partials: Vec<UnsafeCell<Option<(SinkRun, Option<::lanefold::StrStateArena>)>>>,
     /// Observability (NUMAC finalize marker; behavior never reads these).
     steer_hit: AtomicU64,
     steer_miss: AtomicU64,
@@ -1260,11 +1263,13 @@ impl AggSink {
         if self.numa_bucket_eligible(b, locals) {
             let merged = self.merge_bucket_subset(b, numa_half_slice(locals, h))?;
             let run = sink_run_from_bucket_table(b, &merged);
-            nc.note_partial_bytes(run.bytes());
+            let store_bytes = merged.str_store_bytes();
+            let store = merged.into_str_store();
+            nc.note_partial_bytes(run.bytes() + store_bytes);
             // SAFETY: (h,b) was popped exactly once (cursor fetch_add) —
             // this claim is the slot's single writer; the elected final's
             // counter Acquire pairs with our Release increment below.
-            unsafe { *nc.partials[h * SINK_NBUCKETS + b].get() = Some(run) };
+            unsafe { *nc.partials[h * SINK_NBUCKETS + b].get() = Some((run, store)) };
         }
         nc.partial_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         // Election: the claim that brings the bucket to 2 partials runs the
@@ -1282,8 +1287,13 @@ impl AggSink {
         let p0 = unsafe { (*nc.partials[b].get()).take() };
         let p1 = unsafe { (*nc.partials[SINK_NBUCKETS + b].get()).take() };
         let out = match (p0, p1) {
-            (Some(r0), Some(r1)) => {
-                nc.release_partial_bytes(r0.bytes() + r1.bytes());
+            (Some((r0, s0)), Some((r1, s1))) => {
+                nc.release_partial_bytes(
+                    r0.bytes()
+                        + r1.bytes()
+                        + s0.as_ref().map_or(0, ::lanefold::StrStateArena::bytes)
+                        + s1.as_ref().map_or(0, ::lanefold::StrStateArena::bytes),
+                );
                 let views = [
                     SinkLocalView {
                         spilled: &[],
@@ -1327,11 +1337,15 @@ impl AggSink {
                 // asymmetry behind an in-flight failure. Either way the flat
                 // body is correct and self-contained: pass A only READS the
                 // sealed locals, so nothing was consumed.
-                if let Some(r) = &p0 {
-                    nc.release_partial_bytes(r.bytes());
+                if let Some((r, s)) = &p0 {
+                    nc.release_partial_bytes(
+                        r.bytes() + s.as_ref().map_or(0, ::lanefold::StrStateArena::bytes),
+                    );
                 }
-                if let Some(r) = &p1 {
-                    nc.release_partial_bytes(r.bytes());
+                if let Some((r, s)) = &p1 {
+                    nc.release_partial_bytes(
+                        r.bytes() + s.as_ref().map_or(0, ::lanefold::StrStateArena::bytes),
+                    );
                 }
                 drop((p0, p1));
                 nc.finals_flat.fetch_add(1, Ordering::Relaxed);
@@ -1568,7 +1582,7 @@ impl AggSink {
         &self,
         b: usize,
         locals: &[AggSinkLocal],
-    ) -> PgResult<LaneAggTable> {
+    ) -> PgResult<::nodeagg::sink::CombinedBucket> {
         let state_words = self.state_bytes / 8;
         let canon = self.key_words == 0;
         let mut synth: Vec<Vec<SinkRun>> = Vec::with_capacity(locals.len());
@@ -1639,7 +1653,7 @@ impl AggSink {
     fn combine_tail(
         &self,
         b: usize,
-        merged: LaneAggTable,
+        merged: ::nodeagg::sink::CombinedBucket,
         nlocals: usize,
     ) -> PgResult<CombineOutcome> {
         {
