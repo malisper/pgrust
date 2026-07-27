@@ -8742,8 +8742,20 @@ mod tests {
     fn serial_shadow_agrees_with_the_carves_at_their_anchors() {
         use costsize::serial_model as sm;
         use serial_shadow::agrees;
-        // Selective-qual datetime-lead carve: below the survival bound
-        // the carve keeps Gather (enforced=false) — model agrees.
+        // Selective-qual datetime-lead carve, GL-RESIDUAL-2 posture: below
+        // the survival bound the STAR-WIDE class enforces the fitted
+        // two-way — serial at both witnessed scales, outside parity.
+        for rows in [1e7, 1e8] {
+            let v = sm::topn_selqual_starwide_two_way(rows).unwrap();
+            assert_eq!(v.pick, sm::EnginePick::Serial, "priced carve at N={rows}: {v:?}");
+            assert!(!v.parity, "the enforcing pick must be outside the parity band");
+        }
+        // Below the model's support the carve keeps Gather (abstain =
+        // incumbent).
+        assert!(sm::topn_selqual_starwide_two_way(9e6).is_none());
+        // Every OTHER shape in the carve region still keeps Gather
+        // unconditionally (enforced=false) — the observation shadow agrees
+        // at the minting-era anchor.
         let losing = sm::TopnShape {
             class: sm::TopnKeyClass::NarrowTs,
             rows: 1e7,
