@@ -3840,11 +3840,76 @@ enum ArmedDrain {
     Mk(super::ScanMk),
 }
 
+/// The worker's sink-build arm (see [`arm_sink_build_inner`]) plus the ONE
+/// place the by-ref str transvalue store is armed.
+///
+/// GL-SINKCRASH-2 — the class fix. `min/max(text)` transvalues are plain
+/// varlenas that the fold copies on install and copy-then-frees on replace.
+/// The table they live in is Local-owned and LENT to whichever pool thread
+/// serves each morsel, and it is read again LATER by the combine and emit
+/// phases — so the only sound home for those copies is a store that travels
+/// WITH the table and lives as long as the table does
+/// ([`::lanefold::StrStateArena`]). Until now the store was armed inside a
+/// single drain arm (the DictCoded expr-key kind), and the other str-capable
+/// drains — K2 and Mk — copied into `::nodeagg::agg_aggcontext(agg)`: the bump
+/// aggcontext of a pool thread's bound executor, whose lifetime is the
+/// THREAD's binding, not the table's. That is what crashed the release
+/// candidate, witnessed e2e (the crashing statement's own engagement prints
+/// `drain=Mk … str_arena_armed=0`).
+///
+/// Note on the precise failure, because the lane's first reading of it was
+/// wrong and the correction matters to anyone extending this: an in-pod census
+/// of the aggcontext home per table found **zero** changes of home during the
+/// build, i.e. a Local's table is served by ONE thread for the whole
+/// engagement and its transvalues do NOT get scattered across several
+/// contexts. The failure is therefore a LIFETIME failure, not a
+/// multiple-allocator failure: one home, retired (thread unbound, aggcontext
+/// released or rebound by the next statement) while the combine/emit phase
+/// still reads through the pointers — which is why the observed errors are
+/// `runtime agg sink combine panicked` and a shape violation "in a sink
+/// combine/emit", both AFTER the build. A table-owned store fixes it under
+/// either reading, since it both travels with the table and outlives any
+/// thread's context; do not weaken it to a per-thread home on the argument
+/// that tables turn out not to migrate mid-build.
+///
+/// So the arming lives HERE, at the single exit every drain passes through,
+/// keyed on the class predicate ([`::lanefold::plan_has_str_trans`]) rather
+/// than on a drain identity. A drain added later inherits it; a drain arm that
+/// forgets to opt in cannot exist. Shapes with no by-ref str transvalue arm
+/// nothing and are allocation-identical to before.
+///
+/// This is one half of the fix. The other half is the fail-closed check in
+/// `agg_fold_staged_mm`: reaching a str advance on a sink build with no store
+/// armed is a shape error, not a silent fall-back to the aggcontext. Together
+/// they make the discipline provable instead of hopeful — the arming cannot be
+/// incomplete without being loud.
+fn arm_sink_build<'mcx>(
+    sink: &AggSink,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<ArmedDrain> {
+    let armed = arm_sink_build_inner(sink, agg, ss, estate)?;
+    if ::nodeagg::agg_lanefold_plan(agg).is_some_and(::lanefold::plan_has_str_trans) {
+        ::nodeagg::sink::agg_sink_arm_str_state(agg);
+        // Fail closed on the arming itself: every sink drain arms a compact
+        // table before returning, so a plan with a str transvalue that finds no
+        // store here has a shape this code does not understand. Refusing sends
+        // the whole attempt to the serial arm, which is always correct.
+        if ::nodeagg::sink::agg_sink_str_arena(agg).is_none() {
+            return Err(::nodeagg::sink::sink_shape_error(
+                "byref str transvalue on a sink drain whose table has no state store",
+            ));
+        }
+    }
+    Ok(armed)
+}
+
 /// The worker's sink-build arm: the serial lane's own staging + key-shape +
 /// compact arm sequence, under the sink cap, with every admission the leader
 /// proved re-checked (divergence = error). Returns the ExprKey drain's
 /// worker decide (None for the K2 drain).
-fn arm_sink_build<'mcx>(
+fn arm_sink_build_inner<'mcx>(
     sink: &AggSink,
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
@@ -3946,13 +4011,14 @@ fn arm_sink_build<'mcx>(
                 if &wshape != lshape {
                     return Err(shape_err("worker dict-coded shape diverged from the leader's"));
                 }
-                // Arm the TABLE-OWNED byref str state store (GL-DICTDRAIN-3
-                // — travels with the table through the morsel lend/reclaim,
-                // so the replace-free stays allocator-exact across thread
-                // migration) — every str advance on this drain flows
-                // through the mm fold (per-row exits refuse under sink
-                // builds).
-                ::nodeagg::sink::agg_sink_arm_str_state(agg);
+                // The TABLE-OWNED byref str state store used to be armed
+                // HERE, on this one drain arm of three str-capable ones
+                // (GL-DICTDRAIN-3). GL-SINKCRASH-2 moved it to
+                // `arm_sink_build`, the single exit every drain passes
+                // through, keyed on the class predicate instead of on this
+                // drain's identity — the per-arm arming is exactly how K2 and
+                // Mk came to copy min/max(text) transvalues into a per-thread
+                // aggcontext. Do not re-add an arming call here.
                 lane_trace("runtime-agg: dict-coded sink drain armed (worker)");
             }
             _ => return Err(shape_err("worker expr-key kind diverged from the leader's")),
@@ -5324,13 +5390,27 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // alone cannot close the band. Refuse fail-open to the serial arm (the
     // measured winner there). Leader-side pre-launch => workers never arm.
     // Hold disposition D2 (GL-HEAVYTIER-1, coordinator-approved): the
-    // DictCoded kind is EXEMPT from this ceiling — its byref-text
-    // combine/emit rides the allocator-exact StrStateArena substrate and
-    // the class's engaged sink is the witnessed winner with parity at
-    // production scale far above the band (the class letter's cell). The
-    // m5 dict-key classifier dropped its mirror in the SAME commit
-    // (knob-coherence lockstep); every other kind keeps the ceiling
-    // byte-for-byte.
+    // DictCoded kind is EXEMPT from this ceiling, because the class's engaged
+    // sink is the WITNESSED WINNER for that kind with parity at production
+    // scale far above the band (the class letter's cell). The m5 dict-key
+    // classifier dropped its mirror in the SAME commit (knob-coherence
+    // lockstep); every other kind keeps the ceiling byte-for-byte.
+    //
+    // GL-SINKCRASH-2 re-verified this exemption and CORRECTED its stated
+    // grounds. D2 used to read as though the arena substrate were the
+    // discriminator ("its byref-text combine/emit rides the allocator-exact
+    // StrStateArena substrate"). Since every str-capable drain now arms that
+    // store, the substrate is uniform and cannot discriminate anything — so
+    // the only thing holding this exemption up is the measured cell, and the
+    // `!dict_coded_kind` test must STAY. No ladder has been run for the K2 or
+    // Mk kinds above the band; deleting the kind test because "the substrate
+    // is the same now" would be an unpriced perf flip, and leaving the old
+    // wording would be a comment naming a mechanism that no longer explains
+    // the code — the tree's sharpest defect predictor.
+    //
+    // Note also that D2 is NOT what admits the shapes this class crashed on:
+    // the ceiling is an ESTIMATE ceiling, and the crashing statement estimates
+    // far below it, so it was always admitted by the ordinary path.
     if !dict_coded_kind
         && est_groups as f64 >= strminmax_max_groups()
         && combines

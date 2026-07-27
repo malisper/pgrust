@@ -1841,10 +1841,14 @@ pub enum SinkCombineKind {
     /// new-group verbatim block copy IS the correct seed.
     AvgInt8Packed,
     /// min/max(text) — `text_smaller` 459 / `text_larger` 458 over a TEXT
-    /// transvalue (SE-T2AGG CAR B, knob-gated `PGRUST_LANE_V2_AGG_STRMINMAX`
-    /// default OFF): the survivor is a live plain varlena in a worker
-    /// aggcontext (byref accounting via [`sink_combines_byref`]; the same
-    /// lifetime argument as PolyInt128 — every source outlives the combine).
+    /// transvalue (SE-T2AGG CAR B, `PGRUST_LANE_V2_AGG_STRMINMAX`, default ON
+    /// since the GL-STRMM-2 flip): the survivor is a live plain varlena in the
+    /// SOURCE TABLE'S OWN `StrStateArena` — not in a worker aggcontext, which
+    /// is what GL-SINKCRASH-2 had to fix on every drain (byref accounting via
+    /// [`sink_combines_byref`]). The lifetime argument is NOT PolyInt128's:
+    /// these transvalues do not rely on a helper's context outliving the
+    /// combine, they are copied into the destination bucket's own store at
+    /// insert (`sink_own_new_varlena`) and at both adopt points.
     /// Combine is memcmp + length tiebreak pick-pointer
     /// (`varstrfastcmp_c` — the merge.rs `CombineKind::VarlenaMinMax` kernel
     /// verbatim), admitted under memcmp-tier collations only
@@ -4253,9 +4257,17 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
 }
 
 /// Arm the TABLE-OWNED by-ref str transvalue store on a sink WORKER build
-/// (idempotent; `CompactHash::str_arena` doc). Callers: the dict-coded
-/// sink arm — the one drain whose per-row exits refuse, making every str
-/// advance flow through the mm fold where the store is threaded.
+/// (idempotent; `CompactHash::str_arena` doc).
+///
+/// **One caller: `runtime_agg::arm_sink_build`**, at the single exit every
+/// worker drain passes through, keyed on `lanefold::plan_has_str_trans` — NOT
+/// per drain arm. GL-SINKCRASH-2: this used to be called from the DictCoded
+/// expr-key arm alone, so the K2 and Mk drains — which the vguard admission
+/// also lets carry `min/max(text)` — copied their transvalues into the bump
+/// aggcontext of whichever pool thread served each morsel while the table
+/// migrated, and that shipped as a release blocker. Arming per drain identity
+/// is the bug; arming per class predicate is the fix. Do not add a second call
+/// site.
 ///
 /// GL-DICTDRAIN-3 (supersedes the t45-reverted per-thread FREEING context,
 /// `PGRUST_RUNTIME_AGG_STRCTX` retired with it): the drain's Local-owned

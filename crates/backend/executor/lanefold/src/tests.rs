@@ -3233,6 +3233,77 @@ fn str_state_arena_fold_parity_and_recycle() {
 // multiplicity n must be bit-identical to n per-row transitions.
 // ===========================================================================
 
+// GL-SINKCRASH-2: the by-ref str transvalue CLASS PREDICATE. Every kind that
+// `fold_rows_grouped_mm` routes through `str_advance` — i.e. every kind whose
+// transvalue is a heap-allocated varlena copy that needs an allocator whose
+// lifetime is the TABLE's — must be reported by `plan_has_str_trans`, because
+// that one predicate is what arms the table-owned `StrStateArena` on a sink
+// build and what fails the build closed if it was not armed.
+//
+// This test exists because the release blocker it guards was caused by exactly
+// the failure it checks for: the discipline was applied per drain arm instead of
+// per class, so two of the three str-capable sink drains silently copied
+// min/max(text) transvalues into a pool thread's aggcontext, whose lifetime is
+// that thread's binding rather than the table's. A kind added to `str_advance`'s
+// arm without being added here re-opens that hole silently — so this asserts the
+// predicate from the OTHER side too: any kind the fold sends to `str_advance`
+// and this predicate misses is a bug, and vice versa.
+#[test]
+fn plan_has_str_trans_covers_every_str_advance_kind() {
+    let mcx = leaked_mcx();
+    install_utf8_seams();
+    let empty = NodeList::default();
+
+    // min(text) / max(text): the reachable sink surface (combinefns 459/458).
+    for oid in [459u32, 458] {
+        let a = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+        let plan = classify(mcx, &[mk_spec_coll(oid, &a, COLL_C)]).expect("admits");
+        assert!(
+            plan_has_str_trans(&plan),
+            "min/max(text) (oid {oid}) must be reported as a byref str transvalue"
+        );
+    }
+
+    // bpchar min/max: NOT admitted by the sink's combine whitelist today, but
+    // `fold_rows_grouped_mm` already routes BpMin/BpMax through `str_advance`,
+    // so it is the same allocator-lifetime hazard. It must be covered NOW, so
+    // that adding a bpchar oid to that whitelist cannot inherit an unarmed
+    // store.
+    for oid in [1064u32, 1063] {
+        let c = arg_list(mcx, mk_var(mcx, 1, BPCHARV));
+        let Some(plan) = classify(mcx, &[mk_spec_coll(oid, &c, COLL_C)]) else {
+            continue;
+        };
+        assert!(
+            plan_has_str_trans(&plan),
+            "bpchar min/max (oid {oid}) routes through str_advance and must be covered"
+        );
+    }
+
+    // Negative side: a plan with no varlena transvalue must NOT arm the store —
+    // byval shapes have to stay allocation-identical, which is the whole reason
+    // the predicate is narrow rather than "any sink build".
+    let plan_byval = classify(mcx, &[mk_spec(1219, false, &empty)]).expect("admits");
+    assert!(
+        !plan_has_str_trans(&plan_byval),
+        "count(*) has no byref str transvalue and must not arm a state store"
+    );
+    let len = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let plan_len = classify(mcx, &[mk_spec(1963, false, &len)]).expect("admits");
+    assert!(
+        !plan_has_str_trans(&plan_len),
+        "avg(length(text)) reads a text column but its TRANSVALUE is byval"
+    );
+    // A max() over a text column whose TRANSVALUE is an int: reads text, is not
+    // this class. The predicate keys on the transvalue, never on the input.
+    let oct = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let plan_octet = classify(mcx, &[mk_spec(768, true, &oct)]).expect("admits");
+    assert!(
+        !plan_has_str_trans(&plan_octet),
+        "max(octet_length(text)) has an int transvalue"
+    );
+}
+
 #[test]
 fn plan_code_hostable_admission() {
     let mcx = leaked_mcx();
