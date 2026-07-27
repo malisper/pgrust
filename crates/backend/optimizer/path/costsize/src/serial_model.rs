@@ -55,6 +55,10 @@
 //!   @ 34b23fdf2).
 //! * tstrunc family: the GL-OPENROWS car-3 two-scale record (jobs
 //!   -0c51/-2e14/-70ed/-66f5 @ 0ead86dcd/cd271d726).
+//! * topn-selqual family (the carve flip's ENFORCING model): the
+//!   GL-RESIDUAL-2 born-RED red legs' star-wide selective cells (jobs
+//!   pgrust-resid-bornred-red-s{10m,100m}-… -31c8/-0156, 3 draws each)
+//!   plus the green legs' stock-posture cells (-2f77/-671f).
 //! * scanfold-meta family: the ladder-spec L4 named serial-dominance cell
 //!   (job …-1784634348-6239 @ 45f07dd71). Single-cell anchor — the L7
 //!   ladder spec owns the grid.
@@ -376,6 +380,35 @@ pub fn tstrunc_two_way(rows: f64) -> Option<ThreeWay> {
     Some(arbitrate(t_serial, None, t_gather))
 }
 
+/// The selective-qual band-eligible-lead carve family (SE-TOPNNI,
+/// GL-RESIDUAL-2 re-adjudication): the STARVED serial zone walk vs the
+/// kept Gather (Merge) on the REAL sorted banks, wide-tlist (star) shape
+/// — the ONLY class with witnessed sub-threshold-survival cells; every
+/// other shape in the carve region abstains (incumbent stands). The
+/// original unconditional keep-Gather was minted on a cell the current
+/// tree INVERTS at BOTH scales (per-draw-stable at the mid-scale bank,
+/// growing ~6x by the census bank: the kept plan's parallel scan is
+/// width-blind on an all-columns projection while the serial lane reads
+/// the filter+sort columns and late-materializes). Serial is priced FLAT
+/// at its WORST witnessed wall (it improves toward census scale —
+/// conservative); the kept plan is priced through its witnessed cells at
+/// the LOW end of the census band.
+pub const TOPN_SELQUAL_SER_FLAT: f64 = 126.2;
+pub const TOPN_SELQUAL_GM_SETUP: f64 = 24.7721;
+pub const TOPN_SELQUAL_GM_RATE: f64 = 1.2306e-5;
+
+/// The carve's priced two-way (star-wide class only; the runtime sort arm
+/// band-refuses on the friendly posture, so it is not a candidate).
+/// `None` below measured support — the shipped keep-Gather stands there.
+pub fn topn_selqual_starwide_two_way(rows: f64) -> Option<ThreeWay> {
+    if rows < SERIAL_N_MIN {
+        return None;
+    }
+    let t_serial = TOPN_SELQUAL_SER_FLAT;
+    let t_gather = TOPN_SELQUAL_GM_SETUP + TOPN_SELQUAL_GM_RATE * rows;
+    Some(arbitrate(t_serial, None, t_gather))
+}
+
 /// The zone-provable-qual plain-fold family (single-anchor support: the
 /// term abstains unless the META posture holds and N is in support).
 pub fn scanfold_meta_three_way(rows: f64, dop: i32, survival: f64) -> Option<ThreeWay> {
@@ -478,10 +511,25 @@ mod tests {
     /// conservative, never wrong-way.
     #[test]
     fn carve_agreement_at_the_fenced_shapes() {
-        // (1) Selective-qual datetime-lead carve, real-bank anchors
-        // (friendly proxy, narrow shape, 10M): survival 0.0101 must keep
-        // Gather (the carve's verdict), survival 0.75 must suppress into
-        // the serial walk (band refusal — runtime unreachable).
+        // (1) Selective-qual datetime-lead carve, RE-FIT (GL-RESIDUAL-2):
+        // below the survival threshold the ENFORCING verdict is now the
+        // star-wide selqual two-way — the serial walk wins at BOTH
+        // witnessed scales at the current tree (the minting-era losing
+        // cell is refuted; the observation shadow below keeps the
+        // minting-era record for the census trail).
+        let v = topn_selqual_starwide_two_way(1e7).unwrap();
+        assert_eq!(v.pick, EnginePick::Serial, "mid-scale selqual cell: {v:?}");
+        assert!(!v.parity, "the mid-scale margin is outside the parity band");
+        let v = topn_selqual_starwide_two_way(1e8).unwrap();
+        assert_eq!(v.pick, EnginePick::Serial, "census-scale selqual cell: {v:?}");
+        assert!(!v.parity, "the census margin is outside the parity band");
+        assert!(v.t_gather / v.t_serial > 3.0, "census margin must be decisive: {v:?}");
+        assert!(topn_selqual_starwide_two_way(9e6).is_none(), "below support abstains");
+
+        // The minting-era OBSERVATION record (shadow constants, unchanged):
+        // real-bank anchors (friendly proxy, narrow shape, 10M): survival
+        // 0.0101 keeps Gather, survival 0.75 suppresses into the serial
+        // walk (band refusal — runtime unreachable).
         let losing = TopnShape {
             class: TopnKeyClass::NarrowTs,
             rows: 1e7,
@@ -769,6 +817,10 @@ mod tests {
             ("SerialTsTruncFold".into(), "leg_setup".into(), TSTRUNC_LEG_SETUP),
             ("SerialTsTruncFold".into(), "leg_rate".into(), TSTRUNC_LEG_ROW),
             ("SerialTsTruncFold".into(), "n_min_fit".into(), SERIAL_N_MIN),
+            ("SerialTopnSelQual".into(), "ser_flat_ms".into(), TOPN_SELQUAL_SER_FLAT),
+            ("SerialTopnSelQual".into(), "gm_setup".into(), TOPN_SELQUAL_GM_SETUP),
+            ("SerialTopnSelQual".into(), "gm_rate".into(), TOPN_SELQUAL_GM_RATE),
+            ("SerialTopnSelQual".into(), "n_min_fit".into(), SERIAL_N_MIN),
             ("SerialScanFoldMeta".into(), "s_meta".into(), SCANFOLD_S_META),
             ("SerialScanFoldMeta".into(), "ser_setup_ms".into(), SCANFOLD_SER_SETUP),
             ("SerialScanFoldMeta".into(), "par_rate".into(), SCANFOLD_PAR_ROW),
