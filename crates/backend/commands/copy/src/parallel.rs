@@ -218,6 +218,35 @@ fn run_lz4_effective() -> bool {
     run_lz4() && fill_v2()
 }
 
+/// GL-PARQUET-1 inc-2: PGRUST_PARQUET_PARALLEL=1 lets a FORMAT 'parquet'
+/// COPY engage row-group-major parallel decode INSIDE the parallel sort
+/// pipeline (workers decode whole parquet row groups and spill sorted runs;
+/// the merge/fill/stitch back half is the byte-proven text-path machinery).
+/// Default OFF: parquet loads refuse to the serial reader verbatim.
+/// Requires the sort mode (a presort key + PGRUST_PARALLEL_COPY_SORT=1) —
+/// order-preserving parquet parallelism would move cbstore RG seams off the
+/// serial writer's and is refused by design.
+fn parquet_parallel_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_PARQUET_PARALLEL").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// In-flight decode budget, compressed bytes (PGRUST_PARQUET_BUDGET_MB,
+/// default 2048): each worker holds at most one row group's compressed
+/// chunks, so the launched gang is clamped to budget / max-RG-bytes.
+fn parquet_budget_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARQUET_BUDGET_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(2048)
+            .max(64)
+            * (1 << 20)
+    })
+}
+
+
 /// copyfast lever 1: PGRUST_PARALLEL_COPY_SORT_MEMRUNS — keep sorted runs
 /// in MEMORY (same lz4 frames as the run files) instead of spilling, so a
 /// fitting load sorts in one pass: no run write, no merge re-read. Budgeted
@@ -414,34 +443,6 @@ fn memrun_budget(k: i32) -> u64 {
             budget
         }
     }
-}
-
-/// GL-PARQUET-1 inc-2: PGRUST_PARQUET_PARALLEL=1 lets a FORMAT 'parquet'
-/// COPY engage row-group-major parallel decode INSIDE the parallel sort
-/// pipeline (workers decode whole parquet row groups and spill sorted runs;
-/// the merge/fill/stitch back half is the byte-proven text-path machinery).
-/// Default OFF: parquet loads refuse to the serial reader verbatim.
-/// Requires the sort mode (a presort key + PGRUST_PARALLEL_COPY_SORT=1) —
-/// order-preserving parquet parallelism would move cbstore RG seams off the
-/// serial writer's and is refused by design.
-fn parquet_parallel_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_PARQUET_PARALLEL").is_ok_and(|v| v.trim() == "1"))
-}
-
-/// In-flight decode budget, compressed bytes (PGRUST_PARQUET_BUDGET_MB,
-/// default 2048): each worker holds at most one row group's compressed
-/// chunks, so the launched gang is clamped to budget / max-RG-bytes.
-fn parquet_budget_bytes() -> u64 {
-    static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
-        std::env::var("PGRUST_PARQUET_BUDGET_MB")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(2048)
-            .max(64)
-            * (1 << 20)
-    })
 }
 
 /// Segmentator read-block bytes.
