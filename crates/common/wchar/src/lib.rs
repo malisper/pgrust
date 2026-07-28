@@ -1300,7 +1300,11 @@ pub fn pg_utf8_islegal(source: &[u8], length: i32) -> bool {
                 return false;
             }
         }
-        _ => {}
+        1 => {}
+        // C (wchar.c pg_utf8_islegal) switch default: lengths outside 1..=4
+        // are illegal. Divergence found+fixed via proofs/utf8 out-of-contract
+        // harness (Rust used to fall through to the first-byte checks).
+        _ => return false,
     }
     let a = source[0];
     if (0x80..0xc2).contains(&a) {
