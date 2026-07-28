@@ -749,16 +749,6 @@ pub fn fc_timestamp_hash_extended(
     ))
 }
 
-pub fn fc_timestamp_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let (a, b) = (fcinfo.arg_i64(0), fcinfo.arg_i64(1));
-    Ok(Datum::from_i64(if a > b { a } else { b }))
-}
-
-pub fn fc_timestamp_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let (a, b) = (fcinfo.arg_i64(0), fcinfo.arg_i64(1));
-    Ok(Datum::from_i64(if a < b { a } else { b }))
-}
-
 pub fn fc_timestamp_finite(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     Ok(Datum::from_bool(!TIMESTAMP_NOT_FINITE(fcinfo.arg_i64(0))))
 }
