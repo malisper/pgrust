@@ -443,7 +443,8 @@ fn varbit_alloc<'mcx>(mcx: Mcx<'mcx>, bitlen: usize) -> PgResult<PgVec<'mcx, u8>
 }
 
 // VARBIT_PAD: zero the pad bits of the last byte.
-fn pad_last(body: &mut [u8], bitlen: usize) {
+// Pub for proofs/bytea-varbit (Kani C-equivalence harness).
+pub fn pad_last(body: &mut [u8], bitlen: usize) {
     let pad = body.len() * BITS_PER_BYTE - bitlen;
     if pad > 0 {
         let i = body.len() - 1;
