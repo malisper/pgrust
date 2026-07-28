@@ -23,7 +23,9 @@ const LATIN9_MAP: &[u8; 96] =
 const WIN1250_MAP: &[u8; 128] =
     b"  ' \"    %S<STZZ `'\"\".--  s>stzz   L A  \"CS  -RZ  ,l'u .,as L\"lzRAAAALCCCEEEEIIDDNNOOOOxRUUUUYTBraaaalccceeeeiiddnnoooo/ruuuuyt ";
 
-fn pg_to_ascii(src: &[u8], dest: &mut [u8], enc: pg_enc) -> PgResult<()> {
+// pub: proofs/name-ascii Kani harness dual-executes this core against the
+// verbatim C pg_to_ascii (proofs must call shipped code, never a copy).
+pub fn pg_to_ascii(src: &[u8], dest: &mut [u8], enc: pg_enc) -> PgResult<()> {
     let (ascii, range): (&[u8], u8) = if enc == PG_LATIN1 {
         (LATIN1_MAP, RANGE_160)
     } else if enc == PG_LATIN2 {
