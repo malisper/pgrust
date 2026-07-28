@@ -118,7 +118,8 @@ pub fn macaddr8_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgRes
 
 // The C state machine verbatim: NUL-terminated cursor semantics, so reads at
 // or past bytes.len() yield 0.
-fn macaddr8_in_internal(bytes: &[u8]) -> Option<MacAddr8> {
+// pub (visibility only) for the proofs/mac8 Kani equivalence harnesses.
+pub fn macaddr8_in_internal(bytes: &[u8]) -> Option<MacAddr8> {
     let at = |i: usize| bytes.get(i).copied().unwrap_or(0);
     let mut ptr = 0usize;
     let mut badhex = false;
