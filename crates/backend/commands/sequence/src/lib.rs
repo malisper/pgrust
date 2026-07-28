@@ -1153,6 +1153,112 @@ fn nextval_internal_entry(relid: Oid, check_permissions: bool) -> PgResult<i64> 
     nextval_internal(fc_mcx(), relid, check_permissions)
 }
 
+/// Output of the pure nextval fetch-loop computation (proofs/state-seam-probe).
+pub struct NextvalAdvance {
+    /// value to return (elm.last)
+    pub result: i64,
+    /// last fetched value (elm.cached; written back as last_value)
+    pub last: i64,
+    /// value as of "log" future fetches (written into the WAL image)
+    pub next: i64,
+    /// new log_cnt
+    pub log: i64,
+    /// whether a WAL record must be emitted
+    pub logit: bool,
+}
+
+/// Bound a non-cycling sequence exhausted (proofs/state-seam-probe).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NextvalBound {
+    Max,
+    Min,
+}
+
+/// Pure arithmetic core of nextval_internal (C: sequence.c nextval_internal's
+/// pre-log decision + fetch loop). Behavior-identical factoring of the code
+/// previously inline in nextval_internal; `lsn_le_redo` is consulted exactly
+/// where the original read GetRedoRecPtr/page LSN. Factored out so the proofs
+/// suite can prove it against the verbatim C (proofs/state-seam-probe).
+#[allow(clippy::too_many_arguments)]
+pub fn nextval_advance(
+    last_value: i64,
+    log_cnt: i64,
+    is_called: bool,
+    incby: i64,
+    maxv: i64,
+    minv: i64,
+    cache: i64,
+    cycle: bool,
+    lsn_le_redo: impl FnOnce() -> bool,
+) -> Result<NextvalAdvance, NextvalBound> {
+    let mut last = last_value;
+    let mut next = last;
+    let mut result = last;
+    let mut fetch = cache;
+    let mut log = log_cnt;
+    let mut rescnt: i64 = 0;
+    let mut logit = false;
+
+    if !is_called {
+        rescnt += 1;
+        fetch -= 1;
+    }
+
+    // Pre-log SEQ_LOG_VALS extra fetches; also force a record for the first
+    // update after a checkpoint or replay would fail to advance the sequence.
+    if log < fetch || !is_called {
+        fetch += SEQ_LOG_VALS;
+        log = fetch;
+        logit = true;
+    } else if lsn_le_redo() {
+        fetch += SEQ_LOG_VALS;
+        log = fetch;
+        logit = true;
+    }
+
+    while fetch > 0 {
+        if incby > 0 {
+            if (maxv >= 0 && next > maxv - incby) || (maxv < 0 && next + incby > maxv) {
+                if rescnt > 0 {
+                    break;
+                }
+                if !cycle {
+                    return Err(NextvalBound::Max);
+                }
+                next = minv;
+            } else {
+                next += incby;
+            }
+        } else {
+            if (minv < 0 && next < minv - incby) || (minv >= 0 && next + incby < minv) {
+                if rescnt > 0 {
+                    break;
+                }
+                if !cycle {
+                    return Err(NextvalBound::Min);
+                }
+                next = maxv;
+            } else {
+                next += incby;
+            }
+        }
+        fetch -= 1;
+        if rescnt < cache {
+            log -= 1;
+            rescnt += 1;
+            last = next;
+            if rescnt == 1 {
+                result = next;
+            }
+        }
+    }
+
+    log -= fetch;
+    debug_assert!(log >= 0);
+
+    Ok(NextvalAdvance { result, last, next, log, logit })
+}
+
 pub fn nextval_internal(mcx: Mcx<'_>, relid: Oid, check_permissions: bool) -> PgResult<i64> {
     let seqrel = init_sequence(mcx, relid)?;
 
@@ -1192,87 +1298,34 @@ pub fn nextval_internal(mcx: Mcx<'_>, relid: Oid, check_permissions: bool) -> Pg
     // SAFETY: read_seq_tuple leaves the buffer pinned + exclusively locked.
     let mut page = unsafe { PageMut::from_raw(raw) };
 
-    let mut last = seq.last_value();
-    let mut next = last;
-    let mut result = last;
-    let mut fetch = cache;
-    let mut log = seq.log_cnt();
-    let mut rescnt: i64 = 0;
-    let mut logit = false;
-
-    if !seq.is_called() {
-        rescnt += 1;
-        fetch -= 1;
-    }
-
-    // Pre-log SEQ_LOG_VALS extra fetches; also force a record for the first
-    // update after a checkpoint or replay would fail to advance the sequence.
-    if log < fetch || !seq.is_called() {
-        fetch += SEQ_LOG_VALS;
-        log = fetch;
-        logit = true;
-    } else {
-        let redoptr = transam_xlog_seams::get_redo_rec_ptr::call();
-        if page.as_ref().lsn() <= redoptr {
-            fetch += SEQ_LOG_VALS;
-            log = fetch;
-            logit = true;
+    let adv = match nextval_advance(
+        seq.last_value(),
+        seq.log_cnt(),
+        seq.is_called(),
+        incby,
+        maxv,
+        minv,
+        cache,
+        cycle,
+        || page.as_ref().lsn() <= transam_xlog_seams::get_redo_rec_ptr::call(),
+    ) {
+        Ok(a) => a,
+        Err(bound) => {
+            bufmgr::UnlockReleaseBuffer(buf)?;
+            let (word, bnd) = match bound {
+                NextvalBound::Max => ("maximum", maxv),
+                NextvalBound::Min => ("minimum", minv),
+            };
+            return Err(err(
+                format!(
+                    "nextval: reached {word} value of sequence \"{}\" ({bnd})",
+                    seqrel.name()
+                ),
+                ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED,
+            ));
         }
-    }
-
-    while fetch > 0 {
-        if incby > 0 {
-            if (maxv >= 0 && next > maxv - incby) || (maxv < 0 && next + incby > maxv) {
-                if rescnt > 0 {
-                    break;
-                }
-                if !cycle {
-                    bufmgr::UnlockReleaseBuffer(buf)?;
-                    return Err(err(
-                        format!(
-                            "nextval: reached maximum value of sequence \"{}\" ({maxv})",
-                            seqrel.name()
-                        ),
-                        ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED,
-                    ));
-                }
-                next = minv;
-            } else {
-                next += incby;
-            }
-        } else {
-            if (minv < 0 && next < minv - incby) || (minv >= 0 && next + incby < minv) {
-                if rescnt > 0 {
-                    break;
-                }
-                if !cycle {
-                    bufmgr::UnlockReleaseBuffer(buf)?;
-                    return Err(err(
-                        format!(
-                            "nextval: reached minimum value of sequence \"{}\" ({minv})",
-                            seqrel.name()
-                        ),
-                        ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED,
-                    ));
-                }
-                next = maxv;
-            } else {
-                next += incby;
-            }
-        }
-        fetch -= 1;
-        if rescnt < cache {
-            log -= 1;
-            rescnt += 1;
-            last = next;
-            if rescnt == 1 {
-                result = next;
-            }
-        }
-    }
-
-    log -= fetch;
-    debug_assert!(log >= 0);
+    };
+    let (result, last, next, log, logit) = (adv.result, adv.last, adv.next, adv.log, adv.logit);
 
     with_elm(relid, |e| {
         e.increment = incby;
