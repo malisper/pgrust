@@ -497,7 +497,8 @@ pub fn pg_utf_mblen(s: &[u8]) -> i32 {
     pg_utf_mblen_byte(s[0])
 }
 
-fn mbbisearch(ucs: pg_wchar, table: &[mbinterval]) -> bool {
+// pub (visibility only) for the proofs/utf8 Kani equivalence harnesses.
+pub fn mbbisearch(ucs: pg_wchar, table: &[mbinterval]) -> bool {
     let mut min = 0i32;
     let mut max = table.len() as i32 - 1;
     if ucs < table[0].first || ucs > table[max as usize].last {
@@ -517,7 +518,8 @@ fn mbbisearch(ucs: pg_wchar, table: &[mbinterval]) -> bool {
     false
 }
 
-fn ucs_wcwidth(ucs: pg_wchar) -> i32 {
+// pub (visibility only) for the proofs/utf8 Kani equivalence harnesses.
+pub fn ucs_wcwidth(ucs: pg_wchar) -> i32 {
     if ucs == 0 {
         return 0;
     }
