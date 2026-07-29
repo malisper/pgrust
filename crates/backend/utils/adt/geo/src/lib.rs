@@ -163,17 +163,24 @@ pub fn path_encode_none(pts: &[Point], out: &mut Vec<u8>) {
 }
 
 /// adjustBox (gistproc.c): grow b to include addon (also usable here).
+///
+/// The comparisons must be the NaN-aware float8_lt/float8_gt, not raw
+/// `<`/`>`: C switched to them in 1acf757255 (bug #14238, back-patched to
+/// 9.2) because raw double compares assume `x == x`, which NaN breaks —
+/// upstream saw an unkillable infinite loop in GiST build plus qsort
+/// misordering of ordinary values. Raw compares here kept the finite side
+/// where C adopts the NaN (proofs/gist-geo divergence).
 pub fn adjust_box(b: &mut BOX, addon: &BOX) {
-    if b.high.x < addon.high.x {
+    if ::adt_float::float8_lt(b.high.x, addon.high.x) {
         b.high.x = addon.high.x;
     }
-    if b.low.x > addon.low.x {
+    if ::adt_float::float8_gt(b.low.x, addon.low.x) {
         b.low.x = addon.low.x;
     }
-    if b.high.y < addon.high.y {
+    if ::adt_float::float8_lt(b.high.y, addon.high.y) {
         b.high.y = addon.high.y;
     }
-    if b.low.y > addon.low.y {
+    if ::adt_float::float8_gt(b.low.y, addon.low.y) {
         b.low.y = addon.low.y;
     }
 }
@@ -502,5 +509,33 @@ mod tests {
         assert_eq!(point_inside(&Point { x: 1.0, y: 1.0 }, &square).unwrap(), 1);
         assert_eq!(point_inside(&Point { x: 0.0, y: 1.0 }, &square).unwrap(), 2);
         assert_eq!(point_inside(&Point { x: 5.0, y: 5.0 }, &square).unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod nan_comparator_regression {
+    use super::*;
+
+    fn bx(lx: f64, ly: f64, hx: f64, hy: f64) -> BOX {
+        BOX { high: Point { x: hx, y: hy }, low: Point { x: lx, y: ly } }
+    }
+
+    /// C (gistproc.c adjustBox, since 1acf757255 / bug #14238) uses the
+    /// NaN-aware float8_lt/gt, which sort NaN above every non-NaN — so a
+    /// NaN addon coordinate is ADOPTED into the union. Raw </> kept the
+    /// finite value.
+    #[test]
+    fn adjust_box_adopts_nan_like_c() {
+        let nan = f64::NAN;
+        let mut b = bx(0.0, 0.0, 1.0, 1.0);
+        adjust_box(&mut b, &bx(0.0, 0.0, nan, 1.0));
+        assert!(b.high.x.is_nan(), "NaN high.x must be adopted");
+
+        // low side: float8_gt(low, addon.low) — NaN sorts high, so a NaN
+        // low bound is NOT adopted over a finite one, and a finite addon
+        // IS adopted over a NaN low.
+        let mut b2 = bx(nan, 0.0, 1.0, 1.0);
+        adjust_box(&mut b2, &bx(-5.0, 0.0, 1.0, 1.0));
+        assert_eq!(b2.low.x, -5.0, "finite low must replace a NaN low");
     }
 }

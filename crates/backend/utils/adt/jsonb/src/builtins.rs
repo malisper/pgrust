@@ -911,14 +911,10 @@ pub fn fc_jsonb_array_length(
 ) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     let jb = arg_jsonb(fcinfo, 0, mcx)?;
-    let c = jb.as_bytes();
-    if crate::container::container_is_scalar(c) {
-        return Err(invalid_param_msg("cannot get array length of a scalar"));
-    }
-    if !crate::container::container_is_array(c) {
-        return Err(invalid_param_msg("cannot get array length of a non-array"));
-    }
-    Ok(Datum::from_i32(container_size(c) as i32))
+    // Core factored to container::array_length for proofs/jsonb-probe.
+    Ok(Datum::from_i32(
+        crate::container::array_length(jb.as_bytes()).map_err(invalid_param_msg)?,
+    ))
 }
 
 #[cold]

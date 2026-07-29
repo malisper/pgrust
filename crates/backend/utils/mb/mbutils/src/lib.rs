@@ -171,9 +171,9 @@ static PG_ENCNAME: [(&str, pg_enc); 81] = [
 const NAMEDATALEN: usize = 64;
 
 // clean_encoding_name (encnames.c): keep alnum, ASCII-lowercase.
-fn clean_encoding_name(key: &str, buf: &mut [u8; NAMEDATALEN]) -> usize {
+fn clean_encoding_name(key: &[u8], buf: &mut [u8; NAMEDATALEN]) -> usize {
     let mut n = 0;
-    for &b in key.as_bytes() {
+    for &b in key {
         if b.is_ascii_alphanumeric() {
             buf[n] = b.to_ascii_lowercase();
             n += 1;
@@ -182,7 +182,13 @@ fn clean_encoding_name(key: &str, buf: &mut [u8; NAMEDATALEN]) -> usize {
     n
 }
 
-pub fn pg_char_to_encoding(name: &str) -> pg_enc {
+/// Byte-level entry: C (mbutils.c pg_char_to_encoding) cleans the name
+/// byte-wise and never encoding-validates it, so non-UTF-8 bytes must not
+/// reject the whole name — reachable via SQL_ASCII server encodings.
+/// Divergence #10 (proofs/encnames): the SQL wrapper's former
+/// from_utf8(..).unwrap_or("") returned -1 where C returns the cleaned
+/// match (ground-truthed glibc PG 18.4).
+pub fn pg_char_to_encoding_bytes(name: &[u8]) -> pg_enc {
     if name.is_empty() || name.len() >= NAMEDATALEN {
         return -1;
     }
@@ -193,6 +199,10 @@ pub fn pg_char_to_encoding(name: &str) -> pg_enc {
         Ok(idx) => PG_ENCNAME[idx].1,
         Err(_) => -1,
     }
+}
+
+pub fn pg_char_to_encoding(name: &str) -> pg_enc {
+    pg_char_to_encoding_bytes(name.as_bytes())
 }
 
 pub fn pg_valid_client_encoding(name: &str) -> pg_enc {
@@ -1188,7 +1198,9 @@ pub fn report_untranslatable_char(
 }
 
 /// The leading `min(mblen, len, 8)` bytes as space-separated `0xNN`.
-fn byte_sequence(mbstr: &[u8], mblen: i32, len: i32) -> String {
+// pub for proofs/text-slice (Kani stubs the message-text construction;
+// visibility-only change per the 2026-07-28 shipped-edits ruling).
+pub fn byte_sequence(mbstr: &[u8], mblen: i32, len: i32) -> String {
     let jlimit = (mblen.min(len).max(0) as usize).min(8).min(mbstr.len());
     let mut p = String::with_capacity(jlimit * 5);
     for (j, b) in mbstr[..jlimit].iter().enumerate() {
@@ -1294,3 +1306,17 @@ pub fn init_seams() {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod divergence10_regression {
+    // Divergence #10: byte-wise cleaning must match C for non-UTF-8 names
+    // (reachable via SQL_ASCII; ground truth glibc PG 18.4: 'utf\xF18' -> 6).
+    #[test]
+    fn non_utf8_name_cleans_byte_wise() {
+        assert_eq!(super::pg_char_to_encoding_bytes(b"utf\xF18"), 6);
+        assert_eq!(super::pg_char_to_encoding_bytes(b"utf\xFF8"), 6);
+        assert_eq!(super::pg_char_to_encoding_bytes(b"utfx8"), -1); // alnum kept
+        assert_eq!(super::pg_char_to_encoding_bytes(b"utf8"), 6);
+        assert_eq!(super::pg_char_to_encoding_bytes(b""), -1);
+    }
+}

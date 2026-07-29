@@ -246,7 +246,9 @@ fn invalid_type_modifier() -> Box<PgError> {
     Box::new(PgError::error("invalid type modifier").with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-fn anychar_typmodin(tl: &[i32], typename: &str) -> PgResult<i32> {
+// pub for proofs/oracle-compat (Kani check-core harness; visibility-only
+// change per the 2026-07-28 shipped-edits ruling).
+pub fn anychar_typmodin(tl: &[i32], typename: &str) -> PgResult<i32> {
     if tl.len() != 1 {
         return Err(invalid_type_modifier());
     }

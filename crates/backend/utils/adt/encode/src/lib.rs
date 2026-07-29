@@ -341,7 +341,8 @@ fn esc_invalid_bytea() -> Box<PgError> {
     )
 }
 
-fn esc_enc_len(src: &[u8]) -> u64 {
+// Pub for proofs/bytea-varbit (Kani C-equivalence harness).
+pub fn esc_enc_len(src: &[u8]) -> u64 {
     let mut len = 0u64;
     for &c in src {
         if c == 0 || (c & 0x80) != 0 {
@@ -357,11 +358,29 @@ fn esc_enc_len(src: &[u8]) -> u64 {
 
 fn esc_encode(src: &[u8], out: &mut PgVec<'_, u8>) {
     let old = out.len();
-    assert!(out.capacity() - old >= esc_enc_len(src) as usize);
-    // SAFETY: each byte emits the same 1/2/4 bytes esc_enc_len counted for it,
-    // asserted against spare capacity; set_len covers exactly those bytes.
+    let spare = out.capacity() - old;
+    assert!(spare >= esc_enc_len(src) as usize);
+    // SAFETY: the spare capacity past old is valid (possibly uninitialized)
+    // memory; the body initializes exactly the first `written` bytes of it,
+    // which set_len then covers.
     unsafe {
-        let base = out.as_mut_ptr().add(old);
+        let dst = core::slice::from_raw_parts_mut(
+            out.as_mut_ptr().add(old).cast::<core::mem::MaybeUninit<u8>>(),
+            spare,
+        );
+        let written = esc_encode_body(src, dst);
+        out.set_len(old + written);
+    }
+}
+
+// Pure slice core factored out of esc_encode for proofs/bytea-varbit (Kani
+// C-equivalence harness). Caller must supply dst.len() >= esc_enc_len(src).
+pub fn esc_encode_body(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
+    debug_assert!(dst.len() as u64 >= esc_enc_len(src));
+    // SAFETY: each byte emits the same 1/2/4 bytes esc_enc_len counted for it,
+    // within the dst length the caller guarantees.
+    unsafe {
+        let base = dst.as_mut_ptr().cast::<u8>();
         let mut p = base;
         for &c in src {
             if c == 0 || (c & 0x80) != 0 {
@@ -379,11 +398,12 @@ fn esc_encode(src: &[u8], out: &mut PgVec<'_, u8>) {
                 p = p.add(1);
             }
         }
-        out.set_len(old + p.offset_from(base) as usize);
+        p.offset_from(base) as usize
     }
 }
 
-fn esc_dec_len(src: &[u8]) -> PgResult<u64> {
+// Pub for proofs/bytea-varbit (Kani C-equivalence harness).
+pub fn esc_dec_len(src: &[u8]) -> PgResult<u64> {
     let n = src.len();
     let mut i = 0usize;
     let mut len = 0u64;
@@ -407,10 +427,28 @@ fn esc_dec_len(src: &[u8]) -> PgResult<u64> {
 }
 
 fn esc_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
-    let n = src.len();
     let old = out.len();
+    let spare = out.capacity() - old;
     // Revalidates (same checks, same error) to bound the raw writes below.
-    assert!(out.capacity() - old >= esc_dec_len(src)? as usize);
+    assert!(spare >= esc_dec_len(src)? as usize);
+    // SAFETY: the spare capacity past old is valid (possibly uninitialized)
+    // memory; the body initializes exactly the first `written` bytes of it,
+    // which set_len then covers.
+    unsafe {
+        let dst = core::slice::from_raw_parts_mut(
+            out.as_mut_ptr().add(old).cast::<core::mem::MaybeUninit<u8>>(),
+            spare,
+        );
+        let written = esc_decode_body(src, dst)?;
+        out.set_len(old + written);
+    }
+    Ok(())
+}
+
+// Pure slice core factored out of esc_decode for proofs/bytea-varbit (Kani
+// C-equivalence harness). Caller must supply dst.len() >= esc_dec_len(src).
+pub fn esc_decode_body(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> PgResult<usize> {
+    let n = src.len();
     let mut written = 0usize;
     let mut i = 0usize;
     while i < n {
@@ -432,11 +470,9 @@ fn esc_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
             return Err(esc_invalid_bytea());
         }
         // SAFETY: one output byte per unit esc_dec_len counted, within the
-        // asserted spare capacity past old.
-        unsafe { out.as_mut_ptr().add(old + written).write(val) };
+        // dst length the caller guarantees.
+        unsafe { dst.as_mut_ptr().cast::<u8>().add(written).write(val) };
         written += 1;
     }
-    // SAFETY: the first `written` bytes past old were initialized above.
-    unsafe { out.set_len(old + written) };
-    Ok(())
+    Ok(written)
 }

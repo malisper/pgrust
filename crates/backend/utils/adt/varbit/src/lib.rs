@@ -35,7 +35,8 @@ const fn varbit_total_len(bitlen: usize) -> usize {
 }
 
 // bit_in and varbit_in differ only in the typmod check; C keeps two copies.
-fn bits_in<'mcx>(
+// Pub for proofs/varbit-rows (Kani C-equivalence harness; visibility only).
+pub fn bits_in<'mcx>(
     mcx: Mcx<'mcx>,
     input: &[u8],
     atttypmod: i32,
@@ -208,7 +209,8 @@ pub fn fc_varbit_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 
 
 // varbit.c anybit_typmodin/out: typmod is the raw bit length (no VARHDRSZ).
-fn anybit_typmodin(tl: &[i32], typename: &str) -> PgResult<i32> {
+// Pub for proofs/varbit-rows (Kani C-equivalence harness; visibility only).
+pub fn anybit_typmodin(tl: &[i32], typename: &str) -> PgResult<i32> {
     if tl.len() != 1 {
         return Err(Box::new(
             PgError::error("invalid type modifier")
@@ -423,11 +425,13 @@ const HDRSZ: usize = VARHDRSZ + VARBITHDRSZ;
 const BITMASK: u8 = 0xff;
 
 // `payload` below is always the varlena body: [bit_len i32][zero-padded bits].
-fn payload_bitlen(p: &[u8]) -> usize {
+// pub for proofs/varbit-rows (bitlength/bitoctetlength value cores).
+pub fn payload_bitlen(p: &[u8]) -> usize {
     i32::from_ne_bytes(p[..VARBITHDRSZ].try_into().unwrap()) as usize
 }
 
-fn payload_bits(p: &[u8]) -> &[u8] {
+// pub for proofs/varbit-rows (bitlength/bitoctetlength value cores).
+pub fn payload_bits(p: &[u8]) -> &[u8] {
     &p[VARBITHDRSZ..]
 }
 
@@ -443,7 +447,8 @@ fn varbit_alloc<'mcx>(mcx: Mcx<'mcx>, bitlen: usize) -> PgResult<PgVec<'mcx, u8>
 }
 
 // VARBIT_PAD: zero the pad bits of the last byte.
-fn pad_last(body: &mut [u8], bitlen: usize) {
+// Pub for proofs/bytea-varbit (Kani C-equivalence harness).
+pub fn pad_last(body: &mut [u8], bitlen: usize) {
     let pad = body.len() * BITS_PER_BYTE - bitlen;
     if pad > 0 {
         let i = body.len() - 1;
@@ -455,9 +460,10 @@ fn image_datum(img: PgVec<'_, u8>) -> Datum {
     Datum::from_usize(img.leak().as_ptr() as usize)
 }
 
+// Pub for proofs/varbit-rows (Kani stubs the format! message plumbing).
 #[cold]
 #[inline(never)]
-fn size_mismatch_err(opname: &'static str) -> PgError {
+pub fn size_mismatch_err(opname: &'static str) -> PgError {
     PgError::error(format!("cannot {opname} bit strings of different sizes"))
         .with_sqlstate(ERRCODE_STRING_DATA_LENGTH_MISMATCH)
 }
@@ -471,7 +477,8 @@ fn negative_substring_err() -> PgError {
 
 #[cold]
 #[inline(never)]
-fn out_of_range_err(what: &'static str) -> PgError {
+// pub for proofs/varbit-rows (bittoint4/8 error-arm stub target).
+pub fn out_of_range_err(what: &'static str) -> PgError {
     PgError::error(format!("{what} out of range")).with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
 }
 
@@ -498,6 +505,24 @@ fn new_bit_err() -> PgError {
     PgError::error("new bit must be 0 or 1").with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
+// Length-mismatch verdict of bit_logic. Pub slice core for proofs/varbit-rows
+// (Kani C-equivalence harness); factored out of the Mcx-bound bit_logic.
+pub fn bit_logic_verdict(a: &[u8], b: &[u8], opname: &'static str) -> PgResult<usize> {
+    let bitlen1 = payload_bitlen(a);
+    if bitlen1 != payload_bitlen(b) {
+        return Err(size_mismatch_err(opname).into());
+    }
+    Ok(bitlen1)
+}
+
+// Byte-combine body of bit_logic; `r` is the output payload bits (zeroed).
+// Pub slice core for proofs/varbit-rows (Kani C-equivalence harness).
+pub fn bit_logic_body(r: &mut [u8], b1: &[u8], b2: &[u8], op: fn(u8, u8) -> u8) {
+    for ((r, &p1), &p2) in r.iter_mut().zip(b1).zip(b2) {
+        *r = op(p1, p2);
+    }
+}
+
 pub fn bit_logic<'mcx>(
     mcx: Mcx<'mcx>,
     a: &[u8],
@@ -505,15 +530,9 @@ pub fn bit_logic<'mcx>(
     op: fn(u8, u8) -> u8,
     opname: &'static str,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let bitlen1 = payload_bitlen(a);
-    if bitlen1 != payload_bitlen(b) {
-        return Err(size_mismatch_err(opname).into());
-    }
+    let bitlen1 = bit_logic_verdict(a, b, opname)?;
     let mut out = varbit_alloc(mcx, bitlen1)?;
-    let r = &mut out[HDRSZ..];
-    for ((r, &p1), &p2) in r.iter_mut().zip(payload_bits(a)).zip(payload_bits(b)) {
-        *r = op(p1, p2);
-    }
+    bit_logic_body(&mut out[HDRSZ..], payload_bits(a), payload_bits(b), op);
     Ok(out)
 }
 
@@ -541,14 +560,19 @@ pub fn fc_bitxor(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     fc_bit_logic(fcinfo, |a, b| a ^ b, "XOR")
 }
 
-pub fn bitnot_core<'mcx>(mcx: Mcx<'mcx>, p: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let bitlen = payload_bitlen(p);
-    let mut out = varbit_alloc(mcx, bitlen)?;
-    let r = &mut out[HDRSZ..];
-    for (r, &b) in r.iter_mut().zip(payload_bits(p)) {
+// Byte-invert + repad body of bitnot; `r` is the output payload bits.
+// Pub slice core for proofs/varbit-rows (Kani C-equivalence harness).
+pub fn bitnot_body(r: &mut [u8], bits: &[u8], bitlen: usize) {
+    for (r, &b) in r.iter_mut().zip(bits) {
         *r = !b;
     }
     pad_last(r, bitlen);
+}
+
+pub fn bitnot_core<'mcx>(mcx: Mcx<'mcx>, p: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen = payload_bitlen(p);
+    let mut out = varbit_alloc(mcx, bitlen)?;
+    bitnot_body(&mut out[HDRSZ..], payload_bits(p), bitlen);
     Ok(out)
 }
 
@@ -559,22 +583,31 @@ pub fn fc_bitnot(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(image_datum(bitnot_core(mcx, v.data())?))
 }
 
-pub fn bitshiftleft_core<'mcx>(
-    mcx: Mcx<'mcx>,
-    p: &[u8],
-    shft: i32,
-) -> PgResult<PgVec<'mcx, u8>> {
+// Shift bodies: `r` is the output payload bits, zeroed, r.len() == bits.len().
+// Pub slice cores for proofs/varbit-rows (Kani C-equivalence harness);
+// factored out of the Mcx-bound *_core fns (incl. the negative-shift
+// dispatch, which recursed across the cores before allocation — both
+// directions allocate the identical zeroed image, so hoisting the alloc
+// above the dispatch is behavior-preserving).
+pub fn bitshiftleft_body(r: &mut [u8], bits: &[u8], bitlen: usize, shft: i32) {
     if shft < 0 {
+        // The clamped negation is always >= 0, so the cross-call can never
+        // recurse further; calling the positive core directly (rather than
+        // the sibling dispatcher) keeps the call graph acyclic — behavior
+        // identical, and Kani/CBMC would otherwise unwind the syntactic
+        // left<->right recursion cycle to the loop bound (~10x formula,
+        // measured 40s vs 2s in proofs/varbit-rows).
         let shft = shft.max(-(VARBITMAXLEN as i32));
-        return bitshiftright_core(mcx, p, -shft);
+        return bitshiftright_pos(r, bits, bitlen, -shft);
     }
-    let bitlen = payload_bitlen(p);
-    let bits = payload_bits(p);
-    let mut out = varbit_alloc(mcx, bitlen)?;
+    bitshiftleft_pos(r, bits, bitlen, shft);
+}
+
+// Non-negative-shift core of bitshiftleft_body (proofs/varbit-rows).
+fn bitshiftleft_pos(r: &mut [u8], bits: &[u8], bitlen: usize, shft: i32) {
     if shft as usize >= bitlen {
-        return Ok(out);
+        return;
     }
-    let r = &mut out[HDRSZ..];
     let byte_shift = shft as usize / BITS_PER_BYTE;
     let ishift = shft as usize % BITS_PER_BYTE;
     if ishift == 0 {
@@ -588,25 +621,22 @@ pub fn bitshiftleft_core<'mcx>(
             }
         }
     }
-    Ok(out)
 }
 
-pub fn bitshiftright_core<'mcx>(
-    mcx: Mcx<'mcx>,
-    p: &[u8],
-    shft: i32,
-) -> PgResult<PgVec<'mcx, u8>> {
+pub fn bitshiftright_body(r: &mut [u8], bits: &[u8], bitlen: usize, shft: i32) {
     if shft < 0 {
+        // See bitshiftleft_body: acyclic dispatch into the positive core.
         let shft = shft.max(-(VARBITMAXLEN as i32));
-        return bitshiftleft_core(mcx, p, -shft);
+        return bitshiftleft_pos(r, bits, bitlen, -shft);
     }
-    let bitlen = payload_bitlen(p);
-    let bits = payload_bits(p);
-    let mut out = varbit_alloc(mcx, bitlen)?;
+    bitshiftright_pos(r, bits, bitlen, shft);
+}
+
+// Non-negative-shift core of bitshiftright_body (proofs/varbit-rows).
+fn bitshiftright_pos(r: &mut [u8], bits: &[u8], bitlen: usize, shft: i32) {
     if shft as usize >= bitlen {
-        return Ok(out);
+        return;
     }
-    let r = &mut out[HDRSZ..];
     let byte_shift = shft as usize / BITS_PER_BYTE;
     let ishift = shft as usize % BITS_PER_BYTE;
     if ishift == 0 {
@@ -627,6 +657,27 @@ pub fn bitshiftright_core<'mcx>(
     }
     // C VARBIT_PAD_LAST: 1s can shift into the pad bits in either branch.
     pad_last(r, bitlen);
+}
+
+pub fn bitshiftleft_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    shft: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen = payload_bitlen(p);
+    let mut out = varbit_alloc(mcx, bitlen)?;
+    bitshiftleft_body(&mut out[HDRSZ..], payload_bits(p), bitlen, shft);
+    Ok(out)
+}
+
+pub fn bitshiftright_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    shft: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen = payload_bitlen(p);
+    let mut out = varbit_alloc(mcx, bitlen)?;
+    bitshiftright_body(&mut out[HDRSZ..], payload_bits(p), bitlen, shft);
     Ok(out)
 }
 

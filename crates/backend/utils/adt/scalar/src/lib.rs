@@ -187,3 +187,22 @@ pub fn tid_cmp(a: Tid, b: Tid) -> i32 {
         core::cmp::Ordering::Greater => 1,
     }
 }
+
+// Pure selection cores (C tid.c tidlarger/tidsmaller), factored out of the
+// fc wrappers so the value logic is provable without the byref-result
+// allocation (proofs/scalar-misc family).
+pub fn tid_larger(a: Tid, b: Tid) -> Tid {
+    if tid_cmp(a, b) >= 0 {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn tid_smaller(a: Tid, b: Tid) -> Tid {
+    if tid_cmp(a, b) <= 0 {
+        a
+    } else {
+        b
+    }
+}

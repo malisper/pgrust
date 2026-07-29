@@ -497,7 +497,8 @@ pub fn pg_utf_mblen(s: &[u8]) -> i32 {
     pg_utf_mblen_byte(s[0])
 }
 
-fn mbbisearch(ucs: pg_wchar, table: &[mbinterval]) -> bool {
+// pub (visibility only) for the proofs/utf8 Kani equivalence harnesses.
+pub fn mbbisearch(ucs: pg_wchar, table: &[mbinterval]) -> bool {
     let mut min = 0i32;
     let mut max = table.len() as i32 - 1;
     if ucs < table[0].first || ucs > table[max as usize].last {
@@ -517,7 +518,8 @@ fn mbbisearch(ucs: pg_wchar, table: &[mbinterval]) -> bool {
     false
 }
 
-fn ucs_wcwidth(ucs: pg_wchar) -> i32 {
+// pub (visibility only) for the proofs/utf8 Kani equivalence harnesses.
+pub fn ucs_wcwidth(ucs: pg_wchar) -> i32 {
     if ucs == 0 {
         return 0;
     }
@@ -1298,7 +1300,11 @@ pub fn pg_utf8_islegal(source: &[u8], length: i32) -> bool {
                 return false;
             }
         }
-        _ => {}
+        1 => {}
+        // C (wchar.c pg_utf8_islegal) switch default: lengths outside 1..=4
+        // are illegal. Divergence found+fixed via proofs/utf8 out-of-contract
+        // harness (Rust used to fall through to the first-byte checks).
+        _ => return false,
     }
     let a = source[0];
     if (0x80..0xc2).contains(&a) {

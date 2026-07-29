@@ -68,7 +68,8 @@ pub fn object_field_text<'mcx>(
 }
 
 // C: the shared negative-subscript adjustment in jsonb_array_element*.
-fn adjust_element_index(payload: &[u8], element: i32) -> Option<u32> {
+// pub for proofs/jsonb-probe (visibility-only; behavior unchanged).
+pub fn adjust_element_index(payload: &[u8], element: i32) -> Option<u32> {
     if element < 0 {
         let nelements = container_size(payload);
         let abs = element.unsigned_abs();
