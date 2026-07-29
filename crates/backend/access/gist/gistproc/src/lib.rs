@@ -235,12 +235,17 @@ fn fc_gist_box_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     let b1 = unsafe { box_at(fcinfo.arg(0)) };
     let b2 = unsafe { box_at(fcinfo.arg(1)) };
     let result = fcinfo.arg(2).as_usize() as *mut bool;
+    // C (gistproc.c gist_box_same) compares with float8_eq, which is
+    // NaN-aware (NaN == NaN is TRUE there); raw `==` is never true for
+    // NaN, so a NaN-cornered box compared with itself reported "not same"
+    // and GiST would keep re-splitting instead of recognizing the key.
+    // Same NaN-comparator class as adjust_box (proofs/gist-geo).
     let r = match (b1, b2) {
         (Some(b1), (Some(b2))) => {
-            b1.low.x == b2.low.x
-                && b1.low.y == b2.low.y
-                && b1.high.x == b2.high.x
-                && b1.high.y == b2.high.y
+            ::adt_float::float8_eq(b1.low.x, b2.low.x)
+                && ::adt_float::float8_eq(b1.low.y, b2.low.y)
+                && ::adt_float::float8_eq(b1.high.x, b2.high.x)
+                && ::adt_float::float8_eq(b1.high.y, b2.high.y)
         }
         (None, None) => true,
         _ => false,
@@ -951,3 +956,17 @@ pub const GISTPROC_BUILTINS: &[FmgrBuiltin] = &[
     b(3998, "gist_box_distance", 5, fc_gist_box_distance),
     b(6347, "gist_translate_cmptype_common", 1, fc_gist_translate_cmptype_common),
 ];
+
+#[cfg(test)]
+mod nan_same_regression {
+    /// C (gistproc.c gist_box_same) compares via float8_eq, under which
+    /// NaN == NaN is TRUE; raw `==` made a NaN-cornered box differ from
+    /// itself.
+    #[test]
+    fn float8_eq_treats_nan_as_equal() {
+        let nan = f64::NAN;
+        assert!(::adt_float::float8_eq(nan, nan), "C semantics: NaN == NaN");
+        assert!(!::adt_float::float8_eq(nan, 1.0));
+        assert!(!(nan == nan), "raw == is the behavior we removed");
+    }
+}
