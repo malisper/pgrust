@@ -802,7 +802,8 @@ fn invalid_compression_method_id(cmid: u32) -> Box<PgError> {
     Box::new(PgError::error(format!("invalid compression method id {cmid}")))
 }
 
-fn cached_arg_typlen(flinfo: &mut FmgrInfo, argno: i16) -> PgResult<i16> {
+// pub for proofs/strings-scalar (Kani stub target); behavior unchanged.
+pub fn cached_arg_typlen(flinfo: &mut FmgrInfo, argno: i16) -> PgResult<i16> {
     if !flinfo.has_fn_extra() {
         let argtype = fmgr_seams::get_fn_expr_argtype::call(flinfo, argno);
         let typlen = lsyscache::get_typlen(argtype)?;

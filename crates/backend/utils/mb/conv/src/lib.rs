@@ -6,15 +6,17 @@
 
 mod maps;
 
-mod cyrillic_and_mic;
-mod euc2004_sjis2004;
-mod euc_cn_and_mic;
-mod euc_jp_and_sjis;
-mod euc_kr_and_mic;
-mod euc_tw_and_big5;
-mod latin2_and_win1250;
-mod latin_and_mic;
-mod utf8_procs;
+// pub visibility: proofs/mbconv calls the fc_* wrappers directly (CBMC
+// cannot devirtualize CONV_BUILTINS fn pointers); no behavior change.
+pub mod cyrillic_and_mic;
+pub mod euc2004_sjis2004;
+pub mod euc_cn_and_mic;
+pub mod euc_jp_and_sjis;
+pub mod euc_kr_and_mic;
+pub mod euc_tw_and_big5;
+pub mod latin2_and_win1250;
+pub mod latin_and_mic;
+pub mod utf8_procs;
 
 use datum::Datum;
 use mbutils::{

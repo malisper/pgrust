@@ -363,3 +363,13 @@ fn cash_numeric_numeric_cash_roundtrip() {
         assert_eq!(numeric_cash(img.num()).unwrap(), v);
     }
 }
+
+#[test]
+fn div_min_by_neg_one_errors() {
+    // Ruling 2026-07-29: MIN/-1 raises 22003 like int8div, not panic/wrap.
+    let e = cash_div_int64(super::Cash::MIN, -1).unwrap_err();
+    assert_eq!(e.sqlstate, types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+    // neighbours still work
+    assert_eq!(cash_div_int64(super::Cash::MIN, 1).unwrap(), super::Cash::MIN);
+    assert_eq!(cash_div_int64(super::Cash::MIN + 1, -1).unwrap(), super::Cash::MAX);
+}

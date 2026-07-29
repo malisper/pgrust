@@ -393,3 +393,14 @@ fn generate_series_support_rows_estimate() {
     assert_eq!(d.as_usize(), addr, "support fn claims the request");
     assert_eq!(req.rows, 10.0);
 }
+
+#[test]
+fn hashchar_zero_extends_high_bit() {
+    // Ruling 2026-07-29: pin the aarch64 (unsigned char) arm — byte 0x80
+    // hashes as 128, not sign-extended -128.
+    let mut f = types_fmgr::LocalFcinfo::<1>::new(0);
+    f.args[0] = datum::NullableDatum::value(datum::Datum::from_i8(-128)); // 0x80
+    let h = crate::builtins::fc_hashchar(None, &mut f).unwrap().as_u32();
+    let expect = ::hashfn::hash_bytes_uint32(128u32); // unsigned, not -128
+    assert_eq!(h, expect);
+}

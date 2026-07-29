@@ -87,13 +87,15 @@ fn fc_aclitemout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     })
 }
 
-fn fc_aclitem_eq(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for the proofs suite (proofs/state-seam-probe); not part of the crate API.
+pub fn fc_aclitem_eq(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let a1 = arg_aclitem(fcinfo, 0);
     let a2 = arg_aclitem(fcinfo, 1);
     Ok(Datum::from_bool(a1 == a2))
 }
 
-fn fc_hash_aclitem(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for the proofs suite (proofs/state-seam-probe); not part of the crate API.
+pub fn fc_hash_aclitem(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let a = arg_aclitem(fcinfo, 0);
     let sum = (a.ai_privs as u32)
         .wrapping_add(a.ai_grantee)
@@ -101,7 +103,8 @@ fn fc_hash_aclitem(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(Datum::from_i32(sum as i32))
 }
 
-fn fc_hash_aclitem_extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for the proofs suite (proofs/state-seam-probe); not part of the crate API.
+pub fn fc_hash_aclitem_extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let a = arg_aclitem(fcinfo, 0);
     let seed = fcinfo.arg_i64(1) as u64;
     let sum = (a.ai_privs as u32)

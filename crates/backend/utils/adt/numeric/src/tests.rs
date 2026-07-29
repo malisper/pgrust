@@ -785,6 +785,30 @@ mod fc_results {
         assert_eq!(d.as_usize(), num_datum(&b).as_usize());
     }
 
+    // C keeps num2 on ties; the winner's identity is value-visible because
+    // equal numerics can differ in dscale (proofs divergence #9).
+    #[test]
+    fn smaller_larger_tie_keeps_num2() {
+        let ctx = MemoryContext::new_bump("t");
+        let mk = |s: &'static [u8]| {
+            direct_function_call3_coll_in(
+                fc_numeric_in,
+                0,
+                ctx.mcx(),
+                Datum::from_usize(s.as_ptr() as usize),
+                Datum::from_oid(0),
+                Datum::from_i32(-1),
+            )
+            .unwrap()
+        };
+        let one_0 = mk(b"1.0\0");
+        let one_00 = mk(b"1.00\0");
+        for fc in [fc_numeric_smaller, fc_numeric_larger] {
+            let d = types_fmgr::direct_function_call2_coll(fc, 0, one_0, one_00).unwrap();
+            assert_eq!(d.as_usize(), one_00.as_usize());
+        }
+    }
+
     #[test]
     fn in_out_round_trip() {
         let ctx = MemoryContext::new_bump("t");
@@ -1280,4 +1304,228 @@ fn int_sum_transitions_wrap_like_c() {
     assert_eq!(int4_sum(None, Some(7)), Some(7));
     assert_eq!(int4_sum(Some(7), None), Some(7));
     assert_eq!(int2_sum(None, None), None);
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-buffer arithmetic mirrors (fixed.rs) — agreement with the allocating
+// kernels. Proofs campaign / TRIAGE "numeric ARITHMETIC walls on
+// DigitBuf::realloc_uninit": the fixed mirrors must be behavior-identical.
+// ---------------------------------------------------------------------------
+
+fn check_fixed_agree(op: &str, got: VarView<'_>, want: VarView<'_>, v1: VarView<'_>, v2: VarView<'_>) {
+    let g = (got.ndigits, got.weight, got.sign, got.dscale, got.digits.to_vec());
+    let w = (want.ndigits, want.weight, want.sign, want.dscale, want.digits.to_vec());
+    assert_eq!(g, w, "{op} fixed-vs-allocating mismatch for {v1:?} x {v2:?}");
+}
+
+fn check_fixed_ops(v1: VarView<'_>, v2: VarView<'_>) {
+    let mut f = FixedVar::<40>::new();
+    assert!(add_var_fixed(v1, v2, &mut f).is_some(), "add fit {v1:?} {v2:?}");
+    let mut a = NumericVar::new();
+    add_var(v1, v2, &mut a);
+    check_fixed_agree("add", f.view(), a.view(), v1, v2);
+
+    let mut f = FixedVar::<40>::new();
+    assert!(sub_var_fixed(v1, v2, &mut f).is_some(), "sub fit {v1:?} {v2:?}");
+    let mut a = NumericVar::new();
+    sub_var(v1, v2, &mut a);
+    check_fixed_agree("sub", f.view(), a.view(), v1, v2);
+
+    // mul: fixed path exists exactly when the shorter side has <= 6 digits
+    // and rscale == dscale sum (mul_var's short-kernel route).
+    let rscale = v1.dscale + v2.dscale;
+    let mut f = FixedVar::<40>::new();
+    if mul_var_fixed(v1, v2, &mut f, rscale).is_some() {
+        let mut a = NumericVar::new();
+        mul_var(v1, v2, &mut a, rscale);
+        check_fixed_agree("mul", f.view(), a.view(), v1, v2);
+    } else {
+        assert!(
+            v1.ndigits.min(v2.ndigits) > 6,
+            "mul_var_fixed refused a short-kernel case {v1:?} {v2:?}"
+        );
+    }
+}
+
+fn digit_vecs(set: &[NumericDigit], maxlen: usize) -> Vec<Vec<NumericDigit>> {
+    let mut out: Vec<Vec<NumericDigit>> = vec![vec![]];
+    let mut prev: Vec<Vec<NumericDigit>> = vec![vec![]];
+    for _ in 0..maxlen {
+        let mut next = Vec::new();
+        for p in &prev {
+            for &d in set {
+                let mut v = p.clone();
+                v.push(d);
+                next.push(v);
+            }
+        }
+        out.extend(next.iter().cloned());
+        prev = next;
+    }
+    out
+}
+
+// Exhaustive small domain: every digit pattern up to 3 digits/side over the
+// carry/borrow boundary alphabet, crossed with weights (overlapping and
+// disjoint digit ranges) and both signs, for add/sub/mul.
+#[test]
+fn fixed_kernels_agree_exhaustive_small() {
+    let vecs = digit_vecs(&[0, 1, 5000, 9999], 3);
+    let weights = [-2i32, 0, 3];
+    let signs = [NUMERIC_POS, NUMERIC_NEG];
+    for d1 in &vecs {
+        for d2 in &vecs {
+            for &w1 in &weights {
+                for &w2 in &weights {
+                    for &s1 in &signs {
+                        for &s2 in &signs {
+                            let v1 = VarView {
+                                ndigits: d1.len() as i32,
+                                weight: w1,
+                                sign: s1,
+                                dscale: 1,
+                                digits: d1,
+                            };
+                            let v2 = VarView {
+                                ndigits: d2.len() as i32,
+                                weight: w2,
+                                sign: s2,
+                                dscale: 2,
+                                digits: d2,
+                            };
+                            check_fixed_ops(v1, v2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 11
+    }
+}
+
+// Randomized wide cases: up to 12 digits/side (48 decimal digits), full
+// digit range, wide weight spread.
+#[test]
+fn fixed_kernels_agree_randomized_wide() {
+    let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+    for _ in 0..20_000 {
+        let n1 = (rng.next() % 13) as usize;
+        let n2 = (rng.next() % 13) as usize;
+        let d1: Vec<NumericDigit> = (0..n1).map(|_| (rng.next() % 10000) as NumericDigit).collect();
+        let d2: Vec<NumericDigit> = (0..n2).map(|_| (rng.next() % 10000) as NumericDigit).collect();
+        let v1 = VarView {
+            ndigits: n1 as i32,
+            weight: (rng.next() % 31) as i32 - 15,
+            sign: if rng.next() % 2 == 0 { NUMERIC_POS } else { NUMERIC_NEG },
+            dscale: (rng.next() % 7) as i32,
+            digits: &d1,
+        };
+        let v2 = VarView {
+            ndigits: n2 as i32,
+            weight: (rng.next() % 31) as i32 - 15,
+            sign: if rng.next() % 2 == 0 { NUMERIC_POS } else { NUMERIC_NEG },
+            dscale: (rng.next() % 7) as i32,
+            digits: &d2,
+        };
+
+        let mut f = FixedVar::<64>::new();
+        assert!(add_var_fixed(v1, v2, &mut f).is_some());
+        let mut a = NumericVar::new();
+        add_var(v1, v2, &mut a);
+        check_fixed_agree("add", f.view(), a.view(), v1, v2);
+
+        let mut f = FixedVar::<64>::new();
+        assert!(sub_var_fixed(v1, v2, &mut f).is_some());
+        let mut a = NumericVar::new();
+        sub_var(v1, v2, &mut a);
+        check_fixed_agree("sub", f.view(), a.view(), v1, v2);
+
+        // mul with the shorter side truncated to <= 6 digits so the fixed
+        // (short-kernel) route applies.
+        let n1m = n1.min(6);
+        let v1m = VarView {
+            ndigits: n1m as i32,
+            digits: &d1[..n1m],
+            ..v1
+        };
+        let rscale = v1m.dscale + v2.dscale;
+        let mut f = FixedVar::<64>::new();
+        assert!(mul_var_fixed(v1m, v2, &mut f, rscale).is_some());
+        let mut a = NumericVar::new();
+        mul_var(v1m, v2, &mut a, rscale);
+        check_fixed_agree("mul", f.view(), a.view(), v1m, v2);
+    }
+}
+
+// None = allocating fallback: capacity misses and mul cases outside the
+// short-kernel route must refuse, never produce a wrong value.
+#[test]
+fn fixed_kernels_fallback_cases() {
+    let d5 = [1 as NumericDigit, 2, 3, 4, 5];
+    let v5 = VarView {
+        ndigits: 5,
+        weight: 4,
+        sign: NUMERIC_POS,
+        dscale: 0,
+        digits: &d5,
+    };
+    // Result (10 digits + spare) does not fit N=4.
+    let mut f = FixedVar::<4>::new();
+    assert!(add_var_fixed(v5, v5, &mut f).is_none());
+    // (sub of EQUAL operands takes the cmp==0 zero shortcut with no alloc,
+    // so it succeeds at any N — use unequal operands for the capacity miss.)
+    let d5b = [1 as NumericDigit, 2, 3, 4, 6];
+    let v5b = VarView { digits: &d5b, ..v5 };
+    assert!(sub_var_fixed(v5, v5b, &mut f).is_none());
+    assert!(mul_var_fixed(v5, v5, &mut f, 0).is_none());
+    let mut f = FixedVar::<4>::new();
+    assert!(sub_var_fixed(v5, v5, &mut f).is_some());
+    let mut a = NumericVar::new();
+    sub_var(v5, v5, &mut a);
+    check_fixed_agree("sub-equal-zero", f.view(), a.view(), v5, v5);
+    // Same inputs fit N=16.
+    let mut f = FixedVar::<16>::new();
+    assert!(add_var_fixed(v5, v5, &mut f).is_some());
+
+    // mul: rscale != dscale sum -> allocating fallback (mul_var would take
+    // the full pairwise kernel).
+    let mut f = FixedVar::<40>::new();
+    assert!(mul_var_fixed(v5, v5, &mut f, 1).is_none());
+
+    // mul: shorter side > 6 digits -> allocating fallback.
+    let d7 = [9999 as NumericDigit; 7];
+    let v7 = VarView {
+        ndigits: 7,
+        weight: 6,
+        sign: NUMERIC_POS,
+        dscale: 0,
+        digits: &d7,
+    };
+    let mut f = FixedVar::<40>::new();
+    assert!(mul_var_fixed(v7, v7, &mut f, 0).is_none());
+
+    // mul: zero operand short-circuits regardless of rscale (as mul_var).
+    let mut f = FixedVar::<8>::new();
+    let z = VarView {
+        ndigits: 0,
+        weight: 0,
+        sign: NUMERIC_POS,
+        dscale: 0,
+        digits: &[],
+    };
+    assert!(mul_var_fixed(z, v7, &mut f, 5).is_some());
+    let mut a = NumericVar::new();
+    mul_var(z, v7, &mut a, 5);
+    check_fixed_agree("mul-zero", f.view(), a.view(), z, v7);
 }

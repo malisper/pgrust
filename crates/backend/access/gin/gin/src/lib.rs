@@ -15,7 +15,7 @@ pub(crate) mod fast;
 pub(crate) mod get;
 pub(crate) mod insert;
 pub(crate) mod logic;
-pub(crate) mod opclass;
+pub mod opclass; // visibility widened (was pub(crate)) for proofs/jsonb-gin
 pub mod postinglist;
 pub(crate) mod scan;
 pub(crate) mod util;

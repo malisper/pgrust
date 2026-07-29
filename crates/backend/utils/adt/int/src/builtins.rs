@@ -250,15 +250,23 @@ pub fn fc_hashint2extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     )))
 }
 
+// C hashchar is `hash_uint32((int32) PG_GETARG_CHAR(0))`, whose value
+// depends on the platform's `char` signedness: sign-extended on
+// x86-64/macOS, zero-extended on aarch64 (unsigned char). pgrust pins the
+// aarch64 arm — zero-extend the byte — so `"char"` hashes are stable on
+// the deployment target and independent of the compiler's char sign.
+// (Ruling 2026-07-29; upstream is platform-dependent, bug reported.)
 pub fn fc_hashchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
-    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_char() as i32 as u32)))
+    let c = a.value.as_char() as u8 as u32;
+    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(c)))
 }
 
 pub fn fc_hashcharextended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a, seed] = fcinfo.args_n::<2>();
+    let c = a.value.as_char() as u8 as u32;
     Ok(Datum::from_u64(::hashfn::hash_bytes_uint32_extended(
-        a.value.as_char() as i32 as u32,
+        c,
         seed.value.as_i64() as u64,
     )))
 }

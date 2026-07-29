@@ -287,7 +287,10 @@ impl<T> PoolMutex<T> {
 // not(test): mcx's own unit tests bypass pooling entirely (see acct_take).
 #[cfg(all(feature = "std", not(test)))]
 #[inline]
-pub(crate) fn local_pool_on() -> bool {
+// pub for proofs/text-slice (Kani stubs the OnceLock/env read, selecting the
+// global-pool arm; visibility-only change per the 2026-07-28 shipped-edits
+// ruling).
+pub fn local_pool_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         !std::env::var("PGRUST_MCX_POOL_STRIPE").is_ok_and(|v| v.trim() == "0")

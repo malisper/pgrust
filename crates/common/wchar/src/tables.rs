@@ -1,4 +1,5 @@
-static NONSPACING: [mbinterval; 334] = [
+// pub (visibility only) for the proofs/utf8 Kani equivalence harnesses.
+pub static NONSPACING: [mbinterval; 334] = [
     mbinterval { first: 0xad, last: 0xad },
     mbinterval { first: 0x300, last: 0x36f },
     mbinterval { first: 0x483, last: 0x489 },
@@ -335,7 +336,8 @@ static NONSPACING: [mbinterval; 334] = [
     mbinterval { first: 0xe0001, last: 0xe01ef },
 ];
 
-static EAST_ASIAN_FW: [mbinterval; 122] = [
+// pub (visibility only) for the proofs/utf8 Kani equivalence harnesses.
+pub static EAST_ASIAN_FW: [mbinterval; 122] = [
     mbinterval { first: 0x1100, last: 0x115f },
     mbinterval { first: 0x231a, last: 0x231b },
     mbinterval { first: 0x2329, last: 0x232a },

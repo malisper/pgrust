@@ -429,6 +429,15 @@ pub fn cash_div_int64(c: Cash, i: i64) -> PgResult<Cash> {
     if i == 0 {
         return Err(division_by_zero().into());
     }
+    // Cash::MIN / -1 overflows i64 (the quotient is Cash::MAX + 1). C's
+    // cash_div_int64 lacks this guard — its 2024 money-overflow sweep
+    // (4f96281587) covered multiply and the float paths but not division,
+    // so on aarch64 it silently returns Cash::MIN and on x86-64 it traps
+    // into a "floating-point exception". int8div raises 22003 for the same
+    // arithmetic; mirror that (ruling 2026-07-29; bug reported upstream).
+    if i == -1 && c == Cash::MIN {
+        return Err(money_out_of_range().into());
+    }
     Ok(c / i)
 }
 

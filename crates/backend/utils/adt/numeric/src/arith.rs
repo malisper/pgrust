@@ -120,7 +120,10 @@ pub fn cmp_abs_common(
 
         if var1weight == var2weight {
             while i1 < var1ndigits && i2 < var2ndigits {
-                let stat = *d1.add(i1 as usize) - *d2.add(i2 as usize);
+                // C (numeric.c cmp_abs_common) subtracts in int; widen so
+                // out-of-invariant digits (corrupt storage) compare exactly
+                // as C does instead of wrapping at i16 (proofs finding #6).
+                let stat = *d1.add(i1 as usize) as i32 - *d2.add(i2 as usize) as i32;
                 i1 += 1;
                 i2 += 1;
                 if stat != 0 {
