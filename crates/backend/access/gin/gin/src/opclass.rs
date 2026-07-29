@@ -487,7 +487,8 @@ pub(crate) fn extract_query<'m>(
 }
 
 /// consistentFn (binary). `mcx` is the reset-per-call scratch (C tempCtx).
-pub(crate) fn consistent(
+// pub (was pub(crate)) for proofs/jsonb-gin — visibility-only edit.
+pub fn consistent(
     mcx: Mcx<'_>,
     col: &GinColState,
     check: &[GinTernaryValue],
@@ -566,7 +567,8 @@ pub(crate) fn consistent(
 }
 
 /// triConsistentFn. `mcx` is the reset-per-call scratch (C tempCtx).
-pub(crate) fn tri_consistent(
+// pub (was pub(crate)) for proofs/jsonb-gin — visibility-only edit.
+pub fn tri_consistent(
     mcx: Mcx<'_>,
     col: &GinColState,
     check: &[GinTernaryValue],
