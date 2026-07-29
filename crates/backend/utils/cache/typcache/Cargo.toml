@@ -27,6 +27,11 @@ types_nodes = { path = "../../../../_support/types/nodes" }
 pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }
 format_type = { path = "../../adt/format_type" }
 
+[features]
+# Proofs-only seam: exposes TypeCacheEntry::proof_entry_for_compare so a
+# proofs crate can construct a concrete entry (e.g. int4) without the cache.
+proof-support = []
+
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 fmgr_core = { path = "../../fmgr/fmgr_core" }
