@@ -35,7 +35,8 @@ const fn varbit_total_len(bitlen: usize) -> usize {
 }
 
 // bit_in and varbit_in differ only in the typmod check; C keeps two copies.
-fn bits_in<'mcx>(
+// Pub for proofs/varbit-rows (Kani C-equivalence harness; visibility only).
+pub fn bits_in<'mcx>(
     mcx: Mcx<'mcx>,
     input: &[u8],
     atttypmod: i32,
@@ -208,7 +209,8 @@ pub fn fc_varbit_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 
 
 // varbit.c anybit_typmodin/out: typmod is the raw bit length (no VARHDRSZ).
-fn anybit_typmodin(tl: &[i32], typename: &str) -> PgResult<i32> {
+// Pub for proofs/varbit-rows (Kani C-equivalence harness; visibility only).
+pub fn anybit_typmodin(tl: &[i32], typename: &str) -> PgResult<i32> {
     if tl.len() != 1 {
         return Err(Box::new(
             PgError::error("invalid type modifier")

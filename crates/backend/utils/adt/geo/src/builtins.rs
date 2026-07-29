@@ -347,7 +347,8 @@ point2! {
     fc_point_div => crate::point::point_div_point;
 }
 
-fn fc_construct_point(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_construct_point(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let x = fcinfo.arg_f64(0);
     let y = fcinfo.arg_f64(1);
     ret_point(fcinfo, crate::point::construct_point(x, y))
@@ -441,7 +442,8 @@ fc2!(fc_boxes_bound_box, arg_box, arg_box, a, b, |fcinfo: &mut Fcinfo, a, b| {
     ret_box(fcinfo, crate::boxes::boxes_bound_box(&a, &b))
 });
 
-fn fc_box_intersect(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_box_intersect(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let a = unsafe { arg_box(fcinfo, 0) };
     // SAFETY: module contract.
@@ -553,7 +555,8 @@ circle_pt! {
     fc_circle_div_pt => crate::circle::circle_div_pt;
 }
 
-fn fc_cr_circle(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_cr_circle(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let center = unsafe { arg_point(fcinfo, 0) };
     let radius = fcinfo.arg_f64(1);
