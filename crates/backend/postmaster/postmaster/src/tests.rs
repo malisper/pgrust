@@ -223,6 +223,56 @@ fn stall_watchdog_bound_zero_restores_the_unbounded_wait() {
 }
 
 #[test]
+fn stall_early_wake_never_armed_outside_a_shutdown() {
+    // Regression: DetermineSleepTime schedules its early stall-watchdog wake
+    // via `shutdown_stall_armed`. That gate MUST agree with the watchdog's own
+    // arming (`shutdown_stall_due` minus the elapsed-time test) in every state
+    // — otherwise the postmaster schedules a wake the watchdog will never
+    // honor. The specific outage: in steady-state PM_RUN with no shutdown in
+    // progress, `pm_state_since` is stamped at boot, so once uptime exceeds the
+    // bound the wake computed a 0 ms sleep and the postmaster busy-spun
+    // epoll_pwait(…, 0) at 100% CPU. The gate must be false there.
+    let armed = |shutdown, state, since, bound| {
+        crate::serverloop::shutdown_stall_armed(shutdown, false, false, state, since, bound)
+    };
+
+    // The exact spin scenario: normal PM_RUN, stamped at boot, uptime far past
+    // the bound. Must NOT arm.
+    assert!(
+        !armed(NoShutdown, PMState::PM_RUN, 1_000, PM_SHUTDOWN_STALL_SECS),
+        "steady-state PM_RUN must not arm the early wake — this is the 100% CPU spin"
+    );
+
+    // No-shutdown must never arm in ANY state, at any uptime.
+    for &s in &[
+        PMState::PM_INIT,
+        PMState::PM_STARTUP,
+        PMState::PM_RECOVERY,
+        PMState::PM_HOT_STANDBY,
+        PMState::PM_RUN,
+        PMState::PM_STOP_BACKENDS,
+        PMState::PM_WAIT_BACKENDS,
+        PMState::PM_NO_CHILDREN,
+    ] {
+        assert!(
+            !armed(NoShutdown, s, 1_000, PM_SHUTDOWN_STALL_SECS),
+            "no shutdown in progress must not arm the early wake in {}",
+            pmstate_name(s)
+        );
+    }
+
+    // `armed` is exactly `shutdown_stall_due` with the time test removed: in
+    // every watched state, an armed gate + enough elapsed time is due, and a
+    // non-armed gate is never due regardless of elapsed time.
+    for &s in WATCHED_STATES {
+        assert!(armed(FastShutdown, s, 1_000, PM_SHUTDOWN_STALL_SECS));
+        assert!(due(s, PM_SHUTDOWN_STALL_SECS));
+    }
+    assert!(!armed(NoShutdown, PMState::PM_WAIT_BACKENDS, 1_000, PM_SHUTDOWN_STALL_SECS));
+    assert!(!due(PMState::PM_RUN, 100 * PM_SHUTDOWN_STALL_SECS));
+}
+
+#[test]
 fn wedge_marker_is_greppable_and_stable() {
     // Scored runs and the coldopen rig belt grep for this exact token; it is
     // part of the lane's contract with the harness.

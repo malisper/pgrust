@@ -63,10 +63,18 @@ pub fn DetermineSleepTime() -> i64 {
         // GL-GANGWEDGE-1: wake in time for the shutdown-stall watchdog. A
         // wedged shutdown produces no events at all, so without this the
         // postmaster would sleep on its latch for the full 60s tick and the
-        // bound would be quantized to it.
+        // bound would be quantized to it. Gate on `shutdown_stall_armed` — the
+        // exact predicate the watchdog itself uses — so this early wake is only
+        // scheduled when the watchdog can actually fire. In steady-state
+        // PM_RUN (no shutdown in progress) this is false and we fall through to
+        // the 60s tick; scheduling a wake there computed a 0 ms sleep once
+        // uptime passed the bound and spun the postmaster at 100% CPU.
         let stall_bound = crate::pm_shutdown_stall_secs();
-        let state_since = with_pm(|pm| pm.pm_state_since);
-        if stall_bound != 0 && state_since != 0 && !with_pm(|pm| pm.stall_escalated) {
+        let (fatal_error, escalated, pm_state, state_since) = with_pm(|pm| {
+            (pm.fatal_error, pm.stall_escalated, pm.pm_state, pm.pm_state_since)
+        });
+        if shutdown_stall_armed(shutdown, fatal_error, escalated, pm_state, state_since, stall_bound)
+        {
             let seconds = stall_bound - (now_secs() - state_since);
             return (seconds * 1000).max(0).min(60 * 1000);
         }
@@ -125,14 +133,20 @@ fn now_secs() -> i64 {
 ///   waiting on a child to notice a stop request; it may legitimately take
 ///   minutes on a large buffer pool.
 /// * PM_NO_CHILDREN — the ceremony is over; ExitPostmaster runs from there.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn shutdown_stall_due(
+/// The stall watchdog's state gate: every condition of `shutdown_stall_due`
+/// EXCEPT the elapsed-time test. When this is false the watchdog cannot fire
+/// in the current postmaster state, so `DetermineSleepTime` must not schedule
+/// an early wake for it either — the two must share exactly this gate. (They
+/// diverged once: the wake path checked only `bound`/`state_since`/`escalated`
+/// and fired in steady-state PM_RUN, where `pm_state_since` is stamped at boot
+/// and `shutdown == NoShutdown`; once uptime passed `bound` the wake computed a
+/// 0 ms sleep and the postmaster busy-spun `epoll_pwait(…, 0)` at 100% CPU.)
+pub(crate) fn shutdown_stall_armed(
     shutdown: i32,
     fatal_error: bool,
     escalated: bool,
     state: PMState,
     state_since: i64,
-    now: i64,
     bound: i64,
 ) -> bool {
     if bound == 0 || escalated || fatal_error || state_since == 0 {
@@ -147,7 +161,21 @@ pub(crate) fn shutdown_stall_due(
     {
         return false;
     }
-    (now - state_since) >= bound
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shutdown_stall_due(
+    shutdown: i32,
+    fatal_error: bool,
+    escalated: bool,
+    state: PMState,
+    state_since: i64,
+    now: i64,
+    bound: i64,
+) -> bool {
+    shutdown_stall_armed(shutdown, fatal_error, escalated, state, state_since, bound)
+        && (now - state_since) >= bound
 }
 
 pub fn ServerLoop() -> PgResult<i32> {
