@@ -785,6 +785,30 @@ mod fc_results {
         assert_eq!(d.as_usize(), num_datum(&b).as_usize());
     }
 
+    // C keeps num2 on ties; the winner's identity is value-visible because
+    // equal numerics can differ in dscale (proofs divergence #9).
+    #[test]
+    fn smaller_larger_tie_keeps_num2() {
+        let ctx = MemoryContext::new_bump("t");
+        let mk = |s: &'static [u8]| {
+            direct_function_call3_coll_in(
+                fc_numeric_in,
+                0,
+                ctx.mcx(),
+                Datum::from_usize(s.as_ptr() as usize),
+                Datum::from_oid(0),
+                Datum::from_i32(-1),
+            )
+            .unwrap()
+        };
+        let one_0 = mk(b"1.0\0");
+        let one_00 = mk(b"1.00\0");
+        for fc in [fc_numeric_smaller, fc_numeric_larger] {
+            let d = types_fmgr::direct_function_call2_coll(fc, 0, one_0, one_00).unwrap();
+            assert_eq!(d.as_usize(), one_00.as_usize());
+        }
+    }
+
     #[test]
     fn in_out_round_trip() {
         let ctx = MemoryContext::new_bump("t");

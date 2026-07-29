@@ -254,11 +254,14 @@ pub fn fc_width_bucket_numeric(
     )?))
 }
 
-// C returns one of the input pointers — so do smaller/larger.
+// C returns one of the input pointers — so do smaller/larger. The tie must
+// keep num2 as C (numeric.c numeric_smaller/larger) does: equal numerics can
+// have different images (1.0 vs 1.00 dscale), so the winner's identity is
+// value-visible through numeric_out (proofs divergence #9).
 pub fn fc_numeric_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null numeric varlenas (strict fn).
     let (a, b) = unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?) };
-    Ok(if crate::cmp_numerics(a, b) >= 0 {
+    Ok(if crate::cmp_numerics(a, b) > 0 {
         fcinfo.arg(0)
     } else {
         fcinfo.arg(1)
@@ -268,7 +271,7 @@ pub fn fc_numeric_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 pub fn fc_numeric_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null numeric varlenas (strict fn).
     let (a, b) = unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?) };
-    Ok(if crate::cmp_numerics(a, b) <= 0 {
+    Ok(if crate::cmp_numerics(a, b) < 0 {
         fcinfo.arg(0)
     } else {
         fcinfo.arg(1)
