@@ -232,13 +232,17 @@ fn fc_hstore_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
                 .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
                 .into());
         }
-        let key = pqformat::pq_getmsgbytes(buf, rawlen as usize)?.to_vec();
+        // C (hstore_io.c hstore_recv) reads keys/values with pq_getmsgtext,
+        // which runs pg_client_to_server -> pg_verify_mbstr and so rejects
+        // invalid encoding and embedded NULs. Raw pq_getmsgbytes accepted
+        // bytes C refuses (proofs finding #3, validation-bypass class).
+        let key = pqformat::pq_getmsgtext(fcinfo.result_mcx(), buf, rawlen as usize)?.to_vec();
         check_key_len(key.len())?;
         let rawlen = pqformat::pq_getmsgint(buf, 4)? as i32;
         let val = if rawlen < 0 {
             None
         } else {
-            let v = pqformat::pq_getmsgbytes(buf, rawlen as usize)?.to_vec();
+            let v = pqformat::pq_getmsgtext(fcinfo.result_mcx(), buf, rawlen as usize)?.to_vec();
             check_val_len(v.len())?;
             Some(v)
         };
