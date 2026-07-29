@@ -423,11 +423,13 @@ const HDRSZ: usize = VARHDRSZ + VARBITHDRSZ;
 const BITMASK: u8 = 0xff;
 
 // `payload` below is always the varlena body: [bit_len i32][zero-padded bits].
-fn payload_bitlen(p: &[u8]) -> usize {
+// pub for proofs/varbit-rows (bitlength/bitoctetlength value cores).
+pub fn payload_bitlen(p: &[u8]) -> usize {
     i32::from_ne_bytes(p[..VARBITHDRSZ].try_into().unwrap()) as usize
 }
 
-fn payload_bits(p: &[u8]) -> &[u8] {
+// pub for proofs/varbit-rows (bitlength/bitoctetlength value cores).
+pub fn payload_bits(p: &[u8]) -> &[u8] {
     &p[VARBITHDRSZ..]
 }
 
@@ -473,7 +475,8 @@ fn negative_substring_err() -> PgError {
 
 #[cold]
 #[inline(never)]
-fn out_of_range_err(what: &'static str) -> PgError {
+// pub for proofs/varbit-rows (bittoint4/8 error-arm stub target).
+pub fn out_of_range_err(what: &'static str) -> PgError {
     PgError::error(format!("{what} out of range")).with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
 }
 

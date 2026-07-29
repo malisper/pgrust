@@ -393,12 +393,12 @@ pub fn fc_bttidcmp(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 
 pub fn fc_tidlarger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (a, b) = (arg_tid(fcinfo, 0), arg_tid(fcinfo, 1));
-    tid_result(fcinfo, if crate::tid_cmp(a, b) >= 0 { a } else { b })
+    tid_result(fcinfo, crate::tid_larger(a, b))
 }
 
 pub fn fc_tidsmaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (a, b) = (arg_tid(fcinfo, 0), arg_tid(fcinfo, 1));
-    tid_result(fcinfo, if crate::tid_cmp(a, b) <= 0 { a } else { b })
+    tid_result(fcinfo, crate::tid_smaller(a, b))
 }
 
 pub fn fc_hashtid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
