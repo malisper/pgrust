@@ -55,8 +55,9 @@ impl<'a> FlatIter<'a> {
     }
 }
 
+// pub (was pub(crate)) for proofs/typcache-inst: visibility-only, no behavior change.
 #[derive(Clone, Copy)]
-pub(crate) struct ElemMeta {
+pub struct ElemMeta {
     pub typlen: i32,
     pub typbyval: bool,
     pub typalign: u8,
@@ -149,7 +150,8 @@ fn elem_type_mismatch() -> Box<PgError> {
 
 // Loop of C array_eq after the dims fast path (which the caller runs first,
 // matching C's check order relative to the typcache lookup).
-pub(crate) fn array_eq_loop(
+// pub (was pub(crate)) for proofs/typcache-inst: visibility-only, no behavior change.
+pub fn array_eq_loop(
     mcx: Mcx<'_>,
     array1: &[u8],
     array2: &[u8],
@@ -209,7 +211,8 @@ pub fn array_eq_internal(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     array_eq_loop(mcx, &array1, &array2, collation, meta, &mut eqfn)
 }
 
-pub(crate) fn array_cmp_core(
+// pub (was pub(crate)) for proofs/typcache-inst: visibility-only, no behavior change.
+pub fn array_cmp_core(
     mcx: Mcx<'_>,
     array1: &[u8],
     array2: &[u8],
