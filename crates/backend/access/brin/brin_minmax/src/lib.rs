@@ -171,7 +171,13 @@ fn minmax_get_strategy_procinfo(
     let opaque = &bdesc.bd_info[attno as usize - 1].minmax;
 
     if opaque.cached_subtype.get() != subtype {
-        *opaque.strategy_procinfos.borrow_mut() = [const { None }; 5];
+        // Per-slot stores, not `= [const { None }; 5]`: the whole-array
+        // assignment memcpys a const-promoted array into the heap cell, which
+        // defeats the model checker's field tracking of the niche
+        // discriminant (proofs/brin-minmax); same stores, same cold path.
+        for slot in opaque.strategy_procinfos.borrow_mut().iter_mut() {
+            *slot = None;
+        }
         opaque.cached_subtype.set(subtype);
     }
 
