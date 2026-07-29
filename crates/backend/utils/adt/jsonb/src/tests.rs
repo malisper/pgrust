@@ -190,6 +190,46 @@ fn pairwise_cmp_matches_c() {
     }
 }
 
+// Non-allocating core for proofs/jsonb-probe cmp family: the fixed-stack walk
+// must agree with the allocating walk everywhere it engages, and the deep
+// fallback must preserve unbounded-nesting behavior.
+#[test]
+fn fixed_cmp_core_matches_allocating_path() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let images: Vec<Vec<u8>> = golden_docs()
+        .iter()
+        .map(|r| jsonb_image(mcx, &r.input))
+        .collect();
+    for a in 0..images.len() {
+        for b in 0..images.len() {
+            let alloc = ops::compare_containers(mcx, &images[a][4..], &images[b][4..]).unwrap();
+            let fixed = ops::compare_containers_fixed::<{ ops::CMP_FIXED_DEPTH }>(
+                &images[a][4..],
+                &images[b][4..],
+            )
+            .expect("golden docs are within the fixed depth cap")
+            .unwrap();
+            assert_eq!(fixed, alloc, "cmp({a},{b})");
+        }
+    }
+
+    // Depth > CMP_FIXED_DEPTH: fixed core abstains (None), the public entry
+    // point still answers via the allocating fallback.
+    let deep = |inner: &str| {
+        let depth = ops::CMP_FIXED_DEPTH + 8;
+        let doc = format!("{}{}{}", "[".repeat(depth), inner, "]".repeat(depth));
+        jsonb_image(mcx, doc.as_bytes())
+    };
+    let (d1, d2) = (deep("1"), deep("2"));
+    assert!(ops::compare_containers_fixed::<{ ops::CMP_FIXED_DEPTH }>(&d1[4..], &d2[4..])
+        .is_none());
+    assert_eq!(ops::compare_containers(mcx, &d1[4..], &d1[4..]).unwrap(), 0);
+    assert!(ops::compare_containers(mcx, &d1[4..], &d2[4..]).unwrap() < 0);
+    assert!(ops::compare_containers(mcx, &d2[4..], &d1[4..]).unwrap() > 0);
+}
+
 #[test]
 fn containment_matches_c() {
     setup();

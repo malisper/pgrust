@@ -35,6 +35,18 @@ struct Frame<'a> {
     state: IterState,
 }
 
+/// One advance of a single nesting level's state machine — the loop body of
+/// C's JsonbIteratorNext, minus the frame-stack push/pop, which the two
+/// iterator shells (grown vec / fixed inline array) each apply themselves.
+enum Step<'a> {
+    /// Return this token/value to the caller.
+    Emit(WjbToken, JsonbItem<'a>),
+    /// This level is exhausted: pop it and return the end token (value Null).
+    Pop(WjbToken),
+    /// Descend into a nested container (C: iteratorFromContainer push).
+    Recurse(&'a [u8]),
+}
+
 impl<'a> Frame<'a> {
     // C: iteratorFromContainer.
     fn from_container(container: &'a [u8]) -> Frame<'a> {
@@ -58,6 +70,94 @@ impl<'a> Frame<'a> {
             cur_data_offset: 0,
             cur_value_offset: 0,
             state,
+        }
+    }
+
+    fn step(&mut self, skip_nested: bool) -> Step<'a> {
+        match self.state {
+            IterState::ArrayStart => {
+                let item = JsonbItem::Array {
+                    n_elems: self.n_elems,
+                    raw_scalar: self.is_scalar,
+                };
+                self.cur_index = 0;
+                self.cur_data_offset = 0;
+                self.cur_value_offset = 0;
+                self.state = IterState::ArrayElem;
+                Step::Emit(WjbToken::BeginArray, item)
+            }
+            IterState::ArrayElem => {
+                if self.cur_index >= self.n_elems {
+                    return Step::Pop(WjbToken::EndArray);
+                }
+                let val = fill_item(
+                    self.container,
+                    self.cur_index,
+                    self.base_off,
+                    self.cur_data_offset,
+                );
+                jbe_advance_offset(
+                    &mut self.cur_data_offset,
+                    child_jentry(self.container, self.cur_index),
+                );
+                self.cur_index += 1;
+                if let JsonbItem::Binary(child) = val {
+                    if !skip_nested {
+                        return Step::Recurse(child);
+                    }
+                }
+                Step::Emit(WjbToken::Elem, val)
+            }
+            IterState::ObjectStart => {
+                let item = JsonbItem::Object {
+                    n_pairs: self.n_elems,
+                };
+                self.cur_index = 0;
+                self.cur_data_offset = 0;
+                self.cur_value_offset = get_jsonb_offset(self.container, self.n_elems);
+                self.state = IterState::ObjectKey;
+                Step::Emit(WjbToken::BeginObject, item)
+            }
+            IterState::ObjectKey => {
+                if self.cur_index >= self.n_elems {
+                    return Step::Pop(WjbToken::EndObject);
+                }
+                let val = fill_item(
+                    self.container,
+                    self.cur_index,
+                    self.base_off,
+                    self.cur_data_offset,
+                );
+                if !matches!(val, JsonbItem::String(_)) {
+                    panic!("unexpected jsonb type as object key");
+                }
+                self.state = IterState::ObjectValue;
+                Step::Emit(WjbToken::Key, val)
+            }
+            IterState::ObjectValue => {
+                self.state = IterState::ObjectKey;
+                let val = fill_item(
+                    self.container,
+                    self.cur_index + self.n_elems,
+                    self.base_off,
+                    self.cur_value_offset,
+                );
+                jbe_advance_offset(
+                    &mut self.cur_data_offset,
+                    child_jentry(self.container, self.cur_index),
+                );
+                jbe_advance_offset(
+                    &mut self.cur_value_offset,
+                    child_jentry(self.container, self.cur_index + self.n_elems),
+                );
+                self.cur_index += 1;
+                if let JsonbItem::Binary(child) = val {
+                    if !skip_nested {
+                        return Step::Recurse(child);
+                    }
+                }
+                Step::Emit(WjbToken::Value, val)
+            }
         }
     }
 }
@@ -91,85 +191,58 @@ impl<'a, 'mcx> JsonbIterator<'a, 'mcx> {
             let Some(it) = self.stack.last_mut() else {
                 return (WjbToken::Done, JsonbItem::Null);
             };
-            match it.state {
-                IterState::ArrayStart => {
-                    let item = JsonbItem::Array {
-                        n_elems: it.n_elems,
-                        raw_scalar: it.is_scalar,
-                    };
-                    it.cur_index = 0;
-                    it.cur_data_offset = 0;
-                    it.cur_value_offset = 0;
-                    it.state = IterState::ArrayElem;
-                    return (WjbToken::BeginArray, item);
+            match it.step(skip_nested) {
+                Step::Emit(tok, val) => return (tok, val),
+                Step::Pop(tok) => {
+                    self.stack.pop();
+                    return (tok, JsonbItem::Null);
                 }
-                IterState::ArrayElem => {
-                    if it.cur_index >= it.n_elems {
-                        self.stack.pop();
-                        return (WjbToken::EndArray, JsonbItem::Null);
-                    }
-                    let val =
-                        fill_item(it.container, it.cur_index, it.base_off, it.cur_data_offset);
-                    jbe_advance_offset(
-                        &mut it.cur_data_offset,
-                        child_jentry(it.container, it.cur_index),
-                    );
-                    it.cur_index += 1;
-                    if let JsonbItem::Binary(child) = val {
-                        if !skip_nested {
-                            self.stack.push(Frame::from_container(child));
-                            continue;
-                        }
-                    }
-                    return (WjbToken::Elem, val);
+                Step::Recurse(child) => self.stack.push(Frame::from_container(child)),
+            }
+        }
+    }
+}
+
+/// Non-allocating core for the proofs/jsonb-probe cmp family: the same
+/// JsonbIteratorNext state machine as `JsonbIterator`, but the frame stack is
+/// a fixed-capacity inline array (`[Frame; N]`, N >= 1) instead of an
+/// Mcx-backed vec. `next` reports nesting deeper than N as `None` so callers
+/// can fall back to the allocating iterator — behavior stays identical for
+/// every input at any depth.
+pub struct FixedJsonbIterator<'a, const N: usize> {
+    stack: [Frame<'a>; N],
+    depth: usize,
+}
+
+impl<'a, const N: usize> FixedJsonbIterator<'a, N> {
+    pub fn init(container: &'a [u8]) -> FixedJsonbIterator<'a, N> {
+        const { assert!(N >= 1, "FixedJsonbIterator needs room for the root frame") };
+        FixedJsonbIterator {
+            // Frame is Copy; unused slots hold copies of the root frame.
+            stack: [Frame::from_container(container); N],
+            depth: 1,
+        }
+    }
+
+    /// C: JsonbIteratorNext, as in `JsonbIterator::next`; `None` means the
+    /// input nests deeper than N frames (never a semantic result).
+    pub fn next(&mut self, skip_nested: bool) -> Option<(WjbToken, JsonbItem<'a>)> {
+        loop {
+            if self.depth == 0 {
+                return Some((WjbToken::Done, JsonbItem::Null));
+            }
+            match self.stack[self.depth - 1].step(skip_nested) {
+                Step::Emit(tok, val) => return Some((tok, val)),
+                Step::Pop(tok) => {
+                    self.depth -= 1;
+                    return Some((tok, JsonbItem::Null));
                 }
-                IterState::ObjectStart => {
-                    let item = JsonbItem::Object {
-                        n_pairs: it.n_elems,
-                    };
-                    it.cur_index = 0;
-                    it.cur_data_offset = 0;
-                    it.cur_value_offset = get_jsonb_offset(it.container, it.n_elems);
-                    it.state = IterState::ObjectKey;
-                    return (WjbToken::BeginObject, item);
-                }
-                IterState::ObjectKey => {
-                    if it.cur_index >= it.n_elems {
-                        self.stack.pop();
-                        return (WjbToken::EndObject, JsonbItem::Null);
+                Step::Recurse(child) => {
+                    if self.depth == N {
+                        return None;
                     }
-                    let val =
-                        fill_item(it.container, it.cur_index, it.base_off, it.cur_data_offset);
-                    if !matches!(val, JsonbItem::String(_)) {
-                        panic!("unexpected jsonb type as object key");
-                    }
-                    it.state = IterState::ObjectValue;
-                    return (WjbToken::Key, val);
-                }
-                IterState::ObjectValue => {
-                    it.state = IterState::ObjectKey;
-                    let val = fill_item(
-                        it.container,
-                        it.cur_index + it.n_elems,
-                        it.base_off,
-                        it.cur_value_offset,
-                    );
-                    jbe_advance_offset(
-                        &mut it.cur_data_offset,
-                        child_jentry(it.container, it.cur_index),
-                    );
-                    jbe_advance_offset(
-                        &mut it.cur_value_offset,
-                        child_jentry(it.container, it.cur_index + it.n_elems),
-                    );
-                    it.cur_index += 1;
-                    if let JsonbItem::Binary(child) = val {
-                        if !skip_nested {
-                            self.stack.push(Frame::from_container(child));
-                            continue;
-                        }
-                    }
-                    return (WjbToken::Value, val);
+                    self.stack[self.depth] = Frame::from_container(child);
+                    self.depth += 1;
                 }
             }
         }
