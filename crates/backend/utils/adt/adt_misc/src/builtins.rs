@@ -949,8 +949,10 @@ pub fn fc_pg_char_to_encoding(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinf
     // SAFETY: catalog arg is name; strict fn.
     let raw = unsafe { fcinfo.arg_name(0) };
     let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    let name = core::str::from_utf8(&raw[..nul]).unwrap_or("");
-    Ok(Datum::from_i32(mbutils::pg_char_to_encoding(name)))
+    // Bytes, not str: C cleans invalid-encoding bytes byte-wise; a
+    // from_utf8 wholesale-reject here was divergence #10 (reachable in
+    // SQL_ASCII databases; proofs/encnames witness + glibc ground truth).
+    Ok(Datum::from_i32(mbutils::pg_char_to_encoding_bytes(&raw[..nul])))
 }
 
 pub fn fc_anychar_typmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
