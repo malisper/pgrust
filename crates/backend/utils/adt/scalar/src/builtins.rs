@@ -431,21 +431,24 @@ pub fn fc_oidvectoreq(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
 
 // SAFETY: strict catalog arg is a non-null plain-storage oidvector (the
 // fc_oidvectoreq read contract).
-unsafe fn oidvector_bytes(fcinfo: &Fcinfo, i: usize) -> &[u8] {
+unsafe fn oidvector_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<&[u8]> {
     let p = fcinfo.arg(i).as_usize() as *const ::array::oidvector;
     let v = unsafe { &*p };
-    debug_assert!(v.ndim == 1 && v.dataoffset == 0);
-    unsafe {
+    // C (hashfunc.c hashoidvector) calls check_valid_oidvector, which
+    // ereports. A debug_assert here left release builds hashing vectors C
+    // refuses (proofs finding: release-effective gate owed).
+    ::nbt_compare::check_valid_oidvector(v)?;
+    Ok(unsafe {
         core::slice::from_raw_parts(
             p.add(1) as *const u8,
             (v.dim1.max(0) as usize) * core::mem::size_of::<Oid>(),
         )
-    }
+    })
 }
 
 pub fn fc_hashoidvector(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: as fc_oidvectoreq.
-    let b = unsafe { oidvector_bytes(fcinfo, 0) };
+    let b = unsafe { oidvector_bytes(fcinfo, 0) }?;
     Ok(Datum::from_u32(::hashfn::hash_bytes(b)))
 }
 
@@ -454,7 +457,7 @@ pub fn fc_hashoidvectorextended(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: as fc_oidvectoreq.
-    let b = unsafe { oidvector_bytes(fcinfo, 0) };
+    let b = unsafe { oidvector_bytes(fcinfo, 0) }?;
     let seed = fcinfo.arg_i64(1) as u64;
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(b, seed)))
 }
