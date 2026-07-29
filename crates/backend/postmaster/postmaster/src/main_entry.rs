@@ -13,8 +13,9 @@ use crate::{
 
 const PROGNAME: &str = "postgres";
 // PG_VERSION_STR renders compiler/platform detail; the version core is the
-// parity-relevant fragment.
-const PG_VERSION_STR: &str = "PostgreSQL 18.3 (pgrust)";
+// parity-relevant fragment. Kept in step with adt_misc::introspect's
+// PG_VERSION_STR (the version() banner) — see the rationale there.
+const PG_VERSION_STR: &str = "pgrust 0.2 (PostgreSQL 18.3 compatible)";
 const PG_MODE_MASK_OWNER: libc::mode_t = 0o077;
 const LOG_METAINFO_DATAFILE: &str = "current_logfiles";
 
