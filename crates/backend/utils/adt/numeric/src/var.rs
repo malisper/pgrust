@@ -23,13 +23,16 @@ std::thread_local! {
 
 const DIGIT_POOL_SLOTS: usize = 16;
 
-fn word_buf_take() -> Vec<u16> {
+// pub for proofs/numeric-probe (Kani stubs the TLS pool: thread_local
+// destructor registration reaches `_tlv_atexit`, a Kani-unsupported symbol).
+pub fn word_buf_take() -> Vec<u16> {
     WORD_POOL
         .with(|p| p.borrow_mut().pop())
         .unwrap_or_default()
 }
 
-fn word_buf_put(v: Vec<u16>) {
+// pub for proofs/numeric-probe (see word_buf_take).
+pub fn word_buf_put(v: Vec<u16>) {
     if v.capacity() == 0 {
         return;
     }
