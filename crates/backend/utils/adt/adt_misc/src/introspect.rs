@@ -10,11 +10,15 @@ use types_rel::AccessShareLock;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::NameData;
 
-// Shaped like C's PG_VERSION_STR ("PostgreSQL <ver> on <triple>, ..."):
-// collate.linux.utf8 and infinite_recurse gate on version() ~ platform
-// regexes ('linux-gnu'), so the target triple must appear.
+// Shaped like C's PG_VERSION_STR ("... on <triple>, ..."): collate.linux.utf8
+// and infinite_recurse gate on version() ~ platform regexes ('linux-gnu'), so
+// the target triple must appear. Leads with pgrust's OWN version — this is not
+// PostgreSQL and should not claim to be — while keeping the "PostgreSQL 18.3"
+// substring, which is the wire-compatibility statement clients care about.
+// The `server_version` GUC stays exactly "18.3": that is what drivers parse
+// for feature detection and it must remain the plain upstream number.
 pub const PG_VERSION_STR: &str = concat!(
-    "PostgreSQL 18.3 (pgrust) on ",
+    "pgrust 0.2 (PostgreSQL 18.3 compatible) on ",
     env!("PGRUST_TARGET_TRIPLE"),
     ", 64-bit"
 );

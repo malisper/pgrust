@@ -64,12 +64,28 @@ struct NumLocale {
     currency: &'static [u8],
 }
 
-// need_locale under a non-C lc_monetary/lc_numeric raises pglc_localeconv's
-// clean feature error; under C locale all conv strings are empty, so both
-// arms produce the same defaults ('.'/','/' '/'-'/'+').
+// NUM_prepare_locale (formatting.c). Under the C locale every conv string is
+// empty, so both arms fall through to the same defaults ('.'/','/' '/'-'/'+');
+// under a real locale pglc_localeconv now supplies the LC_NUMERIC separators
+// too, so D/G follow the locale the way C's do.
 fn num_prepare_locale(num: &NUMDesc) -> ::types_error::PgResult<NumLocale> {
     Ok(if num.need_locale != 0 {
         let l = ::pg_locale::pglc_localeconv()?;
+        // C's order matters: the thousands fallback is chosen AGAINST the
+        // already-resolved decimal point, so a locale that uses ',' for the
+        // decimal gets '.' for grouping rather than a separator collision.
+        let decimal: &'static [u8] = if !l.decimal_point.is_empty() {
+            l.decimal_point.as_bytes()
+        } else {
+            b"."
+        };
+        let thousands: &'static [u8] = if !l.thousands_sep.is_empty() {
+            l.thousands_sep.as_bytes()
+        } else if decimal != b"," {
+            b","
+        } else {
+            b"."
+        };
         NumLocale {
             negative: if !l.negative_sign.is_empty() {
                 l.negative_sign.as_bytes()
@@ -81,8 +97,8 @@ fn num_prepare_locale(num: &NUMDesc) -> ::types_error::PgResult<NumLocale> {
             } else {
                 b"+"
             },
-            decimal: b".",
-            thousands: b",",
+            decimal,
+            thousands,
             currency: if !l.currency_symbol.is_empty() {
                 l.currency_symbol.as_bytes()
             } else {

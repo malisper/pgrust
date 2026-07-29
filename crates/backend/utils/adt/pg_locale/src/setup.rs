@@ -76,6 +76,16 @@ pub(crate) fn monetary_and_numeric_are_c() -> bool {
     LOCALE_MONETARY.with(|s| is_c(&s.borrow())) && LOCALE_NUMERIC.with(|s| is_c(&s.borrow()))
 }
 
+/// The session's (lc_monetary, lc_numeric) names — the two categories
+/// PGLC_localeconv reads. Per-thread like every other locale record here,
+/// because each backend is a thread and SET lc_monetary is session-scoped.
+pub(crate) fn monetary_and_numeric_names() -> (String, String) {
+    (
+        LOCALE_MONETARY.with(|s| s.borrow().clone()),
+        LOCALE_NUMERIC.with(|s| s.borrow().clone()),
+    )
+}
+
 #[must_use]
 pub fn database_ctype_is_c() -> bool {
     DATABASE_CTYPE_IS_C.with(Cell::get)
