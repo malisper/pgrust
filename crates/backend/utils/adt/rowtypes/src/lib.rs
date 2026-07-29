@@ -367,6 +367,209 @@ fn deform_record<'mcx>(
     Ok(DeformedRec { tup_type, tup_typmod, tupdesc, values, nulls, _rec: rec })
 }
 
+// ---------------------------------------------------------------------------
+// Pure record-comparison core (provability seam).
+//
+// The column loops of C's record_cmp/record_eq, factored over
+// already-deformed columns so they are independent of deform_record, the
+// typcache thread-local, and FmgrInfo memoization. The monoliths below feed
+// them via `FmgrRecordOps`; a proofs crate can feed them concrete columns and
+// a concrete comparator. Behavior-identical to the previous inline loops.
+// ---------------------------------------------------------------------------
+
+/// Per-physical-column metadata the compare loops read (from tupdesc attrs).
+#[derive(Clone, Copy, Debug)]
+pub struct RecordColumnMeta {
+    pub attisdropped: bool,
+    pub atttypid: Oid,
+    pub attcollation: Oid,
+}
+
+/// Pure-core errors; the callers map these onto the C ereports.
+#[derive(Debug)]
+pub enum RecordCoreError<E> {
+    /// C: "cannot compare dissimilar column types %s and %s at record column %d"
+    /// (`col` is the 0-based logical column; the message prints col+1).
+    DissimilarColumns { type1: Oid, type2: Oid, col: usize },
+    /// C: "cannot compare record types with different numbers of columns"
+    ColumnCountMismatch,
+    /// Comparator resolution/invocation error, passed through untouched.
+    Column(E),
+}
+
+/// Per-column comparator hooks for [`record_cmp_core`]. `resolve` is called
+/// exactly where C performs the typcache lookup — BEFORE the null checks —
+/// so a type without a comparison function errors even for all-null columns.
+pub trait RecordColumnCmp {
+    type Err;
+    fn resolve(&mut self, j: usize, typid: Oid) -> Result<(), Self::Err>;
+    fn compare(
+        &mut self,
+        j: usize,
+        collation: Oid,
+        d1: Datum,
+        d2: Datum,
+    ) -> Result<i32, Self::Err>;
+}
+
+/// Per-column equality hooks for [`record_eq_core`]; same resolve placement.
+pub trait RecordColumnEq {
+    type Err;
+    fn resolve(&mut self, j: usize, typid: Oid) -> Result<(), Self::Err>;
+    fn equal(
+        &mut self,
+        j: usize,
+        collation: Oid,
+        d1: Datum,
+        d2: Datum,
+    ) -> Result<bool, Self::Err>;
+}
+
+/// record_cmp's column loop (rowtypes.c), exactly: skip dropped physical
+/// columns independently per side, pair the survivors as logical column `j`,
+/// error on type mismatch, resolve the comparator, then NULLs sort last and
+/// the first non-zero comparison wins; a leftover unpaired non-dropped column
+/// after a tie is the column-count error.
+///
+/// Preconditions: `values*`/`nulls*` are parallel to `meta*` (same length).
+pub fn record_cmp_core<E>(
+    meta1: &[RecordColumnMeta],
+    values1: &[Datum],
+    nulls1: &[bool],
+    meta2: &[RecordColumnMeta],
+    values2: &[Datum],
+    nulls2: &[bool],
+    ops: &mut dyn RecordColumnCmp<Err = E>,
+) -> Result<i32, RecordCoreError<E>> {
+    debug_assert!(values1.len() == meta1.len() && nulls1.len() == meta1.len());
+    debug_assert!(values2.len() == meta2.len() && nulls2.len() == meta2.len());
+    let (n1, n2) = (meta1.len(), meta2.len());
+    let (mut i1, mut i2, mut j) = (0usize, 0usize, 0usize);
+    let mut result = 0i32;
+    while i1 < n1 || i2 < n2 {
+        if i1 < n1 && meta1[i1].attisdropped {
+            i1 += 1;
+            continue;
+        }
+        if i2 < n2 && meta2[i2].attisdropped {
+            i2 += 1;
+            continue;
+        }
+        if i1 >= n1 || i2 >= n2 {
+            break;
+        }
+        let att1 = &meta1[i1];
+        let att2 = &meta2[i2];
+        if att1.atttypid != att2.atttypid {
+            return Err(RecordCoreError::DissimilarColumns {
+                type1: att1.atttypid,
+                type2: att2.atttypid,
+                col: j,
+            });
+        }
+        let collation =
+            if att1.attcollation == att2.attcollation { att1.attcollation } else { InvalidOid };
+
+        ops.resolve(j, att1.atttypid).map_err(RecordCoreError::Column)?;
+
+        if !nulls1[i1] || !nulls2[i2] {
+            if nulls1[i1] {
+                result = 1;
+                break;
+            }
+            if nulls2[i2] {
+                result = -1;
+                break;
+            }
+            let cmpresult = ops
+                .compare(j, collation, values1[i1], values2[i2])
+                .map_err(RecordCoreError::Column)?;
+            if cmpresult < 0 {
+                result = -1;
+                break;
+            }
+            if cmpresult > 0 {
+                result = 1;
+                break;
+            }
+        }
+        i1 += 1;
+        i2 += 1;
+        j += 1;
+    }
+    if result == 0 && (i1 != n1 || i2 != n2) {
+        return Err(RecordCoreError::ColumnCountMismatch);
+    }
+    Ok(result)
+}
+
+/// record_eq's column loop (rowtypes.c), exactly: same pairing/skip/resolve
+/// rules as [`record_cmp_core`], but any NULL-vs-anything pair or unequal
+/// pair short-circuits to false; column-count mismatch only errors when
+/// everything compared equal so far (C parity).
+pub fn record_eq_core<E>(
+    meta1: &[RecordColumnMeta],
+    values1: &[Datum],
+    nulls1: &[bool],
+    meta2: &[RecordColumnMeta],
+    values2: &[Datum],
+    nulls2: &[bool],
+    ops: &mut dyn RecordColumnEq<Err = E>,
+) -> Result<bool, RecordCoreError<E>> {
+    debug_assert!(values1.len() == meta1.len() && nulls1.len() == meta1.len());
+    debug_assert!(values2.len() == meta2.len() && nulls2.len() == meta2.len());
+    let (n1, n2) = (meta1.len(), meta2.len());
+    let (mut i1, mut i2, mut j) = (0usize, 0usize, 0usize);
+    let mut result = true;
+    while i1 < n1 || i2 < n2 {
+        if i1 < n1 && meta1[i1].attisdropped {
+            i1 += 1;
+            continue;
+        }
+        if i2 < n2 && meta2[i2].attisdropped {
+            i2 += 1;
+            continue;
+        }
+        if i1 >= n1 || i2 >= n2 {
+            break;
+        }
+        let att1 = &meta1[i1];
+        let att2 = &meta2[i2];
+        if att1.atttypid != att2.atttypid {
+            return Err(RecordCoreError::DissimilarColumns {
+                type1: att1.atttypid,
+                type2: att2.atttypid,
+                col: j,
+            });
+        }
+        let collation =
+            if att1.attcollation == att2.attcollation { att1.attcollation } else { InvalidOid };
+
+        ops.resolve(j, att1.atttypid).map_err(RecordCoreError::Column)?;
+
+        if !nulls1[i1] || !nulls2[i2] {
+            if nulls1[i1] || nulls2[i2] {
+                result = false;
+                break;
+            }
+            if !ops
+                .equal(j, collation, values1[i1], values2[i2])
+                .map_err(RecordCoreError::Column)?
+            {
+                result = false;
+                break;
+            }
+        }
+        i1 += 1;
+        i2 += 1;
+        j += 1;
+    }
+    if result && (i1 != n1 || i2 != n2) {
+        return Err(RecordCoreError::ColumnCountMismatch);
+    }
+    Ok(result)
+}
+
 // C RecordCompareData fn_extra memo: per-logical-column typcache entries.
 struct RecordCompareData {
     record1_type: Oid,
@@ -450,6 +653,98 @@ fn no_support_fn(kind: &str, typ: Oid) -> alloc::boxed::Box<::types_error::PgErr
     )
 }
 
+/// Build the pure core's per-column metadata view of a deformed record.
+fn column_meta<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    r: &DeformedRec<'_>,
+) -> PgResult<PgVec<'mcx, RecordColumnMeta>> {
+    let n = r.values.len();
+    let mut v: PgVec<'mcx, RecordColumnMeta> = vec_with_capacity_in(mcx, n)?;
+    for att in &r.tupdesc.attrs[..n] {
+        v.push(RecordColumnMeta {
+            attisdropped: att.attisdropped,
+            atttypid: att.atttypid,
+            attcollation: att.attcollation,
+        });
+    }
+    Ok(v)
+}
+
+/// The monoliths' comparator hooks: fn_extra memoized typcache entries, the
+/// exact resolve/apply behavior the previous inline loops performed.
+struct FmgrRecordOps<'a, 'mcx> {
+    flinfo: &'a mut FmgrInfo,
+    mcx: ::mcx::Mcx<'mcx>,
+}
+
+impl RecordColumnCmp for FmgrRecordOps<'_, '_> {
+    type Err = alloc::boxed::Box<::types_error::PgError>;
+
+    fn resolve(&mut self, j: usize, typid: Oid) -> Result<(), Self::Err> {
+        let m = self.flinfo.fn_extra_mut::<RecordCompareData>().unwrap();
+        let stale = match &m.columns[j] {
+            Some(e) => e.type_id != typid,
+            None => true,
+        };
+        if stale {
+            let e = ::typcache::lookup_type_cache(typid, ::typcache::TYPECACHE_CMP_PROC_FINFO)?;
+            if e.cmp_proc_finfo().fn_oid == InvalidOid {
+                return Err(no_support_fn("a comparison function", e.type_id));
+            }
+            self.flinfo.fn_extra_mut::<RecordCompareData>().unwrap().columns[j] = Some(e);
+        }
+        Ok(())
+    }
+
+    fn compare(&mut self, j: usize, collation: Oid, d1: Datum, d2: Datum) -> Result<i32, Self::Err> {
+        let e =
+            self.flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j].clone().unwrap();
+        let mut finfo = e.cmp_proc_finfo();
+        let d = ::types_fmgr::function_call2_coll_in(&mut finfo, collation, self.mcx, d1, d2)?;
+        Ok(d.as_i32())
+    }
+}
+
+impl RecordColumnEq for FmgrRecordOps<'_, '_> {
+    type Err = alloc::boxed::Box<::types_error::PgError>;
+
+    fn resolve(&mut self, j: usize, typid: Oid) -> Result<(), Self::Err> {
+        let m = self.flinfo.fn_extra_mut::<RecordCompareData>().unwrap();
+        let stale = match &m.columns[j] {
+            Some(e) => e.type_id != typid,
+            None => true,
+        };
+        if stale {
+            let e = ::typcache::lookup_type_cache(typid, ::typcache::TYPECACHE_EQ_OPR_FINFO)?;
+            if e.eq_opr_finfo().fn_oid == InvalidOid {
+                return Err(no_support_fn("an equality operator", e.type_id));
+            }
+            self.flinfo.fn_extra_mut::<RecordCompareData>().unwrap().columns[j] = Some(e);
+        }
+        Ok(())
+    }
+
+    fn equal(&mut self, j: usize, collation: Oid, d1: Datum, d2: Datum) -> Result<bool, Self::Err> {
+        let e =
+            self.flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j].clone().unwrap();
+        let mut finfo = e.eq_opr_finfo();
+        let d = ::types_fmgr::function_call2_coll_in(&mut finfo, collation, self.mcx, d1, d2)?;
+        Ok(d.as_bool())
+    }
+}
+
+fn map_core_err(
+    e: RecordCoreError<alloc::boxed::Box<::types_error::PgError>>,
+) -> alloc::boxed::Box<::types_error::PgError> {
+    match e {
+        RecordCoreError::DissimilarColumns { type1, type2, col } => {
+            dissimilar_columns(type1, type2, col)
+        }
+        RecordCoreError::ColumnCountMismatch => column_count_mismatch(),
+        RecordCoreError::Column(e) => e,
+    }
+}
+
 fn record_cmp(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<i32> {
     ::stack_depth::check_stack_depth()?;
     let mcx = fcinfo.result_mcx();
@@ -457,84 +752,11 @@ fn record_cmp(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<i3
     let r2 = deform_record(mcx, fcinfo, 1)?;
     let flinfo = flinfo.expect("record_cmp: NULL flinfo");
     compare_memo(flinfo, &r1, &r2);
-
-    let (n1, n2) = (r1.values.len(), r2.values.len());
-    let (mut i1, mut i2, mut j) = (0usize, 0usize, 0usize);
-    let mut result = 0i32;
-    while i1 < n1 || i2 < n2 {
-        if i1 < n1 && r1.tupdesc.attrs[i1].attisdropped {
-            i1 += 1;
-            continue;
-        }
-        if i2 < n2 && r2.tupdesc.attrs[i2].attisdropped {
-            i2 += 1;
-            continue;
-        }
-        if i1 >= n1 || i2 >= n2 {
-            break;
-        }
-        let att1 = &r1.tupdesc.attrs[i1];
-        let att2 = &r2.tupdesc.attrs[i2];
-        if att1.atttypid != att2.atttypid {
-            return Err(dissimilar_columns(att1.atttypid, att2.atttypid, j));
-        }
-        let collation =
-            if att1.attcollation == att2.attcollation { att1.attcollation } else { InvalidOid };
-
-        let m = flinfo.fn_extra_mut::<RecordCompareData>().unwrap();
-        let stale = match &m.columns[j] {
-            Some(e) => e.type_id != att1.atttypid,
-            None => true,
-        };
-        if stale {
-            let e = ::typcache::lookup_type_cache(
-                att1.atttypid,
-                ::typcache::TYPECACHE_CMP_PROC_FINFO,
-            )?;
-            if e.cmp_proc_finfo().fn_oid == InvalidOid {
-                return Err(no_support_fn("a comparison function", e.type_id));
-            }
-            flinfo.fn_extra_mut::<RecordCompareData>().unwrap().columns[j] = Some(e);
-        }
-
-        if !r1.nulls[i1] || !r2.nulls[i2] {
-            if r1.nulls[i1] {
-                result = 1;
-                break;
-            }
-            if r2.nulls[i2] {
-                result = -1;
-                break;
-            }
-            let e = flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j]
-                .clone()
-                .unwrap();
-            let mut finfo = e.cmp_proc_finfo();
-            let d = ::types_fmgr::function_call2_coll_in(
-                &mut finfo,
-                collation,
-                mcx,
-                r1.values[i1],
-                r2.values[i2],
-            )?;
-            let cmpresult = d.as_i32();
-            if cmpresult < 0 {
-                result = -1;
-                break;
-            }
-            if cmpresult > 0 {
-                result = 1;
-                break;
-            }
-        }
-        i1 += 1;
-        i2 += 1;
-        j += 1;
-    }
-    if result == 0 && (i1 != n1 || i2 != n2) {
-        return Err(column_count_mismatch());
-    }
-    Ok(result)
+    let meta1 = column_meta(mcx, &r1)?;
+    let meta2 = column_meta(mcx, &r2)?;
+    let mut ops = FmgrRecordOps { flinfo, mcx };
+    record_cmp_core(&meta1, &r1.values, &r1.nulls, &meta2, &r2.values, &r2.nulls, &mut ops)
+        .map_err(map_core_err)
 }
 
 pub fn fc_record_eq(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -544,74 +766,12 @@ pub fn fc_record_eq(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let r2 = deform_record(mcx, fcinfo, 1)?;
     let flinfo = flinfo.expect("record_eq: NULL flinfo");
     compare_memo(flinfo, &r1, &r2);
-
-    let (n1, n2) = (r1.values.len(), r2.values.len());
-    let (mut i1, mut i2, mut j) = (0usize, 0usize, 0usize);
-    let mut result = true;
-    while i1 < n1 || i2 < n2 {
-        if i1 < n1 && r1.tupdesc.attrs[i1].attisdropped {
-            i1 += 1;
-            continue;
-        }
-        if i2 < n2 && r2.tupdesc.attrs[i2].attisdropped {
-            i2 += 1;
-            continue;
-        }
-        if i1 >= n1 || i2 >= n2 {
-            break;
-        }
-        let att1 = &r1.tupdesc.attrs[i1];
-        let att2 = &r2.tupdesc.attrs[i2];
-        if att1.atttypid != att2.atttypid {
-            return Err(dissimilar_columns(att1.atttypid, att2.atttypid, j));
-        }
-        let collation =
-            if att1.attcollation == att2.attcollation { att1.attcollation } else { InvalidOid };
-
-        let m = flinfo.fn_extra_mut::<RecordCompareData>().unwrap();
-        let stale = match &m.columns[j] {
-            Some(e) => e.type_id != att1.atttypid,
-            None => true,
-        };
-        if stale {
-            let e = ::typcache::lookup_type_cache(
-                att1.atttypid,
-                ::typcache::TYPECACHE_EQ_OPR_FINFO,
-            )?;
-            if e.eq_opr_finfo().fn_oid == InvalidOid {
-                return Err(no_support_fn("an equality operator", e.type_id));
-            }
-            flinfo.fn_extra_mut::<RecordCompareData>().unwrap().columns[j] = Some(e);
-        }
-
-        if !r1.nulls[i1] || !r2.nulls[i2] {
-            if r1.nulls[i1] || r2.nulls[i2] {
-                result = false;
-                break;
-            }
-            let e = flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j]
-                .clone()
-                .unwrap();
-            let mut finfo = e.eq_opr_finfo();
-            let d = ::types_fmgr::function_call2_coll_in(
-                &mut finfo,
-                collation,
-                mcx,
-                r1.values[i1],
-                r2.values[i2],
-            )?;
-            if !d.as_bool() {
-                result = false;
-                break;
-            }
-        }
-        i1 += 1;
-        i2 += 1;
-        j += 1;
-    }
-    if result && (i1 != n1 || i2 != n2) {
-        return Err(column_count_mismatch());
-    }
+    let meta1 = column_meta(mcx, &r1)?;
+    let meta2 = column_meta(mcx, &r2)?;
+    let mut ops = FmgrRecordOps { flinfo, mcx };
+    let result =
+        record_eq_core(&meta1, &r1.values, &r1.nulls, &meta2, &r2.values, &r2.nulls, &mut ops)
+            .map_err(map_core_err)?;
     Ok(Datum::from_bool(result))
 }
 
@@ -1418,5 +1578,232 @@ mod image_cmp_tests {
         assert!(cmp_gt > 0);
         assert_eq!(cmp_eq, 0);
         assert!(!datum_image_eq(mcx, lo, hi, true, 4).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod compare_core_tests {
+    use super::*;
+    extern crate std;
+    use std::vec::Vec as StdVec;
+
+    const INT4: Oid = 23;
+
+    // Trivial int4 comparator ops: records resolve order so tests can assert
+    // resolve happens before the null checks (C typcache-lookup placement).
+    struct I32Ops {
+        resolved: StdVec<usize>,
+        fail_resolve: bool,
+    }
+    impl I32Ops {
+        fn new() -> Self {
+            I32Ops { resolved: StdVec::new(), fail_resolve: false }
+        }
+    }
+    impl RecordColumnCmp for I32Ops {
+        type Err = &'static str;
+        fn resolve(&mut self, j: usize, _typid: Oid) -> Result<(), Self::Err> {
+            if self.fail_resolve {
+                return Err("no comparator");
+            }
+            self.resolved.push(j);
+            Ok(())
+        }
+        fn compare(&mut self, _j: usize, _coll: Oid, d1: Datum, d2: Datum) -> Result<i32, Self::Err> {
+            Ok(d1.as_i32().cmp(&d2.as_i32()) as i32)
+        }
+    }
+    impl RecordColumnEq for I32Ops {
+        type Err = &'static str;
+        fn resolve(&mut self, j: usize, _typid: Oid) -> Result<(), Self::Err> {
+            if self.fail_resolve {
+                return Err("no comparator");
+            }
+            self.resolved.push(j);
+            Ok(())
+        }
+        fn equal(&mut self, _j: usize, _coll: Oid, d1: Datum, d2: Datum) -> Result<bool, Self::Err> {
+            Ok(d1.as_i32() == d2.as_i32())
+        }
+    }
+
+    fn meta(n: usize) -> StdVec<RecordColumnMeta> {
+        (0..n)
+            .map(|_| RecordColumnMeta {
+                attisdropped: false,
+                atttypid: INT4,
+                attcollation: InvalidOid,
+            })
+            .collect()
+    }
+    fn vals(xs: &[i32]) -> StdVec<Datum> {
+        xs.iter().map(|&x| Datum::from_i32(x)).collect()
+    }
+
+    #[test]
+    fn cmp_core_orders_and_ties() {
+        let m = meta(2);
+        let no_null = [false, false];
+        let mut ops = I32Ops::new();
+        assert_eq!(
+            record_cmp_core(&m, &vals(&[1, 2]), &no_null, &m, &vals(&[1, 2]), &no_null, &mut ops)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            record_cmp_core(&m, &vals(&[1, 2]), &no_null, &m, &vals(&[1, 3]), &no_null, &mut ops)
+                .unwrap(),
+            -1
+        );
+        assert_eq!(
+            record_cmp_core(&m, &vals(&[2, 0]), &no_null, &m, &vals(&[1, 9]), &no_null, &mut ops)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn cmp_core_nulls_sort_last_and_resolve_precedes_null_check() {
+        let m = meta(1);
+        let v = vals(&[1]);
+        let mut ops = I32Ops::new();
+        assert_eq!(record_cmp_core(&m, &v, &[true], &m, &v, &[false], &mut ops).unwrap(), 1);
+        assert_eq!(record_cmp_core(&m, &v, &[false], &m, &v, &[true], &mut ops).unwrap(), -1);
+        // Both null: equal, but the comparator was still resolved (C parity).
+        let mut ops2 = I32Ops::new();
+        assert_eq!(record_cmp_core(&m, &v, &[true], &m, &v, &[true], &mut ops2).unwrap(), 0);
+        assert_eq!(ops2.resolved, [0]);
+        // ...and a resolve failure fires even for all-null columns.
+        let mut ops3 = I32Ops::new();
+        ops3.fail_resolve = true;
+        assert!(matches!(
+            record_cmp_core(&m, &v, &[true], &m, &v, &[true], &mut ops3),
+            Err(RecordCoreError::Column("no comparator"))
+        ));
+    }
+
+    #[test]
+    fn cmp_core_skips_dropped_and_detects_count_mismatch() {
+        // r1 has a dropped middle column; logical shape is (a, b) vs (a, b).
+        let mut m1 = meta(3);
+        m1[1].attisdropped = true;
+        let m2 = meta(2);
+        let mut ops = I32Ops::new();
+        assert_eq!(
+            record_cmp_core(
+                &m1,
+                &vals(&[1, 99, 2]),
+                &[false, false, false],
+                &m2,
+                &vals(&[1, 2]),
+                &[false, false],
+                &mut ops,
+            )
+            .unwrap(),
+            0
+        );
+        // Unpaired trailing column only errors on a tie (C parity)...
+        let mut ops2 = I32Ops::new();
+        assert!(matches!(
+            record_cmp_core(
+                &meta(2),
+                &vals(&[1, 2]),
+                &[false, false],
+                &meta(1),
+                &vals(&[1]),
+                &[false],
+                &mut ops2,
+            ),
+            Err(RecordCoreError::ColumnCountMismatch)
+        ));
+        // ...a decided comparison short-circuits before the count check.
+        let mut ops3 = I32Ops::new();
+        assert_eq!(
+            record_cmp_core(
+                &meta(2),
+                &vals(&[0, 2]),
+                &[false, false],
+                &meta(1),
+                &vals(&[1]),
+                &[false],
+                &mut ops3,
+            )
+            .unwrap(),
+            -1
+        );
+    }
+
+    #[test]
+    fn cmp_core_dissimilar_types_error() {
+        let m1 = meta(1);
+        let mut m2 = meta(1);
+        m2[0].atttypid = 25; // text
+        let mut ops = I32Ops::new();
+        assert!(matches!(
+            record_cmp_core(&m1, &vals(&[1]), &[false], &m2, &vals(&[1]), &[false], &mut ops),
+            Err(RecordCoreError::DissimilarColumns { type1: INT4, type2: 25, col: 0 })
+        ));
+    }
+
+    #[test]
+    fn eq_core_semantics() {
+        let m = meta(2);
+        let no_null = [false, false];
+        let mut ops = I32Ops::new();
+        assert!(record_eq_core(
+            &m,
+            &vals(&[1, 2]),
+            &no_null,
+            &m,
+            &vals(&[1, 2]),
+            &no_null,
+            &mut ops
+        )
+        .unwrap());
+        assert!(!record_eq_core(
+            &m,
+            &vals(&[1, 2]),
+            &no_null,
+            &m,
+            &vals(&[1, 3]),
+            &no_null,
+            &mut ops
+        )
+        .unwrap());
+        // Any NULL-vs-anything pair is false (not error) in record_eq.
+        let m1 = meta(1);
+        assert!(!record_eq_core(
+            &m1,
+            &vals(&[1]),
+            &[true],
+            &m1,
+            &vals(&[1]),
+            &[false],
+            &mut ops
+        )
+        .unwrap());
+        // Count mismatch errors only when the compared prefix was equal.
+        assert!(matches!(
+            record_eq_core(
+                &meta(2),
+                &vals(&[1, 2]),
+                &no_null,
+                &meta(1),
+                &vals(&[1]),
+                &[false],
+                &mut ops,
+            ),
+            Err(RecordCoreError::ColumnCountMismatch)
+        ));
+        assert!(!record_eq_core(
+            &meta(2),
+            &vals(&[7, 2]),
+            &no_null,
+            &meta(1),
+            &vals(&[1]),
+            &[false],
+            &mut ops,
+        )
+        .unwrap());
     }
 }

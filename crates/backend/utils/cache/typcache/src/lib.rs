@@ -304,6 +304,35 @@ impl TypeCacheEntry {
     pub(crate) fn next_domain_get(&self) -> Oid {
         self.next_domain.get()
     }
+
+    /// Proofs-only seam constructor. Builds a concrete, cache-independent
+    /// entry populated with exactly the fields the record/array compare
+    /// paths read (type_id, typlen/typbyval/typalign, eq_opr/cmp_proc and
+    /// their finfos), so a proofs crate can instantiate e.g. an int4 entry
+    /// without the thread-local cache or catalog. Never called in shipping
+    /// code; all other fields stay at their pre-fill defaults.
+    #[cfg(any(test, feature = "proof-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn proof_entry_for_compare(
+        type_id: Oid,
+        typlen: i16,
+        typbyval: bool,
+        typalign: i8,
+        eq_opr: Oid,
+        eq_opr_finfo: FmgrInfo,
+        cmp_proc: Oid,
+        cmp_proc_finfo: FmgrInfo,
+    ) -> Rc<TypeCacheEntry> {
+        let e = TypeCacheEntry::new(type_id, 0);
+        e.typlen.set(typlen);
+        e.typbyval.set(typbyval);
+        e.typalign.set(typalign);
+        e.eq_opr.set(eq_opr);
+        e.cmp_proc.set(cmp_proc);
+        *e.eq_opr_finfo.borrow_mut() = eq_opr_finfo;
+        *e.cmp_proc_finfo.borrow_mut() = cmp_proc_finfo;
+        Rc::new(e)
+    }
 }
 
 pub(crate) struct TypCacheState {
