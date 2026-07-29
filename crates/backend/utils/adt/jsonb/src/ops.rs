@@ -37,8 +37,99 @@ fn compare_scalar(a: &JsonbItem<'_>, b: &JsonbItem<'_>) -> PgResult<i32> {
     }
 }
 
-/// C: compareJsonbContainers — btree support worker.
+/// Outcome of one compareJsonbContainers loop iteration.
+enum CmpStep {
+    /// Both iterators returned Done with res still 0: comparison finished.
+    Break,
+    /// Keep walking (res may have been set, ending the loop).
+    Continue,
+}
+
+/// The loop body of C's compareJsonbContainers, shared by the allocating walk
+/// and the non-allocating core (proofs/jsonb-probe cmp family).
+fn compare_step(
+    ra: WjbToken,
+    va: &JsonbItem<'_>,
+    rb: WjbToken,
+    vb: &JsonbItem<'_>,
+    res: &mut i32,
+) -> PgResult<CmpStep> {
+    if ra == rb {
+        if ra == WjbToken::Done {
+            return Ok(CmpStep::Break);
+        }
+        if ra == WjbToken::EndArray || ra == WjbToken::EndObject {
+            return Ok(CmpStep::Continue);
+        }
+        if va.type_ord() == vb.type_ord() {
+            match (va, vb) {
+                (JsonbItem::Array { n_elems: na, raw_scalar: rsa },
+                 JsonbItem::Array { n_elems: nb, raw_scalar: rsb }) => {
+                    // C quirk preserved: the raw-scalar result may be
+                    // overridden by the nElems check (no else) — an empty
+                    // top-level array sorts less than null.
+                    if rsa != rsb {
+                        *res = if *rsa { -1 } else { 1 };
+                    }
+                    if na != nb {
+                        *res = if na > nb { 1 } else { -1 };
+                    }
+                }
+                (JsonbItem::Object { n_pairs: na }, JsonbItem::Object { n_pairs: nb }) => {
+                    if na != nb {
+                        *res = if na > nb { 1 } else { -1 };
+                    }
+                }
+                (JsonbItem::Binary(_), _) => panic!("unexpected jbvBinary value"),
+                _ => *res = compare_scalar(va, vb)?,
+            }
+        } else {
+            // Type-defined order.
+            *res = if va.type_ord() > vb.type_ord() { 1 } else { -1 };
+        }
+    } else {
+        debug_assert!(ra != WjbToken::EndArray && ra != WjbToken::EndObject);
+        debug_assert!(rb != WjbToken::EndArray && rb != WjbToken::EndObject);
+        *res = if va.type_ord() > vb.type_ord() { 1 } else { -1 };
+    }
+    Ok(CmpStep::Continue)
+}
+
+/// Nesting depth (frames, root included) the non-allocating compare core
+/// handles before `compare_containers` falls back to the allocating walk.
+pub const CMP_FIXED_DEPTH: usize = 32;
+
+/// C: compareJsonbContainers — non-allocating core for the proofs/jsonb-probe
+/// cmp family. No Mcx, no heap: the iterator frame stacks are inline
+/// `[Frame; N]` arrays. Returns `None` iff either input nests deeper than N
+/// frames; otherwise identical to the allocating walk on the same input.
+pub fn compare_containers_fixed<const N: usize>(a: &[u8], b: &[u8]) -> Option<PgResult<i32>> {
+    let mut ita = crate::iter::FixedJsonbIterator::<N>::init(a);
+    let mut itb = crate::iter::FixedJsonbIterator::<N>::init(b);
+    let mut res: i32 = 0;
+
+    while res == 0 {
+        let (ra, va) = ita.next(false)?;
+        let (rb, vb) = itb.next(false)?;
+        match compare_step(ra, &va, rb, &vb, &mut res) {
+            Ok(CmpStep::Break) => break,
+            Ok(CmpStep::Continue) => {}
+            Err(e) => return Some(Err(e)),
+        }
+    }
+
+    Some(Ok(res))
+}
+
+/// C: compareJsonbContainers — btree support worker. Runs the non-allocating
+/// core first; inputs nesting deeper than CMP_FIXED_DEPTH take the original
+/// Mcx-backed walk (C pallocs one iterator per level with no depth limit, so
+/// the deep path must stay unbounded).
 pub fn compare_containers(mcx: Mcx<'_>, a: &[u8], b: &[u8]) -> PgResult<i32> {
+    if let Some(res) = compare_containers_fixed::<CMP_FIXED_DEPTH>(a, b) {
+        return res;
+    }
+
     let mut ita = JsonbIterator::init(mcx, a)?;
     let mut itb = JsonbIterator::init(mcx, b)?;
     let mut res: i32 = 0;
@@ -46,44 +137,9 @@ pub fn compare_containers(mcx: Mcx<'_>, a: &[u8], b: &[u8]) -> PgResult<i32> {
     while res == 0 {
         let (ra, va) = ita.next(false);
         let (rb, vb) = itb.next(false);
-
-        if ra == rb {
-            if ra == WjbToken::Done {
-                break;
-            }
-            if ra == WjbToken::EndArray || ra == WjbToken::EndObject {
-                continue;
-            }
-            if va.type_ord() == vb.type_ord() {
-                match (&va, &vb) {
-                    (JsonbItem::Array { n_elems: na, raw_scalar: rsa },
-                     JsonbItem::Array { n_elems: nb, raw_scalar: rsb }) => {
-                        // C quirk preserved: the raw-scalar result may be
-                        // overridden by the nElems check (no else) — an empty
-                        // top-level array sorts less than null.
-                        if rsa != rsb {
-                            res = if *rsa { -1 } else { 1 };
-                        }
-                        if na != nb {
-                            res = if na > nb { 1 } else { -1 };
-                        }
-                    }
-                    (JsonbItem::Object { n_pairs: na }, JsonbItem::Object { n_pairs: nb }) => {
-                        if na != nb {
-                            res = if na > nb { 1 } else { -1 };
-                        }
-                    }
-                    (JsonbItem::Binary(_), _) => panic!("unexpected jbvBinary value"),
-                    _ => res = compare_scalar(&va, &vb)?,
-                }
-            } else {
-                // Type-defined order.
-                res = if va.type_ord() > vb.type_ord() { 1 } else { -1 };
-            }
-        } else {
-            debug_assert!(ra != WjbToken::EndArray && ra != WjbToken::EndObject);
-            debug_assert!(rb != WjbToken::EndArray && rb != WjbToken::EndObject);
-            res = if va.type_ord() > vb.type_ord() { 1 } else { -1 };
+        match compare_step(ra, &va, rb, &vb, &mut res)? {
+            CmpStep::Break => break,
+            CmpStep::Continue => {}
         }
     }
 

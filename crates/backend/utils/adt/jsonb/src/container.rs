@@ -208,6 +208,19 @@ pub fn get_key_value<'a>(c: &'a [u8], key: &[u8]) -> Option<JsonbItem<'a>> {
     None
 }
 
+/// C: jsonb_array_length's value/verdict core, factored out of
+/// fc_jsonb_array_length for proofs/jsonb-probe (behavior unchanged; the
+/// wrapper maps Err(msg) to the same PgError it previously built inline).
+pub fn array_length(c: &[u8]) -> Result<i32, &'static str> {
+    if container_is_scalar(c) {
+        return Err("cannot get array length of a scalar");
+    }
+    if !container_is_array(c) {
+        return Err("cannot get array length of a non-array");
+    }
+    Ok(container_size(c) as i32)
+}
+
 /// C: getIthJsonbValueFromContainer.
 pub fn get_ith_value(c: &[u8], i: u32) -> Option<JsonbItem<'_>> {
     assert!(container_is_array(c), "not a jsonb array");
