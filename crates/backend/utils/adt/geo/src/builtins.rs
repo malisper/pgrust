@@ -260,7 +260,9 @@ fn fc_poly_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
 
 macro_rules! fc2 {
     ($fc:ident, $a0:ident, $a1:ident, $x:ident, $y:ident, $body:expr) => {
-        fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // pub: visibility-only, exposes the shipped wrapper to the Kani
+        // equivalence harnesses (proofs/geo-cmp).
+        pub fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: module contract.
             let $x = unsafe { $a0(fcinfo, 0) };
             // SAFETY: module contract.
@@ -272,7 +274,9 @@ macro_rules! fc2 {
 
 macro_rules! fc1 {
     ($fc:ident, $a0:ident, $x:ident, $body:expr) => {
-        fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // pub: visibility-only, exposes the shipped wrapper to the Kani
+        // equivalence harnesses (proofs/geo-cmp).
+        pub fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: module contract.
             let $x = unsafe { $a0(fcinfo, 0) };
             $body(fcinfo, $x)
