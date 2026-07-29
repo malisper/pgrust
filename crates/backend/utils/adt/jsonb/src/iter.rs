@@ -210,41 +210,70 @@ impl<'a, 'mcx> JsonbIterator<'a, 'mcx> {
 /// can fall back to the allocating iterator — behavior stays identical for
 /// every input at any depth.
 pub struct FixedJsonbIterator<'a, const N: usize> {
-    stack: [Frame<'a>; N],
+    /// The current nesting level's frame. Kept as a plain struct field —
+    /// NOT a dynamically indexed stack slot — mirroring C's `*it` current
+    /// iterator: a dynamically indexed hot slot defeats CBMC's array field
+    /// sensitivity and makes every post-mutation `next` call explode
+    /// (proofs/jsonb-probe cmp family; same class as the brin-minmax
+    /// per-slot-stores lesson).
+    cur: Frame<'a>,
+    /// Saved parent frames below the current level: when at depth d,
+    /// `parents[0..d-1]` hold levels 1..d-1 (the root has no parent; the
+    /// last slot is spare). Only touched on recursion into / return from a
+    /// nested container, so flat documents never index it.
+    parents: [Frame<'a>; N],
     depth: usize,
 }
 
 impl<'a, const N: usize> FixedJsonbIterator<'a, N> {
     pub fn init(container: &'a [u8]) -> FixedJsonbIterator<'a, N> {
         const { assert!(N >= 1, "FixedJsonbIterator needs room for the root frame") };
+        let root = Frame::from_container(container);
         FixedJsonbIterator {
+            cur: root,
             // Frame is Copy; unused slots hold copies of the root frame.
-            stack: [Frame::from_container(container); N],
+            parents: [root; N],
             depth: 1,
         }
     }
 
     /// C: JsonbIteratorNext, as in `JsonbIterator::next`; `None` means the
     /// input nests deeper than N frames (never a semantic result).
+    ///
+    /// The retry loop is written with its exact syntactic bound: one call
+    /// loops only on `Recurse`, each of which either aborts (depth == N) or
+    /// increments depth (< N), so from depth >= 1 there are at most N - 1
+    /// recursions before a mandatory Emit — <= N iterations total. A plain
+    /// `loop` here unwinds to the harness bound and its dead copies blow up
+    /// the proofs/jsonb-probe cmp formulas exponentially per call (measured
+    /// 10x/call); the constant-bound `for` lets symbolic execution stop by
+    /// itself. Behavior is identical.
     pub fn next(&mut self, skip_nested: bool) -> Option<(WjbToken, JsonbItem<'a>)> {
-        loop {
+        for _ in 0..N {
             if self.depth == 0 {
                 return Some((WjbToken::Done, JsonbItem::Null));
             }
-            match self.stack[self.depth - 1].step(skip_nested) {
+            match self.cur.step(skip_nested) {
                 Step::Emit(tok, val) => return Some((tok, val)),
                 Step::Pop(tok) => {
                     self.depth -= 1;
+                    if self.depth > 0 {
+                        self.cur = self.parents[self.depth - 1];
+                    }
                     return Some((tok, JsonbItem::Null));
                 }
                 Step::Recurse(child) => {
                     if self.depth == N {
                         return None;
                     }
-                    self.stack[self.depth] = Frame::from_container(child);
+                    self.parents[self.depth - 1] = self.cur;
+                    self.cur = Frame::from_container(child);
                     self.depth += 1;
                 }
             }
         }
+        // Unreachable: <= N - 1 recursions are possible before a step must
+        // emit or abort (see the loop-bound note above).
+        panic!("FixedJsonbIterator::next: more than N recursions")
     }
 }
