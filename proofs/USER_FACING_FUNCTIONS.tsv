@@ -32,7 +32,7 @@ oid	name	source_file	status	class	notes
 66	int4lt	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain)	fast	<=0.03s; proofs/int-cmp
 67	texteq	crates/backend/utils/adt/varlena/src/builtins.rs	proved(wrapper-level varlena; C-collation fence; len<=8/side sym)	fast	1-5s; proofs/text-cmp
 68	xideq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level)	fast	0.12s; eq-only, modular ordering out of scope; proofs/scalar-misc
-69	cideq	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+69	cideq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level)	fast	0.29s kissat; wave5::eq_cideq (pre-built wave5, first solve 2026-07-30); proofs/scalar-misc
 70	charne	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 72	charle	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 73	chargt	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
