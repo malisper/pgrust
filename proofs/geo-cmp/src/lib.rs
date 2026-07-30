@@ -54,6 +54,7 @@
 
 mod ext;
 mod ext2;
+mod ext3;
 
 #[cfg(kani)]
 mod proofs {
