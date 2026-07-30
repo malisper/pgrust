@@ -73,19 +73,7 @@ impl DigitBuf {
             self.len = n as u32;
             return;
         }
-        if self.heap.capacity() < n {
-            let mut v = DIGIT_POOL
-                .with(|p| p.borrow_mut().pop())
-                .unwrap_or_default();
-            v.clear();
-            v.reserve(n);
-            self.heap = v;
-        } else {
-            self.heap.clear();
-        }
-        // SAFETY: capacity ensured; i16 has no invalid bit patterns and the
-        // exposed prefix is written by the caller before any read.
-        unsafe { self.heap.set_len(n) };
+        digit_buf_heap_realloc(&mut self.heap, n);
         self.len = n as u32;
     }
 
@@ -112,19 +100,45 @@ impl DigitBuf {
     }
 }
 
+// pub for proofs (Kani stub seam; see word_buf_take): the heap arm of
+// DigitBuf::realloc_uninit — pool draw + reserve + set_len. Behavior-identical
+// code motion; harnesses whose plane fences ndigits within INLINE_DIGITS stub
+// this with a panic so Vec-growth/TLS-pool machinery leaves the formula
+// (kani::assume never prunes the not-taken arm — proofs/TRIAGE.md).
+pub fn digit_buf_heap_realloc(heap: &mut Vec<NumericDigit>, n: usize) {
+    if heap.capacity() < n {
+        let mut v = DIGIT_POOL
+            .with(|p| p.borrow_mut().pop())
+            .unwrap_or_default();
+        v.clear();
+        v.reserve(n);
+        *heap = v;
+    } else {
+        heap.clear();
+    }
+    // SAFETY: capacity ensured; i16 has no invalid bit patterns and the
+    // exposed prefix is written by the caller before any read.
+    unsafe { heap.set_len(n) };
+}
+
+// pub for proofs (Kani stub seam; see word_buf_put): DigitBuf's drop-time
+// pool return. Behavior-identical code motion from Drop::drop.
+pub fn digit_buf_put(v: Vec<NumericDigit>) {
+    if v.capacity() == 0 {
+        return;
+    }
+    DIGIT_POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.len() < DIGIT_POOL_SLOTS {
+            p.push(v);
+        }
+    });
+}
+
 // Drop is the pool-return guard (memory guard exception to the no-drop rule).
 impl Drop for DigitBuf {
     fn drop(&mut self) {
-        if self.heap.capacity() == 0 {
-            return;
-        }
-        let v = core::mem::take(&mut self.heap);
-        DIGIT_POOL.with(|p| {
-            let mut p = p.borrow_mut();
-            if p.len() < DIGIT_POOL_SLOTS {
-                p.push(v);
-            }
-        });
+        digit_buf_put(core::mem::take(&mut self.heap));
     }
 }
 
