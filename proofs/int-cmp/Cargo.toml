@@ -1,0 +1,13 @@
+[package]
+name = "proof_int_cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }
+nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
+proof_support = { path = "../support" }

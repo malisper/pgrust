@@ -1,0 +1,11 @@
+[package]
+name = "proof-skipsupport"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
+datum = { path = "../../crates/_support/types/datum" }

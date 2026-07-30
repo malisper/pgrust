@@ -1,0 +1,27 @@
+# proofs/pg_lsn — WAVE 5 run queue (pre-built 2026-07-28, compile-gated via
+# cargo kani --only-codegen; zero solves run).  Execute from proofs/pg_lsn/.
+# Format: <harness> | <expected> | <tier> | <command>
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+wave5::eq_pg_lsn_recv_core | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --harness wave5::eq_pg_lsn_recv_core --exact
+wave5::eq_pg_lsn_send | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --harness wave5::eq_pg_lsn_send --exact
+wave5::control_pg_lsn_send_skew | must-fail | control | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --harness wave5::control_pg_lsn_send_skew --exact
+
+# Row bookkeeping:
+#   eq_pg_lsn_recv_core -> 3238 pg_lsn_recv (core-level, direct StringInfo)
+#   eq_pg_lsn_send -> 3239 pg_lsn_send (wrapper-level, modulo static-buffer
+#     allocator model)
+#   3252 pg_lsn_hash / 3413 pg_lsn_hash_extended run from proofs/hash-rows
+#     (eq_pg_lsn_hash / eq_pg_lsn_hash_extended there).
+# SKIPPED (record excluded/wall): 3237 pg_lsn_mi, 5022 pg_lsn_pli, 5024
+#   pg_lsn_mii — shipped cores route through adt_numeric numeric_in/add/sub
+#   (allocating DigitBuf digit-loop = TRIAGE numeric-arithmetic wall; needs
+#   the fixed-buffer numeric core refactor).  6103 numeric_pg_lsn — parked
+#   with the same family pending a shared packed-numeric image-builder rig
+#   (numeric-probe has one; port it in the follow-up).

@@ -1,0 +1,15 @@
+[package]
+name = "proof-bool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED port, not a copy.
+adt_bool = { path = "../../crates/backend/utils/adt/bool" }
+# int4_bool / bool_int4 (oids 2557/2558) cores live in adt_int.
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+# bool_accum_inv NULL-state error arm (stub_pg_error_error).
+proof_support = { path = "../support" }
+types_error = { path = "../../crates/_support/types/types_error" }
+
+[workspace]

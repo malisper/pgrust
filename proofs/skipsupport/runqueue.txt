@@ -1,0 +1,41 @@
+# proofs/skipsupport runqueue — oids 6402-6409 (compile-only pre-build 2026-07-28;
+# NOT yet run — solver slots saturated). One line per harness.
+# All harnesses are loop-free full-word branch+add circuits: expected fast class (<1s).
+# kissat for expected-green, DEFAULT solver for the control (kissat never terminates on failing harnesses).
+# Run from proofs/skipsupport/.
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+# RAN 2026-07-29 (RVR audit lane, TRIAGE + ledger 6402-6409): 25/25 eq harnesses
+# PROVED 0.02-0.05s kissat — cleanest family; expectations below reflect that.
+
+proofs::eq_bool_decrement | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_bool_decrement --exact   # expect: PROVED (fast) — oid 6408
+proofs::eq_bool_increment | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_bool_increment --exact   # expect: PROVED (fast) — oid 6408
+proofs::eq_int2_decrement | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_int2_decrement --exact   # expect: PROVED (fast) — oid 6402
+proofs::eq_int2_increment | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_int2_increment --exact   # expect: PROVED (fast) — oid 6402
+proofs::eq_int4_decrement | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_int4_decrement --exact   # expect: PROVED (fast) — oid 6403
+proofs::eq_int4_increment | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_int4_increment --exact   # expect: PROVED (fast) — oid 6403
+proofs::eq_int8_decrement | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_int8_decrement --exact   # expect: PROVED (fast) — oid 6404 (+6409 routing)
+proofs::eq_int8_increment | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_int8_increment --exact   # expect: PROVED (fast) — oid 6404 (+6409 routing)
+proofs::eq_oid_decrement | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_oid_decrement --exact   # expect: PROVED (fast) — oid 6405
+proofs::eq_oid_increment | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_oid_increment --exact   # expect: PROVED (fast) — oid 6405
+proofs::eq_char_decrement | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_char_decrement --exact   # expect: PROVED (fast) — oid 6406 (VALUE-level, see module doc)
+proofs::eq_char_increment | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_char_increment --exact   # expect: PROVED (fast) — oid 6406 (VALUE-level, see module doc)
+proofs::eq_date_decrement | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_date_decrement --exact   # expect: PROVED (fast) — oid 6407
+proofs::eq_date_increment | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_date_increment --exact   # expect: PROVED (fast) — oid 6407
+proofs::eq_sentinels_btint2 | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_btint2 --exact   # expect: PROVED (fast) — oid 6402 sentinels
+proofs::eq_sentinels_btint4 | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_btint4 --exact   # expect: PROVED (fast) — oid 6403 sentinels
+proofs::eq_sentinels_btint8 | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_btint8 --exact   # expect: PROVED (fast) — oid 6404 sentinels
+proofs::eq_sentinels_btoid | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_btoid --exact   # expect: PROVED (fast) — oid 6405 sentinels
+proofs::eq_sentinels_btchar | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_btchar --exact   # expect: PROVED (fast) — oid 6406 sentinels
+proofs::eq_sentinels_btbool | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_btbool --exact   # expect: PROVED (fast) — oid 6408 sentinels
+proofs::eq_sentinels_date | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_date --exact   # expect: PROVED (fast) — oid 6407 sentinels (shipped DATEVAL_* consts in-theorem)
+proofs::eq_sentinels_timestamp | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_sentinels_timestamp --exact   # expect: PROVED (fast) — oid 6409 sentinels
+proofs::eq_timestamp_dt_sentinel_constants | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_timestamp_dt_sentinel_constants --exact   # expect: PROVED (fast) — oid 6409 DT_NOBEGIN/NOEND comment-claim theorem
+proofs::eq_timestamp_decrement_is_int8 | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_timestamp_decrement_is_int8 --exact   # expect: PROVED (fast) — oid 6409 kernel ≡ shipped int8 kernel
+proofs::eq_timestamp_increment_is_int8 | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --solver kissat --harness proofs::eq_timestamp_increment_is_int8 --exact   # expect: PROVED (fast) — oid 6409 kernel ≡ shipped int8 kernel
+proofs::control_int4_increment_vs_c_decrement | must-fail | control | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_skipsupport.c --harness proofs::control_int4_increment_vs_c_decrement --exact   # expect: VERIFICATION FAILED (negative control, DEFAULT solver; decode before recording)

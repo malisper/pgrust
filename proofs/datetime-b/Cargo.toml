@@ -1,0 +1,29 @@
+[package]
+name = "proof_datetime_b"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
+adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }
+adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+types_error = { path = "../../crates/_support/types/types_error" }
+mcx = { path = "../../crates/_support/mcx" }
+# WARNING-arm suppression stub target (intervaltypmodin precision clamp)
+elog = { path = "../../crates/backend/utils/error/elog" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+# lane D (adt_date remainder): core-level recv/send rows ride the shipped
+# pqformat path over a proof-heap StringInfo (int-arith send recipe).
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+pqformat = { path = "../../crates/backend/libpq/pqformat" }
+
+# native differential tier for the band-immune divider faces (loop-free
+# /10^k in AdjustTimeForTypmod, loop-free /100 and /4 in date2j, the
+# 53-bit make_* second-multiply and the interval_avg mean arm): build.rs
+# links the vendored C for non-kani builds only (wave-6 precedent).
+[build-dependencies]
+cc = "1"

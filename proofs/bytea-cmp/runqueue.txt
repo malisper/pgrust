@@ -1,0 +1,20 @@
+# proofs/bytea-cmp runqueue — get/set byte/bit wave, oids 721/723/722/724
+# (compile-only pre-build 2026-07-28; NOT yet run — solver slots saturated).
+# The pre-existing comparator-family harnesses (byteaeq..byteacmp,
+# bytea_larger/smaller + control_byteacmp_short_c_len) are already recorded
+# in the ledger and are not re-queued here.
+# kissat for expected-green, DEFAULT solver for the control.
+# Run from proofs/bytea-cmp/.
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+proofs::eq_bytea_get_byte | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --harness proofs::eq_bytea_get_byte --exact   # expect: PROVED (fast) — oid 721; len<=8, full-i32 n; value+verdict+sqlstate 2202E | RAN 2026-07-29: proved 0.89s kissat (ledger 721)
+proofs::eq_bytea_get_bit | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --harness proofs::eq_bytea_get_bit --exact   # expect: PROVED (fast) — oid 723; len<=8, full-i64 n; value+verdict+sqlstate 2202E | RAN 2026-07-29: proved 1.13s kissat (ledger 723)
+proofs::eq_bytea_set_byte | info | release-gate | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --harness proofs::eq_bytea_set_byte --exact   # expect: PROVED (mcx recipe; if >10s try default solver — mixed-arm inversion trap) — oid 722; result image + (char)-truncation plane + 2202E | RAN 2026-07-29: wall(CNF width-bound at symbolic len<=8, both solvers); len=4 spot form proved 104.9s DEFAULT solver — ledger 722; grow/dealloc mcx stubs load-bearing (TRIAGE RVR)
+proofs::eq_bytea_set_bit | info | release-gate | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --harness proofs::eq_bytea_set_bit --exact   # expect: PROVED (mcx recipe; same solver note) — oid 724; result image + 2202E + 22023 planes (3-way cover) | RAN 2026-07-29: wall(CNF width-bound at symbolic len<=8, both solvers; same circuit as 722) — ledger 724
+proofs::control_get_byte_short_c_len | must-fail | control | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --harness proofs::control_get_byte_short_c_len --exact   # expect: VERIFICATION FAILED (negative control, DEFAULT solver; decode before recording)

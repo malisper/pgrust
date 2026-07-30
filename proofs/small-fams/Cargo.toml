@@ -1,0 +1,17 @@
+[package]
+name = "proof-small-fams"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_enum = { path = "../../crates/backend/utils/adt/adt_enum" }
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+adt_varbit = { path = "../../crates/backend/utils/adt/varbit" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_error = { path = "../../crates/_support/types/types_error" }
+proof_support = { path = "../support" }

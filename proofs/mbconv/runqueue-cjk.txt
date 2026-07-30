@@ -1,0 +1,63 @@
+# proofs/mbconv runqueue — CJK/utf8 radix-table conversion arm (wave-13
+# big-node tier; built 2026-07-29, compile-gated locally via
+# --only-codegen on proofs::eq_gb18030_to_utf8 at sha 31ad423d9b0f).
+# Execute from proofs/mbconv/.
+#
+# Canonical 4-col pipe rows:  <harness> | <expected> | <tier> | <command>
+#
+# Recipe per MBCONV RUN-VERIFY-RECORD LAWS (proofs/TRIAGE.md):
+#   * per-harness pruned --c-lib: pg_mbconv_common.c + pg_conv_check.c +
+#     the ONE family shim file only (whole-family linking = ~45s fixed
+#     CBMC cost per harness, same defect class as CONV_BUILTINS refs);
+#   * DEFAULT solver (kissat inverts on this mixed-arm family) — no
+#     --solver flag anywhere in this queue;
+#   * growth-exact dest caps + unwinds live IN the harness code
+#     (conv_proof! len/unwind columns; D = maxgrowth*L+1 per direction);
+#   * generous timeouts (big-table rows, n^1.5 table-length law);
+#     KANI_SOLVE_RSS_GB=40 at submit — a memory kill at 40GB is a
+#     CAP-RELATIVE verdict: record "wall(memory, 40GB cap)".
+#
+# Section 1: 24 unrun CJK utf8 radix-map rows (first run, expect PROVED).
+# Section 2: 13 prior wall rows as info-tier retry PROBES at the 40GB cap
+#   (walled at 6-7GB default cap / 75-150s on contended small nodes).
+
+# ---- section 1: CJK utf8 radix pairs (24 rows, first run) ----
+eq_big5_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_big5.c --harness proofs::eq_big5_to_utf8 --exact
+eq_utf8_to_big5 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_big5.c --harness proofs::eq_utf8_to_big5 --exact
+eq_euc_cn_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_cn.c --harness proofs::eq_euc_cn_to_utf8 --exact
+eq_utf8_to_euc_cn | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_cn.c --harness proofs::eq_utf8_to_euc_cn --exact
+eq_euc_jp_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_jp.c --harness proofs::eq_euc_jp_to_utf8 --exact
+eq_utf8_to_euc_jp | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_jp.c --harness proofs::eq_utf8_to_euc_jp --exact
+eq_euc_kr_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_kr.c --harness proofs::eq_euc_kr_to_utf8 --exact
+eq_utf8_to_euc_kr | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_kr.c --harness proofs::eq_utf8_to_euc_kr --exact
+eq_euc_tw_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_tw.c --harness proofs::eq_euc_tw_to_utf8 --exact
+eq_utf8_to_euc_tw | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc_tw.c --harness proofs::eq_utf8_to_euc_tw --exact
+eq_gb18030_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_gb18030.c --harness proofs::eq_gb18030_to_utf8 --exact
+eq_utf8_to_gb18030 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_gb18030.c --harness proofs::eq_utf8_to_gb18030 --exact
+eq_gbk_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_gbk.c --harness proofs::eq_gbk_to_utf8 --exact
+eq_utf8_to_gbk | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_gbk.c --harness proofs::eq_utf8_to_gbk --exact
+eq_johab_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_johab.c --harness proofs::eq_johab_to_utf8 --exact
+eq_utf8_to_johab | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_johab.c --harness proofs::eq_utf8_to_johab --exact
+eq_sjis_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_sjis.c --harness proofs::eq_sjis_to_utf8 --exact
+eq_utf8_to_sjis | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_sjis.c --harness proofs::eq_utf8_to_sjis --exact
+eq_uhc_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_uhc.c --harness proofs::eq_uhc_to_utf8 --exact
+eq_utf8_to_uhc | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_uhc.c --harness proofs::eq_utf8_to_uhc --exact
+eq_euc_jis_2004_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc2004.c --harness proofs::eq_euc_jis_2004_to_utf8 --exact
+eq_utf8_to_euc_jis_2004 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_euc2004.c --harness proofs::eq_utf8_to_euc_jis_2004 --exact
+eq_shift_jis_2004_to_utf8 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_sjis2004.c --harness proofs::eq_shift_jis_2004_to_utf8 --exact
+eq_utf8_to_shift_jis_2004 | green first-run expect PROVED | cjk-utf8 | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_sjis2004.c --harness proofs::eq_utf8_to_shift_jis_2004 --exact
+
+# ---- section 2: 13 prior wall rows, info-tier retry probes @ 40GB cap ----
+eq_euc_jp_to_sjis | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_jp_sjis.c --harness proofs::eq_euc_jp_to_sjis --exact
+eq_sjis_to_euc_jp | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_jp_sjis.c --harness proofs::eq_sjis_to_euc_jp --exact
+eq_sjis_to_mic | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_jp_sjis.c --harness proofs::eq_sjis_to_mic --exact
+eq_mic_to_sjis | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_jp_sjis.c --harness proofs::eq_mic_to_sjis --exact
+eq_euc_tw_to_big5 | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_euc_tw_to_big5 --exact
+eq_big5_to_euc_tw | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_big5_to_euc_tw --exact
+eq_big5_to_mic | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_big5_to_mic --exact
+eq_mic_to_big5 | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc_tw_big5.c --harness proofs::eq_mic_to_big5 --exact
+eq_win_to_utf8 | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_win.c --harness proofs::eq_win_to_utf8 --exact
+eq_utf8_to_win | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_win.c --harness proofs::eq_utf8_to_win --exact
+eq_iso8859_to_utf8 | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_iso8859.c --harness proofs::eq_iso8859_to_utf8 --exact
+eq_utf8_to_iso8859 | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_utf8_iso8859.c --harness proofs::eq_utf8_to_iso8859 --exact
+eq_shift_jis_2004_to_euc_jis_2004 | probe wall-retry | wall-retry | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/pg_conv_euc2004_sjis2004.c --harness proofs::eq_shift_jis_2004_to_euc_jis_2004 --exact

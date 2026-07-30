@@ -1,0 +1,9 @@
+[package]
+name = "proof-numeric-arith"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_numeric = { path = "../../crates/backend/utils/adt/numeric" }

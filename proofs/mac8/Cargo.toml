@@ -1,0 +1,11 @@
+[package]
+name = "proof-mac8"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adt_mac8 = { path = "../../crates/backend/utils/adt/mac8" }
+adt_mac = { path = "../../crates/backend/utils/adt/mac" }
+types_error = { path = "../../crates/_support/types/types_error" }
+
+[workspace]

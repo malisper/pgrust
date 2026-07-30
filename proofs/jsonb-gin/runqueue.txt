@@ -1,0 +1,110 @@
+# proofs/jsonb-gin runqueue — jsonb GIN opclass + ginarray consistent
+# (compile-only pre-build 2026-07-28; ZERO solves run — pre-build lane).
+# Compile gate PASSED: cargo kani --only-codegen -Z c-ffi -Z stubbing (exit 0,
+# 43.5s, includes the full `gin` crate graph).
+# Ledger rows: 3482, 3484, 3485, 3487, 3488, 3489 (jsonb_gin.c family);
+# 2744 ginarrayconsistent, 3920 ginarraytriconsistent.
+#
+# One line per harness. Run from proofs/jsonb-gin/. RSS watchdog +
+# one-at-a-time per prove-target skill. kissat for expected-green cells;
+# DEFAULT solver for controls/covers (kissat never terminates on failing
+# harnesses) — and note two prior solver INVERSIONS on jsonb-adjacent
+# families, so flip solver before recording any wall.
+# Per mbconv law each harness links ONLY its family's C file ($KJ vs $KA);
+# cover_jsp_shapes_len4 + eq_strategy_constants are pure-Rust (no C reached,
+# either C lib is fine to link).
+#
+# CAVEAT (codegen-gate limitation): #[kani::stub] path resolution is only
+# validated per-harness at run time — the extract cells' stub set
+# (mcx allocate/deallocate/grow, vec_with_capacity_in, std::fmt::format,
+# hashfn::hash_bytes) is written per the prove-target recipe but has NOT
+# been resolver-exercised. If mcx::Mcx::grow / std::fmt::format fail to
+# resolve, see the stub-attribute gotchas in the skill.
+#
+# Expected classes:
+#  - consistent / ginarray cells: FAST (pure ternary logic, bounded scans).
+#  - extract cells: mcx-stubs tier (tens of seconds, release-gate; hex and
+#    jsonb-probe precedents). eq_extract_jsonb_* compare bounded text-key
+#    IMAGES with per-cell PINNED string lengths (offsets concrete); if a
+#    cell still walls in CNF, record wall(CNF width-bound) per the
+#    result-image law and keep the path_ops (scalar-hash) cells green.
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+# (file-local var KJ expanded into the rows below at normalization)
+#   KJ="cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c"
+# (file-local var KA expanded into the rows below at normalization)
+#   KA="cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c"
+
+# ---- wiring (pure Rust, sub-second) ----
+proofs::eq_strategy_constants | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_strategy_constants --exact
+
+# ---- gin_consistent_jsonb / gin_triconsistent_jsonb (3484/3488):
+#      jsonpath arm, per-shape cells over the bounded ops-shape fence ----
+proofs::eq_jsp_bin_entry | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_entry --exact
+proofs::eq_jsp_bin_and2 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_and2 --exact
+proofs::eq_jsp_bin_or2 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_or2 --exact
+proofs::eq_jsp_bin_and3 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_and3 --exact
+proofs::eq_jsp_bin_and_or | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_and_or --exact   # 5-op spot shape
+proofs::eq_jsp_bin_or_and | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_or_and --exact   # 5-op spot shape
+proofs::eq_jsp_tri_entry | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_entry --exact
+proofs::eq_jsp_tri_and2 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_and2 --exact
+proofs::eq_jsp_tri_or2 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_or2 --exact
+proofs::eq_jsp_tri_and3 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_and3 --exact
+proofs::eq_jsp_tri_and_or | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_and_or --exact
+proofs::eq_jsp_tri_or_and | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_or_and --exact
+proofs::eq_jsp_bin_pred_and2 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_pred_and2 --exact   # strategy 16 alias
+proofs::eq_jsp_tri_pred_or2 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_pred_or2 --exact   # strategy 16 alias
+proofs::eq_jsp_nokeys | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_nokeys --exact
+# union coverage for the shape case-split — MANDATORY, default solver
+proofs::cover_jsp_shapes_len4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::cover_jsp_shapes_len4 --exact
+
+# ---- gin_consistent_jsonb_path / gin_triconsistent_jsonb_path (3487/3489) --
+proofs::eq_jsp_path_bin_and_or | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_path_bin_and_or --exact
+proofs::eq_jsp_path_tri_or_and | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_path_tri_or_and --exact
+proofs::eq_jsp_path_nokeys | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_path_nokeys --exact
+proofs::eq_consistent_jsonb_path_contains | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_consistent_jsonb_path_contains --exact
+proofs::eq_triconsistent_jsonb_path_contains | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_triconsistent_jsonb_path_contains --exact
+
+# ---- non-jsonpath jsonb_ops strategies (3484/3488) ----
+proofs::eq_consistent_jsonb_contains | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_consistent_jsonb_contains --exact
+proofs::eq_consistent_jsonb_exists | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_consistent_jsonb_exists --exact
+proofs::eq_consistent_jsonb_exists_any | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_consistent_jsonb_exists_any --exact
+proofs::eq_consistent_jsonb_exists_all | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_consistent_jsonb_exists_all --exact
+proofs::eq_triconsistent_jsonb_contains | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_triconsistent_jsonb_contains --exact
+proofs::eq_triconsistent_jsonb_exists | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_triconsistent_jsonb_exists --exact
+proofs::eq_triconsistent_jsonb_exists_any | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_triconsistent_jsonb_exists_any --exact
+proofs::eq_triconsistent_jsonb_exists_all | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_triconsistent_jsonb_exists_all --exact
+
+# ---- ginarray[tri]consistent (2744/3920), wrapper-level via gin::opclass --
+proofs::eq_ginarray_consistent_overlap | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_consistent_overlap --exact
+proofs::eq_ginarray_consistent_contains | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_consistent_contains --exact
+proofs::eq_ginarray_consistent_contained | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_consistent_contained --exact
+proofs::eq_ginarray_consistent_equal | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_consistent_equal --exact
+proofs::eq_ginarray_tri_overlap | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_tri_overlap --exact
+proofs::eq_ginarray_tri_contains | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_tri_contains --exact
+proofs::eq_ginarray_tri_contained | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_tri_contained --exact
+proofs::eq_ginarray_tri_equal | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --solver kissat --harness proofs::eq_ginarray_tri_equal --exact
+
+# ---- gin_extract_jsonb (3482): per-n cells, mcx-stubs + tiny-proof-heap --
+proofs::eq_extract_jsonb_arr_n0 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n0 --exact   # wall-risk per header: bounded text-key IMAGE cell — if it walls in CNF record wall(CNF width-bound), keep path_ops cells green
+proofs::eq_extract_jsonb_arr_n1 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n1 --exact   # wall-risk per header: bounded text-key IMAGE cell — if it walls in CNF record wall(CNF width-bound), keep path_ops cells green
+proofs::eq_extract_jsonb_arr_n2 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n2 --exact   # wall-risk per header: bounded text-key IMAGE cell — if it walls in CNF record wall(CNF width-bound), keep path_ops cells green
+proofs::eq_extract_jsonb_arr_n3 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n3 --exact   # wall-risk per header: bounded text-key IMAGE cell — if it walls in CNF record wall(CNF width-bound), keep path_ops cells green
+proofs::eq_extract_jsonb_obj_n1 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_obj_n1 --exact   # wall-risk per header: bounded text-key IMAGE cell — if it walls in CNF record wall(CNF width-bound), keep path_ops cells green
+
+# ---- gin_extract_jsonb_path (3485): per-n cells, scalar-hash outputs ----
+proofs::eq_extract_jsonb_path_arr_n1 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_arr_n1 --exact
+proofs::eq_extract_jsonb_path_arr_n2 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_arr_n2 --exact
+proofs::eq_extract_jsonb_path_arr_n3 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_arr_n3 --exact
+proofs::eq_extract_jsonb_path_str_n1 | green | release-gate | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_str_n1 --exact   # hash seam active
+
+# ---- controls (MUST FAIL, DEFAULT solver) ----
+proofs::control_jsp_wrong_entry | must-fail | control | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::control_jsp_wrong_entry --exact   # expect VERIFICATION FAILED
+proofs::control_ginarray_null_skew | must-fail | control | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_ginarray.c --harness proofs::control_ginarray_null_skew --exact   # expect VERIFICATION FAILED
+proofs::control_extract_hash_seam_skew | must-fail | control | timeout 240 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::control_extract_hash_seam_skew --exact   # expect VERIFICATION FAILED

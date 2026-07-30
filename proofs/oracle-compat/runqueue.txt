@@ -1,0 +1,86 @@
+# proofs/oracle-compat runqueue (WAVE 14: oracle_compat + varchar)
+# PRE-BUILD LANE: harnesses written + codegen-gated ONLY
+#   (cargo kani --only-codegen -Z c-ffi -Z stubbing --c-lib c/pg_oracle_compat.c --c-lib c/pg_varchar.c : PASS 2026-07-28)
+# ZERO kani/cbmc solves have been run. Expected classes below are
+# claim-before-code triage, not verdicts.
+#
+# Run template (one harness, one C file — mbconv law: never link both):
+#   cd proofs/oracle-compat
+#   timeout <T> cargo kani -Z c-ffi -Z stubbing --solver <S> \
+#       --c-lib <CLIB> --harness proofs::<NAME> --exact
+# Solver: kissat for expected-green; DEFAULT for the controls and any
+# harness being decoded (kissat-failure trap). Judge near-cap runs on
+# CBMC's reported Verification Time, not wall clock (load inflation law);
+# under multi-lane contention use T=75 for the per-commit tier.
+#
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+# (original 6-col rows <name|c-lib|solver|timeout|class|rows> converted;
+#  class + ledger rows preserved as trailing comments)
+proofs::eq_dotrim_window_latin1 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_dotrim_window_latin1 --exact   # class: fast; ledger rows: 875 876 884 (window verdict)
+proofs::eq_dotrim_window_utf8 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_dotrim_window_utf8 --exact   # class: ladder; ledger rows: 875 876 884 (mb arm)
+proofs::eq_dotrim1_window | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_dotrim1_window --exact   # class: fast; ledger rows: 401 881 882 885
+proofs::eq_dobyteatrim_window | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_dobyteatrim_window --exact   # class: fast; ledger rows: 2015 6195 6196
+proofs::spot_fc_trims_text | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_fc_trims_text --exact   # class: fast (spot); ledger rows: 884 875 876 (wrapper image)
+proofs::spot_fc_trims1 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_fc_trims1 --exact   # class: fast (spot); ledger rows: 885 881 401 882 (wrapper image)
+proofs::spot_fc_btrim_utf8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_fc_btrim_utf8 --exact   # class: fast (spot); ledger rows: 884 (mb wrapper image)
+proofs::spot_fc_byteatrims | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_fc_byteatrims --exact   # class: fast (spot); ledger rows: 2015 6195 6196 (wrapper image)
+proofs::eq_lpad_latin1 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_lpad_latin1 --exact   # class: ladder; ledger rows: 873 (explicit-length image)
+proofs::eq_rpad_latin1 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_rpad_latin1 --exact   # class: ladder; ledger rows: 874 (explicit-length image)
+proofs::eq_lpad_err_plane | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_lpad_err_plane --exact   # class: fast; ledger rows: 873 (54000 plane)
+proofs::eq_rpad_err_plane | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_rpad_err_plane --exact   # class: fast; ledger rows: 874 (54000 plane)
+proofs::spot_pads_utf8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_pads_utf8 --exact   # class: fast (spot); ledger rows: 873 874 (mb arm spots)
+proofs::spot_translate_latin1 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_translate_latin1 --exact   # class: fast (spot); ledger rows: 878 (derived-length: spots only, see wall note)
+proofs::spot_translate_utf8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_translate_utf8 --exact   # class: fast (spot); ledger rows: 878
+proofs::eq_repeat_small | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_repeat_small --exact   # class: ladder; ledger rows: 1622 (ok arm)
+proofs::eq_repeat_err_plane | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_repeat_err_plane --exact   # class: fast; ledger rows: 1622 (54000 plane)
+proofs::eq_text_reverse_latin1 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::eq_text_reverse_latin1 --exact   # class: ladder/wall; ledger rows: 3062 (result-image class; attempt of record)
+proofs::spot_text_reverse_utf8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_oracle_compat.c --harness proofs::spot_text_reverse_utf8 --exact   # class: fast (spot); ledger rows: 3062
+proofs::control_dobyteatrim_short_set | must-fail | control | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_oracle_compat.c --harness proofs::control_dobyteatrim_short_set --exact   # class: MUST FAIL; ledger rows: (oracle-rig non-vacuity control)
+proofs::cover_oracle_regimes | green | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_oracle_compat.c --harness proofs::cover_oracle_regimes --exact   # class: covers green; ledger rows: (oracle-rig coverage witnesses)
+proofs::eq_bpcharlen_latin1 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpcharlen_latin1 --exact   # class: fast; ledger rows: 1318 1367 1372
+proofs::eq_bpcharlen_utf8 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpcharlen_utf8 --exact   # class: fast; ledger rows: 1318 1367 1372 (mb arm)
+proofs::eq_bpcharoctetlen | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpcharoctetlen --exact   # class: fast; ledger rows: 1375
+proofs::eq_bpchar_clip_latin1 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpchar_clip_latin1 --exact   # class: fast; ledger rows: 1044 (clip core; recv half of 2430)
+proofs::eq_bpchar_clip_utf8 | green | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpchar_clip_utf8 --exact   # class: fast/ladder; ledger rows: 1044 (mb arm)
+proofs::eq_varchar_clip_latin1 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_varchar_clip_latin1 --exact   # class: fast; ledger rows: 1046 (clip core; recv half of 2432)
+proofs::eq_varchar_clip_utf8 | green | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_varchar_clip_utf8 --exact   # class: fast/ladder; ledger rows: 1046 (mb arm)
+proofs::eq_bpchar_coerce_latin1 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpchar_coerce_latin1 --exact   # class: ladder; ledger rows: 668 (bounded-typmod image + identity + 22001)
+proofs::eq_bpchar_coerce_utf8 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpchar_coerce_utf8 --exact   # class: ladder; ledger rows: 668 (mb arm)
+proofs::spot_bpchar_coerce_wrap | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::spot_bpchar_coerce_wrap --exact   # class: fast (spot); ledger rows: 668 (alloc-guard wrap comment-claim; verdict-only)
+proofs::eq_varchar_coerce_latin1 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_varchar_coerce_latin1 --exact   # class: ladder; ledger rows: 669 (FULL-i32 typmod incl INT32_MIN wrap claim)
+proofs::eq_varchar_coerce_utf8 | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_varchar_coerce_utf8 --exact   # class: ladder; ledger rows: 669 (mb arm)
+proofs::eq_char_bpchar | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_char_bpchar --exact   # class: fast; ledger rows: 860
+proofs::eq_bpchar_name_short | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpchar_name_short --exact   # class: fast; ledger rows: 409 (cap-8 arm, fixed 64B result)
+proofs::eq_bpchar_name_clip | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_bpchar_name_clip --exact   # class: release-gate; ledger rows: 409 (len-66 clip arm, unwind 70)
+proofs::eq_name_bpchar | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_name_bpchar --exact   # class: fast; ledger rows: 408 (Name-invariant fence)
+proofs::eq_anychar_typmodin | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_anychar_typmodin --exact   # class: fast; ledger rows: 2913 2915 (CHECK CORE only — array walk out of theorem)
+proofs::eq_anychar_typmodout_band | info | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::eq_anychar_typmodout_band --exact   # class: ladder (band); ledger rows: 2914 2916 (typmod in [-16, 1e7+3])
+proofs::spot_anychar_typmodout_wide | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --harness proofs::spot_anychar_typmodout_wide --exact   # class: fast (spot); ledger rows: 2914 2916 (MaxAttrSize / INT32_MAX / INT32_MIN)
+proofs::control_varchar_clip_skew | must-fail | control | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --harness proofs::control_varchar_clip_skew --exact   # class: MUST FAIL; ledger rows: (varchar-rig non-vacuity control)
+proofs::cover_varchar_regimes | green | release-gate | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --harness proofs::cover_varchar_regimes --exact   # class: covers green; ledger rows: (varchar-rig coverage witnesses)
+
+# WALL NOTES (claim-before-code):
+# - translate (878): derived-length image (output length depends on
+#   from/to content). Symbolic image harness intentionally NOT written —
+#   expected wall per the DERIVED-LENGTH COPY + RESULT-IMAGE laws; spots
+#   above are the coverage of record. Record wall(derived-length image;
+#   spots proved) if the solve lane wants a formal wall row.
+# - text_reverse (3062) LATIN1 symbolic harness is result-image class:
+#   expect ladder-or-wall; the UTF8 spot + LATIN1 attempt together bound
+#   the row (proved(spots) at worst).
+# - repeat (1622): the slen==0 x huge-count plane is EXCLUDED (both sides
+#   run a 2^31-iteration no-op loop; value-identical, solver-unbounded).
+# - lpad/rpad UTF8 image arms: derived offsets under mb walk -> spots only
+#   (s1 additionally under the datatype-invariant UTF8 fence, module doc).
+#
+# SKIPPED ROWS (report to identify-proof-target, do not harness here):
+#   1620 ascii / 1621 chr        -> in-progress (strings-misc lane)
+#   870/871/872/6412 case family -> formatting.c/pg_locale lane (not vendored)
+#   2431/2433 sends              -> textsend delegation, sibling of row 2415
+#   2430/2432 recvs              -> recv ABI pointer-datum wall (clip halves covered)

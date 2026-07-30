@@ -1,0 +1,27 @@
+[package]
+name = "proof_aclcheck"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_acl = { path = "../../crates/backend/utils/adt/acl" }
+aclchk = { path = "../../crates/backend/catalog/aclchk" }
+aclchk_seams = { path = "../../crates/backend/catalog/aclchk_seams" }
+cache_syscache = { path = "../../crates/backend/utils/cache/cache_syscache" }
+catcache = { path = "../../crates/backend/utils/cache/catcache" }
+superuser = { path = "../../crates/backend/utils/misc/superuser" }
+miscinit_seams = { path = "../../crates/backend/utils/init/miscinit_seams" }
+dbcommands_seams = { path = "../../crates/backend/commands/dbcommands_seams" }
+catalog_namespace = { path = "../../crates/backend/catalog/catalog_namespace" }
+lsyscache = { path = "../../crates/backend/utils/cache/lsyscache" }
+syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }
+elog = { path = "../../crates/backend/utils/error/elog" }
+mcx = { path = "../../crates/_support/mcx" }
+datum = { path = "../../crates/_support/types/datum" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }

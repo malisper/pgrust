@@ -1,0 +1,16 @@
+[package]
+name = "proof-pg_lsn"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_pg_lsn = { path = "../../crates/backend/utils/adt/pg_lsn" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+# --- wave 5 (recv/send wire rows) ---
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_error = { path = "../../crates/_support/types/types_error" }
+mcx = { path = "../../crates/_support/mcx" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }

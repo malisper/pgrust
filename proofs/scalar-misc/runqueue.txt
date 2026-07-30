@@ -1,0 +1,127 @@
+# proofs/scalar-misc — WAVE 5 run queue (pre-built 2026-07-28, COMPILE-GATED
+# via cargo kani --only-codegen; ZERO solves run — this lane's contract).
+# Runner: execute each line's command from proofs/scalar-misc/, record
+# CBMC's REPORTED Verification Time (not wall clock), update
+# USER_FACING_FUNCTIONS.tsv per the verdict rules in the prove-target skill.
+# Format: <harness> | <expected> | <tier> | <command>
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+# expected legend: GREEN = expect success; MUST-FAIL = control, pass
+#   condition is VERIFICATION FAILED with a decodable counterexample;
+#   LADDER = may exceed 30s — run idle, escalate per skill ladder, record
+#   honestly (wall is an acceptable verdict).
+# KANI=timeout 30 ~/.cargo/bin/cargo-kani kani  (raise timeout only on
+# LADDER rows, to 120/600 as marked)
+#
+# C libs: SM = --c-lib c/pg_scalar_misc.c
+#         X8 = --c-lib c/pg_xid8funcs.c
+#         IO = --c-lib ../intout/c/pg_intout.c
+# All runs need: -Z c-ffi -Z stubbing --harness proofs-path --exact
+# (module path prefix: wave5:: or xid8snap::)
+
+# ---- wave5: cideq / xid_age / mxid_age (fast) ----
+wave5::eq_cideq | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_cideq --exact
+wave5::eq_xid_age | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_xid_age --exact
+wave5::eq_mxid_age | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_mxid_age --exact
+wave5::control_xid_age_seam_skew | must-fail | control | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --harness wave5::control_xid_age_seam_skew --exact
+
+# ---- wave5: xidout/cidout digit bands (sloped-wall ladder, intout law) ----
+# xidout = CORE (crate::xidout); cidout = WRAPPER (fc_cidout TLS scratch —
+# if the thread_local walls, fall back to recording the pg_ultoa_n identity
+# per proofs/intout and note wrapper-plumbing untested).
+wave5::eq_xidout_r1_lt1e4 | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_xidout_r1_lt1e4 --exact
+wave5::eq_xidout_d5 | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_xidout_d5 --exact
+wave5::eq_xidout_d6 | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_xidout_d6 --exact
+wave5::eq_xidout_d7a | info | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_xidout_d7a --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+wave5::eq_xidout_d7b | info | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_xidout_d7b --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+wave5::eq_xidout_spots | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_xidout_spots --exact
+wave5::cover_xidout_split | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --harness wave5::cover_xidout_split --exact
+wave5::eq_cidout_r1_lt1e4 | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_cidout_r1_lt1e4 --exact
+wave5::eq_cidout_d5 | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_cidout_d5 --exact
+wave5::eq_cidout_d6 | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_cidout_d6 --exact
+wave5::eq_cidout_d7a | info | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_cidout_d7a --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+wave5::eq_cidout_d7b | info | release-gate | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_cidout_d7b --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+wave5::eq_cidout_spots | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --harness wave5::eq_cidout_spots --exact
+wave5::cover_cidout_split | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --harness wave5::cover_cidout_split --exact
+
+# ---- wave5: sends (int-arith precedent: PROVED at 49-113s => run with
+# 300s budget, RELEASE-GATE tier; kissat) ----
+wave5::eq_oidsend | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_oidsend --exact
+wave5::eq_xidsend | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_xidsend --exact
+wave5::eq_xid8send | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_xid8send --exact
+wave5::eq_tidsend | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_tidsend --exact
+wave5::control_xid8send_vs_c_uint32send | must-fail | control | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --harness wave5::control_xid8send_vs_c_uint32send --exact
+
+# ---- wave5: recv cores (NEW SHAPE: direct StringInfo, no datum
+# round-trip — the int-arith recv wall should NOT reproduce; if a harness
+# still walls >300s idle, record wall(blocked:stringinfo-symex) and the
+# refactor note) ----
+wave5::eq_oidrecv_core | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_oidrecv_core --exact
+wave5::eq_xid8recv_core | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_xid8recv_core --exact
+wave5::eq_tidrecv_core | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --harness wave5::eq_tidrecv_core --exact
+wave5::cover_recv_core_both_arms | green | per-commit | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --harness wave5::cover_recv_core_both_arms --exact   # was: GREEN(covers)
+wave5::control_oidrecv_core_cursor_skew | must-fail | control | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --harness wave5::control_oidrecv_core_cursor_skew --exact
+
+# ---- xid8snap: epoch core + accessors + visibility (fast/medium) ----
+xid8snap::eq_full_xid_from_allowable_at | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_full_xid_from_allowable_at --exact
+xid8snap::eq_pg_snapshot_xmin | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_pg_snapshot_xmin --exact
+xid8snap::eq_pg_snapshot_xmax | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_pg_snapshot_xmax --exact
+xid8snap::eq_pg_visible_in_snapshot_linear | green | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_pg_visible_in_snapshot_linear --exact
+xid8snap::eq_pg_visible_in_snapshot_bsearch | info | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --harness xid8snap::eq_pg_visible_in_snapshot_bsearch --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+xid8snap::control_visible_xmax_skew | must-fail | control | timeout 120 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --harness xid8snap::control_visible_xmax_skew --exact
+
+# ---- xid8snap: send (wrapper, per-nxip) ----
+xid8snap::eq_pg_snapshot_send_n0 | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_pg_snapshot_send_n0 --exact
+xid8snap::eq_pg_snapshot_send_n1 | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_pg_snapshot_send_n1 --exact
+xid8snap::eq_pg_snapshot_send_n2 | green | release-gate | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_pg_snapshot_send_n2 --exact
+
+# ---- xid8snap: recv/out/in (EXPECTED LADDER: PgVec/image build in symex,
+# STD-VEC trap class; run idle, 600s cap, both solvers before recording a
+# wall; escalate per skill) ----
+xid8snap::eq_pg_snapshot_recv_core | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib c/pg_scalar_misc.c --solver kissat --no-assertion-reach-checks --harness xid8snap::eq_pg_snapshot_recv_core --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+xid8snap::eq_pg_snapshot_out_lt1e4 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --harness xid8snap::eq_pg_snapshot_out_lt1e4 --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+xid8snap::eq_pg_snapshot_out_spots | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --harness xid8snap::eq_pg_snapshot_out_spots --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+xid8snap::eq_strtou64_cap8 | green | per-commit | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --harness xid8snap::eq_strtou64_cap8 --exact
+xid8snap::eq_pg_snapshot_in_cap6 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --harness xid8snap::eq_pg_snapshot_in_cap6 --exact   # was: LADDER (may exceed 30s; run idle, escalate per skill ladder; wall is an acceptable verdict)
+
+# Row bookkeeping for the runner:
+#   eq_cideq -> 69 cideq
+#   eq_xidout_* + cover + spots -> 51 xidout  proved([0,1e7) bands + spots
+#     d8-d10 incl u32::MAX; remainder sloped wall) — SPEC-ANCHOR note: C ref
+#     is pg_ultoa_n, C xidout itself is snprintf %lu (no CBMC model)
+#   eq_cidout_* -> 53 cidout (same bounds wording + wrapper TLS in-theorem)
+#   eq_oidsend -> 2419 oidsend; eq_xidsend -> 2441 xidsend AND 2443 cidsend
+#     (same registered fc_xidsend body); eq_xid8send -> 5083 xid8send;
+#     eq_tidsend -> 2439 tidsend
+#   eq_oidrecv_core -> 2418 oidrecv AND 2440 xidrecv AND 2442 cidrecv
+#     (identical one-call body; ledger wording "core-level (direct
+#     StringInfo); fc datum plumbing out of proof")
+#   eq_xid8recv_core -> 5082 xid8recv; eq_tidrecv_core -> 2438 tidrecv
+#   eq_xid_age -> 1181 (modulo GetStableLatestTransactionId seam model);
+#   eq_mxid_age -> 3939 (modulo ReadNextMultiXactId seam model)
+#   eq_full_xid_from_allowable_at -> supports 2945/2946/2948 epoch cores
+#     (fenced to the transam.h Assert precondition; fence in bounds)
+#   eq_pg_snapshot_xmin -> 2945+5062; eq_pg_snapshot_xmax -> 2946+5063
+#   eq_pg_visible_in_snapshot_{linear,bsearch} -> 2948+5065 (bsearch arm
+#     modulo libc-bsearch model, sorted-invariant fence in bounds)
+#   eq_pg_snapshot_send_n* -> 2942+5058 (nxip<=2 per-count)
+#   eq_pg_snapshot_recv_core -> 2941+5057 (nxip<=1 cap)
+#   eq_pg_snapshot_out_* -> 2940+5056 (values<1e4 bands + spot; %llu
+#     spec-anchor via pg_ulltoa_n)
+#   eq_strtou64_cap8 + eq_pg_snapshot_in_cap6 -> 2939+5055 (len<=6; modulo
+#     glibc-strtoul model, shim X4)
+# SKIPPED (record excluded): 1294 currtid_byrelname (catalog/heap state);
+#   2943/5059, 2944/5061, 3348/5060 (live xact state); 2947/5064 (SRF);
+#   3809 (file I/O); 3360/5066 pg_xact_status (clog+lwlock seams —
+#   state-seam lane follow-up); 52 cidin + 54 oidvectorin (libc strtoul
+#   BASE-0 seam: uint32in_subr accepts 0x/octal via strtoul(s,e,0) and its
+#   edge semantics are platform-flavored — needs a ratified libc base-0
+#   model + GROUND-TRUTH pass first; NEXT-200 misfiled these as plain
+#   digit-band ladders); 55 oidvectorout (same emitter spec-anchor as
+#   cidout but the PgVec loop core = STD-VEC trap on top of the %u anchor;
+#   defer to the oidvector follow-up with a slice core).

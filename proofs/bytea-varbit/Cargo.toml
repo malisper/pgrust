@@ -1,0 +1,13 @@
+[package]
+name = "proof-bytea-varbit"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_encode = { path = "../../crates/backend/utils/adt/encode" }
+adt_varbit = { path = "../../crates/backend/utils/adt/varbit" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }
+types_error = { path = "../../crates/_support/types/types_error" }

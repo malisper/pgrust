@@ -1,0 +1,18 @@
+[package]
+name = "proof_spgist_inet"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+network_spgist = { path = "../../crates/backend/utils/adt/network_spgist" }
+adt_network = { path = "../../crates/backend/utils/adt/network" }
+types_spgist = { path = "../../crates/_support/types/types_spgist" }
+types_scan = { path = "../../crates/_support/types/types_scan" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+datum = { path = "../../crates/_support/types/datum" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }

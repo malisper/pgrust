@@ -1,0 +1,188 @@
+# WAVE-8 runqueue — varlena byte kernels (proofs/text-slice, src/wave8.rs)
+# PRE-BUILT 2026-07-28; ZERO kani/cbmc solves run (compile gate only).
+# Compile gate PASSED:
+#   cargo kani --only-codegen -Z c-ffi -Z stubbing \
+#     --c-lib c/pg_text_slice.c c/pg_varlena_wave8.c ../hash/pg_hashfn.c
+#   (exit 0; both C files also cc -Wall clean; 37 wave8 harnesses listed by
+#   `cargo kani list -Z unstable-options -Z c-ffi -Z stubbing`)
+#
+# C LIBS: every wave8 harness links THREE files (pg_varlena_wave8.c calls
+# pg_bytea_substring/pg_bytea_catenate/pg_take_err from pg_text_slice.c;
+# hash rows call pg_hash_bytes[_extended] from ../hash/pg_hashfn.c).
+# Per the mbconv table law, if a harness reads slow at codegen/symex, prune
+# to the two files it needs (only eq_hashvarlena* needs ../hash/pg_hashfn.c;
+# only eq_byteaoverlay*/cover_byteaoverlay_regimes need pg_text_slice.c) —
+# but note pg_text_slice.c contains no dispatch tables, so the fixed read
+# cost should be small.
+#
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+# (former run:-template format converted; the per-section timeout/solver
+#  hints from the original header are baked into each row's command)
+# COMMAND TEMPLATE (kissat for expected-green; DEFAULT solver for controls,
+# covers, and anything that might fail; solver choice is PER-HARNESS —
+# retry the other solver before recording a wall):
+#   timeout <T> cargo kani -Z c-ffi -Z stubbing --solver kissat \
+#     --c-lib c/pg_text_slice.c c/pg_varlena_wave8.c ../hash/pg_hashfn.c \
+#     --harness wave8::<name> --exact
+# Judge near-cap verdicts on kani-reported Verification Time, not wall
+# clock (multi-agent load inflates 2-3x; use run-one.sh's RSS watchdog).
+#
+# Ledger wording for every green (mirror of src/wave8.rs module doc):
+#   "wrapper-level (LocalFcinfo); value+verdict+sqlstate-class parity;
+#    inline images; modulo static-buffer allocator model; proofs/text-slice
+#    wave8" + per-row bounds/fences below.
+#
+# ---------------------------------------------------------------------------
+# TIER A — per-commit expectation (fast class; scalar-verdict or
+# explicit-length images; timeout 350 under load). Expected: PROVED.
+#
+# oids 6370 bytea_int2 | bounds len<=8 fully symbolic (error plane len>2 =
+#   22003 in-theorem) | unwind 12 (fold loop <=8 + image init 8+2)
+wave8::eq_bytea_int2 | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_bytea_int2 --exact
+# oids 6371 bytea_int4 | len<=8 (error plane len>4) | unwind 12
+wave8::eq_bytea_int4 | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_bytea_int4 --exact
+# oids 6372 bytea_int8 | len<=9 via CAP-9 image so the len>8 error plane is
+#   REACHABLE | unwind 13 (9-iter fold + 11-byte image init)
+wave8::eq_bytea_int8 | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_bytea_int8 --exact
+# oids 6367/6368/6369 int2/4/8_bytea | full symbolic i16/i32/i64; result =
+#   fixed-width BE image (explicit length) | unwind 12
+wave8::eq_int2_bytea | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_int2_bytea --exact
+wave8::eq_int4_bytea | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_int4_bytea --exact
+wave8::eq_int8_bytea | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_int8_bytea --exact
+# oid 6382 bytea_reverse | len<=8; out-len == in-len explicit | unwind 12
+#   (reverse loop <=8) | NOTE: shipped core is a per-byte PgVec::push loop
+#   (STD-VEC trap, softer sibling) — if this walls, propose the
+#   reserve+write+set_len refactor in bytea.rs::bytea_reverse, do NOT fence
+wave8::eq_bytea_reverse | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_bytea_reverse --exact
+# oids 6393/6394 bytea_larger/smaller | len<=8 both args; theorem includes
+#   C's POINTER-IDENTITY result (returned datum IS one arg's datum, shim W7);
+#   ties pick arg2 both sides | unwind 12
+wave8::eq_bytea_larger | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_bytea_larger --exact
+wave8::eq_bytea_smaller | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_bytea_smaller --exact
+# oids 456+6413 hashvarlena/hashbytea (one fmgr body, both oids registered
+#   on fc_hashvarlena) | len<=8 fully symbolic; UNALIGNED hash_bytes arm
+#   (payload at odd offset; aligned arm proved in proofs/hash) | unwind 12
+wave8::eq_hashvarlena | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_hashvarlena --exact
+# oids 772+6414 hashvarlenaextended/hashbyteaextended | + full symbolic seed
+wave8::eq_hashvarlena_extended | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_hashvarlena_extended --exact
+# oid 6163 bytea_bit_count | LEN<=7 FENCE (shipped pg_popcount routes len>=8
+#   through NEON on aarch64 = unsupported_construct; record len>=8 arm
+#   excluded(blocked:simd), len<=7 = whole scalar arm) | unwind 12
+wave8::eq_bytea_bit_count | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_bytea_bit_count --exact
+# oid 47 textout | len<=8; out-len == in-len + NUL explicit; wrapper-level
+#   incl. the shipped OutBuf std-Vec scratch (std global allocator,
+#   Kani-native) | unwind 12
+wave8::eq_textout | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_textout --exact
+# oid 2413 byteasend | len<=8 identity copy | unwind 12
+wave8::eq_byteasend | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_byteasend --exact
+# oid 2415 textsend | len<=8; ENCODING-CONVERSION FENCE: pg_server_to_client
+#   seam pinned to identity both sides (ClientEncoding==ServerEncoding arm);
+#   conversion out of scope | unwind 12 | StringInfo construction is
+#   in-theorem via Mcx::allocate-level stubs (TRIAGE mcx-stubs round 2)
+wave8::eq_textsend | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_textsend --exact
+#
+# Covers (MUST report "satisfied" for every cover; DEFAULT solver — kissat
+# pays one full solve per property):
+#   cover_bytea_int_err_arms: Err arms of bytea_int2/int4/int8 reachable
+#   cover_byteaoverlay_regimes: interior splice + sp<=0 error + overflow
+wave8::cover_bytea_int_err_arms | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::cover_bytea_int_err_arms --exact   # default solver
+wave8::cover_byteaoverlay_regimes | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::cover_byteaoverlay_regimes --exact   # default solver
+#
+# Controls (MUST FAIL with decodable counterexamples; DEFAULT solver;
+# timeout 350). A passing control = broken gate, stop the lane:
+wave8::control_bytea_int4_short | must-fail | control | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::control_bytea_int4_short --exact   # default solver, EXPECTED FAIL
+wave8::control_bytea_reverse_short | must-fail | control | timeout 350 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::control_bytea_reverse_short --exact   # default solver, EXPECTED FAIL
+#
+# ---------------------------------------------------------------------------
+# TIER B — LADDER (timeout 600, release-gate budget).
+#
+# oids 749/752 byteaoverlay[_no_len] | len<=8 both args, sp/sl FULL i32
+#   (overflow edge + sp<=0 plane in-theorem); composed
+#   substr+substr+cat+cat both sides; t1 rides raw image through
+#   detoast_attr_slice | unwind 20 (crate-root substr bound 14 + catenate
+#   over <=24 bytes) | expected 10-300s (4 chained allocations; the lane's
+#   eq_textcat/eq_bytea_substr were green at unwind 14-20)
+wave8::eq_byteaoverlay | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_byteaoverlay --exact
+wave8::eq_byteaoverlay_no_len | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_byteaoverlay_no_len --exact
+#
+# oids 6330/6332/2089 to_bin/oct/hex32, 6331/6333/2090 to_bin/oct/hex64 |
+#   full symbolic i32/i64 | WALL RISK: derived-length copy class (digit
+#   count computed by the loop => all stores at symbolic offsets; TRIAGE
+#   pseudotypes law says this can wall on MEMORY regardless of solver).
+#   Kept because the emission buffer is only 64B and divides are by powers
+#   of two (shift/mask class, NOT the /10 sloped wall). Unwind is EXACT
+#   digit-count+2 per harness (dead divider-loop copies are catastrophic —
+#   TRIAGE intout lesson): bin32=34 oct32=13 hex32=10 bin64=66 oct64=24
+#   hex64=18. Run hex32 FIRST (smallest); if it walls on memory, skip the
+#   other five eq_* and record the spot grids as the coverage of record:
+#   proved(boundary grid; full-domain wall(memory:derived-length)).
+wave8::eq_to_hex32 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_to_hex32 --exact   # canary for the class — run first | WALL RISK class (derived-length copy) — see section header; spot grids are the fallback of record
+wave8::eq_to_oct32 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_to_oct32 --exact   # WALL RISK class (derived-length copy) — see section header; spot grids are the fallback of record
+wave8::eq_to_bin32 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_to_bin32 --exact   # WALL RISK class (derived-length copy) — see section header; spot grids are the fallback of record
+wave8::eq_to_hex64 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_to_hex64 --exact   # WALL RISK class (derived-length copy) — see section header; spot grids are the fallback of record
+wave8::eq_to_oct64 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_to_oct64 --exact   # WALL RISK class (derived-length copy) — see section header; spot grids are the fallback of record
+wave8::eq_to_bin64 | info | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::eq_to_bin64 --exact   # WALL RISK class (derived-length copy) — see section header; spot grids are the fallback of record
+#
+# Spot grids for the same rows (one-symbolic-index-into-concrete-table,
+# geo-cmp law; boundary set: 0, 1, digit-count transitions, MIN, -1, MAX,
+# mixed patterns). Expected: PROVED fast. These stand regardless of the
+# eq_* outcome (they are the fallback of record):
+wave8::spot_to_hex32 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_to_hex32 --exact
+wave8::spot_to_oct32 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_to_oct32 --exact
+wave8::spot_to_bin32 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_to_bin32 --exact
+wave8::spot_to_hex64 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_to_hex64 --exact
+wave8::spot_to_oct64 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_to_oct64 --exact
+wave8::spot_to_bin64 | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_to_bin64 --exact
+#
+# ---------------------------------------------------------------------------
+# TIER C — derived-length cstring rows: SPOT GRIDS ONLY (timeout 350).
+# WALL NOTE (do not attempt symbolic harnesses): textin (46),
+# unknownin (109), unknownout (110), unknownsend (2417) all compute their
+# result length by strlen/NUL-scan INSIDE the code under proof — the exact
+# pstrdup derived-length copy wall the pseudotypes lane measured
+# (6.7-9.7 GiB at every cap/solver/reach-check combo; input case-splits do
+# NOT help). Grid: 6 concrete NUL-terminated strings (empty / 1 / mid-NUL
+# with trailing bytes / 6 / 7 / high-bytes+mid-NUL). Record as
+# proved(NUL-boundary grid; full-domain wall(memory:derived-length copy)).
+wave8::spot_textin | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_textin --exact   # oid 46
+wave8::spot_unknownin | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_unknownin --exact   # oid 109
+wave8::spot_unknownout | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_unknownout --exact   # oid 110
+wave8::spot_unknownsend | green | per-commit | timeout 350 cargo kani -Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_text_slice.c --c-lib c/pg_varlena_wave8.c --c-lib ../hash/pg_hashfn.c --harness wave8::spot_unknownsend --exact   # oid 2417; conversion seam pinned identity
+#
+# ---------------------------------------------------------------------------
+# DEFERRED (no harness written — record in ledger notes, do not lose):
+# 2412 bytearecv, 2414 textrecv, 2416 unknownrecv:
+#   - wrapper level = POINTER-DATUM ROUND-TRIP WALL (TRIAGE int-arith wave
+#     3: Datum::from_usize(&mut StringInfo) -> arg_stringinfo recovery keeps
+#     kani::mem provenance checks live on every field access, >240s symex);
+#   - core level (varlena::textrecv / bytea::bytearecv /
+#     varlena::unknownrecv) needs the pq_getmsgtext + pg_client_to_server
+#     VALIDATING conversion stack vendored (pg_verify_mbstr + per-encoding
+#     verifiers) — the validating path is the point of these rows per the
+#     hstore_recv lesson, so a LATIN1-only shortcut would under-claim.
+#     Charter as its own recv-validation sub-lane; bytearecv's core
+#     (explicit remaining-length copy, no conversion) is the cheap first
+#     row of that lane.
+# 720/2010/1374/849/2014/3696/1257/1317/1369/1381 (octetlen/pos/
+#   starts_with/textlen): already proved in this crate's root module —
+#   screened OUT, not re-proved.
+# 46/47/109/110 *in/*out rows via fmgr dispatch gap: none (all four are
+#   registered; textin/textout additionally need a resolved FmgrInfo for
+#   their OutBuf scratch — harnesses construct one).
+#
+# ---------------------------------------------------------------------------
+# SHIPPED-CODE EDITS: NONE. (All fc_* wrappers and value cores were already
+# pub; no visibility or refactor edits were made anywhere under crates/.)
+# Files touched, all inside proofs/text-slice/:
+#   c/pg_varlena_wave8.c   (new; REL_18_STABLE vendored, shims W1-W11 in
+#                           header; every body verbatim)
+#   src/wave8.rs           (new; 37 harnesses)
+#   src/lib.rs             (3-line mod hook only; crate-root proofs module
+#                           untouched)
+#   runqueue-wave8.txt     (this file)

@@ -1,0 +1,16 @@
+[package]
+name = "proof_float_agg"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_float = { path = "../../crates/backend/utils/adt/float" }
+types_error = { path = "../../crates/_support/types/types_error" }
+proof_support = { path = "../support" }
+
+# Native differential replay of the sqrt-grid FAILEDs (datetime-cmp
+# precedent): build.rs links the vendored C for non-kani builds only.
+[build-dependencies]
+cc = "1"

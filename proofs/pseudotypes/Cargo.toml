@@ -1,0 +1,18 @@
+[package]
+name = "proof_pseudotypes"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_pseudotypes = { path = "../../crates/backend/utils/adt/pseudotypes" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
+types_error = { path = "../../crates/_support/types/types_error" }
+datum = { path = "../../crates/_support/types/datum" }
+mcx = { path = "../../crates/_support/mcx" }
+# tiny-proof-heap: 2 KiB static heap — the 64 KiB default's bit-blasted
+# backing array walled these harnesses (>6 GiB RSS, brin-minmax precedent);
+# every allocation in this family is <= ~16 bytes.
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

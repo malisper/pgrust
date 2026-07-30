@@ -1,0 +1,17 @@
+[package]
+name = "proof-jsonb-gin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }
+gin = { path = "../../crates/backend/access/gin/gin" }
+gin_vocab = { path = "../../crates/backend/access/gin/gin_vocab" }
+hashfn = { path = "../../crates/common/hashfn" }
+mcx = { path = "../../crates/_support/mcx" }
+datum = { path = "../../crates/_support/types/datum" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+types_error = { path = "../../crates/_support/types/types_error" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

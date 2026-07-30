@@ -1,0 +1,27 @@
+# proofs/int-cmp runqueue — tail-triage nbtree warm-up extension
+# (added 2026-07-29; the crate's original 58 harnesses are already proved,
+# see results.txt / run-all.sh — do NOT re-run them from here).
+# PRE-BUILD LANE: new harnesses written + codegen-gated ONLY
+#   (cargo kani --only-codegen -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c : PASS, exit 0).
+# ZERO solves run on the new rows. Expected classes below are
+# claim-before-code triage, not verdicts.
+#
+# Run from proofs/int-cmp/, one at a time. kissat for expected-green;
+# DEFAULT solver for the control. All are loop-free full-word compare
+# circuits: expected fast class (<1s) per the proved siblings.
+#
+# Ledger bookkeeping: eq_btboolcmp -> 1693; eq_btint48cmp -> 2188;
+# eq_btint84cmp -> 2189; eq_btint24cmp -> 2190; eq_btint42cmp -> 2191;
+# eq_btint28cmp -> 2192; eq_btint82cmp -> 2193; eq_btequalimage -> 5051
+# (fc-level: closes the nbt_compare crate).
+#
+# harness | expected | tier | command
+proofs::eq_btboolcmp             | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btboolcmp --exact              # expect: PROVED(full bool x bool) fast — raw (int32)a-(int32)b magnitude in-theorem
+proofs::eq_btint48cmp            | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btint48cmp --exact             # expect: PROVED(full i32 x i64) fast
+proofs::eq_btint84cmp            | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btint84cmp --exact             # expect: PROVED(full i64 x i32) fast
+proofs::eq_btint24cmp            | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btint24cmp --exact             # expect: PROVED(full i16 x i32) fast
+proofs::eq_btint42cmp            | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btint42cmp --exact             # expect: PROVED(full i32 x i16) fast
+proofs::eq_btint28cmp            | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btint28cmp --exact             # expect: PROVED(full i16 x i64) fast
+proofs::eq_btint82cmp            | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btint82cmp --exact             # expect: PROVED(full i64 x i16) fast
+proofs::eq_btequalimage          | GREEN     | per-commit | timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --solver kissat --harness proofs::eq_btequalimage --exact           # expect: PROVED(full-u32 opcintype, fc-level) fast — codegen warns caller_location/foreign-fn: reachable only on the call1_ok panic arm, dead when the wrapper is infallible
+proofs::neg_control_btboolcmp_argswap | MUST-FAIL | control | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_intcmp.c --harness proofs::neg_control_btboolcmp_argswap --exact           # expect: VERIFICATION FAILED w/ counterexample (new-C-section rig non-vacuity; DEFAULT solver)

@@ -1,0 +1,22 @@
+[package]
+name = "proof_support"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[features]
+# The Mcx allocation stub set (see src/lib.rs::mcx_stubs). Off by default so
+# families that never touch the allocator don't pull mcx into their Kani
+# codegen graph.
+mcx-stubs = ["dep:mcx", "dep:allocator-api2"]
+# Shrink the mcx-stub bump heap to 2 KiB (see src/lib.rs) for harnesses whose
+# propositional encoding cannot afford a 64 KiB backing array.
+tiny-proof-heap = []
+
+[dependencies]
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+mcx = { path = "../../crates/_support/mcx", optional = true }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"], optional = true }

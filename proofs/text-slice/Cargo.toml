@@ -1,0 +1,22 @@
+[package]
+name = "proof_text_slice"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+adt_oracle_compat = { path = "../../crates/backend/utils/adt/oracle_compat" }
+mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
+mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
+detoast = { path = "../../crates/backend/access/common/detoast" }
+detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
+wchar = { path = "../../crates/common/wchar" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }

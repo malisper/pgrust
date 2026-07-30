@@ -1,0 +1,18 @@
+[package]
+name = "proof_misc_ops"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_bool = { path = "../../crates/backend/utils/adt/bool" }
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }
+numutils = { path = "../../crates/backend/utils/adt/numutils" }
+types_error = { path = "../../crates/_support/types/types_error" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+
+[package.metadata.kani.flags]
+c-lib = ["c/pg_misc_ops.c"]

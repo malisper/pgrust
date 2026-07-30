@@ -1,0 +1,19 @@
+[package]
+name = "proof_int_arith"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_error = { path = "../../crates/_support/types/types_error" }
+datum = { path = "../../crates/_support/types/datum" }
+# recv/send harnesses (wave 3): real StringInfo/Mcx under the proof_support
+# mcx-stubs recipe; tiny-proof-heap keeps the bit-blasted heap array small
+# (StringInfo's 1024-byte default buffer fits the 2 KiB cap).
+mcx = { path = "../../crates/_support/mcx" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

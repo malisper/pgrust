@@ -1,0 +1,9 @@
+[package]
+name = "t2_bool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adt_bool = { path = "../../crates/backend/utils/adt/bool" }
+
+[workspace]

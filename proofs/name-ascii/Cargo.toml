@@ -1,0 +1,14 @@
+[package]
+name = "proof-name-ascii"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+name = { path = "../../crates/backend/utils/adt/name" }
+adt_ascii = { path = "../../crates/backend/utils/adt/adt_ascii" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+types_core = { path = "../../crates/_support/types/types_core" }
+wchar = { path = "../../crates/common/wchar" }
+mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }

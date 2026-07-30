@@ -1,0 +1,9 @@
+[package]
+name = "t3_case"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pgstrcasecmp = { path = "../../crates/port/pgstrcasecmp" }
+
+[workspace]
