@@ -1,0 +1,35 @@
+# proofs/mac8 final sweep 2026-07-28 (kani 0.67.0)
+# kissat harnesses (timeout 30, cargo kani -Z c-ffi --c-lib csrc/mac8_shim.c --solver kissat):
+eq_macaddr8_out EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.6307222s 
+eq_macaddr8_cmp EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.18435004s 
+eq_macaddr8_lt EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.18104121s 
+eq_macaddr8_le EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.20200959s 
+eq_macaddr8_eq EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.17152132s 
+eq_macaddr8_ge EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.18108363s 
+eq_macaddr8_gt EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.1972s 
+eq_macaddr8_ne EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.16929346s 
+wit_in_colon64 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.91878706s 
+wit_in_dash64 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.9203213s 
+wit_in_dot64 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.8928583s 
+wit_in_bare64 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.8234998s 
+wit_in_colon48 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.9438766s 
+wit_in_bare48 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.9084565s 
+wit_in_ws64 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.9149544s 
+sym_in_band_coverage EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.04720821s 
+# default-solver harnesses (symbolic-in bands; kissat multi-passes and walls on these):
+eq_macaddr8_in_sym_len_0_12 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 9.745194s 
+eq_macaddr8_in_sym_len_13_18 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 15.901703s 
+eq_macaddr8_in_sym_len_19_22 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 20.571693s 
+eq_macaddr8_in_sym_len_23_25 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 26.038551s 
+control EXIT=1 VERIFICATION:- FAILED 
+# control_macaddr8_cmp_swap_must_fail: FAILED as designed (negative control; counterexample decodes via -Z concrete-playback)
+
+# 2026-07-28 extension: macaddr8_set7bit/macaddrtomacaddr8/macaddr8tomacaddr (REL_18_STABLE C)
+eq_macaddr8_set7bit EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.08s (kissat)
+eq_macaddrtomacaddr8 EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 0.06s (kissat)
+eq_macaddr8tomacaddr EXIT=0 VERIFICATION:- SUCCESSFUL Verification Time: 2.50s (kissat, -Z stubbing: PgError::error stub; verdict+value+sqlstate parity, message/hint text out of scope; with_hint left unstubbed, did not wall)
+# standing-gate recheck after csrc extension (all pass):
+eq_macaddr8_out 0.72s / eq_macaddr8_cmp 0.19s / lt-le-eq-ge-gt-ne 0.17-0.20s (kissat)
+sym_in_band_coverage 0.05s / wit_in_* 0.79-1.10s (kissat)
+eq_macaddr8_in_sym_len_0_12 9.1s / 13_18 17.1s / 19_22 21.6s / 23_25 25.7s (default solver)
+control_macaddr8_cmp_swap_must_fail EXIT=1 VERIFICATION:- FAILED 0.18s (default solver) — fails as designed, rig still non-vacuous

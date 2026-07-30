@@ -1,0 +1,178 @@
+# proof_int_arith run results — 2026-07-28 (final sweep)
+# harness<TAB>status<TAB>wall<TAB>solver_time<TAB>flags
+# Batch 1 (infallible up/larger/smaller; default solver):
+eq_int2up	PROVED	2s	0.09918325s	default
+eq_int4up	PROVED	2s	0.098352544s	default
+eq_int8up	PROVED	2s	0.09344408s	default
+eq_int2larger	PROVED	2s	0.09968675s	default
+eq_int2smaller	PROVED	2s	0.10379592s	default
+eq_int4larger	PROVED	2s	0.105638795s	default
+eq_int4smaller	PROVED	2s	0.10339529s	default
+eq_int8larger	PROVED	3s	0.13213333s	default
+eq_int8smaller	PROVED	2s	0.12845658s	default
+# Batch 2 (all fallible um/abs/pl/mi + mul/div/mod probes; default solver; mem::forget(e) on Err arms):
+eq_int2um	PROVED	2s	0.37059668s	default
+eq_int4um	PROVED	2s	0.36973694s	default
+eq_int8um	PROVED	2s	0.39482564s	default
+eq_int2abs	PROVED	2s	0.35243094s	default
+eq_int4abs	PROVED	2s	0.34838936s	default
+eq_int8abs	PROVED	2s	0.3578549s	default
+eq_int2pl	PROVED	2s	0.42661837s	default
+eq_int2mi	PROVED	3s	0.38898146s	default
+eq_int4pl	PROVED	2s	0.3809167s	default
+eq_int4mi	PROVED	2s	0.4202113s	default
+eq_int24pl	PROVED	2s	0.3826273s	default
+eq_int24mi	PROVED	2s	0.39798188s	default
+eq_int42pl	PROVED	2s	0.37194797s	default
+eq_int42mi	PROVED	2s	0.38588423s	default
+eq_int8pl	PROVED	2s	0.40510812s	default
+eq_int8mi	PROVED	2s	0.5225902s	default
+eq_int84pl	PROVED	2s	0.3951817s	default
+eq_int84mi	PROVED	2s	0.42261073s	default
+eq_int48pl	PROVED	2s	0.38687325s	default
+eq_int48mi	PROVED	2s	0.5410566s	default
+eq_int82pl	PROVED	2s	0.39235216s	default
+eq_int82mi	PROVED	2s	0.4234203s	default
+eq_int28pl	PROVED	2s	0.40631762s	default
+eq_int28mi	PROVED	2s	0.5416527s	default
+eq_int2mul	PROVED	10s	8.223726s	default
+eq_int4mul	TIMEOUT(30s)	31s	n/a	default
+eq_int24mul	TIMEOUT(30s)	30s	n/a	default
+eq_int42mul	TIMEOUT(30s)	30s	n/a	default
+eq_int8mul	TIMEOUT(30s)	30s	n/a	default
+eq_int84mul	TIMEOUT(30s)	30s	n/a	default
+eq_int48mul	TIMEOUT(30s)	30s	n/a	default
+eq_int82mul	TIMEOUT(30s)	30s	n/a	default
+eq_int28mul	TIMEOUT(30s)	31s	n/a	default
+eq_int2div	TIMEOUT(30s)	30s	n/a	default
+eq_int2mod	TIMEOUT(30s)	30s	n/a	default
+eq_int4div	TIMEOUT(30s)	31s	n/a	default
+eq_int4mod	TIMEOUT(30s)	30s	n/a	default
+eq_int24div	TIMEOUT(30s)	30s	n/a	default
+eq_int42div	TIMEOUT(30s)	31s	n/a	default
+eq_int8div	TIMEOUT(30s)	30s	n/a	default
+eq_int8mod	TIMEOUT(30s)	30s	n/a	default
+eq_int84div	TIMEOUT(30s)	31s	n/a	default
+eq_int48div	TIMEOUT(30s)	30s	n/a	default
+eq_int82div	TIMEOUT(30s)	30s	n/a	default
+eq_int28div	TIMEOUT(30s)	31s	n/a	default
+# Batch 3 (retry ladder: kissat + --no-assertion-reach-checks):
+eq_int2div	PROVED	30s	27.045155s	--solver kissat --no-assertion-reach-checks
+eq_int2mod	TIMEOUT(30s)	31s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int4div	TIMEOUT(30s)	30s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int4mod	TIMEOUT(30s)	30s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int24div	PROVED	29s	25.613596s	--solver kissat --no-assertion-reach-checks
+eq_int42div	TIMEOUT(30s)	30s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int8div	TIMEOUT(30s)	30s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int8mod	TIMEOUT(30s)	31s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int84div	TIMEOUT(30s)	30s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int48div	TIMEOUT(30s)	31s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int82div	TIMEOUT(30s)	30s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int28div	TIMEOUT(30s)	30s	n/a	--solver kissat --no-assertion-reach-checks
+eq_int4mul	PROVED	4s	1.3622553s	--solver kissat --no-assertion-reach-checks
+eq_int24mul	PROVED	4s	1.1339328s	--solver kissat --no-assertion-reach-checks
+eq_int42mul	PROVED	4s	1.0135573s	--solver kissat --no-assertion-reach-checks
+eq_int8mul	PROVED	6s	2.907784s	--solver kissat --no-assertion-reach-checks
+eq_int84mul	PROVED	4s	2.0375664s	--solver kissat --no-assertion-reach-checks
+eq_int48mul	PROVED	4s	1.6887536s	--solver kissat --no-assertion-reach-checks
+eq_int82mul	PROVED	4s	1.874876s	--solver kissat --no-assertion-reach-checks
+eq_int28mul	PROVED	4s	1.5861638s	--solver kissat --no-assertion-reach-checks
+# Batch 4 (div/mod danger-pair spots; kissat + --no-assertion-reach-checks):
+spot_int4div_b0	PROVED	5s	0.17197771s	--solver kissat --no-assertion-reach-checks
+spot_int4div_bneg1	PROVED	2s	0.20832491s	--solver kissat --no-assertion-reach-checks
+spot_int4div_b1	PROVED	2s	0.097742245s	--solver kissat --no-assertion-reach-checks
+spot_int42div_b0	PROVED	2s	0.17289433s	--solver kissat --no-assertion-reach-checks
+spot_int42div_bneg1	PROVED	2s	0.21466587s	--solver kissat --no-assertion-reach-checks
+spot_int42div_b1	PROVED	2s	0.09573813s	--solver kissat --no-assertion-reach-checks
+spot_int8div_b0	PROVED	2s	0.1817005s	--solver kissat --no-assertion-reach-checks
+spot_int8div_bneg1	PROVED	2s	0.203201s	--solver kissat --no-assertion-reach-checks
+spot_int8div_b1	PROVED	2s	0.09829687s	--solver kissat --no-assertion-reach-checks
+spot_int84div_b0	PROVED	2s	0.17897075s	--solver kissat --no-assertion-reach-checks
+spot_int84div_bneg1	PROVED	2s	0.19727142s	--solver kissat --no-assertion-reach-checks
+spot_int84div_b1	PROVED	2s	0.10105913s	--solver kissat --no-assertion-reach-checks
+spot_int48div_b0	PROVED	2s	0.17929837s	--solver kissat --no-assertion-reach-checks
+spot_int48div_bneg1	PROVED	2s	0.10208258s	--solver kissat --no-assertion-reach-checks
+spot_int48div_b1	PROVED	2s	0.10175675s	--solver kissat --no-assertion-reach-checks
+spot_int82div_b0	PROVED	2s	0.18319364s	--solver kissat --no-assertion-reach-checks
+spot_int82div_bneg1	PROVED	2s	0.20231695s	--solver kissat --no-assertion-reach-checks
+spot_int82div_b1	PROVED	2s	0.10440704s	--solver kissat --no-assertion-reach-checks
+spot_int28div_b0	PROVED	2s	0.17886695s	--solver kissat --no-assertion-reach-checks
+spot_int28div_bneg1	PROVED	2s	0.11052196s	--solver kissat --no-assertion-reach-checks
+spot_int28div_b1	PROVED	2s	0.10826175s	--solver kissat --no-assertion-reach-checks
+spot_int2mod_b0	PROVED	2s	0.171509s	--solver kissat --no-assertion-reach-checks
+spot_int2mod_bneg1	PROVED	2s	0.10297046s	--solver kissat --no-assertion-reach-checks
+spot_int2mod_b1	PROVED	2s	0.10146629s	--solver kissat --no-assertion-reach-checks
+spot_int4mod_b0	PROVED	2s	0.1731648s	--solver kissat --no-assertion-reach-checks
+spot_int4mod_bneg1	PROVED	2s	0.101935s	--solver kissat --no-assertion-reach-checks
+spot_int4mod_b1	PROVED	2s	0.10029075s	--solver kissat --no-assertion-reach-checks
+spot_int8mod_b0	PROVED	2s	0.18951966s	--solver kissat --no-assertion-reach-checks
+spot_int8mod_bneg1	PROVED	3s	0.10220596s	--solver kissat --no-assertion-reach-checks
+spot_int8mod_b1	PROVED	2s	0.105279416s	--solver kissat --no-assertion-reach-checks
+# Negative control (default solver; MUST FAIL, and does):
+control_int4larger_vs_c_smaller	FAILED(as-required)	2s	0.106s	default
+# Wave 3 batch 1 (bit ops / casts / inc / in_range / shift fenced+model; kissat + --no-assertion-reach-checks) 2026-07-28 21:05:24:
+eq_i2toi4	PROVED	11s	0.18912467s	--solver kissat --no-assertion-reach-checks
+eq_int48	PROVED	2s	0.10226709s	--solver kissat --no-assertion-reach-checks
+eq_int28	PROVED	2s	0.10741708s	--solver kissat --no-assertion-reach-checks
+eq_oidtoi8	PROVED	2s	0.09817713s	--solver kissat --no-assertion-reach-checks
+eq_int2not	PROVED	2s	0.10486371s	--solver kissat --no-assertion-reach-checks
+eq_int4not	PROVED	2s	0.102709085s	--solver kissat --no-assertion-reach-checks
+eq_int8not	PROVED	2s	0.09825425s	--solver kissat --no-assertion-reach-checks
+eq_int2and	PROVED	2s	0.107526496s	--solver kissat --no-assertion-reach-checks
+eq_int2or	PROVED	2s	0.1038233s	--solver kissat --no-assertion-reach-checks
+eq_int2xor	PROVED	2s	0.10081071s	--solver kissat --no-assertion-reach-checks
+eq_int4and	PROVED	2s	0.104352415s	--solver kissat --no-assertion-reach-checks
+eq_int4or	PROVED	12s	0.8629084s	--solver kissat --no-assertion-reach-checks
+eq_int4xor	PROVED	30s	1.9446032s	--solver kissat --no-assertion-reach-checks
+eq_int8and	PROVED	5s	0.100443s	--solver kissat --no-assertion-reach-checks
+eq_int8or	PROVED	2s	0.10736583s	--solver kissat --no-assertion-reach-checks
+eq_int8xor	PROVED	2s	0.1026007s	--solver kissat --no-assertion-reach-checks
+eq_int2shl	PROVED	2s	0.114141874s	--solver kissat --no-assertion-reach-checks
+eq_int2shr	PROVED	2s	0.10407734s	--solver kissat --no-assertion-reach-checks
+eq_int4shl	PROVED	2s	0.108406246s	--solver kissat --no-assertion-reach-checks
+eq_int4shr	PROVED	2s	0.10534692s	--solver kissat --no-assertion-reach-checks
+eq_int8shl	PROVED	2s	0.10803638s	--solver kissat --no-assertion-reach-checks
+eq_int8shr	PROVED	3s	0.19552062s	--solver kissat --no-assertion-reach-checks
+model_int2shl	PROVED	2s	0.11257704s	--solver kissat --no-assertion-reach-checks
+model_int2shr	PROVED	2s	0.11010329s	--solver kissat --no-assertion-reach-checks
+model_int4shl	PROVED	2s	0.105264544s	--solver kissat --no-assertion-reach-checks
+model_int4shr	PROVED	2s	0.10772962s	--solver kissat --no-assertion-reach-checks
+model_int8shl	PROVED	12s	0.88119936s	--solver kissat --no-assertion-reach-checks
+model_int8shr	PROVED	14s	0.1080595s	--solver kissat --no-assertion-reach-checks
+eq_i4toi2	PROVED	2s	0.2323035s	--solver kissat --no-assertion-reach-checks
+eq_int4inc	PROVED	2s	0.22180821s	--solver kissat --no-assertion-reach-checks
+eq_int84	PROVED	2s	0.25542033s	--solver kissat --no-assertion-reach-checks
+eq_int82	PROVED	2s	0.27771783s	--solver kissat --no-assertion-reach-checks
+eq_i8tooid	PROVED	2s	0.22978579s	--solver kissat --no-assertion-reach-checks
+eq_int8inc	PROVED	2s	0.19800366s	--solver kissat --no-assertion-reach-checks
+eq_int8dec	PROVED	2s	0.20690846s	--solver kissat --no-assertion-reach-checks
+eq_int8inc_any	PROVED	2s	0.21259037s	--solver kissat --no-assertion-reach-checks
+eq_int8dec_any	PROVED	2s	0.21509407s	--solver kissat --no-assertion-reach-checks
+eq_in_range_int4_int4	PROVED	2s	0.28005198s	--solver kissat --no-assertion-reach-checks
+eq_in_range_int4_int2	PROVED	2s	0.29043892s	--solver kissat --no-assertion-reach-checks
+eq_in_range_int4_int8	PROVED	2s	0.31812137s	--solver kissat --no-assertion-reach-checks
+eq_in_range_int2_int4	PROVED	2s	0.26365104s	--solver kissat --no-assertion-reach-checks
+eq_in_range_int2_int2	PROVED	2s	0.26850367s	--solver kissat --no-assertion-reach-checks
+eq_in_range_int2_int8	PROVED	2s	0.33020166s	--solver kissat --no-assertion-reach-checks
+eq_in_range_int8_int8	PROVED	2s	0.32320812s	--solver kissat --no-assertion-reach-checks
+BATCH-DONE eq_i2toi4 eq_int48 eq_int28 eq_oidtoi8 eq_int2not eq_int4not eq_int8not eq_int2and eq_int2or eq_int2xor eq_int4and eq_int4or eq_int4xor eq_int8and eq_int8or eq_int8xor eq_int2shl eq_int2shr eq_int4shl eq_int4shr eq_int8shl eq_int8shr model_int2shl model_int2shr model_int4shl model_int4shr model_int8shl model_int8shr eq_i4toi2 eq_int4inc eq_int84 eq_int82 eq_i8tooid eq_int8inc eq_int8dec eq_int8inc_any eq_int8dec_any eq_in_range_int4_int4 eq_in_range_int4_int2 eq_in_range_int4_int8 eq_in_range_int2_int4 eq_in_range_int2_int2 eq_in_range_int2_int8 eq_in_range_int8_int8
+# Wave 3 batch 2 (covers + controls; DEFAULT solver). All 20 cover
+# properties SATISFIED (both Ok and Err arms of every new fallible
+# section); controls MUST FAIL and do, on the parity assertion:
+cover_casts_both_arms	PROVED	4s	0.74197114s	default
+cover_inc_dec_both_arms	PROVED	4s	0.58625084s	default
+cover_in_range_both_arms	PROVED	24s	6.3897305s	default
+control_int4shl_vs_c_shr_model	FAILED(as-required)	16s	1.0528207s	default
+control_in_range_int4_int4_lessflip	FAILED(as-required)	7s	0.2751644s	default
+BATCH-DONE cover_casts_both_arms cover_inc_dec_both_arms cover_in_range_both_arms control_int4shl_vs_c_shr_model control_in_range_int4_int4_lessflip
+# Wave 3 batch 3 (recv/send; mcx-stubs recipe + tiny-proof-heap + fmt stub;
+# per-harness exact unwind; 300s calibration cap — RELEASE-GATE tier runs,
+# NOT per-commit; shared-box load):
+eq_int2send	PROVED	57s	49.15585s	--solver kissat (unwind 8)
+eq_int4send	PROVED	73s	65.58286s	--solver kissat (unwind 10)
+eq_int8send	PROVED	118s	112.808s	--solver kissat (unwind 14)
+control_int4send_vs_c_int2send	FAILED(as-required)	42s	35.06037s	default; fails on img[i]==cbuf[i] — through-datum image read provenance intact
+eq_int2recv	WALL(symex >240s)	-	n/a	kissat; datum->&mut StringInfo pointer round-trip keeps kani::mem provenance checks live per field access
+eq_int4recv	WALL(symex >300s)	-	n/a	kissat; same class
+eq_int8recv	NOT-RUN	-	n/a	same class as int2/int4 recv (shared macro body); skipped per expensive-rerun budget
+cover_recv_both_arms	NOT-RUN	-	n/a	shares the recv wall

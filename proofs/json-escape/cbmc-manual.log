@@ -1,0 +1,7 @@
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit arm64 macos
+Reading GOTO program from file target/kani/aarch64-apple-darwin/debug/deps/poc_json_escape-2bf233739daa4b1a__RNvCs9tMFDVKw7eU_15poc_json_escape19census_len1_cstr_r2.out
+Generating GOTO Program
+Adding CPROVER library (arm64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Starting Bounded Model Checking
