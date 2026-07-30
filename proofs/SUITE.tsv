@@ -1851,3 +1851,4 @@ datetime-cmp	wave7_proofs::eq_tstz_mi_interval_noend	-Z c-ffi -Z stubbing --c-li
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
 geo-cmp	ext3::proofs_ext3::eq_poly_left	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --c-lib c/pg_geo_poly.c --no-overflow-checks --solver kissat	green	per-commit	5.9	poly position op; raw-IEEE boundbox compare; covers both arms
 geo-cmp	ext3::proofs_ext3::eq_poly_overleft	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --c-lib c/pg_geo_poly.c --no-overflow-checks --solver kissat	green	per-commit	5.2	poly position op; raw-IEEE boundbox compare; covers both arms
+geo-cmp	ext3::proofs_ext3::eq_poly_right	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --c-lib c/pg_geo_poly.c --no-overflow-checks --solver kissat	green	per-commit	5.9	poly position op; raw-IEEE boundbox compare; covers both arms
