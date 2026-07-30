@@ -735,50 +735,9 @@ pub(crate) fn install_guc_hooks() {
         }
     });
 
-    hooks::check_recovery_target_timeline.install(|newval, extra, _source| {
-        let v = newval.as_deref().unwrap_or("");
-        let goal = match v {
-            "current" => RecoveryTargetTimeLineGoal::ControlFile,
-            "latest" => RecoveryTargetTimeLineGoal::Latest,
-            _ => {
-                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) || v.parse::<u64>().is_err()
-                {
-                    return Err(Box::new(types_error::PgError::new(
-                        types_error::ERROR,
-                        "invalid value: \"recovery_target_timeline\" is not a valid number."
-                            .to_string(),
-                    )));
-                }
-                RecoveryTargetTimeLineGoal::Numeric
-            }
-        };
-        *extra = Some(Box::new(goal));
-        Ok(true)
-    });
-    hooks::assign_recovery_target_timeline.install(|newval, extra| {
-        let goal = *extra
-            .and_then(|e| e.downcast_ref::<RecoveryTargetTimeLineGoal>())
-            .expect("check hook stored the goal");
-        TIMELINE_GOAL.with(|c| c.set(goal as i32));
-        if goal == RecoveryTargetTimeLineGoal::Numeric {
-            TLI_REQUESTED
-                .with(|c| c.set(newval.and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)));
-        } else {
-            TLI_REQUESTED.with(|c| c.set(0));
-        }
-    });
-
-    hooks::check_recovery_target_xid.install(|newval, extra, _source| {
-        if let Some(v) = newval.as_deref() {
-            if !v.is_empty() {
-                let Ok(xid) = v.parse::<u64>() else {
-                    return Ok(false);
-                };
-                *extra = Some(Box::new(xid as u32));
-            }
-        }
-        Ok(true)
-    });
+    hooks::check_recovery_target_timeline.install(check_recovery_target_timeline);
+    hooks::assign_recovery_target_timeline.install(assign_recovery_target_timeline);
+    hooks::check_recovery_target_xid.install(check_recovery_target_xid);
     hooks::assign_recovery_target_xid.install(|newval, extra| {
         if newval.map_or(false, |v| !v.is_empty()) {
             guard_target(RecoveryTargetType::Xid);
@@ -800,4 +759,224 @@ pub(crate) fn install_guc_hooks() {
         }
         Ok(true)
     });
+}
+
+fn check_recovery_target_timeline(
+    newval: &mut Option<String>,
+    extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: ::types_guc::GucSource,
+) -> types_error::PgResult<bool> {
+    {
+        let v = newval.as_deref().unwrap_or("");
+        let goal = match v {
+            "current" => RecoveryTargetTimeLineGoal::ControlFile,
+            "latest" => RecoveryTargetTimeLineGoal::Latest,
+            _ => {
+                // C: errno = 0; strtoul(*newval, NULL, 0); reject on
+                // EINVAL/ERANGE.  Base 0 (hex/octal prefixes), leading
+                // C-locale whitespace, sign, ignored trailing garbage —
+                // and glibc sets NO errno on no-conversion, so "abc" (and
+                // even "") is ACCEPTED here, parses as timeline 0 in the
+                // assign hook, and only fails at recovery start with
+                // "recovery target timeline 0 does not exist" (executed
+                // against PG 18.4).  Only u64-magnitude overflow rejects.
+                if pg_string::strtoul_base0(v.as_bytes()).range_err {
+                    return Err(Box::new(types_error::PgError::new(
+                        types_error::ERROR,
+                        "invalid value: \"recovery_target_timeline\" is not a valid number."
+                            .to_string(),
+                    )));
+                }
+                RecoveryTargetTimeLineGoal::Numeric
+            }
+        };
+        *extra = Some(Box::new(goal));
+        Ok(true)
+    }
+}
+
+fn assign_recovery_target_timeline(
+    newval: Option<&str>,
+    extra: Option<&guc_tables::GucHookExtra>,
+) {
+    {
+        let goal = *extra
+            .and_then(|e| e.downcast_ref::<RecoveryTargetTimeLineGoal>())
+            .expect("check hook stored the goal");
+        TIMELINE_GOAL.with(|c| c.set(goal as i32));
+        if goal == RecoveryTargetTimeLineGoal::Numeric {
+            // C: (TimeLineID) strtoul(newval, NULL, 0) — base 0, wrapping
+            // "-1" to ULONG_MAX, then truncating to uint32 ("-1" and
+            // "18446744073709551615" both become timeline 4294967295;
+            // "4294967296" becomes 0; executed against PG 18.4).
+            TLI_REQUESTED.with(|c| {
+                c.set(newval.map_or(0, |v| pg_string::strtoul_base0(v.as_bytes()).value as u32))
+            });
+        } else {
+            TLI_REQUESTED.with(|c| c.set(0));
+        }
+    }
+}
+
+fn check_recovery_target_xid(
+    newval: &mut Option<String>,
+    extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: ::types_guc::GucSource,
+) -> types_error::PgResult<bool> {
+    {
+        if let Some(v) = newval.as_deref() {
+            if !v.is_empty() {
+                // C: errno = 0; xid = (TransactionId) strtou64(*newval,
+                // NULL, 0); reject on EINVAL/ERANGE.  glibc sets no errno
+                // on no-conversion, so "abc" is ACCEPTED and silently
+                // becomes XID 0 ("starting point-in-time recovery to
+                // XID 0", executed against PG 18.4); "-1" wraps and
+                // truncates to XID 4294967295; only u64-magnitude
+                // overflow rejects.  The u32 cast is C's (TransactionId)
+                // truncation of the 64-bit value.
+                let r = pg_string::strtoul_base0(v.as_bytes());
+                if r.range_err {
+                    return Ok(false);
+                }
+                *extra = Some(Box::new(r.value as u32));
+            }
+        }
+        Ok(true)
+    }
+}
+
+// Table-driven conformance tests for the recovery-target numeric GUC hooks.
+// Every expectation below was EXECUTED against real PostgreSQL 18.4 (Debian
+// glibc, aarch64, 2026-07-30): acceptance via `ALTER SYSTEM SET`, parsed
+// values via targeted-recovery log output ("recovery target timeline %u
+// does not exist" / "starting point-in-time recovery to XID %u").
+#[cfg(test)]
+mod recovery_target_parse_tests {
+    use super::*;
+
+    fn check_tli(v: &str) -> PgResult<(bool, Option<RecoveryTargetTimeLineGoal>)> {
+        let mut newval = Some(v.to_string());
+        let mut extra = None;
+        let ok = check_recovery_target_timeline(&mut newval, &mut extra, ::types_guc::GucSource::PGC_S_FILE)?;
+        Ok((ok, extra.as_ref().and_then(|e| e.downcast_ref().copied())))
+    }
+
+    fn assigned_tli(v: &str) -> TimeLineID {
+        let mut newval = Some(v.to_string());
+        let mut extra = None;
+        assert!(check_recovery_target_timeline(&mut newval, &mut extra, ::types_guc::GucSource::PGC_S_FILE).unwrap());
+        assign_recovery_target_timeline(newval.as_deref(), extra.as_ref());
+        recovery_target_tli_requested()
+    }
+
+    /// Ok(None) = check hook returned false/Err (rejected);
+    /// Ok(Some(x)) = accepted with parsed XID x; the empty string is
+    /// accepted with no parse (unsets the target).
+    fn check_xid(v: &str) -> Option<Option<u32>> {
+        let mut newval = Some(v.to_string());
+        let mut extra = None;
+        match check_recovery_target_xid(&mut newval, &mut extra, ::types_guc::GucSource::PGC_S_FILE) {
+            Ok(true) => Some(extra.as_ref().and_then(|e| e.downcast_ref().copied())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn timeline_named_forms_unchanged() {
+        assert_eq!(
+            check_tli("current").unwrap(),
+            (true, Some(RecoveryTargetTimeLineGoal::ControlFile))
+        );
+        assert_eq!(
+            check_tli("latest").unwrap(),
+            (true, Some(RecoveryTargetTimeLineGoal::Latest))
+        );
+        assert_eq!(assigned_tli("latest"), 0);
+        assert_eq!(assigned_tli("current"), 0);
+    }
+
+    #[test]
+    fn timeline_matches_executed_c_truth_table() {
+        // (input, parsed TimeLineID) — the uint32 PG 18.4 reported in
+        // "recovery target timeline %u does not exist".
+        let accepted: &[(&str, u32)] = &[
+            ("1", 1),
+            ("42", 42),
+            ("7", 7),
+            ("0x10", 16),                     // base 0: hex
+            ("0X10", 16),
+            ("0xff", 255),
+            ("010", 8),                       // base 0: octal
+            ("0", 0),
+            ("0x", 0),                        // parses the "0", 'x' is garbage
+            ("0x1G", 1),                      // "0x1", trailing G ignored
+            (" 7", 7),                        // leading C-locale space
+            ("\t7", 7),
+            ("\x0b7", 7),                     // VT is C-locale space
+            (" 0x10", 16),
+            ("+5", 5),
+            ("-1", 4294967295),               // wraps to u64::MAX, truncates to u32
+            ("-5", 4294967291),
+            ("abc", 0),                       // no conversion: accepted as 0 (!)
+            ("", 0),                          //   ditto — later FATAL "timeline 0 does not exist"
+            ("latest2", 0),                   // not a named form; no conversion -> 0
+            ("++1", 0),
+            ("- 1", 0),
+            ("123abc", 123),                  // trailing garbage ignored
+            ("12 ", 12),
+            ("4294967295", 4294967295),
+            ("4294967296", 0),                // u32 truncation of 2^32
+            ("18446744073709551615", 4294967295), // ULONG_MAX truncates to 2^32-1
+            ("-18446744073709551615", 1),     // wraps to 1, no ERANGE
+        ];
+        for &(input, tli) in accepted {
+            let (ok, goal) = check_tli(input).unwrap();
+            assert!(ok, "C accepts {input:?}");
+            assert_eq!(goal, Some(RecoveryTargetTimeLineGoal::Numeric), "{input:?}");
+            assert_eq!(assigned_tli(input), tli, "parsed TLI for {input:?}");
+        }
+
+        // The ONLY rejects: u64-magnitude overflow (glibc ERANGE).
+        for input in ["18446744073709551616", "-18446744073709551616",
+                      "99999999999999999999999", "0xffffffffffffffffff"] {
+            assert!(check_tli(input).is_err(), "C rejects {input:?} with ERANGE");
+        }
+    }
+
+    #[test]
+    fn xid_matches_executed_c_truth_table() {
+        // (input, parsed XID) — the uint32 PG 18.4 reported in
+        // "starting point-in-time recovery to XID %u".
+        let accepted: &[(&str, u32)] = &[
+            ("1", 1),
+            ("42", 42),
+            ("0x10", 16),
+            ("010", 8),
+            ("0", 0),
+            (" 7", 7),
+            ("\x0b7", 7),
+            ("+5", 5),
+            ("-1", 4294967295),
+            ("abc", 0),                       // silently becomes XID 0 (!)
+            ("latest", 0),                    // xid has no named forms; garbage -> 0
+            ("123abc", 123),
+            ("12 ", 12),
+            ("4294967295", 4294967295),
+            ("4294967296", 0),                // (TransactionId) truncation of 2^32
+            ("18446744073709551615", 4294967295),
+            ("-18446744073709551615", 1),
+        ];
+        for &(input, xid) in accepted {
+            assert_eq!(check_xid(input), Some(Some(xid)), "parsed XID for {input:?}");
+        }
+
+        // Empty string: accepted, no parse (unsets the target).
+        assert_eq!(check_xid(""), Some(None));
+
+        // ERANGE rejects (check hook returns false).
+        for input in ["18446744073709551616", "-18446744073709551616",
+                      "99999999999999999999999"] {
+            assert_eq!(check_xid(input), None, "C rejects {input:?} with ERANGE");
+        }
+    }
 }

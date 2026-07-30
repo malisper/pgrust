@@ -89,6 +89,111 @@ pub fn strtoint10_strict(s: &[u8]) -> Option<i32> {
     Some(v as i32)
 }
 
+/// Result of [`strtoul_base0`]; mirrors what a C caller can observe from
+/// `strtoul`/`strtou64`: the return value, the endptr offset, and whether
+/// ERANGE was set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StrtoulBase0 {
+    /// The C return value.  0 when nothing converted; `u64::MAX` on ERANGE
+    /// (glibc saturates to ULONG_MAX regardless of sign); otherwise the
+    /// parsed magnitude, negated with wrapping if a `-` sign was present
+    /// (`"-1"` -> `u64::MAX`, no ERANGE).
+    pub value: u64,
+    /// endptr offset: bytes consumed from the start of `s`.  0 == "no
+    /// conversion" (C leaves `*endptr == nptr`).
+    pub consumed: usize,
+    /// glibc set ERANGE: the parsed magnitude exceeded `u64::MAX`.
+    pub range_err: bool,
+}
+
+/// C: `strtoul(s, endptr, 0)` == `strtou64(s, endptr, 0)` on the 64-bit
+/// glibc targets the server runs on (`unsigned long` is `uint64`).
+///
+/// Base 0 semantics: skip leading C-locale whitespace ([`isspace_c_locale`],
+/// VT/FF included), one optional `+`/`-`, then `0x`/`0X` + hex digit ->
+/// base 16, else leading `0` -> base 8, else base 10.  Trailing garbage is
+/// NOT an error (callers passing NULL endptr simply ignore it: `"123abc"`
+/// -> 123).  A minus sign is ACCEPTED and the value wraps modulo 2^64
+/// without ERANGE unless the magnitude itself overflows u64.
+///
+/// glibc errno contract (verified by execution against PostgreSQL 18.4 on
+/// Debian glibc): NO errno is set on no-conversion — `"abc"` returns 0 with
+/// `consumed == 0` and `range_err == false`; EINVAL only fires for an
+/// invalid `base` argument, which 0 is not.  So a C caller's
+/// `errno == EINVAL || errno == ERANGE` reject test maps to `range_err`
+/// alone, and garbage input "successfully" parses as 0.  Do not "improve"
+/// on this — behavioral identity with the C call sites is the contract.
+pub fn strtoul_base0(s: &[u8]) -> StrtoulBase0 {
+    // C strings end at the first NUL.
+    let s = match s.iter().position(|&b| b == 0) {
+        Some(n) => &s[..n],
+        None => s,
+    };
+
+    let mut i = 0;
+    while i < s.len() && isspace_c_locale(s[i]) {
+        i += 1;
+    }
+    let mut neg = false;
+    match s.get(i) {
+        Some(b'-') => {
+            neg = true;
+            i += 1;
+        }
+        Some(b'+') => i += 1,
+        _ => {}
+    }
+
+    // Base detection.  "0x" NOT followed by a hex digit parses as the
+    // number 0 with endptr after the "0" (glibc behavior).
+    let base: u64 = if s.get(i) == Some(&b'0')
+        && matches!(s.get(i + 1), Some(b'x') | Some(b'X'))
+        && s.get(i + 2).is_some_and(|b| b.is_ascii_hexdigit())
+    {
+        i += 2;
+        16
+    } else if s.get(i) == Some(&b'0') {
+        8
+    } else {
+        10
+    };
+
+    let digits_start = i;
+    let mut acc: u64 = 0;
+    let mut range_err = false;
+    while i < s.len() {
+        let d = match s[i] {
+            b @ b'0'..=b'9' => u64::from(b - b'0'),
+            b @ b'a'..=b'f' if base == 16 => u64::from(b - b'a' + 10),
+            b @ b'A'..=b'F' if base == 16 => u64::from(b - b'A' + 10),
+            _ => break,
+        };
+        if d >= base {
+            break; // '8'/'9' terminate an octal number
+        }
+        if !range_err {
+            match acc.checked_mul(base).and_then(|v| v.checked_add(d)) {
+                Some(v) => acc = v,
+                None => range_err = true,
+            }
+        }
+        i += 1;
+    }
+
+    if i == digits_start {
+        // No conversion: value 0, endptr == nptr, errno untouched.
+        return StrtoulBase0 { value: 0, consumed: 0, range_err: false };
+    }
+    let value = if range_err {
+        u64::MAX // ULONG_MAX regardless of sign
+    } else if neg {
+        acc.wrapping_neg()
+    } else {
+        acc
+    };
+    StrtoulBase0 { value, consumed: i, range_err }
+}
+
 pub fn init_seams() {
     string_seams::pg_clean_ascii::set(pg_clean_ascii);
 }
@@ -172,6 +277,79 @@ mod tests {
         // TextDatumGetCString: the C string ends at the first NUL.
         assert_eq!(strtoint10_strict(b"1\0junk"), Some(1));
         assert_eq!(strtoint10_strict(b"\0"), None);
+    }
+
+    /// Expectations executed against PostgreSQL 18.4 (Debian glibc,
+    /// aarch64) via the recovery_target_timeline / recovery_target_xid
+    /// check+assign hooks (ALTER SYSTEM acceptance + the parsed value
+    /// echoed in "recovery target timeline %u does not exist" /
+    /// "starting point-in-time recovery to XID %u"), 2026-07-30.
+    #[test]
+    fn strtoul_base0_matches_glibc() {
+        let ok = |value, consumed| StrtoulBase0 { value, consumed, range_err: false };
+
+        // Plain decimal.
+        assert_eq!(strtoul_base0(b"1"), ok(1, 1));
+        assert_eq!(strtoul_base0(b"42"), ok(42, 2));
+        assert_eq!(strtoul_base0(b"7"), ok(7, 1));
+        assert_eq!(strtoul_base0(b"0"), ok(0, 1));
+
+        // Base 0: hex and octal prefixes.
+        assert_eq!(strtoul_base0(b"0x10"), ok(16, 4)); // PG parsed timeline 16
+        assert_eq!(strtoul_base0(b"0X10"), ok(16, 4));
+        assert_eq!(strtoul_base0(b"0xff"), ok(255, 4));
+        assert_eq!(strtoul_base0(b"010"), ok(8, 3)); // PG parsed timeline 8
+        assert_eq!(strtoul_base0(b"0x"), ok(0, 1)); // just the "0"; 'x' is garbage
+        assert_eq!(strtoul_base0(b"0x1G"), ok(1, 3)); // "0x1", trailing G ignored
+        assert_eq!(strtoul_base0(b"08"), ok(0, 1)); // '8' ends an octal number
+
+        // Leading C-locale whitespace (VT included) and signs.
+        assert_eq!(strtoul_base0(b" 7"), ok(7, 2));
+        assert_eq!(strtoul_base0(b"\t7"), ok(7, 2));
+        assert_eq!(strtoul_base0(b"\x0b7"), ok(7, 2)); // VT: PG accepts
+        assert_eq!(strtoul_base0(b" 0x10"), ok(16, 5));
+        assert_eq!(strtoul_base0(b"+5"), ok(5, 2));
+        // Minus wraps modulo 2^64, no ERANGE: PG parsed timeline/xid
+        // 4294967295 from "-1" (u32 truncation of u64::MAX).
+        assert_eq!(strtoul_base0(b"-1"), ok(u64::MAX, 2));
+        assert_eq!(strtoul_base0(b"-5"), ok(u64::MAX - 4, 2));
+        assert_eq!(strtoul_base0(b"-18446744073709551615"), ok(1, 21));
+
+        // No conversion: value 0, consumed 0, NO error (glibc sets no
+        // errno) — PG ACCEPTS these and they parse as 0.
+        assert_eq!(strtoul_base0(b"abc"), ok(0, 0));
+        assert_eq!(strtoul_base0(b""), ok(0, 0));
+        assert_eq!(strtoul_base0(b"++1"), ok(0, 0));
+        assert_eq!(strtoul_base0(b"- 1"), ok(0, 0));
+        assert_eq!(strtoul_base0(b"latest"), ok(0, 0));
+
+        // Trailing garbage ignored (NULL endptr callers never see it).
+        assert_eq!(strtoul_base0(b"123abc"), ok(123, 3)); // PG parsed 123
+        assert_eq!(strtoul_base0(b"12 "), ok(12, 2));
+
+        // Boundaries and ERANGE (the ONLY reject the C call sites see).
+        assert_eq!(strtoul_base0(b"4294967295"), ok(4294967295, 10));
+        assert_eq!(strtoul_base0(b"4294967296"), ok(4294967296, 10)); // u32-truncates to 0 downstream
+        assert_eq!(strtoul_base0(b"18446744073709551615"), ok(u64::MAX, 20));
+        assert_eq!(
+            strtoul_base0(b"18446744073709551616"),
+            StrtoulBase0 { value: u64::MAX, consumed: 20, range_err: true }
+        );
+        assert_eq!(
+            strtoul_base0(b"-18446744073709551616"),
+            StrtoulBase0 { value: u64::MAX, consumed: 21, range_err: true }
+        );
+        assert_eq!(
+            strtoul_base0(b"99999999999999999999999"),
+            StrtoulBase0 { value: u64::MAX, consumed: 23, range_err: true }
+        );
+        assert_eq!(
+            strtoul_base0(b"0xffffffffffffffffff"),
+            StrtoulBase0 { value: u64::MAX, consumed: 20, range_err: true }
+        );
+
+        // C strings end at the first NUL.
+        assert_eq!(strtoul_base0(b"12\034"), ok(12, 2));
     }
 
     #[test]

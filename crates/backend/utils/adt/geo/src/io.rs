@@ -1,6 +1,7 @@
 use ::adt_float::{float8_lt, float8in_internal, float8out_internal};
 use ::datum::Varlena;
 use ::mcx::{Mcx, PgVec};
+use ::pg_string::isspace_c_locale;
 use ::stringinfo::StringInfo;
 use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG, PATH_HEADER_SIZE, POLYGON_HEADER_SIZE};
 use ::types_error::{
@@ -59,11 +60,23 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    // C: `while (isspace((unsigned char) *p)) p++;` starting at `from`.  This is
+    // the single whitespace predicate for every geo input function: geo_ops.c
+    // asks the question through `isspace()` in the C locale, whose set is
+    // {HT, LF, VT, FF, CR, SP}.  Rust's `is_ascii_whitespace` is NOT that set
+    // (it omits VT, 0x0b), so it must not stand in here -- see
+    // `pg_string::isspace_c_locale`.
+    #[inline]
+    fn ws_end(&self, mut from: usize) -> usize {
+        while from < self.bytes.len() && isspace_c_locale(self.bytes[from]) {
+            from += 1;
+        }
+        from
+    }
+
     #[inline]
     fn skip_ws(&mut self) {
-        while self.cur().is_ascii_whitespace() {
-            self.advance();
-        }
+        self.pos = self.ws_end(self.pos.min(self.bytes.len()));
     }
 
     #[inline]
@@ -171,10 +184,7 @@ fn path_decode(
         depth += 1;
         cur.advance();
     } else if cur.cur() == LDELIM {
-        let mut peek = cur.pos + 1;
-        while peek < cur.bytes.len() && cur.bytes[peek].is_ascii_whitespace() {
-            peek += 1;
-        }
+        let peek = cur.ws_end(cur.pos + 1);
         let cp_is_ldelim = peek < cur.bytes.len() && cur.bytes[peek] == LDELIM;
         if cp_is_ldelim || cur.last_occurrence_is_here(LDELIM) {
             depth += 1;
@@ -631,10 +641,7 @@ pub fn circle_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgR
         depth += 1;
         cur.advance();
     } else if cur.cur() == LDELIM {
-        let mut peek = cur.pos + 1;
-        while peek < cur.bytes.len() && cur.bytes[peek].is_ascii_whitespace() {
-            peek += 1;
-        }
+        let peek = cur.ws_end(cur.pos + 1);
         if peek < cur.bytes.len() && cur.bytes[peek] == LDELIM {
             depth += 1;
             cur.pos = peek;
