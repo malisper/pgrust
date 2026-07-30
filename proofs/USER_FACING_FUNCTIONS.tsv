@@ -1036,7 +1036,7 @@ oid	name	source_file	status	class	notes
 1779	numeric_int8	crates/backend/utils/adt/numeric/src/builtins.rs	blocked(numeric fixed-buffer core (DigitBuf))	ladder	var_to_int64 var.rs:671
 1780	to_date	crates/backend/utils/adt/formatting/src/fmgr_builtins.rs	excluded(wall: format-picture engine)	-	dch_entry.rs:238 + date_out_of_range arm
 1781	int8_numeric	crates/backend/utils/adt/numeric/src/builtins.rs	candidate	ladder	int8_numeric ops.rs:647 -> int64_to_numeric; constant alloc; full i64 = 19 digits -> mandatory magnitude case-split + spot proofs. Host proofs/numeric-conv
-1782	int2_numeric	crates/backend/utils/adt/numeric/src/builtins.rs	candidate	fast	int2_numeric ops.rs:651; i16 = ≤2 NBASE digits, 2 iterations, constant alloc — cheapest row in group. Host proofs/numeric-conv
+1782	int2_numeric	crates/backend/utils/adt/numeric/src/builtins.rs	proved(FULL i16 domain, one harness; full varlena image byte-parity; C digit emission + packed-header encode in-theorem; modulo TLS word-pool model)	fast	30.1s kissat 2026-07-30; proofs/numeric-probe eq_int2_numeric_full
 1783	numeric_int2	crates/backend/utils/adt/numeric/src/builtins.rs	blocked(numeric fixed-buffer core (DigitBuf))	ladder	var_to_int64 var.rs:671; i16 range check trivial, from_view is blocker
 1798	oidin	crates/backend/utils/adt/scalar/src/builtins.rs	proved(len<=5 sym + 20 spots; value+error-class 22P02/22003+level; len 6-12 wall)	fast	proofs/misc-ops
 1799	oidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved(band [0,1e7)+spots to u32::MAX, wrapper-level)	fast	proofs/misc-ops
