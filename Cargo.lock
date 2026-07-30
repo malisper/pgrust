@@ -355,6 +355,7 @@ dependencies = [
  "adt_float",
  "datum",
  "mcx",
+ "pg_string",
  "postgres_seams",
  "pqformat",
  "stack_depth",
