@@ -1075,6 +1075,23 @@ pub fn index_build<'mcx>(
     let save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
+    // C index.c:3033-3043: report which build path was chosen. Every pgrust
+    // build is serial (ii_ParallelWorkers == 0 always — see the header
+    // comment), so only C's "serially" branch is reachable; the
+    // "with request for %d parallel workers" branch belongs to the
+    // unported parallel-build path. errmsg_internal: not translated.
+    elog_seams::ereport::call(
+        PgError::new(
+            types_error::DEBUG1,
+            format!(
+                "building index \"{}\" on table \"{}\" serially",
+                indexRelation.name(),
+                heapRelation.name()
+            ),
+        )
+        .with_location("index.c", 3034, "index_build"),
+    )?;
+
     let stats = match am_kind {
         types_relscan::IndexAmKind::Btree => {
             let r = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
