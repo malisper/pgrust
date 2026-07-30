@@ -15,8 +15,8 @@ use cache_syscache::{
 };
 use datum::Datum;
 use types_core::catalog::{
-    FirstUnpinnedObjectId, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
-    LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, PG_TOAST_NAMESPACE, PROCEDURE_RELATION_ID,
+    BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
+    LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID,
     RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_core::Oid;
@@ -398,11 +398,14 @@ pub fn pg_class_aclmask_ext(
     // Only rolsuper may write system catalogs (updatable system views exempt).
     const SYSTEM_WRITE: u64 = ACL_INSERT | ACL_UPDATE | ACL_DELETE | ACL_TRUNCATE | ACL_USAGE;
     if mask & SYSTEM_WRITE != 0 {
-        // IsSystemClass (catalog.c, unported): toast namespace or pinned oid.
+        // IsSystemClass (catalog.c): pinned oid or toast namespace, where the
+        // toast test covers this session's temp toast namespace as well as
+        // pg_toast. Reduced inlines of this have silently dropped the temp
+        // arm, granting writes C denies.
         let relnamespace =
             SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELNAMESPACE)?.as_oid();
-        let is_system_class =
-            relnamespace == PG_TOAST_NAMESPACE || table_oid < FirstUnpinnedObjectId;
+        let is_system_class = catalog::IsCatalogRelationOid(table_oid)
+            || catalog::IsToastNamespace(relnamespace);
         if is_system_class && relkind != RELKIND_VIEW && !superuser::superuser_arg(roleid)? {
             mask &= !SYSTEM_WRITE;
         }
