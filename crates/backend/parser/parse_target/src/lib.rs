@@ -365,7 +365,7 @@ fn default_with_indirection(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "transformAssignedExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformAssignedExpr")),
     )
 }
 
@@ -386,7 +386,7 @@ fn cannot_assign_to_system_column(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "transformAssignedExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformAssignedExpr")),
     )
 }
 
@@ -419,7 +419,7 @@ fn column_type_mismatch(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "transformAssignedExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformAssignedExpr")),
     )
 }
 
@@ -441,7 +441,7 @@ fn undefined_insert_column(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "checkInsertTargets")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "checkInsertTargets")),
     )
 }
 
@@ -462,7 +462,7 @@ fn duplicate_insert_column(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "checkInsertTargets")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "checkInsertTargets")),
     )
 }
 
@@ -1050,7 +1050,7 @@ fn cross_database_reference(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "ExpandColumnRefStar")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ExpandColumnRefStar")),
     )
 }
 
@@ -1074,7 +1074,7 @@ fn too_many_dotted_names(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "ExpandColumnRefStar")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ExpandColumnRefStar")),
     )
 }
 
@@ -1167,7 +1167,7 @@ fn star_with_no_tables(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_target.c", 0, "ExpandAllTables")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ExpandAllTables")),
     )
 }
 

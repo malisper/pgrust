@@ -66,7 +66,7 @@ fn oid_not_set(loc_fn: &'static str, what: &str) -> Box<PgError> {
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!("{what} OID value not set when in binary upgrade mode"))
             .into_error()
-            .with_error_location(ErrorLocation::new("src/backend/catalog/pg_type.c", 0, loc_fn)),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, loc_fn)),
     )
 }
 use types_rel::{AccessShareLock, RowExclusiveLock, RELKIND_COMPOSITE_TYPE};

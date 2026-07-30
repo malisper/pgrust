@@ -22,8 +22,12 @@ mod tests;
 const PG_WAIT_IPC: u32 = 0x0800_0000;
 const WAIT_EVENT_RESTORE_COMMAND: u32 = PG_WAIT_IPC + 50;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("xlogarchive.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 fn saved_errno() -> i32 {

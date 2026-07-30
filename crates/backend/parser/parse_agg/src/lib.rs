@@ -147,7 +147,7 @@ where
                 .errmsg("GROUPING must have fewer than 32 arguments")
                 .errposition(parser_errposition(pstate, p.location, mbutils::GetDatabaseEncoding()))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_agg.c", 0, "transformGroupingFunc")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformGroupingFunc")),
         ));
     }
 
@@ -339,7 +339,7 @@ fn check_agg_arguments<'mcx>(
                     mbutils::GetDatabaseEncoding(),
                 ))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_agg.c", 0, "check_agg_arguments")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "check_agg_arguments")),
         )
     };
     if ctx.min_ctelevel >= 0 && ctx.min_ctelevel < agglevel {
@@ -1031,7 +1031,7 @@ fn agg_in_recursive_term(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box
             .errmsg("aggregate functions are not allowed in a recursive query's recursive term")
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_agg.c", 0, "parseCheckAggregates")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "parseCheckAggregates")),
     )
 }
 
@@ -1056,7 +1056,7 @@ fn grouping_sets_limit_error(pstate: &ParseState<'_, '_>, location: ParseLoc) ->
             .errmsg("too many grouping sets present (maximum 4096)")
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_agg.c", 0, "parseCheckAggregates")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "parseCheckAggregates")),
     )
 }
 
@@ -1991,7 +1991,7 @@ fn windowing_error(
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_agg.c", 0, funcname)),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, funcname)),
     )
 }
 
@@ -2011,7 +2011,7 @@ fn grouping_error(
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_agg.c", 0, funcname)),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, funcname)),
     )
 }
 
@@ -2087,6 +2087,6 @@ fn ungrouped_var_error(
     Box::new(
         b.errposition(parser_errposition(pstate, var.location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_agg.c", 0, "check_ungrouped_columns")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "check_ungrouped_columns")),
     )
 }

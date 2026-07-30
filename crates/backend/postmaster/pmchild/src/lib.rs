@@ -268,7 +268,7 @@ pub fn CountChildren(target_mask: u32) -> i32 {
                 launch_backend::postmaster_child_name(bp.bkend_type),
                 bp.pid
             ))
-            .finish(types_error::ErrorLocation::new("postmaster.c", 0, "CountChildren"));
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "CountChildren"));
     })
 }
 

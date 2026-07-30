@@ -31,8 +31,12 @@ pub fn init_seams() {
     utility_seams::utility_contains_query::set(UtilityContainsQuery);
 }
 
+#[track_caller]
 pub(crate) fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("utility.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 #[cold]

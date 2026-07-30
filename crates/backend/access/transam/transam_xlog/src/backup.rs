@@ -36,8 +36,12 @@ const PG_TBLSPC_DIR: &str = "pg_tblspc";
 const ARCHIVE_MODE_OFF: i32 = 0;
 const ARCHIVE_MODE_ALWAYS: i32 = 2;
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("xlog.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 /// `enum SessionBackupState` (xlog.h) — backend-local backup status.

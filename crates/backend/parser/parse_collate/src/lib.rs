@@ -1100,6 +1100,6 @@ fn collation_mismatch_error(
         report
             .errposition(parser_errposition(ctx.pstate, errloc, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_collate.c", 0, funcname)),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, funcname)),
     )
 }

@@ -30,8 +30,12 @@ use types_error::{
 };
 use types_rel::{Relation, LOCKMODE};
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("src/backend/replication/logical/relation.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 pub const SUBREL_STATE_READY: u8 = b'r';

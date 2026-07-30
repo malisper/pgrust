@@ -781,7 +781,7 @@ fn transformPLAssignStmt<'mcx>(
                     n as u64,
                 )
                 .into_error()
-                .with_error_location(ErrorLocation::new("analyze.c", 0, "transformPLAssignStmt")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformPLAssignStmt")),
         ));
     }
 
@@ -2083,7 +2083,7 @@ fn undefined_update_column(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformUpdateTargetList")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformUpdateTargetList")),
     )
 }
 
@@ -2200,7 +2200,7 @@ fn insert_row_length_error(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformInsertRow")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformInsertRow")),
     )
 }
 
@@ -2380,7 +2380,7 @@ fn returning_no_columns(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformReturningClause")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformReturningClause")),
     )
 }
 
@@ -2424,7 +2424,7 @@ fn values_length_mismatch(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformInsertStmt")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformInsertStmt")),
     )
 }
 
@@ -2464,7 +2464,7 @@ pub(crate) fn locking_not_allowed_with(
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!("{} is not allowed with {what}", LCS_asString(strength)))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, funcname)),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, funcname)),
     )
 }
 
@@ -2480,7 +2480,7 @@ fn locking_not_applicable_to(
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!("{} cannot be applied to {what}", LCS_asString(strength)))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, funcname)),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, funcname)),
     )
 }
 
@@ -2810,7 +2810,7 @@ fn locking_unqualified_names(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformLockingClause")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformLockingClause")),
     )
 }
 
@@ -2832,7 +2832,7 @@ fn locking_bad_target(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformLockingClause")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformLockingClause")),
     )
 }
 
@@ -2857,6 +2857,6 @@ fn locking_rel_not_found(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformLockingClause")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformLockingClause")),
     )
 }

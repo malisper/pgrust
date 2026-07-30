@@ -371,7 +371,7 @@ pub fn RmgrNotFound(rmid: RmgrId) -> PgResult<()> {
             "Include the extension module that implements this resource manager in \
              \"shared_preload_libraries\".",
         )
-        .finish(ErrorLocation::new("rmgr.c", 0, "RmgrNotFound"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "RmgrNotFound"))
 }
 
 pub fn init_seams() {}

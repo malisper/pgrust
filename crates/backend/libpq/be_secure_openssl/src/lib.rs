@@ -67,8 +67,12 @@ fDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq\n\
 5RXSJhiY+gUQFXKOWoqsqmj//////////wIBAg==\n\
 -----END DH PARAMETERS-----\n";
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("be-secure-openssl.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 static SSL_CONTEXT: RwLock<Option<SslContext>> = RwLock::new(None);

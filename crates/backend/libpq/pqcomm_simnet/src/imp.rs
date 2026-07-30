@@ -552,8 +552,11 @@ fn with<R>(f: impl FnOnce(&mut SimNetState) -> R) -> R {
     SIM.with(|s| f(&mut s.borrow_mut()))
 }
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("pqcomm_simnet.rs", 0, funcname)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 // ---------------------------------------------------------------------------

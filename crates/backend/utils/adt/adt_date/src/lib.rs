@@ -111,6 +111,7 @@ pub const DATE_WORKBUF: usize = MAXDATELEN + MAXDATEFIELDS;
 pub const EARLY: &[u8] = b"-infinity";
 pub const LATE: &[u8] = b"infinity";
 
+#[track_caller]
 #[cold]
 fn date_out_of_range(s: &str) -> Box<PgError> {
     Box::new(
@@ -119,6 +120,7 @@ fn date_out_of_range(s: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn timestamp_out_of_range() -> Box<PgError> {
     Box::new(
@@ -127,6 +129,7 @@ fn timestamp_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn date_out_of_range_for_timestamp() -> Box<PgError> {
     Box::new(
@@ -287,6 +290,7 @@ pub fn make_date(year: i32, month: i32, day: i32) -> PgResult<DateADT> {
     let mut tm = pg_tm { tm_year: year, tm_mon: month, tm_mday: day, ..pg_tm::default() };
     let mut bc = false;
 
+    #[track_caller]
     #[cold]
     fn field_out_of_range(y: i32, m: i32, d: i32) -> Box<PgError> {
         Box::new(
@@ -324,6 +328,7 @@ pub fn make_date(year: i32, month: i32, day: i32) -> PgResult<DateADT> {
     Ok(date)
 }
 
+#[track_caller]
 #[cold]
 fn date_out_of_range_ymd(y: i32, m: i32, d: i32) -> Box<PgError> {
     Box::new(
@@ -353,6 +358,7 @@ pub fn date_mi(d1: DateADT, d2: DateADT) -> PgResult<i32> {
     Ok(d1.wrapping_sub(d2))
 }
 
+#[track_caller]
 #[cold]
 fn date_out_of_range_plain() -> Box<PgError> {
     Box::new(
@@ -938,6 +944,7 @@ pub fn timetz_send<'mcx>(mcx: Mcx<'mcx>, t: &TimeTzADT) -> PgResult<Bytea<'mcx>>
     Ok(pqformat::pq_endtypsend(b))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn datetime_out_of_range(msg: &'static str) -> Box<PgError> {
@@ -975,6 +982,7 @@ pub fn time_mi_time(time1: TimeADT, time2: TimeADT) -> Interval {
     Interval { time: time1 - time2, day: 0, month: 0 }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn infinite_interval_time_err(msg: &'static str) -> Box<PgError> {
@@ -1095,6 +1103,7 @@ fn downcase_ident<'a>(src: &[u8], out: &'a mut [u8; 64]) -> &'a [u8] {
     &out[..n]
 }
 
+#[track_caller]
 #[cold]
 fn unit_not_supported(lowunits: &[u8], typename: &str) -> Box<PgError> {
     Box::new(
@@ -1106,6 +1115,7 @@ fn unit_not_supported(lowunits: &[u8], typename: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn unit_not_recognized(lowunits: &[u8], typename: &str) -> Box<PgError> {
     Box::new(

@@ -26,8 +26,12 @@ const InvalidXLogRecPtr: XLogRecPtr = 0;
 const MaxAllocSize: usize = 0x3fffffff;
 const VARHDRSZ: usize = 4;
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("logicalfuncs.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 struct DecodingOutputState {

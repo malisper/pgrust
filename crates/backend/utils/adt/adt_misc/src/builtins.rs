@@ -654,7 +654,7 @@ pub fn fc_pg_promote(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
                 .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
                 .errmsg("terminating connection due to unexpected postmaster exit")
                 .errcontext_msg("while waiting on promotion")
-                .finish(types_error::ErrorLocation::new("xlogfuncs.c", 0, "pg_promote"))?;
+                .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "pg_promote"))?;
         }
     }
 
@@ -664,7 +664,7 @@ pub fn fc_pg_promote(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
             format!("server did not promote within {wait_seconds} seconds"),
             wait_seconds as u64,
         )
-        .finish(types_error::ErrorLocation::new("xlogfuncs.c", 0, "pg_promote"))?;
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "pg_promote"))?;
     Ok(Datum::from_bool(false))
 }
 
@@ -1120,7 +1120,7 @@ pub fn fc_pg_get_catalog_foreign_keys(
 fn tablespace_warning(msg: String) -> PgResult<()> {
     elog::ereport(types_error::WARNING)
         .errmsg(msg)
-        .finish(types_error::ErrorLocation::new("misc.c", 0, "pg_tablespace_databases"))
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "pg_tablespace_databases"))
 }
 
 #[track_caller]

@@ -30,8 +30,12 @@ pub fn backend_context_forest() -> Vec<TreeStats> {
     })
 }
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("src/backend/utils/mmgr/mcxt.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 fn handle_log_memory_context_interrupt() {

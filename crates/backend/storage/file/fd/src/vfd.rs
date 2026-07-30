@@ -194,8 +194,12 @@ pub(crate) fn cpath(path: &str) -> CString {
     CString::new(path.as_bytes()).unwrap_or_else(|_| CString::new("").unwrap())
 }
 
+#[track_caller]
 pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("fd.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 pub(crate) fn Delete(fd: &mut FdState, file: i32) {

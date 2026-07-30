@@ -55,8 +55,12 @@ const MAXPGPATH: usize = 1024;
 const OIDCHARS: usize = 10;
 const FORKNAMECHARS: usize = 4;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("tablespace.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 // binary_upgrade_next_pg_tablespace_oid (pg_upgrade_support.c): set-once,

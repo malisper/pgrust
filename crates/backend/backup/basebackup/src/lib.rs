@@ -41,8 +41,11 @@ use walsender::WalSndState;
 
 const SRCFILE: &str = "src/backend/backup/basebackup.c";
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new(SRCFILE, 0, func)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 // SINK_BUFFER_LENGTH = Max(32768, BLCKSZ).

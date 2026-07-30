@@ -116,8 +116,12 @@ fn err_detail(msg: &str, detail: String, sqlstate: SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()).with_sqlstate(sqlstate).with_detail(detail))
 }
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("user.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn notice(msg: String, func: &'static str) -> PgResult<()> {

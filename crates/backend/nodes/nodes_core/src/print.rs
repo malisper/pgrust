@@ -179,7 +179,7 @@ pub fn elog_node_display(
     elog::ereport(lev)
         .errmsg_internal(format!("{title}:"))
         .errdetail_internal(f.as_str().to_owned())
-        .finish(ErrorLocation::new("print.c", 0, "elog_node_display"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "elog_node_display"))
 }
 
 pub fn print_rt(mcx: Mcx<'_>, rtable: &NodeList<'_>) {

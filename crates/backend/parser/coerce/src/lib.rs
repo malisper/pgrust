@@ -2428,7 +2428,7 @@ fn common_type_mismatch(
             .errmsg(format!("{context} types {p} and {n} cannot be matched"))
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "select_common_type")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "select_common_type")),
     )
 }
 
@@ -2456,7 +2456,7 @@ fn cannot_coerce(
             .errmsg(format!("{context} could not convert type {input} to {target}"))
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "coerce_to_common_type")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "coerce_to_common_type")),
     )
 }
 
@@ -2485,7 +2485,7 @@ fn construct_type_mismatch(
             ))
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "coerce_to_boolean")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "coerce_to_boolean")),
     )
 }
 
@@ -2504,6 +2504,6 @@ fn returns_set(
             .errmsg(format!("argument of {construct_name} must not return a set"))
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "coerce_to_boolean")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "coerce_to_boolean")),
     )
 }

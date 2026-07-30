@@ -575,7 +575,7 @@ fn setop_column_count_mismatch(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformSetOperationTree")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformSetOperationTree")),
     )
 }
 
@@ -593,7 +593,7 @@ fn setop_refers_to_same_level(pstate: &ParseState<'_, '_>, location: i32) -> Box
             )
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformSetOperationTree")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformSetOperationTree")),
     )
 }
 
@@ -613,7 +613,7 @@ fn invalid_setop_order_by(pstate: &ParseState<'_, '_>, extra_tle: Node<'_>) -> B
             )
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformSetOperationStmt")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformSetOperationStmt")),
     )
 }
 

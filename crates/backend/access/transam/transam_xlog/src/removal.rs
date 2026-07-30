@@ -22,7 +22,7 @@ pub fn CheckXLogRemoved(segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
         return elog::ereport(types_error::ERROR)
             .errcode_for_file_access()
             .errmsg(format!("requested WAL segment {filename} has already been removed"))
-            .finish(types_error::ErrorLocation::new("xlog.c", 0, "CheckXLogRemoved"));
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "CheckXLogRemoved"));
     }
     Ok(())
 }

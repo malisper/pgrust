@@ -27,8 +27,12 @@ const STS_CHUNK_DATA_SIZE: usize = STS_CHUNK_SIZE - STS_CHUNK_HEADER_SIZE;
 /// `SHARED_TUPLESTORE_SINGLE_PASS` is the only flag and is advisory in C too.
 pub const SHARED_TUPLESTORE_SINGLE_PASS: i32 = 0x01;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("sharedtuplestore.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 struct StsParticipant {

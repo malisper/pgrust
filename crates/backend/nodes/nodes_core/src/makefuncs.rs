@@ -108,6 +108,6 @@ fn composite_type_err(
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!("relation \"{name}\" does not have a composite type"))
             .into_error()
-            .with_error_location(ErrorLocation::new("makefuncs.c", 0, "makeWholeRowVar")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "makeWholeRowVar")),
     )
 }

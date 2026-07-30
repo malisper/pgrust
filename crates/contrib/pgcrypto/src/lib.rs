@@ -160,8 +160,11 @@ fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) ->
 }
 
 
+#[track_caller]
 fn here(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("pgcrypto/pgp", 0, func)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn pgp_notice(msg: &str) {

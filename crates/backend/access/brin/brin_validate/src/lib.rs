@@ -22,7 +22,7 @@ fn info(msg: String) -> PgResult<()> {
     ereport(INFO)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg)
-        .finish(ErrorLocation::new("brin_validate.c", 0, "brinvalidate"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "brinvalidate"))
 }
 
 pub fn brinvalidate(opclassoid: Oid) -> PgResult<bool> {

@@ -76,7 +76,7 @@ fn warn(msg: String, sqlstate: types_error::SqlState) -> PgResult<()> {
     elog::ereport(WARNING)
         .errcode(sqlstate)
         .errmsg(msg)
-        .finish(types_error::ErrorLocation::new("aclchk.c", 0, "ExecuteGrantStmt"))
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "ExecuteGrantStmt"))
 }
 
 // get_rolespec_oid (acl.c).

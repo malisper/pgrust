@@ -16,8 +16,12 @@ use types_fmgr::{
 };
 use types_rel::{AccessShareLock, RowExclusiveLock};
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("src/backend/utils/adt/pg_upgrade_support.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 fn check_is_binary_upgrade(funcname: &'static str) -> PgResult<()> {

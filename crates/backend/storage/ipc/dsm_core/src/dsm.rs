@@ -23,7 +23,7 @@ pub const INVALID_CONTROL_SLOT: u32 = u32::MAX;
 pub const DSM_CREATE_NULL_IF_MAXSEGMENTS: i32 = 0x0001;
 
 fn loc(funcname: &str) -> ErrorLocation {
-    ErrorLocation::new("dsm.c", 0, funcname)
+    ErrorLocation::new(file!(), line!() as i32, funcname)
 }
 
 #[repr(C)]

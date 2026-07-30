@@ -136,7 +136,7 @@ pub fn DefineOperator<'mcx>(
                 ereport(WARNING)
                     .errcode(ERRCODE_SYNTAX_ERROR)
                     .errmsg(format!("operator attribute \"{other}\" not recognized"))
-                    .finish(ErrorLocation::new("operatorcmds.c", 0, "DefineOperator"))?;
+                    .finish(ErrorLocation::new(file!(), line!() as i32, "DefineOperator"))?;
             }
         }
     }

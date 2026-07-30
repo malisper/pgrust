@@ -128,7 +128,7 @@ pub fn DefineView<'mcx>(
                 "view \"{}\" will be a temporary view",
                 view.relname.unwrap_or("")
             ))
-            .finish(types_error::ErrorLocation::new("view.c", 0, "DefineView"))?;
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "DefineView"))?;
     }
 
     DefineVirtualRelation(mcx, stmt, view, options, &mut viewParse, query_string)

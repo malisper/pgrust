@@ -83,11 +83,13 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         self.sc.syntax_error(message, lloc)
     }
 
+    #[track_caller]
     #[cold]
     fn gram_err(&self, code: types_error::SqlState, msg: String) -> Box<PgError> {
         Box::new(elog::ereport(ERROR).errcode(code).errmsg(msg).into_error())
     }
 
+    #[track_caller]
     #[cold]
     fn gram_err_pos(
         &self,
@@ -977,7 +979,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             }
             // The warning's cursor transposes onto the CREATE statement via
             // the compile-scope emit callback (do_compile).
-            b.finish(types_error::ErrorLocation::new("pl_gram.y", 0, "decl_varname"))?;
+            b.finish(types_error::ErrorLocation::new(file!(), line!() as i32, "decl_varname"))?;
         }
         Ok((name, loc))
     }

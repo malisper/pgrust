@@ -953,8 +953,12 @@ pub(crate) fn committed_children_in(xp: XsPtr) -> PgResult<Vec<TransactionId>> {
     })
 }
 
+#[track_caller]
 pub(crate) fn xact_location(function: &'static str) -> ErrorLocation {
-    ErrorLocation::new("xact.c", 0, function)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, function)
 }
 
 pub(crate) fn try_strdup(s: &str, what: &'static str) -> PgResult<String> {

@@ -31,8 +31,12 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported callee reached from snapbuild.c: {what}")
 }
 
+#[track_caller]
 pub(crate) fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("snapbuild.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 thread_local! {

@@ -32,7 +32,7 @@ fn getInstallationPaths(argv0: &str) {
     let exe = match pg_path::find_my_exec(argv0, |m| {
         let _ = elog::ereport(LOG)
             .errmsg(m)
-            .finish(types_error::ErrorLocation::new("src/common/exec.c", 0, "find_my_exec"));
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "find_my_exec"));
     }) {
         Ok(exe) => exe,
         Err(_) => {

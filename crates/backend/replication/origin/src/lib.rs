@@ -61,8 +61,12 @@ pub const XLOG_REPLORIGIN_DROP: u8 = 0x10;
 // before REPLICATION_SLOT_DROP=49 as in the slot crate).
 const WAIT_EVENT_REPLICATION_ORIGIN_DROP: u32 = 0x0800_0000 + 48;
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("src/backend/replication/logical/origin.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 // ---------------------------------------------------------------------------

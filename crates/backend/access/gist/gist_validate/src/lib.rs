@@ -21,7 +21,7 @@ fn info(msg: String) -> PgResult<()> {
     ereport(INFO)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg)
-        .finish(ErrorLocation::new("gistvalidate.c", 0, "gistvalidate"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "gistvalidate"))
 }
 
 pub fn gistvalidate(opclassoid: Oid) -> PgResult<bool> {

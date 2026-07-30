@@ -30,8 +30,12 @@ pub use createdb::{check_encoding_locale_matches, createdb};
 pub use dropdb::dropdb;
 pub(crate) use dropdb::name_key;
 
+#[track_caller]
 pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("dbcommands.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 const ANUM_PG_DATABASE_DATNAME: i32 = 2;

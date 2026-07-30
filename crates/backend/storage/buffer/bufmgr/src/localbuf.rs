@@ -312,7 +312,7 @@ pub(crate) fn GetLocalVictimBuffer() -> PgResult<Buffer> {
             ereport(ERROR)
                 .errcode(ERRCODE_INSUFFICIENT_RESOURCES)
                 .errmsg("no empty local buffer available")
-                .finish(ErrorLocation::new("localbuf.c", 0, "GetLocalVictimBuffer"))?;
+                .finish(ErrorLocation::new(file!(), line!() as i32, "GetLocalVictimBuffer"))?;
             unreachable!("ERROR reported");
         }
     };
@@ -358,7 +358,7 @@ fn InvalidateLocalBuffer(buffer: Buffer, check_unreferenced: bool) -> PgResult<(
                         lb.ref_counts[id].get()
                     ),
                 )
-                .with_error_location(ErrorLocation::new("localbuf.c", 0, "InvalidateLocalBuffer")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "InvalidateLocalBuffer")),
             ));
         }
         let removed = lb.hash.remove(&tag);
@@ -519,7 +519,7 @@ pub(crate) fn ExtendBufferedRelLocal(
                 smgr.locator.relNumber,
                 MaxBlockNumber
             ))
-            .finish(ErrorLocation::new("localbuf.c", 0, "ExtendBufferedRelLocal"))?;
+            .finish(ErrorLocation::new(file!(), line!() as i32, "ExtendBufferedRelLocal"))?;
     }
 
     for i in 0..extend_by as usize {

@@ -49,8 +49,12 @@ const WAIT_EVENT_CHECKPOINT_WRITE_DELAY: u32 = PG_WAIT_TIMEOUT + 1;
 // CheckpointerCommLock offset in lwlocklist.h order (name pinned by test).
 pub(crate) const CHECKPOINTER_COMM_LOCK_OFFSET: usize = 17;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("checkpointer.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 thread_local! {

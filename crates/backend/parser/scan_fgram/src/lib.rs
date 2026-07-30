@@ -331,6 +331,7 @@ impl<'mcx> Scanner<'mcx> {
     // scanner_yyerror (scan.l:1355): yyerror(msg) with the "at or near"
     // rendering and cursor position. flex's hold-char NUL bounds the quoted
     // text at the end of the current match.
+    #[track_caller]
     #[cold]
     fn yyerr(&self, message: &str) -> Box<PgError> {
         let tail = &self.scanbuf[self.yylloc as usize..self.pos.max(self.yylloc as usize)];
@@ -349,6 +350,7 @@ impl<'mcx> Scanner<'mcx> {
         )
     }
 
+    #[track_caller]
     #[cold]
     fn lexerr(
         &self,

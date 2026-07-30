@@ -604,7 +604,7 @@ fn volatile_warning<'mcx>(
     elog::ereport(types_error::WARNING)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(format!("type {} function {} should not be volatile", what, name.as_str()))
-        .finish(types_error::ErrorLocation::new("typecmds.c", 0, "DefineType"))
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "DefineType"))
 }
 
 fn io_func_rettype_check<'mcx>(
@@ -863,7 +863,7 @@ pub fn DefineType<'mcx>(
                     .errcode(ERRCODE_SYNTAX_ERROR)
                     .errmsg(format!("type attribute \"{other}\" not recognized"))
                     .errposition(pos)
-                    .finish(types_error::ErrorLocation::new("typecmds.c", 0, "DefineType"))?;
+                    .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "DefineType"))?;
                 continue;
             }
         };

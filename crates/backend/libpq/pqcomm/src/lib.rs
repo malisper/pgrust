@@ -63,8 +63,12 @@ thread_local! {
     static SEND_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("pqcomm.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 fn grow_zeroed(buf: &mut PgVec<'_, u8>, new_len: usize) -> PgResult<()> {

@@ -82,8 +82,12 @@ pub(crate) const RELKIND_PARTITIONED_INDEX: u8 = b'I';
 
 const ACLCHECK_OK: i32 = 0;
 
+#[track_caller]
 pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("stat_utils.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 pub(crate) fn warn(

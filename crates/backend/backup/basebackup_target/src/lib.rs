@@ -178,8 +178,12 @@ impl BaseBackupTarget for ServerTarget {
     }
 }
 
+#[track_caller]
 pub(crate) fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("basebackup_target.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn ereport_syntax_error<T>(msg: String, func: &'static str) -> PgResult<T> {

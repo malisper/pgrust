@@ -18,8 +18,11 @@ pub const Natts_pg_collation: usize = 12;
 
 const SRC: &str = "src/backend/catalog/pg_collation.c";
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new(SRC, 0, func)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn existing_oid(collname: &str, encoding: i32, nsp: Oid) -> PgResult<Oid> {

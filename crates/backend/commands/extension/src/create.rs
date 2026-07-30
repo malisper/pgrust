@@ -26,8 +26,12 @@ use crate::{
     Anum_pg_extension_oid, ExtensionOidIndexId, Natts_pg_extension,
 };
 
+#[track_caller]
 fn here(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("extension.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {

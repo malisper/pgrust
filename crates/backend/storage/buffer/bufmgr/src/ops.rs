@@ -50,7 +50,7 @@ pub fn LockBuffer(buffer: Buffer, mode: i32) -> PgResult<()> {
         }
         _ => Err(Box::new(
             types_error::PgError::new(ERROR, format!("unrecognized buffer lock mode: {mode}"))
-                .with_error_location(ErrorLocation::new("bufmgr.c", 0, "LockBuffer")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "LockBuffer")),
         )),
     }
 }
@@ -95,7 +95,7 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
                     ERROR,
                     "multiple backends attempting to wait for pincount 1",
                 )
-                .with_error_location(ErrorLocation::new("bufmgr.c", 0, "LockBufferForCleanup")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "LockBufferForCleanup")),
             ));
         }
         // SAFETY: header lock held.

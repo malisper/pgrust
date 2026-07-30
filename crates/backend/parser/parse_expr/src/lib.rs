@@ -392,7 +392,7 @@ fn construct_requires_boolean_eq(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformAExprNullIf")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformAExprNullIf")),
     )
 }
 
@@ -454,7 +454,7 @@ fn construct_must_not_return_set(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformAExprNullIf")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformAExprNullIf")),
     )
 }
 
@@ -682,7 +682,7 @@ fn row_expansion_error(pstate: &ParseState<'_, '_>, location: i32) -> Box<types_
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformIndirection")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformIndirection")),
     )
 }
 
@@ -735,7 +735,7 @@ fn unknown_attribute(
         builder
             .errposition(errpos)
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "unknown_attribute")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "unknown_attribute")),
     )
 }
 
@@ -920,7 +920,7 @@ fn empty_array_error(pstate: &ParseState<'_, '_>, location: i32) -> Box<types_er
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformArrayExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformArrayExpr")),
     )
 }
 
@@ -948,7 +948,7 @@ fn array_elem_type_error(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformArrayExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformArrayExpr")),
     )
 }
 
@@ -1100,7 +1100,7 @@ fn cannot_cast_error(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformTypeCast")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformTypeCast")),
     )
 }
 
@@ -1578,7 +1578,7 @@ fn xml_syntax_error(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformXmlExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformXmlExpr")),
     )
 }
 
@@ -1602,7 +1602,7 @@ fn cannot_cast_xmlserialize(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformXmlSerialize")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformXmlSerialize")),
     ))
 }
 
@@ -1805,7 +1805,7 @@ fn column_value_count_mismatch(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformMultiAssignRef")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformMultiAssignRef")),
     )
 }
 
@@ -1829,7 +1829,7 @@ fn multiassign_source_not_supported(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformMultiAssignRef")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformMultiAssignRef")),
     )
 }
 
@@ -1849,7 +1849,7 @@ fn distinct_requires_boolean_eq(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_distinct_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_distinct_op")),
     )
 }
 
@@ -1871,7 +1871,7 @@ fn collations_not_supported(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformCollateClause")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformCollateClause")),
     )
 }
 
@@ -1894,7 +1894,7 @@ fn too_many_row_entries(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformRowExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformRowExpr")),
     )
 }
 
@@ -2204,7 +2204,7 @@ fn typmod_check(what: &str, istz: bool, typmod: i32) -> PgResult<i32> {
                 .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
                 .errmsg(format!("{what}({typmod}){tz} precision must not be negative"))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_expr.c", 0, "typmod_check")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "typmod_check")),
         ));
     }
     if typmod > MAX_PRECISION {
@@ -2213,7 +2213,7 @@ fn typmod_check(what: &str, istz: bool, typmod: i32) -> PgResult<i32> {
             .errmsg(format!(
                 "{what}({typmod}){tz} precision reduced to maximum allowed, {MAX_PRECISION}"
             ))
-            .finish(ErrorLocation::new("parse_expr.c", 0, "typmod_check"))?;
+            .finish(ErrorLocation::new(file!(), line!() as i32, "typmod_check"))?;
         return Ok(MAX_PRECISION);
     }
     Ok(typmod)
@@ -2255,7 +2255,7 @@ fn srf_not_allowed_in(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformCaseExpr")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformCaseExpr")),
     )
 }
 
@@ -2596,7 +2596,7 @@ fn improper_qualified_name(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformColumnRef")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformColumnRef")),
     )
 }
 
@@ -2762,7 +2762,7 @@ fn column_ref_not_allowed(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformColumnRef")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformColumnRef")),
     )
 }
 
@@ -2803,7 +2803,7 @@ fn no_parameter_error(
             .errmsg(format!("there is no parameter ${}", pref.number))
             .errposition(parser_small1::parser_errposition(pstate, pref.location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformParamRef")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformParamRef")),
     )
 }
 
@@ -3198,7 +3198,7 @@ fn row_comparison_ambiguous(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_row_comparison_op")),
     )
 }
 
@@ -3220,7 +3220,7 @@ fn row_length_error(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_row_comparison_op")),
     )
 }
 
@@ -3245,7 +3245,7 @@ fn row_comparison_no_interpretation(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_row_comparison_op")),
     )
 }
 
@@ -3265,7 +3265,7 @@ fn default_not_allowed(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformExprRecurse")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformExprRecurse")),
     )
 }
 
@@ -3286,7 +3286,7 @@ fn column_count_mismatch(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformSubLink")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformSubLink")),
     )
 }
 
@@ -3310,7 +3310,7 @@ fn row_comparison_not_boolean(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_row_comparison_op")),
     )
 }
 
@@ -3330,7 +3330,7 @@ fn row_comparison_returns_set(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_row_comparison_op")),
     )
 }
 
@@ -3351,7 +3351,7 @@ fn sublink_not_allowed(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformSubLink")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformSubLink")),
     )
 }
 
@@ -3371,7 +3371,7 @@ fn one_column_required(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformSubLink")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformSubLink")),
     )
 }
 

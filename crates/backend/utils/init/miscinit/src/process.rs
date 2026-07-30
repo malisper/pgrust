@@ -76,7 +76,7 @@ pub fn InitStandaloneProcess(argv0: &str) -> PgResult<()> {
         let exe = pg_path::find_my_exec(argv0, |m| {
             let _ = ereport(types_error::LOG)
                 .errmsg(m)
-                .finish(ErrorLocation::new("src/common/exec.c", 0, "find_my_exec"));
+                .finish(ErrorLocation::new(file!(), line!() as i32, "find_my_exec"));
         })
         .map_err(|_| {
             ereport(FATAL)

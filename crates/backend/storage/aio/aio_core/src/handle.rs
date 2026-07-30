@@ -27,8 +27,12 @@ const PG_WAIT_IO: u32 = 0x0A00_0000;
 pub(crate) const WAIT_EVENT_AIO_IO_COMPLETION: u32 = PG_WAIT_IO;
 
 #[cold]
+#[track_caller]
 pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("aio.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 pub fn pgaio_io_acquire(

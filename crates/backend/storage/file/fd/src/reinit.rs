@@ -15,8 +15,12 @@ pub const UNLOGGED_RELATION_CLEANUP: i32 = 1 << 0;
 pub const UNLOGGED_RELATION_INIT: i32 = 1 << 1;
 
 #[cold]
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("reinit.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 /// CLEANUP removes every non-init fork of any relation that has an init

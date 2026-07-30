@@ -739,7 +739,7 @@ pub fn DefineSequence<'mcx>(
             elog::ereport(NOTICE)
                 .errcode(ERRCODE_DUPLICATE_TABLE)
                 .errmsg(format!("relation \"{}\" already exists, skipping", rvv.relname))
-                .finish(types_error::ErrorLocation::new("sequence.c", 0, "DefineSequence"))?;
+                .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "DefineSequence"))?;
             return Ok(types_core::InvalidOid);
         }
     }
@@ -854,7 +854,7 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     if relid == types_core::InvalidOid {
         ::elog::ereport(::types_error::NOTICE)
             .errmsg(format!("relation \"{}\" does not exist, skipping", v.relname))
-            .finish(::types_error::ErrorLocation::new("sequence.c", 0, "AlterSequence"))?;
+            .finish(::types_error::ErrorLocation::new(file!(), line!() as i32, "AlterSequence"))?;
         return Ok(types_core::InvalidOid);
     }
     // C: RangeVarCallbackOwnsRelation inside RangeVarGetRelidExtended

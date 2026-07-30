@@ -123,6 +123,7 @@ pub(crate) struct ParquetSrc {
 
 const BATCH_ROWS: usize = 1024;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_mismatch(attname: &str, pg_type: &str, pq_type: &str) -> Box<PgError> {
@@ -268,6 +269,7 @@ fn wants_utf8(conv: Conv) -> bool {
     matches!(conv, Conv::Text | Conv::VarcharN(_) | Conv::Bpchar(_))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn stdin_unsupported() -> Box<PgError> {
@@ -427,6 +429,7 @@ impl ParquetSrc {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn out_of_range(what: &'static str) -> Box<PgError> {
@@ -436,6 +439,7 @@ fn out_of_range(what: &'static str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn dt_out_of_range(what: &'static str) -> Box<PgError> {
@@ -604,6 +608,7 @@ pub(crate) fn convert_cell<'mcx>(
     batch: &ColumnBatch,
     k: usize,
 ) -> PgResult<Datum> {
+    #[track_caller]
     #[cold]
     #[inline(never)]
     fn batch_shape() -> Box<PgError> {

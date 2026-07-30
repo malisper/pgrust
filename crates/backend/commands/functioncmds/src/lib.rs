@@ -453,7 +453,7 @@ fn resolve_pct_type<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
             catalog_objectaddress::TypeNameToString(tn),
             format_type::format_type_be(typoid)?
         ))
-        .finish(types_error::ErrorLocation::new("parse_type.c", 0, "LookupTypeNameExtended"))?;
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "LookupTypeNameExtended"))?;
     Ok((typoid, field))
 }
 
@@ -501,7 +501,7 @@ fn shell_type_check<'mcx>(
         .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
         .errmsg(format!("{what} {} is only a shell", name.as_str()))
         .errposition(pos)
-        .finish(types_error::ErrorLocation::new("functioncmds.c", 0, "CreateFunction"))
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "CreateFunction"))
 }
 
 // compute_return_type (functioncmds.c) incl. shell-type creation for
@@ -537,7 +537,7 @@ fn compute_return_type<'mcx>(
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!("type \"{}\" is not yet defined", typnam.as_str()))
             .errdetail("Creating a shell type definition.")
-            .finish(types_error::ErrorLocation::new("functioncmds.c", 0, "CreateFunction"))?;
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "CreateFunction"))?;
         let mut buf = [""; 4];
         let nnames = returnType.names.len();
         assert!((1..=3).contains(&nnames), "improper qualified name");

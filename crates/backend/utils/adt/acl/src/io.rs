@@ -238,7 +238,7 @@ pub fn aclparse<'a>(
 }
 
 fn err_loc() -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("acl.c", 0, "aclparse")
+    types_error::ErrorLocation::new(file!(), line!() as i32, "aclparse")
 }
 
 pub fn aclitemin(

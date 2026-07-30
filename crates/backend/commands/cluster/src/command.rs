@@ -483,7 +483,7 @@ fn copy_table_data<'mcx>(
     };
     elog::ereport(elevel)
         .errmsg(what)
-        .finish(types_error::ErrorLocation::new("cluster.c", 0, "copy_table_data"))?;
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "copy_table_data"))?;
 
     let (num_tuples, tups_vacuumed, tups_recently_dead) = crate::copy::copy_for_cluster(
         mcx,
@@ -520,7 +520,7 @@ fn copy_table_data<'mcx>(
             tups_recently_dead,
             pg_rusage::pg_rusage_show(&ru0).as_str(),
         ))
-        .finish(types_error::ErrorLocation::new("cluster.c", 0, "copy_table_data"))?;
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "copy_table_data"))?;
 
     // Update the transient rel's pg_class stats. When rebuilding pg_class
     // itself the update would scribble on the data we're about to discard;

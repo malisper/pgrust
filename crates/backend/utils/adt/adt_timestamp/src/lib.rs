@@ -684,6 +684,7 @@ pub fn downcase_ident<'a>(src: &[u8], out: &'a mut [u8; 64]) -> &'a [u8] {
     &out[..n]
 }
 
+#[track_caller]
 #[cold]
 fn tz_not_recognized(tzname: &[u8]) -> Box<PgError> {
     Box::new(
@@ -744,6 +745,7 @@ pub fn lookup_timezone(zone: &[u8]) -> PgResult<&'static PgTz> {
 }
 
 pub fn parse_sane_timezone(tm: &mut pg_tm, zone: &[u8]) -> PgResult<i32> {
+    #[track_caller]
     #[cold]
     fn digit_first(tzname: &[u8]) -> Box<PgError> {
         Box::new(
@@ -756,6 +758,7 @@ pub fn parse_sane_timezone(tm: &mut pg_tm, zone: &[u8]) -> PgResult<i32> {
             .with_hint("Numeric time zones must have \"-\" or \"+\" as first character."),
         )
     }
+    #[track_caller]
     #[cold]
     fn numeric_tz_out_of_range(tzname: &[u8]) -> Box<PgError> {
         Box::new(
@@ -907,6 +910,7 @@ pub fn make_timestamp_internal(
     min: i32,
     sec: f64,
 ) -> PgResult<Timestamp> {
+    #[track_caller]
     #[cold]
     fn date_field_out_of_range(y: i32, m: i32, d: i32) -> Box<PgError> {
         Box::new(
@@ -914,6 +918,7 @@ pub fn make_timestamp_internal(
                 .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW),
         )
     }
+    #[track_caller]
     #[cold]
     fn date_out_of_range(y: i32, m: i32, d: i32) -> Box<PgError> {
         Box::new(
@@ -921,6 +926,7 @@ pub fn make_timestamp_internal(
                 .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
         )
     }
+    #[track_caller]
     #[cold]
     fn ts_out_of_range(y: i32, m: i32, d: i32, h: i32, mi: i32, s: f64) -> Box<PgError> {
         // C (timestamp.c make_timestamp_internal): "%d-%02d-%02d %d:%02d:%02g".
@@ -951,6 +957,7 @@ pub fn make_timestamp_internal(
     let date: TimeOffset =
         (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE) as i64;
 
+    #[track_caller]
     #[cold]
     fn time_field_out_of_range(h: i32, m: i32, s: f64) -> Box<PgError> {
         Box::new(
@@ -1042,6 +1049,7 @@ fn type_name(is_tz: bool) -> &'static str {
     }
 }
 
+#[track_caller]
 #[cold]
 fn unit_not_supported(lowunits: &[u8], is_tz: bool) -> Box<PgError> {
     Box::new(
@@ -1054,6 +1062,7 @@ fn unit_not_supported(lowunits: &[u8], is_tz: bool) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn unit_not_recognized(lowunits: &[u8], is_tz: bool) -> Box<PgError> {
     Box::new(
@@ -1745,6 +1754,7 @@ fn fmt_g6(v: f64) -> String {
     s
 }
 
+#[track_caller]
 #[cold]
 fn float_timestamp_out_of_range(seconds: f64) -> Box<PgError> {
     Box::new(
