@@ -354,27 +354,58 @@ mod proofs {
         });
     }
 
+    // One harness per config row: five chained fmgr frames in one harness
+    // is a symex wall (measured >450s; single-config ~1 frame is the
+    // proven-cheap inet shape).
+
     sg_proof! {
-        /// rows 4018/4023/4027 + 5010/5012: literal spgConfigOut stores for
-        /// all five config functions (incl the 5010-vs-5012 leafType split).
-        fn eq_spg_configs() {
+        /// row 4018: literal spgConfigOut stores.
+        fn eq_spg_quad_config_h() {
             let cfgin = types_spgist::spgConfigIn { attType: kani::any() };
             let a0 = dptr(&cfgin as *const types_spgist::spgConfigIn);
             run_config(pg_spg_quad_config, &spgist_quadtree::SPGIST_QUAD_BUILTINS[0], 4018, a0);
+        }
+    }
+
+    sg_proof! {
+        /// row 4023: literal spgConfigOut stores.
+        fn eq_spg_kd_config_h() {
+            let cfgin = types_spgist::spgConfigIn { attType: kani::any() };
+            let a0 = dptr(&cfgin as *const types_spgist::spgConfigIn);
             run_config(pg_spg_kd_config, &spgist_kdtree::SPGIST_KD_BUILTINS[0], 4023, a0);
+        }
+    }
+
+    sg_proof! {
+        /// row 5012: literal spgConfigOut stores.
+        fn eq_spg_box_config_h() {
+            let cfgin = types_spgist::spgConfigIn { attType: kani::any() };
+            let a0 = dptr(&cfgin as *const types_spgist::spgConfigIn);
             run_config(pg_spg_box_quad_config, &spgist_box::SPGIST_BOX_BUILTINS[2], 5012, a0);
+        }
+    }
+
+    sg_proof! {
+        /// row 5010: literal stores incl the leafType split vs 5012.
+        fn eq_spg_bbox_config_h() {
+            let cfgin = types_spgist::spgConfigIn { attType: kani::any() };
+            let a0 = dptr(&cfgin as *const types_spgist::spgConfigIn);
             run_config(pg_spg_bbox_quad_config, &spgist_box::SPGIST_BOX_BUILTINS[0], 5010, a0);
-            // 4027 at the CORE level (spg_text_config is pub): touching
-            // SPGIST_TEXT_BUILTINS reaches fc_spghandler -> the whole AM ->
-            // ipc_seams::proc_exit, a Kani codegen ICE. The fc_ shell is the
-            // same one-liner shape as the four proven above.
-            {
-                let mut c_out = CConfigOut::zeroed();
-                unsafe { pg_spg_text_config(&mut c_out) };
-                let mut r_out = spgConfigOut::default();
-                spgist_text::spg_text_config(&cfgin, &mut r_out);
-                assert_config_eq(&c_out, &r_out);
-            }
+        }
+    }
+
+    sg_proof! {
+        /// row 4027 at the CORE level (spg_text_config is pub): touching
+        /// SPGIST_TEXT_BUILTINS reaches fc_spghandler -> the whole AM ->
+        /// ipc_seams::proc_exit, a Kani codegen ICE. The fc_ shell is the
+        /// same one-liner shape as the four fmgr-level config proofs.
+        fn eq_spg_text_config_core() {
+            let cfgin = types_spgist::spgConfigIn { attType: kani::any() };
+            let mut c_out = CConfigOut::zeroed();
+            unsafe { pg_spg_text_config(&mut c_out) };
+            let mut r_out = spgConfigOut::default();
+            spgist_text::spg_text_config(&cfgin, &mut r_out);
+            assert_config_eq(&c_out, &r_out);
         }
     }
 
