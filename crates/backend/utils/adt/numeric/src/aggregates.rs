@@ -758,20 +758,23 @@ impl Int128AggState {
 
 #[inline]
 pub fn do_int128_accum(state: &mut Int128AggState, newval: i128) {
+    // C is compiled -fwrapv: overflow wraps silently. wrapping ops keep
+    // debug builds identical to release and to C.
     if state.calc_sum_x2 {
-        state.sum_x2 += newval * newval;
+        state.sum_x2 = state.sum_x2.wrapping_add(newval.wrapping_mul(newval));
     }
-    state.sum_x += newval;
-    state.n += 1;
+    state.sum_x = state.sum_x.wrapping_add(newval);
+    state.n = state.n.wrapping_add(1);
 }
 
 #[inline]
 pub fn do_int128_discard(state: &mut Int128AggState, newval: i128) {
+    // C is compiled -fwrapv: overflow wraps silently (see do_int128_accum).
     if state.calc_sum_x2 {
-        state.sum_x2 -= newval * newval;
+        state.sum_x2 = state.sum_x2.wrapping_sub(newval.wrapping_mul(newval));
     }
-    state.sum_x -= newval;
-    state.n -= 1;
+    state.sum_x = state.sum_x.wrapping_sub(newval);
+    state.n = state.n.wrapping_sub(1);
 }
 
 pub fn numeric_poly_sum(state: Option<&Int128AggState>) -> PgResult<Option<NumericImage>> {

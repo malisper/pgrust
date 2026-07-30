@@ -1529,3 +1529,142 @@ fn fixed_kernels_fallback_cases() {
     mul_var(z, v7, &mut a, 5);
     check_fixed_agree("mul-zero", f.view(), a.view(), z, v7);
 }
+
+// C numeric.c is compiled -fwrapv: the int2/int4 avg transarray accumulators,
+// their inverses, int4_avg_combine, and the HAVE_INT128 poly accumulators all
+// wrap silently on overflow. Pin the wrap plane so a refactor can't silently
+// reintroduce a checked (debug-panicking) add.
+mod wrap_parity {
+    use ::datum::Datum;
+    use ::mcx::MemoryContext;
+    use ::types_fmgr::{AggStateNode, LocalFcinfo};
+
+    use crate::aggregates::{do_int128_accum, do_int128_discard, Int128AggState};
+    use crate::builtins::*;
+
+    // A 1-D, no-nulls _int8[2] {count,sum} image (Int8TransTypeData lane).
+    #[repr(C, align(8))]
+    struct Int8TransArray([u8; 40]);
+
+    fn transarray(count: i64, sum: i64) -> Int8TransArray {
+        let mut a = Int8TransArray([0u8; 40]);
+        let p = a.0.as_mut_ptr();
+        // SAFETY: in-bounds writes into the 40-byte backing array.
+        unsafe {
+            p.cast::<u32>().write(::types_tuple::varatt::set_varsize_4b_word(40));
+            p.add(4).cast::<i32>().write(1); // ndim
+            p.add(8).cast::<i32>().write(0); // dataoffset: 0 = no null bitmap
+            p.add(12).cast::<u32>().write(20); // elemtype: int8
+            p.add(16).cast::<i32>().write(2); // dim
+            p.add(20).cast::<i32>().write(1); // lbound
+            p.add(24).cast::<i64>().write(count);
+            p.add(32).cast::<i64>().write(sum);
+        }
+        a
+    }
+
+    fn read2(d: Datum) -> [i64; 2] {
+        let p = d.as_usize() as *const u8;
+        // SAFETY: result is a live validated int8[2] transarray image.
+        unsafe { [p.add(24).cast::<i64>().read(), p.add(32).cast::<i64>().read()] }
+    }
+
+    #[test]
+    fn int_avg_accum_wraps() {
+        // SQL repro: int4_avg_accum('{1,9223372036854775807}'::int8[], 1)
+        // C 18.x returns {2,-9223372036854775808}; debug builds must too.
+        let ctx = MemoryContext::new_bump("t");
+        for (fc, arg) in [
+            (fc_int4_avg_accum as ::types_fmgr::PGFunction, Datum::from_i32(1)),
+            (fc_int2_avg_accum, Datum::from_i16(1)),
+        ] {
+            let arr = transarray(1, i64::MAX);
+            let mut fci = LocalFcinfo::<2>::fresh(0);
+            // SAFETY: ctx outlives the call (non-agg path copies the array).
+            unsafe { fci.set_result_mcx(ctx.mcx()) };
+            fci.set_arg(0, Datum::from_usize(arr.0.as_ptr() as usize));
+            fci.set_arg(1, arg);
+            let d = fc(None, &mut fci).unwrap();
+            assert_eq!(read2(d), [2, i64::MIN]);
+        }
+        // Count slot wraps too.
+        let arr = transarray(i64::MAX, 0);
+        let mut fci = LocalFcinfo::<2>::fresh(0);
+        // SAFETY: as above.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(arr.0.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_i32(0));
+        let d = fc_int4_avg_accum(None, &mut fci).unwrap();
+        assert_eq!(read2(d), [i64::MIN, 0]);
+    }
+
+    #[test]
+    fn int_avg_accum_inv_wraps() {
+        let ctx = MemoryContext::new_bump("t");
+        for (fc, arg) in [
+            (fc_int4_avg_accum_inv as ::types_fmgr::PGFunction, Datum::from_i32(1)),
+            (fc_int2_avg_accum_inv, Datum::from_i16(1)),
+        ] {
+            let arr = transarray(i64::MIN, i64::MIN);
+            let mut fci = LocalFcinfo::<2>::fresh(0);
+            // SAFETY: ctx outlives the call.
+            unsafe { fci.set_result_mcx(ctx.mcx()) };
+            fci.set_arg(0, Datum::from_usize(arr.0.as_ptr() as usize));
+            fci.set_arg(1, arg);
+            let d = fc(None, &mut fci).unwrap();
+            assert_eq!(read2(d), [i64::MAX, i64::MAX]);
+        }
+    }
+
+    #[test]
+    fn int4_avg_combine_wraps() {
+        let mut agg = AggStateNode::new(MemoryContext::new_bump("num-aggctx"));
+        let arr1 = transarray(1, i64::MAX);
+        let arr2 = transarray(i64::MAX, 1);
+        let mut fci = LocalFcinfo::<2>::fresh(0);
+        fci.context = agg.fm_node_ptr();
+        fci.set_arg(0, Datum::from_usize(arr1.0.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_usize(arr2.0.as_ptr() as usize));
+        let d = fc_int4_avg_combine(None, &mut fci).unwrap();
+        assert_eq!(d.as_usize(), arr1.0.as_ptr() as usize);
+        assert_eq!(read2(d), [i64::MIN, i64::MIN]);
+    }
+
+    #[test]
+    fn int128_accum_discard_wrap() {
+        let mut s = Int128AggState::new(true);
+        s.n = i64::MAX;
+        s.sum_x = i128::MAX;
+        s.sum_x2 = i128::MAX;
+        do_int128_accum(&mut s, 1);
+        assert_eq!(s.n, i64::MIN);
+        assert_eq!(s.sum_x, i128::MIN);
+        assert_eq!(s.sum_x2, i128::MIN);
+        do_int128_discard(&mut s, 1);
+        assert_eq!(s.n, i64::MAX);
+        assert_eq!(s.sum_x, i128::MAX);
+        assert_eq!(s.sum_x2, i128::MAX);
+    }
+
+    #[test]
+    fn poly_combine_wraps() {
+        let mut agg = AggStateNode::new(MemoryContext::new_bump("num-aggctx"));
+        let mut s1 = Int128AggState::new(true);
+        s1.n = 1;
+        s1.sum_x = i128::MAX;
+        s1.sum_x2 = i128::MAX;
+        let mut s2 = Int128AggState::new(true);
+        s2.n = 1;
+        s2.sum_x = 1;
+        s2.sum_x2 = 1;
+        let mut fci = LocalFcinfo::<2>::fresh(0);
+        fci.context = agg.fm_node_ptr();
+        fci.set_arg(0, Datum::from_usize(&mut s1 as *mut _ as usize));
+        fci.set_arg(1, Datum::from_usize(&mut s2 as *mut _ as usize));
+        let d = fc_numeric_poly_combine(None, &mut fci).unwrap();
+        assert_eq!(d.as_usize(), &s1 as *const _ as usize);
+        assert_eq!(s1.n, 2);
+        assert_eq!(s1.sum_x, i128::MIN);
+        assert_eq!(s1.sum_x2, i128::MIN);
+    }
+}
