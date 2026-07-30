@@ -1851,3 +1851,5 @@ datetime-cmp	wave7_proofs::eq_tstz_mi_interval_noend	-Z c-ffi -Z stubbing --c-li
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
 numeric-probe	proofs::eq_numeric_sign_nd4	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --c-lib c/pg_numeric_tail.c --solver kissat --exact	green	per-commit	6.7	oid 1706; measured 2026-07-30
 numeric-probe	proofs::eq_numeric_scale_nd4	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --c-lib c/pg_numeric_tail.c --solver kissat --exact	green	per-commit	4.9	oid 3281; measured 2026-07-30
+numeric-probe	proofs::eq_numeric_typmod_codec	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --c-lib c/pg_numeric_tail.c --solver kissat --exact	green	per-commit	0.05	typmod codec trio full-i32; feeds oids 2917/2918/1703
+numeric-probe	proofs::eq_numerictypmodin	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --c-lib c/pg_numeric_tail.c --solver kissat --exact	green	per-commit	3.0	oid 2917; measured 2026-07-30

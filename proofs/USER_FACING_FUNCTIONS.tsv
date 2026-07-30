@@ -1666,8 +1666,8 @@ oid	name	source_file	status	class	notes
 2914	bpchartypmodout	crates/backend/utils/adt/varchar/src/builtins.rs	untriaged		
 2915	varchartypmodin	crates/backend/utils/adt/varchar/src/builtins.rs	untriaged		
 2916	varchartypmodout	crates/backend/utils/adt/varchar/src/builtins.rs	untriaged		
-2917	numerictypmodin	crates/backend/utils/adt/numeric/src/builtins.rs	candidate	fast	numerictypmodin_core ops.rs:19 + make_numeric_typmod ops.rs:59 — pure compares + shift/mask over &[i32] len 0..=3; stub PgError::error; proves typmod codec trio ops.rs:64/69/74 used by 8 other rows. Host proofs/numeric-probe
-2918	numerictypmodout	crates/backend/utils/adt/adt_misc/src/builtins.rs	candidate	fast	pure typmod formatting (adt_misc/builtins.rs:962)
+2917	numerictypmodin	crates/backend/utils/adt/numeric/src/builtins.rs	proved(full domain: tl len 0..=3 x full-i32 elements; value+verdict+sqlstate parity, message text out of proof; codec trio proved full-i32 by eq_numeric_typmod_codec)	fast	3.0s + 0.05s kissat 2026-07-30; proofs/numeric-probe eq_numerictypmodin + eq_numeric_typmod_codec
+2918	numerictypmodout	crates/backend/utils/adt/adt_misc/src/builtins.rs	candidate	fast	pure typmod formatting (adt_misc/builtins.rs:962); its scalar core (typmod codec trio) proved full-i32 2026-07-30 by numeric-probe eq_numeric_typmod_codec — remainder is the format image only
 2919	bittypmodin	crates/backend/utils/adt/varbit/src/lib.rs	proved(anybit_typmodin check+value core, tl/n symbolic n<=2, all 3 err planes + 22023; cstring[] parse tested-tier)	fast	0.67s; proofs/varbit-rows relaunch 2026-07-29 (re-derived)
 2920	bittypmodout	crates/backend/utils/adt/varbit/src/lib.rs	excluded(blocked: format-machinery both sides — bare "(%d)" print; C variadic snprintf goto-cc-unsupported, Rust format!; no logic beyond decimal print)	-	proofs/varbit-rows relaunch 2026-07-29 (re-derived)
 2921	varbittypmodout	crates/backend/utils/adt/varbit/src/lib.rs	excluded(blocked: format-machinery both sides — bare "(%d)" print; C variadic snprintf goto-cc-unsupported, Rust format!; no logic beyond decimal print)	-	proofs/varbit-rows relaunch 2026-07-29 (re-derived)
