@@ -4,7 +4,7 @@
 # through Wasm exception handling), and the catch_unwind smoke actually
 # catches under wasmtime's exceptions proposal.
 #
-# Exclusion ledger: docs/design/wasm-crate-ledger.md (ratchet-only — it may
+# Exclusion ledger: wasm/wasm-crate-ledger.md (ratchet-only — it may
 # only shrink). Every workspace member is either BUILT here or LISTED there;
 # a member that is neither fails this gate loudly (no silent drops: the
 # include set is computed as members-minus-ledger, so an unledgered breakage
@@ -26,7 +26,7 @@ cd "$ROOT"
 
 TOOLCHAIN="${PGRUST_WASM_TOOLCHAIN:-nightly-2026-07-17}"
 TARGET=wasm32-wasip1
-LEDGER="$ROOT/docs/design/wasm-crate-ledger.md"
+LEDGER="$ROOT/wasm/wasm-crate-ledger.md"
 
 # re2 is a build.rs probe; force the stub engine deterministically on wasm.
 export PGRUST_FORCE_NO_RE2=1

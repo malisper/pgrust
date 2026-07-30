@@ -191,10 +191,11 @@ fi
 # wasm-web-e2e uses.)
 "$PGBIN/pg_controldata" "$WORK/dd-native" | grep -q 'shut down' \
     || miss "native datadir not in 'shut down' state"
-# flags 0x5 = IS_SHUTDOWN|IMMEDIATE — the Terminate-path shutdown checkpoint.
-# (No "database system is shut down" line exists on this engine's
-# single-process path — the native arm ends at the same line.)
-grep -q 'checkpoint starting: flags 0x5' "$WORK/wasm.err" \
+# "shutdown immediate" = IS_SHUTDOWN|IMMEDIATE — the Terminate-path shutdown
+# checkpoint (the engine logs C's human-readable flag names, not the old raw
+# "flags 0x5" form). (No "database system is shut down" line exists on this
+# engine's single-process path — the native arm ends at the same line.)
+grep -q 'checkpoint starting: shutdown immediate' "$WORK/wasm.err" \
     || miss "wasm: no shutdown checkpoint start in the session log"
 grep -q 'checkpoint complete' "$WORK/wasm.err" \
     || miss "wasm: no shutdown checkpoint completion in the session log"
