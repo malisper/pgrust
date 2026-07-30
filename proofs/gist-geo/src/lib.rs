@@ -962,6 +962,90 @@ mod proofs {
         }
     }
 
+    // Per-strategy literal split of group 0 (2026-07-30): the full-sym
+    // group0 harness above walls both solvers at 450s under load (same
+    // symbolic-selector wall class as 2578).  In-group live strategies:
+    // 1 RTLeft, 5 RTRight, 6 RTSame (leaf/internal split), 10 RTBelow,
+    // 11 RTAbove, plus the 29/30 RTOld remaps; everything else in <20 is
+    // the error arm (own harness below).  page_is_leaf stays symbolic in
+    // every cell.
+    macro_rules! point_consistent_g0_cell {
+        ($($h:ident: $strat:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let q = pt(any_f64(), any_f64());
+                let leaf: bool = kani::any();
+                let qimg = q.to_datum_bytes();
+                let mut recheck = true;
+                let r = rust_point_consistent(&k, dp(qimg.as_ptr()), $strat, leaf, &mut recheck);
+                let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+                let cerr = unsafe {
+                    pg_gist_point_consistent(
+                        $strat, leaf as c_int,
+                        k.high.x, k.high.y, k.low.x, k.low.y,
+                        q.x, q.y,
+                        0.0, 0.0, 0.0, 0.0,
+                        &mut crech, &mut cres,
+                    )
+                };
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(recheck as c_int == crech);
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    point_consistent_g0_cell! {
+        eq_gp0_s1: 1u16;   // RTLeft
+        eq_gp0_s5: 5u16;   // RTRight
+        eq_gp0_s6: 6u16;   // RTSame (leaf/internal both, leaf symbolic)
+        eq_gp0_s10: 10u16; // RTBelow
+        eq_gp0_s11: 11u16; // RTAbove
+        eq_gp0_s29: 29u16; // RTOldBelow -> remapped to 10 on both sides
+        eq_gp0_s30: 30u16; // RTOldAbove -> remapped to 11 on both sides
+    }
+
+    /// Group 0 in-group error arm: symbolic strategy < 20 outside the live
+    /// set {1,5,6,10,11} — unrecognized-strategy verdict parity (no
+    /// comparator circuit on this path).
+    #[kani::proof]
+    #[kani::unwind(34)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_point_consistent_group0_badstrategy() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let q = pt(any_f64(), any_f64());
+        let strategy: u16 = kani::any();
+        kani::assume(strategy < 20);
+        kani::assume(
+            strategy != 1 && strategy != 5 && strategy != 6 && strategy != 10 && strategy != 11,
+        );
+        let leaf: bool = kani::any();
+        let qimg = q.to_datum_bytes();
+        let mut recheck = true;
+        let r = rust_point_consistent(&k, dp(qimg.as_ptr()), strategy, leaf, &mut recheck);
+        let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+        let cerr = unsafe {
+            pg_gist_point_consistent(
+                strategy, leaf as c_int,
+                k.high.x, k.high.y, k.low.x, k.low.y,
+                q.x, q.y,
+                0.0, 0.0, 0.0, 0.0,
+                &mut crech, &mut cres,
+            )
+        };
+        assert!(cerr != 0 && cerr != 99);
+        assert!(r.is_err());
+        if let Err(e) = r {
+            core::mem::forget(e);
+        }
+    }
+
     /// Group 1 (point <@ box, on_pb): the deliberately NON-FUZZY overlap
     /// test; query is a box datum.
     #[kani::proof]
@@ -1708,6 +1792,102 @@ mod proofs {
         eq_gpc_s1: 1u16;  eq_gpc_s2: 2u16;  eq_gpc_s3: 3u16;  eq_gpc_s4: 4u16;
         eq_gpc_s5: 5u16;  eq_gpc_s6: 6u16;  eq_gpc_s7: 7u16;  eq_gpc_s8: 8u16;
         eq_gpc_s9: 9u16;  eq_gpc_s10: 10u16; eq_gpc_s11: 11u16; eq_gpc_s12: 12u16;
+    }
+
+    /// 2585 null lattice: key and/or query null -> false before any
+    /// comparator; strategy fully symbolic (never dispatched to a fuzzy
+    /// compare on the null path); recheck stays the C value.
+    #[kani::proof]
+    #[kani::unwind(72)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_poly_consistent_nulls() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let bb = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let p0 = pt(any_f64(), any_f64());
+        let strategy: u16 = kani::any();
+        let (knull, qnull): (bool, bool) = (kani::any(), kani::any());
+        kani::assume(knull || qnull);
+        let kimg = k.to_datum_bytes();
+        let qimg = poly_image(&bb, &p0);
+        let e = entry(
+            if knull { Datum::from_usize(0) } else { dp(kimg.as_ptr()) },
+            0, false, kani::any(),
+        );
+        let f = fcn(IDX_POLY_CONSISTENT, 2585, "gist_poly_consistent");
+        let mut recheck = false;
+        let r = call(
+            f,
+            [
+                dp(&e as *const GISTENTRY),
+                if qnull { Datum::from_usize(0) } else { dp(qimg.as_ptr()) },
+                Datum::from_u16(strategy),
+                Datum::from_u16(0),
+                dpm(&mut recheck as *mut bool),
+            ],
+            true,
+        )
+        .map(Datum::as_bool);
+        let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+        let cerr = unsafe {
+            pg_gist_poly_consistent(
+                knull as c_int, k.high.x, k.high.y, k.low.x, k.low.y,
+                qnull as c_int, bb.high.x, bb.high.y, bb.low.x, bb.low.y,
+                strategy, &mut crech, &mut cres,
+            )
+        };
+        assert!(recheck as c_int == crech);
+        if let Some(v) = adjudicate(r, cerr) {
+            assert!(v as c_int == cres);
+        }
+    }
+
+    /// 2591 null lattice: same shape, circle query.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_circle_consistent_nulls() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let c = CIRCLE { center: pt(any_f64(), any_f64()), radius: any_f64() };
+        let strategy: u16 = kani::any();
+        let (knull, qnull): (bool, bool) = (kani::any(), kani::any());
+        kani::assume(knull || qnull);
+        let kimg = k.to_datum_bytes();
+        let qimg = c.to_datum_bytes();
+        let e = entry(
+            if knull { Datum::from_usize(0) } else { dp(kimg.as_ptr()) },
+            0, false, kani::any(),
+        );
+        let f = fcn(IDX_CIRCLE_CONSISTENT, 2591, "gist_circle_consistent");
+        let mut recheck = false;
+        let r = call(
+            f,
+            [
+                dp(&e as *const GISTENTRY),
+                if qnull { Datum::from_usize(0) } else { dp(qimg.as_ptr()) },
+                Datum::from_u16(strategy),
+                Datum::from_u16(0),
+                dpm(&mut recheck as *mut bool),
+            ],
+            false,
+        )
+        .map(Datum::as_bool);
+        let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+        let cerr = unsafe {
+            pg_gist_circle_consistent(
+                knull as c_int, k.high.x, k.high.y, k.low.x, k.low.y,
+                qnull as c_int, c.center.x, c.center.y, c.radius,
+                strategy, &mut crech, &mut cres,
+            )
+        };
+        assert!(recheck as c_int == crech);
+        if let Some(v) = adjudicate(r, cerr) {
+            assert!(v as c_int == cres);
+        }
     }
 
     // =================================================================
