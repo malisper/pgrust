@@ -45,7 +45,20 @@
 
 /* ---- shims (see header comment) ---- */
 
-int			pg_diff_errcode = 0;
+/*
+ * THREAD-LOCAL (2026-07-30): the stable test suite drives the oracles from
+ * parallel threads; a shared errcode raced across oracles (another test's
+ * reset between record and read produced phantom verdicts). Rust reads it
+ * through pg_diff_errcode_get() because stable Rust cannot bind a C
+ * thread-local as an extern static.
+ */
+_Thread_local int pg_diff_errcode;
+
+int
+pg_diff_errcode_get(void)
+{
+	return pg_diff_errcode;
+}
 
 #define ERRCODE_INVALID_TEXT_REPRESENTATION 1
 #define ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE 2
