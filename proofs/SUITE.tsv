@@ -2155,3 +2155,7 @@ scalar-misc	xid8snap::eq_pg_snapshot_out_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg
 scalar-misc	xid8snap::eq_pg_snapshot_out_spots	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
 scalar-misc	xid8snap::eq_strtou64_cap8	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	6.0	wave-5 run 2026-07-30 idle
 scalar-misc	xid8snap::eq_pg_snapshot_in_cap6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+brin-opcinfo	proofs::eq_bloom_opcinfo	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact --solver kissat	green	per-commit	1	w2-fmgr 2026-07-30: 0.19s; full symbolic typoid metadata parity; typcache seam named-static model (proved-3383 mirror)
+brin-opcinfo	proofs::eq_minmax_multi_opcinfo	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact --solver kissat	green	per-commit	1	w2-fmgr 2026-07-30: 0.17s (see eq_bloom_opcinfo note)
+brin-opcinfo	proofs::eq_inclusion_opcinfo	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact --solver kissat	green	per-commit	2	w2-fmgr 2026-07-30: 1.5s; 3-column INCLUSION_* order in-theorem
+brin-opcinfo	proofs::control_bloom_wrong_summary_oid	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact	must-fail	defect-witness	1	w2-fmgr 2026-07-30: FAILED as required on the summary-oid check; DEFAULT solver only
