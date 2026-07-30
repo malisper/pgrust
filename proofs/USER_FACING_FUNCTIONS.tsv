@@ -2919,9 +2919,9 @@ oid	name	source_file	status	class	notes
 6363	pg_restore_attribute_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6364	crc32_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	fc_crc32_bytea cryptohashfuncs/src/lib.rs:55 -> traditional_crc32 table loop; cap len<=8 + fixed-len spots; VARLENA fence. Host proofs/hash or new proofs/crc
 6365	crc32c_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	lib.rs:61 -> pg_comp_crc32c; SCREEN aarch64 CRC intrinsics arm (unsupported_construct) — prove sb8 table path
-6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	bytea::int_bytea bytea.rs:522 FIXED 4-byte BE image; mcx-stubs sweet spot; pins "aliases int4send"
-6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	same core 8 bytes; free sibling
+6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i16; payload image + varsize; modulo static-buffer allocator model; little-endian pg_hton arm pinned)	ladder	100s DEFAULT solver (kissat inversion, mixed-arm trap); lane pick-a 2026-07-30; proofs/bytea-cmp eq_int2_bytea
+6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i32; payload image + varsize; modulo static-buffer allocator model; little-endian pg_hton arm pinned)	ladder	89s DEFAULT solver; proofs/bytea-cmp eq_int4_bytea
+6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i64; payload image + varsize; modulo static-buffer allocator model; little-endian pg_hton arm pinned)	ladder	88s DEFAULT solver; proofs/bytea-cmp eq_int8_bytea
 6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	proved(sym len<=9; value+verdict+sqlstate 22003+level; message text out of proof)	fast	1.3s kissat; lane pick-a 2026-07-30; proofs/bytea-cmp eq_bytea_int2
 6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	proved(sym len<=9; value+verdict+sqlstate 22003+level; message text out of proof)	fast	1.3s kissat; proofs/bytea-cmp eq_bytea_int4
 6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	proved(sym len<=9; value+verdict+sqlstate 22003+level; message text out of proof)	fast	1.4s kissat; Err arm in-domain at len 9; proofs/bytea-cmp eq_bytea_int8

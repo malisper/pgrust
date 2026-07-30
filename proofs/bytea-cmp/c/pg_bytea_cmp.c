@@ -550,3 +550,141 @@ pg_convert_to_base(uint64 value, int base, unsigned char *out /* [64] */ )
 	 * offset; caller reads out[start..64] */
 	return (int) (ptr - buf);
 }
+
+/* ================================================================
+ * INT -> BYTEA CAST WAVE (lane pick-a 2026-07-30, oids 6367/6368/6369).
+ *
+ * Provenance (fetched 2026-07-30, REL_18_STABLE):
+ *  - varlena.c int2_bytea/int4_bytea/int8_bytea (l.4214-4230): each
+ *    "can just use intNsend()".
+ *  - int.c int2send/int4send, int8.c int8send.
+ *  - libpq/pqformat.h pq_sendint16/32/64 + pq_writeint16/32/64.
+ *  - port/pg_bswap.h pg_bswap16/32/64 shift fallbacks (verbatim);
+ *    pg_htonN -> pg_bswapN is the little-endian arm of pg_bswap.h's
+ *    "#ifndef WORDS_BIGENDIAN" — the proof pins the little-endian
+ *    target platform (aarch64/x86-64), same as the shipped Rust's
+ *    to_be_bytes.
+ *
+ * SHIMS (everything else verbatim):
+ *  - StringInfoData -> minimal {data,len,maxlen} struct over a
+ *    caller-provided fixed buffer; pq_begintypsend -> init at len 0
+ *    (the real one reserves the varlena header hole; header assembly
+ *    is compared via the total varsize on the Rust side, see the
+ *    harness doc); enlargeStringInfo -> no-op (caller buffer is
+ *    already wide enough; the Assert in pq_writeintN keeps the bound
+ *    check); pq_endtypsend -> returns buf.len.
+ *  - Assert -> proof_assert (live: goto-cc has no NDEBUG-free assert.h
+ *    model; the bound check is part of the vendored contract).
+ * ================================================================ */
+
+typedef struct
+{
+	char	   *data;
+	int			len;
+	int			maxlen;
+} pg_StringInfoData;
+
+#define pg_proof_assert(c) do { if (!(c)) { *(volatile int *) 0 = 0; } } while (0)
+
+static uint16
+pg_bswap16(uint16 x)
+{
+	return
+		((x << 8) & 0xff00) |
+		((x >> 8) & 0x00ff);
+}
+
+static uint32
+pg_bswap32(uint32 x)
+{
+	return
+		((x << 24) & 0xff000000) |
+		((x << 8) & 0x00ff0000) |
+		((x >> 8) & 0x0000ff00) |
+		((x >> 24) & 0x000000ff);
+}
+
+static uint64
+pg_bswap64(uint64 x)
+{
+	return
+		((x << 56) & 0xff00000000000000ULL) |
+		((x << 40) & 0x00ff000000000000ULL) |
+		((x << 24) & 0x0000ff0000000000ULL) |
+		((x << 8) & 0x000000ff00000000ULL) |
+		((x >> 8) & 0x00000000ff000000ULL) |
+		((x >> 24) & 0x0000000000ff0000ULL) |
+		((x >> 40) & 0x000000000000ff00ULL) |
+		((x >> 56) & 0x00000000000000ffULL);
+}
+
+#define pg_hton16(x) pg_bswap16(x)	/* shim: little-endian arm */
+#define pg_hton32(x) pg_bswap32(x)
+#define pg_hton64(x) pg_bswap64(x)
+
+static void
+pg_pq_writeint16(pg_StringInfoData *buf, uint16 i)
+{
+	uint16		ni = pg_hton16(i);
+
+	pg_proof_assert(buf->len + (int) sizeof(uint16) <= buf->maxlen);
+	memcpy(buf->data + buf->len, &ni, sizeof(uint16));
+	buf->len += sizeof(uint16);
+}
+
+static void
+pg_pq_writeint32(pg_StringInfoData *buf, uint32 i)
+{
+	uint32		ni = pg_hton32(i);
+
+	pg_proof_assert(buf->len + (int) sizeof(uint32) <= buf->maxlen);
+	memcpy(buf->data + buf->len, &ni, sizeof(uint32));
+	buf->len += sizeof(uint32);
+}
+
+static void
+pg_pq_writeint64(pg_StringInfoData *buf, uint64 i)
+{
+	uint64		ni = pg_hton64(i);
+
+	pg_proof_assert(buf->len + (int) sizeof(uint64) <= buf->maxlen);
+	memcpy(buf->data + buf->len, &ni, sizeof(uint64));
+	buf->len += sizeof(uint64);
+}
+
+/* int2_bytea "can just use int2send()": BE image into out[2], returns len */
+int
+pg_int2_bytea(int16_t arg1, unsigned char *out)
+{
+	pg_StringInfoData buf;
+
+	buf.data = (char *) out;	/* shim: pq_begintypsend fixed frame */
+	buf.len = 0;
+	buf.maxlen = 2;
+	pg_pq_writeint16(&buf, (uint16) arg1);	/* pq_sendint16: enlarge no-op */
+	return buf.len;				/* shim: pq_endtypsend */
+}
+
+int
+pg_int4_bytea(int32_t arg1, unsigned char *out)
+{
+	pg_StringInfoData buf;
+
+	buf.data = (char *) out;
+	buf.len = 0;
+	buf.maxlen = 4;
+	pg_pq_writeint32(&buf, (uint32) arg1);
+	return buf.len;
+}
+
+int
+pg_int8_bytea(int64_t arg1, unsigned char *out)
+{
+	pg_StringInfoData buf;
+
+	buf.data = (char *) out;
+	buf.len = 0;
+	buf.maxlen = 8;
+	pg_pq_writeint64(&buf, (uint64) arg1);
+	return buf.len;
+}

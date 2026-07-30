@@ -618,4 +618,70 @@ mod proofs {
         assert!(start_c as usize == start_r && cf == rf); // fails
     }
 
+
+    // ---- int2/int4/int8_bytea (oids 6367/6368/6369): fixed BE image ----
+    //
+    // C "can just use intNsend()" (varlena.c): pq_writeintN BE image,
+    // vendored with the little-endian pg_hton arm (see the C wave header).
+    // Rust: fc wrapper passes v.to_be_bytes() to bytea::int_bytea, which
+    // builds header + payload; the cast chain is mirrored in-harness.
+    // Claim: payload image == C image, varsize == VARHDRSZ + N (the
+    // fixed-width result-image class — offsets literal, no CNF wall).
+    // Harness scaffolding qualifier: "modulo static-buffer allocator
+    // model" (same mcx recipe as the Set* wave above).
+
+    extern "C" {
+        fn pg_int2_bytea(arg1: i16, out: *mut u8) -> c_int;
+        fn pg_int4_bytea(arg1: i32, out: *mut u8) -> c_int;
+        fn pg_int8_bytea(arg1: i64, out: *mut u8) -> c_int;
+    }
+
+    macro_rules! int_bytea_harness {
+        ($harness:ident, $cfn:ident, $ty:ty, $n:expr) => {
+            #[kani::proof]
+            // image build copies VARHDRSZ + N <= 12 bytes; result compare
+            // <= 8; +slack for the AcctWeak retain loop (Set* precedent)
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let v: $ty = kani::any();
+                let mut cimg = [0u8; $n];
+                let clen = unsafe { $cfn(v, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-int-bytea");
+                match varlena::bytea::int_bytea(ctx.mcx(), &v.to_be_bytes()) {
+                    Ok(r) => {
+                        assert!(clen as usize == $n);
+                        assert!(r.varsize() == varlena::VARHDRSZ + $n);
+                        let d = r.data();
+                        assert!(d.len() == $n);
+                        let mut i = 0;
+                        while i < $n {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(r);
+                    }
+                    Err(e) => {
+                        // alloc failure is harness-model territory, not a
+                        // C-parity arm; unreachable under the static-buffer
+                        // allocator
+                        assert!(false);
+                        core::mem::forget(e);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    int_bytea_harness!(eq_int2_bytea, pg_int2_bytea, i16, 2);
+    int_bytea_harness!(eq_int4_bytea, pg_int4_bytea, i32, 4);
+    int_bytea_harness!(eq_int8_bytea, pg_int8_bytea, i64, 8);
+
 }
