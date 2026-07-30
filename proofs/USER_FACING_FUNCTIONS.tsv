@@ -1513,7 +1513,7 @@ oid	name	source_file	status	class	notes
 2566	poly_below	crates/backend/utils/adt/geo/src/builtins.rs	proved(full-f64 boundbox domain incl NaN/Inf/+-0/subnormals; wrapper-level inline 4B varlena image; npts=1)	fast	5.9s kissat; RAW IEEE compare (no EPSILON) parity surface, negative control on family; proofs/geo-cmp ext3
 2567	poly_overbelow	crates/backend/utils/adt/geo/src/builtins.rs	proved(full-f64 boundbox domain incl NaN/Inf/+-0/subnormals; wrapper-level inline 4B varlena image; npts=1)	fast	5.2s kissat; RAW IEEE compare (no EPSILON) parity surface, negative control on family; proofs/geo-cmp ext3
 2568	poly_overabove	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
-2569	poly_above	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+2569	poly_above	crates/backend/utils/adt/geo/src/builtins.rs	proved(full-f64 boundbox domain incl NaN/Inf/+-0/subnormals; wrapper-level inline 4B varlena image; npts=1)	fast	5.9s kissat; RAW IEEE compare (no EPSILON) parity surface, negative control on family; proofs/geo-cmp ext3
 2578	gist_box_consistent	crates/backend/access/gist/gistproc/src/lib.rs	candidate	fast	gist_box_leaf_consistent :144 + rtree_internal_consistent :165; 12-strategy lattice, wrapper-level, trace parity on strategy arm
 2580	jsonb_float8	crates/backend/utils/adt/jsonb/src/builtins.rs	candidate	ladder	fc builtins.rs:781 -> io::extract_scalar io.rs:401 + numeric_float8; FENCE: prove extraction+cast-error class + NaN/±Inf lattice; finite arm walls
 2581	gist_box_penalty	crates/backend/access/gist/gistproc/src/lib.rs	candidate	ladder	box_penalty :138 -> rt_box_size :119 (53-bit multiply); zero-plane + boundary grid + f64->f32 cast; NaN/inf legs cheap
