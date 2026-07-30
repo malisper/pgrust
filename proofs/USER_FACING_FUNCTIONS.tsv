@@ -561,8 +561,8 @@ oid	name	source_file	status	class	notes
 1030	gist_point_compress	crates/backend/access/gist/gistproc/src/lib.rs	proved(leaf no-op identity arm)	fast	CI cluster; proofs/gist-geo
 1031	aclitemin	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	role-name catalog lookup (get_role_oid)
 1032	aclitemout	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	role-name catalog lookup
-1035	aclinsert	crates/backend/utils/adt/acl/src/builtins.rs	candidate	fast	pure error stub, feature removed (acl/builtins.rs:173)
-1036	aclremove	crates/backend/utils/adt/acl/src/builtins.rs	candidate	fast	pure error stub, feature removed (acl/builtins.rs:177)
+1035	aclinsert	crates/backend/utils/adt/acl/src/builtins.rs	proved(full; verdict+sqlstate-class parity, wrapper-level)	fast	4s kissat; message text/location out of proof (stub_pg_error_error); proofs/aclcheck
+1036	aclremove	crates/backend/utils/adt/acl/src/builtins.rs	proved(full; verdict+sqlstate-class parity, wrapper-level)	fast	3s kissat; message text/location out of proof (stub_pg_error_error); proofs/aclcheck
 1037	aclcontains	crates/backend/utils/adt/acl/src/builtins.rs	proved(core, n<=4; varlena decode out)	seam	1.3s; proofs/state-seam-probe
 1039	getdatabaseencoding	crates/backend/utils/mb/mbutils/src/builtins.rs	blocked(seam:DatabaseEncoding-global)	ladder	fc_getdatabaseencoding mbutils/src/builtins.rs:9; symbolic encoding-id seam + mcx-stubs; cheap filler
 1044	bpcharin	crates/backend/utils/adt/varchar/src/builtins.rs	candidate	fast	SCALAR CORE bpchar_clip varchar/src/lib.rs:70 (BpClip{copy,total} + 22001 class; mblen kernels proved); image write = RESULT-IMAGE wall, out of theorem. Host proofs/strings-scalar
@@ -1095,12 +1095,12 @@ oid	name	source_file	status	class	notes
 1913	float4up	crates/backend/utils/adt/float/src/builtins.rs	proved(full-domain bit-exact, wrapper-level)	fast	0.1s; proofs/float-arith
 1914	float8up	crates/backend/utils/adt/float/src/builtins.rs	proved(full-domain bit-exact, wrapper-level)	fast	0.1s; proofs/float-arith
 1915	numeric_uplus	crates/backend/utils/adt/numeric/src/builtins.rs	proved(byte-identity; C body is duplicate_numeric)	fast	7.1s; proofs/numeric-probe
-1922	has_table_privilege_name_name	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
-1923	has_table_privilege_name_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
-1924	has_table_privilege_id_name	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
-1925	has_table_privilege_id_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
-1926	has_table_privilege_name	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
-1927	has_table_privilege_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
+1922	has_table_privilege_name_name	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check; DIVERGENCE CANDIDATE #A1 temp-toast IsSystemClass (aclchk lib.rs:404, confirmed on binaries 2026-07-30, proofs/aclcheck/ADJUDICATION-TEMPTOAST-SYSCLASS.md) + #A2 \v priv-string trim (ops.rs:374, ADJUDICATION-VTAB-PRIVSTRING.md); eq harnesses wall(timeout-450s) at lane cap
+1923	has_table_privilege_name_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check; DIVERGENCE CANDIDATE #A1 temp-toast IsSystemClass (aclchk lib.rs:404, confirmed on binaries 2026-07-30, proofs/aclcheck/ADJUDICATION-TEMPTOAST-SYSCLASS.md) + #A2 \v priv-string trim (ops.rs:374, ADJUDICATION-VTAB-PRIVSTRING.md); eq harnesses wall(timeout-450s) at lane cap
+1924	has_table_privilege_id_name	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check; DIVERGENCE CANDIDATE #A1 temp-toast IsSystemClass (aclchk lib.rs:404, confirmed on binaries 2026-07-30, proofs/aclcheck/ADJUDICATION-TEMPTOAST-SYSCLASS.md) + #A2 \v priv-string trim (ops.rs:374, ADJUDICATION-VTAB-PRIVSTRING.md); eq harnesses wall(timeout-450s) at lane cap
+1925	has_table_privilege_id_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check; DIVERGENCE CANDIDATE #A1 temp-toast IsSystemClass (aclchk lib.rs:404, confirmed on binaries 2026-07-30, proofs/aclcheck/ADJUDICATION-TEMPTOAST-SYSCLASS.md) + #A2 \v priv-string trim (ops.rs:374, ADJUDICATION-VTAB-PRIVSTRING.md); eq harnesses wall(timeout-450s) at lane cap
+1926	has_table_privilege_name	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check; DIVERGENCE CANDIDATE #A1 temp-toast IsSystemClass (aclchk lib.rs:404, confirmed on binaries 2026-07-30, proofs/aclcheck/ADJUDICATION-TEMPTOAST-SYSCLASS.md) + #A2 \v priv-string trim (ops.rs:374, ADJUDICATION-VTAB-PRIVSTRING.md); eq harnesses wall(timeout-450s) at lane cap
+1927	has_table_privilege_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check; DIVERGENCE CANDIDATE #A1 temp-toast IsSystemClass (aclchk lib.rs:404, confirmed on binaries 2026-07-30, proofs/aclcheck/ADJUDICATION-TEMPTOAST-SYSCLASS.md) + #A2 \v priv-string trim (ops.rs:374, ADJUDICATION-VTAB-PRIVSTRING.md); eq harnesses wall(timeout-450s) at lane cap
 1928	pg_stat_get_numscans	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 1929	pg_stat_get_tuples_returned	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 1930	pg_stat_get_tuples_fetched	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads

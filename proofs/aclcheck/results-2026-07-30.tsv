@@ -1,0 +1,5 @@
+proofs::eq_has_table_privilege_id_id	wall(timeout-450s)	455s
+proofs::eq_has_table_privilege_name_id	wall(timeout-450s)	452s
+proofs::eq_aclinsert	SUCCESSFUL	4s
+proofs::eq_aclremove	SUCCESSFUL	3s
+proofs::spot_acldefault_sql_bad_char	wall(timeout-60s)	60s
