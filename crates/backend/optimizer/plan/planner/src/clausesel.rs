@@ -496,10 +496,15 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
         // IsA(clause, DistinctExpr)` arm rejects it and clausesel.c's final
         // else takes it — a boolean NULLIF qual estimates via boolvarsel,
         // never via the operator's restriction estimator.
+        // T_Aggref lands here as well: a boolean-returning aggregate used as a
+        // whole HAVING qual is not an opclause, so C's final else takes it and
+        // estimates via boolvarsel (which falls back to its default for a
+        // non-Var expression).
         NodeTag::T_CaseExpr
         | NodeTag::T_CoalesceExpr
         | NodeTag::T_JsonIsPredicate
         | NodeTag::T_NullIfExpr
+        | NodeTag::T_Aggref
         | NodeTag::T_PlaceHolderVar => {
             crate::selfuncs::boolvarsel(run, clause, varrelid)
         }
