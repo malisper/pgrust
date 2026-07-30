@@ -4,3 +4,5 @@ fleet-results/
 *.profraw
 **/target-*/
 scripts/__pycache__/
+.nix-fhs-home
+.direnv
