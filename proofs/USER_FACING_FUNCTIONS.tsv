@@ -2374,16 +2374,16 @@ oid	name	source_file	status	class	notes
 4010	jsonb_path_exists_opr	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
 4011	jsonb_path_match_opr	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
 4014	brin_desummarize_range	crates/backend/access/brin/brin_funcs/src/lib.rs	excluded(state/engine)	-	revmap mutation
-4018	spg_quad_config	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	fast	spgist_quadtree/src/lib.rs:139 constant stores; free proof
+4018	spg_quad_config	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	proved(fmgr-level; all fields incl untouched-zero; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_quad_config_h kissat 100.9s (load~21)
 4019	spg_quad_choose	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	fast	getQuadrant :93 (proved FP compares) + fc :153; impossible-case panic arm = unreachability claim
 4020	spg_quad_picksplit	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	blocked(wall+mcx: centroid /= n symbolic divide + PgVec)	-	:177
 4021	spg_quad_inner_consistent	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	ladder	:217 which-bitmask lattice 6 strategies + ContainedBy 4-corner fold; mcx-stubs for PgVec outs; fence norderbys=0, nkeys<=2
 4022	spg_quad_leaf_consistent	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	fast	:344 point predicates over nkeys<=2, no alloc when norderbys=0
-4023	spg_kd_config	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	candidate	fast	spgist_kdtree/src/lib.rs:54 constant stores
-4024	spg_kd_choose	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	candidate	fast	getSide :43 + level%2 axis pick :68
+4023	spg_kd_config	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	proved(fmgr-level; all fields incl untouched-zero; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_kd_config_h kissat 124.7s (load~22)
+4024	spg_kd_choose	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	proved(fmgr-level; full-symbolic point+coord incl NaN/+-0; fences: allTheSame=false (C elog/Rust panic plane), hasPrefix, nNodes=2, level>=0; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_kd_choose kissat 141.4s (load~15)
 4025	spg_kd_picksplit	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	excluded(blocked: sort — stable sort_by vs C unstable qsort, declared tie-order difference)	-	:91 + PgVec
 4026	spg_kd_inner_consistent	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	candidate	ladder	:151 FP lattice + by_x axis + hi/lo arm; mcx-stubs, fence norderbys=0
-4027	spg_text_config	crates/backend/access/spgist/spgist_text/src/lib.rs	candidate	fast	spgist_text/src/lib.rs:115 constant stores
+4027	spg_text_config	crates/backend/access/spgist/spgist_text/src/lib.rs	proved(core-level spg_text_config; all fields incl untouched-zero)	fast	proofs/spgist-geo eq_spg_text_config_core kissat 0.05s; fmgr shell excluded: SPGIST_TEXT_BUILTINS reaches fc_spghandler -> ipc_seams::proc_exit = Kani 0.67 codegen ICE
 4028	spg_text_choose	crates/backend/access/spgist/spgist_text/src/lib.rs	blocked(refactor: decision core — emits level-derived text images)	-	:130; SPLIT OUT common_prefix :87 + search_char :98 (int16 bsearch) as standalone candidate-fast kernels
 4029	spg_text_picksplit	crates/backend/access/spgist/spgist_text/src/lib.rs	blocked(alloc/sort)	-	:240
 4030	spg_text_inner_consistent	crates/backend/access/spgist/spgist_text/src/lib.rs	blocked(seam+image: pg_newlocale_from_collation + form_text_4b derived lengths)	-	:325; cmp/strategy lattice only provable projection
