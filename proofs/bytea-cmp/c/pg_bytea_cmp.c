@@ -688,3 +688,51 @@ pg_int8_bytea(int64_t arg1, unsigned char *out)
 	pg_pq_writeint64(&buf, (uint64) arg1);
 	return buf.len;
 }
+
+/* ================================================================
+ * BYTEAIN ESCAPED-STYLE PASS ONE (lane pick-a 2026-07-30, oid 1244).
+ *
+ * Provenance: REL_18_STABLE varlena.c byteain (l.299), first loop
+ * (count + validate) verbatim.  The hex arm delegates to
+ * hex_decode_safe (proofs/hex family); pass two is the image build
+ * (result-image class, out of this scalar claim).
+ *
+ * SHIMS: ereturn(escontext, ..., errcode(ERRCODE_INVALID_TEXT_
+ * REPRESENTATION) "invalid input syntax") -> *err = 1, return -1.
+ * Input contract: NUL-terminated cstring (fmgr CSTRING protocol; the
+ * harness builds it from the slice + literal NUL).  The escape check
+ * reads at most one byte past the last content byte (the NUL) — in
+ * bounds by the cstring contract.
+ * ================================================================ */
+
+int
+pg_byteain_escaped_count(const char *inputText, int *err)
+{
+	const char *tp;				/* shim: char *tp (const for the shim sig) */
+	int			bc;
+
+	for (bc = 0, tp = inputText; *tp != '\0'; bc++)
+	{
+		if (tp[0] != '\\')
+			tp++;
+		else if ((tp[0] == '\\') &&
+				 (tp[1] >= '0' && tp[1] <= '3') &&
+				 (tp[2] >= '0' && tp[2] <= '7') &&
+				 (tp[3] >= '0' && tp[3] <= '7'))
+			tp += 4;
+		else if ((tp[0] == '\\') &&
+				 (tp[1] == '\\'))
+			tp += 2;
+		else
+		{
+			/*
+			 * one backslash, not followed by another or ### valid octal
+			 */
+			/* shim: ereturn 22P02 "invalid input syntax for type bytea" */
+			*err = 1;
+			return -1;
+		}
+	}
+
+	return bc;
+}

@@ -131,3 +131,21 @@ fn control_expected_divergence() {
     let c = unsafe { pg_hash_bytes(buf.as_ptr(), 3) };
     assert_eq!(hashfn::hash_bytes(&buf), c);
 }
+
+/// hashvarlena/hashbytea/hashvarlenaextended/hashbyteaextended (varlena
+/// builtins, oids 456/6413/772/6414) reduce to hash_bytes(_extended) over
+/// the detoasted (ptr,len) payload — C hashvarlena(extended) is
+/// hash_any(_extended) which is an inline UIntNGetDatum(hash_bytes*)
+/// alias (REL_18 hashfn.h:31-40).  The unextended rows ride the
+/// hash_bytes_symlen* theorems above; this adds the missing symbolic
+/// length x symbolic seed form for the extended rows.
+#[kani::proof]
+#[kani::unwind(4)]
+fn hash_bytes_extended_symlen16() {
+    let buf: [u8; 16] = kani::any();
+    let len: usize = kani::any();
+    kani::assume(len <= 16);
+    let seed: u64 = kani::any();
+    let c = unsafe { pg_hash_bytes_extended(buf.as_ptr(), len as i32, seed) };
+    assert_eq!(hashfn::hash_bytes_extended(&buf[..len], seed), c);
+}

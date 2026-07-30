@@ -312,6 +312,7 @@ hash	hash_bytes_symlen16	-Z c-ffi --c-lib pg_hashfn.c	green	calibration	109	symb
 hash	hash_bytes_symlen32	-Z c-ffi --c-lib pg_hashfn.c	green	calibration	262	symbolic len<=32
 hash	hash_bytes_symlen48	-Z c-ffi --c-lib pg_hashfn.c	wall-recorded	calibration	?	WALLS >600s; stretch
 hash	control_expected_divergence	-Z c-ffi --c-lib pg_hashfn.c	must-fail	defect-witness	?	length-mismatch control; DEFAULT solver
+hash	hash_bytes_extended_symlen16	-Z c-ffi --c-lib pg_hashfn.c --solver kissat	green	calibration	216	sym len<=16 x full-u64 seed; extended rows 772/6414 wrapper reduction; lane pick-a 2026-07-30
 hash-rows	proofs::eq_hashchar	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashint2	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashint4	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
@@ -1830,6 +1831,7 @@ bytea-cmp	control_to_base_skewed_value	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_c
 bytea-cmp	eq_int2_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c	green	calibration	100	oid 6367; DEFAULT solver (kissat walls — mixed-arm inversion); mcx recipe
 bytea-cmp	eq_int4_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c	green	calibration	89	oid 6368; DEFAULT solver
 bytea-cmp	eq_int8_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c	green	calibration	88	oid 6369; DEFAULT solver
+bytea-cmp	eq_byteain_escaped_count	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	4.5	oid 1244; escaped pass-one core verdict+count; NUL-free cstring fence
 datetime-cmp	wave7_proofs::eq_timestamp_finite	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	0.16	
 datetime-cmp	wave7_proofs::eq_timestamp_hash	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.6	
 datetime-cmp	wave7_proofs::eq_timestamp_hash_extended	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.6	

@@ -684,4 +684,55 @@ mod proofs {
     int_bytea_harness!(eq_int4_bytea, pg_int4_bytea, i32, 4);
     int_bytea_harness!(eq_int8_bytea, pg_int8_bytea, i64, 8);
 
+
+    // ---- byteain escaped-style pass one (oid 1244) ----
+    //
+    // Rust core: varlena::bytea::byteain_escaped_count (pure core
+    // factored from byteain pass one — behavior identical, byteain
+    // calls it).  C: REL_18 byteain first loop, cstring contract.
+    // Claim: accept/reject verdict + output byte COUNT parity over
+    // symbolic len<=8 NUL-free bytes (fmgr cstring protocol; the C
+    // buffer is the same bytes + literal NUL terminator).  Full domain
+    // incl. hex-looking inputs: at core level both sides reject
+    // "\\x.." identically; the wrappers route the hex arm to
+    // hex_decode by the same 2-byte prefix test on both sides
+    // (hex_decode is proofs/hex).  Pass two (image build) and the
+    // 22P02 sqlstate stay out of this scalar claim (core-level).
+
+    extern "C" {
+        fn pg_byteain_escaped_count(input_text: *const core::ffi::c_char, err: *mut c_int) -> c_int;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn eq_byteain_escaped_count() {
+        const M: usize = 8;
+        let buf: [u8; M] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= M);
+        let mut cbuf = [0u8; M + 1]; // literal-zero tail = NUL terminator
+        let mut k = 0;
+        while k < M {
+            if k < len {
+                kani::assume(buf[k] != 0); // cstring contract: no interior NUL
+                cbuf[k] = buf[k];
+            }
+            k += 1;
+        }
+        let mut cerr: c_int = 0;
+        let c = unsafe {
+            pg_byteain_escaped_count(cbuf.as_ptr() as *const core::ffi::c_char, &mut cerr)
+        };
+        match varlena::bytea::byteain_escaped_count(&buf[..len]) {
+            Some(bc) => {
+                assert!(cerr == 0);
+                assert!(c >= 0);
+                assert!(c as usize == bc);
+            }
+            None => assert!(cerr == 1),
+        }
+        kani::cover!(cerr == 0);
+        kani::cover!(cerr == 1);
+    }
+
 }

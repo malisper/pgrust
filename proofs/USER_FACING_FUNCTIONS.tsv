@@ -316,7 +316,7 @@ oid	name	source_file	status	class	notes
 453	hashoid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 454	hashchar	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 455	hashname	crates/backend/utils/adt/name/src/builtins.rs	proved(len<=8 + len-16 spot, NUL-scan in-theorem; 2 interior lengths unresolved-under-load, retry idle)	fast	proofs/hash-rows
-456	hashvarlena	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+456	hashvarlena	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: hash_bytes sym len<=48 + fixed-len grid; wrapper is direct delegation, hash_any = inline hash_bytes alias REL_18 hashfn.h:31; fmgr/detoast plumbing tested-tier)	fast	lane pick-a 2026-07-30; proofs/hash hash_bytes_symlen48 et al
 457	hashoidvector	crates/backend/utils/adt/scalar/src/builtins.rs	proved(dim<=4 per-length + coverage; valid-oidvector fence)	fast	FIXED 2026-07-28: release-effective check_valid_oidvector gate added; proofs/hash-rows
 458	text_larger	crates/backend/utils/adt/varlena/src/builtins.rs	proved(wrapper-level varlena; C-collation fence; len<=8/side sym)	fast	1-5s; proofs/text-cmp
 459	text_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	proved(wrapper-level varlena; C-collation fence; len<=8/side sym)	fast	1-5s; proofs/text-cmp
@@ -411,7 +411,7 @@ oid	name	source_file	status	class	notes
 769	int4smaller	crates/backend/utils/adt/int/src/builtins.rs	proved(full domain, wrapper-level)	fast	0.1s; proofs/int-arith
 770	int2larger	crates/backend/utils/adt/int/src/builtins.rs	proved(full domain, wrapper-level)	fast	0.1s; proofs/int-arith
 771	int2smaller	crates/backend/utils/adt/int/src/builtins.rs	proved(full domain, wrapper-level)	fast	0.1s; proofs/int-arith
-772	hashvarlenaextended	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+772	hashvarlenaextended	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: hash_bytes_extended sym len<=16 x full-u64 seed + len8 grid; hash_any_extended = inline alias; plumbing tested-tier)	ladder	216s kissat; lane pick-a 2026-07-30; proofs/hash hash_bytes_extended_symlen16
 776	hashoidvectorextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(dim<=4 per-length + coverage; valid-oidvector fence)	fast	FIXED 2026-07-28: release-effective check_valid_oidvector gate added; proofs/hash-rows
 777	hash_aclitem_extended	crates/backend/utils/adt/acl/src/builtins.rs	proved(full item x seed, wrapper-level)	seam	3.0s; proofs/state-seam-probe
 778	hashmacaddrextended	crates/backend/utils/adt/mac/src/builtins.rs	proved(full block + seed, wrapper-level)	fast	1-13s; proofs/hash-rows
@@ -674,7 +674,7 @@ oid	name	source_file	status	class	notes
 1241	nameicregexne	crates/backend/utils/adt/regexp/src/builtins.rs	excluded(engine)	-	regex engine internals
 1242	boolin	crates/backend/utils/adt/bool/src/builtins.rs	proved(len<=8)	fast	7.7s; proofs/bool-parse; trailing-space==NUL comment claim machine-checked; also case-split l0-l6 + union coverage in proofs/bool
 1243	boolout	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-bool; byte+NUL)	fast	proofs/bool; <1s; kissat
-1244	byteain	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	SCALAR CORE byteain pass one varlena/src/bytea.rs:151-170: escape-count + accept/reject (invalid_bytea_input); symbolic len<=8; pass-two image walls; \x arm delegates hex_decode — fence out. Octal-escape acceptance parity
+1244	byteain	crates/backend/utils/adt/varlena/src/builtins.rs	proved(escaped pass-one core: accept/reject verdict + output count, sym len<=8 NUL-free; hex arm = proofs/hex; pass-two image + 22P02 sqlstate out of claim)	fast	4.5s kissat; core byteain_escaped_count factored (behavior identical); lane pick-a 2026-07-30; proofs/bytea-cmp eq_byteain_escaped_count
 1245	charin	crates/backend/utils/adt/char/src/builtins.rs	proved(cstr len<=4)	fast	0.42s; proofs/char
 1246	charlt	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 1250	unique_key_recheck	crates/backend/commands/constraint_cmd/src/lib.rs	excluded(state)	-	constraint catalog state
@@ -2948,8 +2948,8 @@ oid	name	source_file	status	class	notes
 6400	pg_ls_summariesdir	crates/backend/utils/adt/genfile/src/builtins.rs	excluded(state)	-	server filesystem access
 6401	pg_timezone_abbrevs_zone	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(SRF)	-	builtins.rs:1252
 6412	casefold	crates/backend/utils/adt/oracle_compat/src/builtins.rs	untriaged		
-6413	hashbytea	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6414	hashbyteaextended	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6413	hashbytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: same registration as hashvarlena — fc_hashvarlena; rides the same theorems)	fast	lane pick-a 2026-07-30; proofs/hash
+6414	hashbyteaextended	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: same registration as hashvarlenaextended — fc_hashvarlenaextended)	ladder	lane pick-a 2026-07-30; proofs/hash
 6415	hashdate	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i32 x full seed, wrapper-level)	fast	0.75s; proofs/datetime-b lane D
 6416	hashdateextended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i32 x full seed)	fast	4.2s; proofs/datetime-b lane D
 6417	hashbool	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
