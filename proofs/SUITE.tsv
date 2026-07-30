@@ -2149,3 +2149,11 @@ datetime-b	proofs::eq_intervaltypmodin_n0	-Z c-ffi -Z stubbing --c-lib c/pg_date
 datetime-b	proofs::eq_intervaltypmodin_n1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.8	oid 2903; default solver; w2-timestamp 2026-07-30
 datetime-b	proofs::eq_intervaltypmodin_n2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.7	oid 2903; default solver; w2-timestamp 2026-07-30
 datetime-b	proofs::eq_intervaltypmodin_n3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.8	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_fieldstr_fullprec	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.8	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.7	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.2	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	4.4	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d4	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	6.4	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d5	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	6.8	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_fullrange_prec_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.4	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::cover_intervaltypmodout_prec_bands	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	per-commit	0.1	oid 2904 union coverage; w2-timestamp 2026-07-30

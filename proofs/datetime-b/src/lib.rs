@@ -481,7 +481,12 @@ mod proofs {
     /// range fully symbolic — 14-way fieldstr table, the typmod<0 empty
     /// plane, and the invalid-range error arm (XX000) all in-theorem.
     /// Whole-64-byte image compare (both buffers zero-initialized).
+    /// unwind 66 (w2-timestamp repair 2026-07-30): without a bound the
+    /// emit_str_paren_int do-loop unwinds unboundedly (symex hang at
+    /// iteration 14000+); 66 = 64-byte image memcmp + 1, same binding
+    /// bound as the prec_d* bands.
     #[kani::proof]
+    #[kani::unwind(66)]
     #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
     #[kani::stub(std::fmt::format, stubs::stub_format)]
     fn eq_intervaltypmodout_fieldstr_fullprec() {
