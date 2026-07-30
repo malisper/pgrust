@@ -337,3 +337,216 @@ pg_byteaSetBit(unsigned char *res, int len, int64 n, int32 newBit, int *err)
 
 	return 0;					/* shim: PG_RETURN_BYTEA_P(res) */
 }
+
+/* ================================================================
+ * SCALAR-CAST / MINMAX / BIT-COUNT / TO-BASE WAVE (lane pick-a,
+ * fetched 2026-07-30 from postgres/postgres REL_18_STABLE
+ * src/backend/utils/adt/varlena.c: bytea_int2 (l.4139), bytea_int4
+ * (l.4164), bytea_int8 (l.4189), bytea_larger (l.4084),
+ * bytea_smaller (l.4103), bytea_bit_count (l.3254),
+ * convert_to_base (l.5191); src/port/pg_bitutils.c:
+ * pg_number_of_ones + pg_popcount_portable (l.104).
+ *
+ * SHIMS (bodies verbatim; everything shimmed is listed):
+ *  - names pg_-prefixed; PG_GETARG_BYTEA_PP + VARDATA_ANY /
+ *    VARSIZE_ANY_EXHDR -> (data, len) parameters (same detoasted
+ *    caller contract as the comparator wave above).
+ *  - postgres typedefs inlined: uint16/uint32/uint64 -> stdint
+ *    equivalents; BITS_PER_BYTE = 8; Assert -> no-op.
+ *  - ereport(ERROR, errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE), ...)
+ *    -> PROOF_EREPORT_FLAG convention: *err = 1, return 0.  Message
+ *    text out of proof.
+ *  - PG_RETURN_INT16/32/64 -> plain integer returns.
+ *  - bytea_larger/smaller: PG_RETURN_BYTEA_P(result) -> WINNER
+ *    IDENTITY return (1 if arg1 won, 2 if arg2) — the function
+ *    returns one of its INPUT datums, so which datum won is the
+ *    user-visible claim (winner-identity theorem).
+ *  - bytea_bit_count: PG's pg_popcount() dispatch macro resolves to
+ *    pg_popcount_portable (dispatch is a perf mechanism, value-
+ *    identical by upstream contract); the SIZEOF_VOID_P>=8
+ *    word-chunk block is compiled out (SIZEOF_VOID_P undefined
+ *    here) — the proof domain len<=7 never enters it upstream
+ *    either (word loop requires bytes >= 8).
+ *  - convert_to_base: static inline dropped; cstring_to_text_with_len
+ *    (allocation) -> caller-provided 64-byte frame `out` that the
+ *    verbatim body writes through (buf -> out), returning the start
+ *    offset ptr - out; the caller reads digits out[start..64].
+ * ================================================================ */
+
+#include <stdint.h>
+
+typedef uint16_t uint16;
+typedef uint32_t uint32;
+typedef uint64_t uint64;
+typedef uint8_t uint8;
+#define BITS_PER_BYTE 8
+
+/* Cast bytea -> int2 */
+int16_t
+pg_bytea_int2(const unsigned char *vdata, int len, int *err)
+{
+	uint16		result;
+
+	/* Check that the byte array is not too long */
+	if (len > sizeof(result))
+	{
+		/* shim: ereport(ERROR, errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+		 * errmsg("smallint out of range")) */
+		*err = 1;
+		return 0;
+	}
+
+	/* Convert it to an integer; most significant bytes come first */
+	result = 0;
+	for (int i = 0; i < len; i++)
+	{
+		result <<= BITS_PER_BYTE;
+		result |= vdata[i];		/* shim: ((unsigned char *) VARDATA_ANY(v))[i] */
+	}
+
+	return result;				/* shim: PG_RETURN_INT16(result) */
+}
+
+/* Cast bytea -> int4 */
+int32_t
+pg_bytea_int4(const unsigned char *vdata, int len, int *err)
+{
+	uint32		result;
+
+	/* Check that the byte array is not too long */
+	if (len > sizeof(result))
+	{
+		/* shim: ereport ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE "integer out of range" */
+		*err = 1;
+		return 0;
+	}
+
+	/* Convert it to an integer; most significant bytes come first */
+	result = 0;
+	for (int i = 0; i < len; i++)
+	{
+		result <<= BITS_PER_BYTE;
+		result |= vdata[i];
+	}
+
+	return result;				/* shim: PG_RETURN_INT32(result) */
+}
+
+/* Cast bytea -> int8 */
+int64_t
+pg_bytea_int8(const unsigned char *vdata, int len, int *err)
+{
+	uint64		result;
+
+	/* Check that the byte array is not too long */
+	if (len > sizeof(result))
+	{
+		/* shim: ereport ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE "bigint out of range" */
+		*err = 1;
+		return 0;
+	}
+
+	/* Convert it to an integer; most significant bytes come first */
+	result = 0;
+	for (int i = 0; i < len; i++)
+	{
+		result <<= BITS_PER_BYTE;
+		result |= vdata[i];
+	}
+
+	return result;				/* shim: PG_RETURN_INT64(result) */
+}
+
+/* bytea_larger / bytea_smaller: already vendored in the comparator wave
+ * above (winner-identity shim) — not duplicated here. */
+
+/* src/port/pg_bitutils.c pg_number_of_ones, verbatim */
+static const uint8 pg_number_of_ones[256] = {
+	0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8
+};
+
+/*
+ * pg_popcount_portable
+ *		Returns the number of 1-bits in buf
+ */
+static uint64
+pg_popcount_portable(const char *buf, int bytes)
+{
+	uint64		popcnt = 0;
+
+#if SIZEOF_VOID_P >= 8
+	/* Process in 64-bit chunks if the buffer is aligned. */
+	if (buf == (const char *) TYPEALIGN(8, buf))
+	{
+		const uint64 *words = (const uint64 *) buf;
+
+		while (bytes >= 8)
+		{
+			popcnt += pg_popcount64(*words++);
+			bytes -= 8;
+		}
+
+		buf = (const char *) words;
+	}
+#endif
+
+	/* Process any remaining bytes */
+	while (bytes--)
+		popcnt += pg_number_of_ones[(unsigned char) *buf++];
+
+	return popcnt;
+}
+
+/*
+ * bit_count
+ */
+int64_t
+pg_bytea_bit_count(const unsigned char *vdata, int len)
+{
+	/* shim: pg_popcount(VARDATA_ANY(t1), VARSIZE_ANY_EXHDR(t1)) dispatch
+	 * -> pg_popcount_portable */
+	return pg_popcount_portable((const char *) vdata, len);
+}
+
+/*
+ * Workhorse for to_bin, to_oct, and to_hex.  Note that base must be > 1 and <=
+ * 16.
+ */
+int
+pg_convert_to_base(uint64 value, int base, unsigned char *out /* [64] */ )
+{
+	const char *digits = "0123456789abcdef";
+
+	/* We size the buffer for to_bin's longest possible return value. */
+	/* shim: char buf[sizeof(uint64) * BITS_PER_BYTE] -> caller frame `out` */
+	char	   *const buf = (char *) out;
+	char	   *const end = buf + sizeof(uint64) * BITS_PER_BYTE;
+	char	   *ptr = end;
+
+	/* Assert(base > 1); Assert(base <= 16);  shim: Assert -> no-op */
+
+	do
+	{
+		*--ptr = digits[value % base];
+		value /= base;
+	} while (ptr > buf && value);
+
+	/* shim: cstring_to_text_with_len(ptr, end - ptr) -> return start
+	 * offset; caller reads out[start..64] */
+	return (int) (ptr - buf);
+}

@@ -469,4 +469,153 @@ mod proofs {
             }
         }
     }
+
+    // ================================================================
+    // SCALAR-CAST / MINMAX / BIT-COUNT / TO-BASE WAVE (lane pick-a
+    // 2026-07-30; oids 6370/6371/6372 bytea_int2/4/8, 6163 bytea_bit_count, 2089/2090/6330/6331/
+    // 6332/6333 to_hex/bin/oct 32/64).
+    //
+    // Rust cores (shipped, path-dep):
+    //  - varlena::bytea::{bytea_int2, bytea_int4, bytea_int8}
+    //    (bytea.rs:499-520, bytea_uint_be BE fold + width check)
+    //  - varlena::bytea::bytea_bit_count (bytea.rs:484 -> pg_bitutils::
+    //    pg_popcount; len<=7 = table path.  The len>=8 arm is aarch64
+    //    NEON on this host: SIMD is Kani-unsupported, excluded
+    //    (blocked:simd) and fenced out by the cap)
+    //  - varlena::convert_to_base_frame (lib.rs:473, pure frame core
+    //    factored from convert_to_base for this proof — behavior
+    //    identical, the shipped convert_to_base calls it)
+    //
+    // C: REL_18_STABLE varlena.c / pg_bitutils.c, vendored in
+    // c/pg_bytea_cmp.c (provenance + shims in the wave header there).
+    //
+    // Claims:
+    //  - casts: Ok-arm VALUE parity + verdict/sqlstate(22003)/level
+    //    parity on the Err arm, symbolic len<=9 (one past the widest
+    //    cast width, so bytea_int8's Err arm is in-domain).  Error
+    //    message text out of proof (value-space only).
+    //  - bit_count: exact i64 value parity, symbolic len<=7 (table
+    //    path; see NEON note above).
+    //  - to_hex/bin/oct: full-frame RESULT IMAGE parity + start-index
+    //    parity over the full 32/64-bit input domain.  Both sides fill
+    //    the tail of a zero-initialized (literal) 64-byte frame, so
+    //    whole-frame equality == image equality without symbolic-range
+    //    reads (dead-symbolic-bytes law).  The fc wrapper cast chain
+    //    (i32 as u32 as u64 / i64 as u64) is mirrored in-harness.
+    //    Bases are literals (2/8/16, powers of two): the % / /= chain
+    //    folds to masks/shifts — not the divider wall class.
+    // ================================================================
+
+    use types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
+
+    extern "C" {
+        fn pg_bytea_int2(vdata: *const u8, len: c_int, err: *mut c_int) -> i16;
+        fn pg_bytea_int4(vdata: *const u8, len: c_int, err: *mut c_int) -> i32;
+        fn pg_bytea_int8(vdata: *const u8, len: c_int, err: *mut c_int) -> i64;
+        fn pg_bytea_bit_count(vdata: *const u8, len: c_int) -> i64;
+        fn pg_convert_to_base(value: u64, base: c_int, out: *mut u8) -> c_int;
+    }
+
+    /// bytea payload, cap 9: one past the widest cast width (8) so the
+    /// bytea_int8 error arm is reachable.
+    fn sym_bytea9() -> ([u8; 9], usize) {
+        let buf: [u8; 9] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 9);
+        (buf, len)
+    }
+
+    macro_rules! cast_harness {
+        ($harness:ident, $cfn:ident, $rfn:ident) => {
+            #[kani::proof]
+            #[kani::unwind(11)] // BE fold loop <= 9 iterations + exit
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let (buf, len) = sym_bytea9();
+                let mut cerr: c_int = 0;
+                let c = unsafe { $cfn(buf.as_ptr(), len as c_int, &mut cerr) };
+                match varlena::bytea::$rfn(&buf[..len]) {
+                    Ok(r) => {
+                        assert!(cerr == 0);
+                        assert!(r == c);
+                    }
+                    Err(e) => {
+                        assert!(cerr == 1);
+                        assert!(e.sqlstate == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+                kani::cover!(cerr == 0);
+                kani::cover!(cerr == 1);
+            }
+        };
+    }
+
+    cast_harness!(eq_bytea_int2, pg_bytea_int2, bytea_int2);
+    cast_harness!(eq_bytea_int4, pg_bytea_int4, bytea_int4);
+    cast_harness!(eq_bytea_int8, pg_bytea_int8, bytea_int8);
+
+    // larger/smaller (oids 6393/6394): harnessed in the comparator wave
+    // above (winner-identity minmax_harness) — run + recorded by this lane.
+
+    // ---- bit_count: table path, len <= 7 ----
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn eq_bytea_bit_count() {
+        let buf: [u8; 7] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 7);
+        let c = unsafe { pg_bytea_bit_count(buf.as_ptr(), len as c_int) };
+        let r = varlena::bytea::bytea_bit_count(&buf[..len]);
+        assert!(c == r);
+    }
+
+    // ---- to_bin/to_oct/to_hex: full-frame image + start index ----
+
+    macro_rules! to_base_harness {
+        ($harness:ident, $ty:ty, $uty:ty, $base:expr) => {
+            #[kani::proof]
+            // 66: digit loop <= 64 iterations (to_bin64) + frame compare
+            // over the 64-byte arrays; shift/mask circuit tolerates the
+            // slack on the narrower bases
+            #[kani::unwind(66)]
+            fn $harness() {
+                let v: $ty = kani::any();
+                let value = v as $uty as u64; // fc wrapper cast chain
+                let mut cf = [0u8; 64]; // literal zero: untouched prefix
+                let mut rf = [0u8; 64]; // identical on both sides
+                let start_c = unsafe { pg_convert_to_base(value, $base, cf.as_mut_ptr()) };
+                let start_r = varlena::convert_to_base_frame(value, $base as u64, &mut rf);
+                assert!(start_c as usize == start_r);
+                assert!(cf == rf);
+            }
+        };
+    }
+
+    to_base_harness!(eq_to_bin32, i32, u32, 2);
+    to_base_harness!(eq_to_bin64, i64, u64, 2);
+    to_base_harness!(eq_to_oct32, i32, u32, 8);
+    to_base_harness!(eq_to_oct64, i64, u64, 8);
+    to_base_harness!(eq_to_hex32, i32, u32, 16);
+    to_base_harness!(eq_to_hex64, i64, u64, 16);
+
+    // ---- wave negative control: image rig is non-vacuous ----
+    // C converts value+1: frames/start must differ somewhere — MUST FAIL
+    // with a decodable counterexample.  DEFAULT solver (kissat never
+    // terminates on failures).
+    #[kani::proof]
+    #[kani::unwind(66)]
+    fn control_to_base_skewed_value() {
+        let v: i32 = kani::any();
+        let value = v as u32 as u64;
+        let mut cf = [0u8; 64];
+        let mut rf = [0u8; 64];
+        let start_c = unsafe { pg_convert_to_base(value.wrapping_add(1), 16, cf.as_mut_ptr()) };
+        let start_r = varlena::convert_to_base_frame(value, 16, &mut rf);
+        assert!(start_c as usize == start_r && cf == rf); // fails
+    }
+
 }

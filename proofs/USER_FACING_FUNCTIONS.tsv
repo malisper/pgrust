@@ -1207,8 +1207,8 @@ oid	name	source_file	status	class	notes
 2086	bytea_substr_no_len	crates/backend/utils/adt/varlena/src/builtins.rs	wall(SAT/memory; symex completes 35-108s; both solvers; result-image (check_bytes) subfamily — scalar-verdict proves, image-compare walls; measured under multi-agent load, idle rerun owed)	wall	LATIN1/bytea arms SAT residue >490-560s, UTF8 arms >6GiB RSS; clamp arithmetic witnessed reachable by green cover; proofs/text-slice
 2087	replace_text	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(wall: result-image + std-Vec push)	-	lib.rs:777 text_position scan + Vec push build
 2088	split_part	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	varlena/src/lib.rs:810; SCALAR SLICE = selected field WINDOW + 22023 fldnum==0 + empty-sep/no-match arms; text_position_setup lib.rs:560 alloc-free fixed skiptable; B-M-H loop sets unwind floor; fence collid C
-2089	to_hex32	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-2090	to_hex64	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+2089	to_hex32	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: convert_to_base lib.rs:472 literal base 16 = shift/mask; fixed 64B frame image + start-index; host proofs/bytea-cmp
+2090	to_hex64	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: convert_to_base base 16, u64 domain; host proofs/bytea-cmp
 2091	array_lower	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	candidate	fast	pure array-header arithmetic (arrayfuncs/ops.rs:711)
 2092	array_upper	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	candidate	fast	pure array-header arithmetic (arrayfuncs/ops.rs:724)
 2096	pg_terminate_backend	crates/backend/storage/ipc/signalfuncs/src/lib.rs	excluded(state)	-	process signaling
@@ -2769,7 +2769,7 @@ oid	name	source_file	status	class	notes
 6160	text_to_table	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: SRF tuplestore)	-	split_text::fc_text_to_table ReturnSetInfo/tuplestore
 6161	text_to_table_null	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: SRF tuplestore)	-	same body
 6162	bit_bit_count	crates/backend/utils/adt/varbit/src/lib.rs	proved(shipped fc wrapper through LocalFcinfo, len<=8 symbolic)	fast	1.6s; proofs/varbit-rows relaunch 2026-07-29 (re-derived)
-6163	bytea_bit_count	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6163	bytea_bit_count	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: pg_popcount table path len<=7 (crates/port/pg_bitutils lib.rs:122); len>=8 aarch64 NEON = blocked:simd; host proofs/bytea-cmp
 6168	pg_xact_commit_timestamp_origin	crates/backend/access/transam/commit_ts/src/fmgr_builtins.rs	excluded(state: SLRU/shmem)	-	commit_ts fmgr_builtins.rs:90
 6169	pg_stat_get_replication_slot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 6170	pg_stat_reset_replication_slot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
@@ -2889,10 +2889,10 @@ oid	name	source_file	status	class	notes
 6324	interval_avg_serialize	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	candidate	fast	builtins.rs:785 FIXED 40-byte BE image at literal offsets — NOT data-dependent-width class; mcx-stub for PgVec tail
 6325	interval_avg_deserialize	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	candidate	fast	builtins.rs:806 fixed-offset from_be_bytes; prove as round-trip inverse of 6324; agg_context stubbed both sides
 6326	interval_sum	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	candidate	fast	CORE interval_sum_final interval.rs:1321; pure lattice + i64 adds over symbolic state; cheapest agg row
-6330	to_bin32	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6331	to_bin64	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6332	to_oct32	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6333	to_oct64	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6330	to_bin32	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: convert_to_base base 2, <=32 iter; host proofs/bytea-cmp
+6331	to_bin64	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: convert_to_base base 2, <=64 iter; host proofs/bytea-cmp
+6332	to_oct32	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: convert_to_base base 8; host proofs/bytea-cmp
+6333	to_oct64	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: convert_to_base base 8, u64; host proofs/bytea-cmp
 6334	timestamptz_at_local	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(planes as 2027)	fast	0.75s; proofs/datetime-cmp wave7
 6335	timestamp_at_local	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 modulo shared tz-seam ±86400)	fast	1.9s; proofs/datetime-cmp wave7
 6336	timetz_at_local	crates/backend/utils/adt/adt_date/src/builtins.rs	excluded(state: same seams as 2037)	-	proofs/datetime-b lane D
@@ -2922,9 +2922,9 @@ oid	name	source_file	status	class	notes
 6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
 6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	bytea::int_bytea bytea.rs:522 FIXED 4-byte BE image; mcx-stubs sweet spot; pins "aliases int4send"
 6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	same core 8 bytes; free sibling
-6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea_uint_be bytea.rs:513; SCALAR verdict: length-check error class + BE assembly (shift/or); symbolic len<=8; VARLENA fence
-6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea.rs:517 same rig 8-byte
+6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: bytea_uint_be bytea.rs:499 width 2; value+verdict+sqlstate; host proofs/bytea-cmp
+6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: bytea_uint_be bytea.rs:499 width 4; value+verdict+sqlstate; host proofs/bytea-cmp
+6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: bytea_uint_be bytea.rs:499 width 8; value+verdict+sqlstate; host proofs/bytea-cmp
 6375	record_larger	crates/backend/utils/adt/rowtypes/src/lib.rs	excluded(typcache)	-	generic record ops need typcache
 6376	record_smaller	crates/backend/utils/adt/rowtypes/src/lib.rs	excluded(typcache)	-	generic record ops need typcache
 6378	array_append_support	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
@@ -2940,8 +2940,8 @@ oid	name	source_file	status	class	notes
 6389	array_sort_order	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6390	array_sort_order_nulls_first	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6391	range_sortsupport	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
-6393	bytea_larger	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6394	bytea_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6393	bytea_larger	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: bytea.rs:309; WINNER-IDENTITY theorem incl tie plane; host proofs/bytea-cmp
+6394	bytea_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	in-progress	fast	LANE pick-a 2026-07-30: bytea.rs:317; WINNER-IDENTITY theorem incl tie plane; host proofs/bytea-cmp
 6397	pg_clear_relation_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6398	pg_clear_attribute_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6399	pg_get_aios	crates/backend/storage/aio/aio_funcs/src/lib.rs	excluded(state: SRF + AIO shmem handles)	-	aio_funcs/src/lib.rs InitMaterializedSRF over live pgaio handle table; same class as 6248/6318 SRF rows
