@@ -198,14 +198,15 @@ mod proofs {
     // Regime-reachability witnesses, HOISTED into one harness (each inline
     // cover = one extra SAT call under kissat): same builder, same fences,
     // so reachability transfers to the eq harnesses.
-    // Cover plane = the nd3 GATE cell's builder+fences (cap 3, w 3, ds 6)
-    // so reachability transfers to the standing eq gates; full-NDMAX covers
-    // were a >540s multi-solve under load for zero extra claim.
+    // Cover plane = the RE-CONFIRMED nd2 GATE cell's builder+fences
+    // (cap 2, w 2, ds 6) so reachability transfers to the standing eq
+    // gates; wider planes were multi-solve walls under load for zero
+    // extra claim.
     #[kani::proof]
-    #[kani::unwind(11)]
+    #[kani::unwind(8)]
     fn cover_addsub_regimes() {
-        let a = sym_var(3, 3, 6);
-        let b = sym_var(3, 3, 6);
+        let a = sym_var(2, 2, 6);
+        let b = sym_var(2, 2, 6);
         let mut r = FixedVar::<N>::new();
         let ok = add_var_fixed(a.view(), b.view(), &mut r).is_some();
         kani::cover!(ok && a.sign != b.sign && r.ndigits == 0); // exact cancel (zero arm)

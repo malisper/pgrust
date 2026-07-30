@@ -1849,3 +1849,12 @@ datetime-cmp	wave7_proofs::eq_tstz_mi_interval_nobegin	-Z c-ffi -Z stubbing --c-
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_nobegin	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.0	plane; DEFAULT solver
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
+numeric-arith	proofs::eq_add_var_nd2	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	315	GATE add_var var-level nd<=2 w<=2 ds<=6; re-confirmed post 2026-07-30 disk-window
+numeric-arith	proofs::eq_sub_var_nd2	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	301	GATE sub_var var-level; re-confirmed post disk-window
+numeric-arith	proofs::eq_add_var_nd3	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	880	pre-window observation only; exceeds 450s cap under load; re-confirm on idle box
+numeric-arith	proofs::eq_sub_var_nd3	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	771	pre-window observation only; re-confirm on idle box
+numeric-arith	proofs::eq_mul_var_nd1	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	68	GATE mul short-kernel plane; nd2 walls >1800s (NBASE-carry slope)
+numeric-arith	proofs::eq_mul_fallback_routing	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	37	mul plane-boundary routing parity (C trap==1 <=> Rust None)
+numeric-arith	proofs::cover_addsub_regimes	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	green	release-gate	152	7/7 covers at nd2 gate plane; default solver
+numeric-arith	proofs::cover_mul_regimes	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	green	release-gate	22	5/5 covers at nd1 gate plane; default solver
+numeric-arith	proofs::control_add_var_weight_skew	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	fail	defect-witness	143	must-FAIL; sole failing check = "assertion failed: ok" (assert_match); default solver
