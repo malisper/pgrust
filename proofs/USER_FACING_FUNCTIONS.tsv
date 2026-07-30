@@ -1687,16 +1687,16 @@ oid	name	source_file	status	class	notes
 2936	database_to_xml	crates/backend/utils/adt/xmlmap/src/builtins.rs	excluded(state)	-	catalog-to-xml SQL execution
 2937	database_to_xmlschema	crates/backend/utils/adt/xmlmap/src/builtins.rs	excluded(state)	-	catalog-to-xml SQL execution
 2938	database_to_xml_and_xmlschema	crates/backend/utils/adt/xmlmap/src/builtins.rs	excluded(state)	-	catalog-to-xml SQL execution
-2939	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2940	pg_snapshot_out	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2941	pg_snapshot_recv	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2942	pg_snapshot_send	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2943	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2944	pg_current_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2945	pg_snapshot_xmin	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2946	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2947	pg_snapshot_xip	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-2948	pg_visible_in_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
+2939	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(kernels: strtou64 len<=6 value+end; empty-input reject verdict+22P02+level; accept-arm image = wall)	fast/wall-split	parse_snapshot lib.rs:186; strtou64 lib.rs:125 libc comment-claim MACHINE-CHECKED modulo libc strtoull model (native diff 4M checks 0 diffs, host libc); accept arm walls in CNF on PgVec push/grow machinery (TRIAGE wall class 5) even at concrete spots — refactor proposal: exact-capacity image build + fixed-array xips core; cells+spots kept as high-mem retry vehicles; proofs/xid8snap
+2940	pg_snapshot_out	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(wall: result-image + full-u64 digit-emission /10 chain)	wall	snapshot_out_bytes lib.rs:236 push_u64 /10 loop over full u64 = sloped-wall class; read-side kernels (SnapView layout) proved in proofs/xid8snap
+2941	pg_snapshot_recv	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	snapshot_recv lib.rs:277 via pqformat StringInfo; recv-direction precedent 77-127s (harness-built StringInfo); validation lattice mirrors parse (proved SnapView reads reusable). Host proofs/xid8snap
+2942	pg_snapshot_send	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	fc builtins.rs:48 pq_sendint32/64 fixed-offset BE image, length linear in nxip; send-direction reads prove per precedent. Host proofs/xid8snap
+2943	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		recovery_in_progress seam + GetTopFullTransactionId session xact state
+2944	pg_current_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		ReadNextFullTransactionId + GetActiveSnapshot server state; its epoch-widening core full_xid_from_allowable_at lib.rs:81 PROVED full-domain (fenced to transam.h caller contract) in proofs/xid8snap
+2945	pg_snapshot_xmin	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	eq_snapview_layout 0.7s: SnapView offset arithmetic (lib.rs:24-26 C-struct-offset comment claim) vs C member reads; proofs/xid8snap
+2946	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	same theorem as 2945; proofs/xid8snap
+2947	pg_snapshot_xip	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(engine: SRF protocol)		funcapi SRF machinery; the xip[i] element read itself proved in eq_snapview_layout (proofs/xid8snap)
+2948	pg_visible_in_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(linear arm nxip<=4 full-symbolic; bsearch arm nxip 31..=33 literal-split, sorted fence, modulo bsearch libc model)	fast	is_visible_fxid lib.rs:93; linear 17.7s kissat; bsearch cells 27-62s default solver (kissat false-fails unwinding asserts; load-inflated); sorted fence = superset of on-disk rep; both-arm covers; proofs/xid8snap
 2952	uuid_in	crates/backend/utils/adt/uuid/src/builtins.rs	proved(cstr lens 32/36/38, verdict+bytes)	fast	19-22s under 30s cap; msg text stubbed (value-space only); proofs/uuid
 2953	uuid_out	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16] -> 36B+NUL)	fast	1.6s; proofs/uuid
 2954	uuid_lt	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full pairs)	fast	0.11s; proofs/uuid
@@ -1960,7 +1960,7 @@ oid	name	source_file	status	class	notes
 3343	jsonb_delete	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(wall: CNF width / image)	-	fc_jsonb_delete_array builtins.rs:486
 3344	cash_mul_int8	crates/backend/utils/adt/cash/src/builtins.rs	proved(full-i64x2, wrapper-level; value+verdict+sqlstate-22003)	fast	5.0s; proofs/cash
 3345	cash_div_int8	crates/backend/utils/adt/cash/src/builtins.rs	proved(16-bit-dividend x full-i64; full-i64/-1 fenced!=MIN; full-i64/0 22012) + divergence(candidate: MIN/-1 — pgrust PANICS (crash-and-restart); C x86-64 PG18.4 = clean ERROR floating-point exception via SIGFPE handler, session SURVIVES; C aarch64 = SILENT WRONG VALUE (unchanged negative); all three differ, pgrust is the only backend-killer; int8div 22003 on both arches = fix precedent; coordinator-verified 2026-07-29)	ladder	0.3-30s; proofs/cash
-3348	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
+3348	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		GetTopFullTransactionIdIfAny session xact state
 3352	pg_get_partkeydef	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 3353	pg_ls_logdir	crates/backend/utils/adt/genfile/src/builtins.rs	excluded(state)	-	server filesystem access
 3354	pg_ls_waldir	crates/backend/utils/adt/genfile/src/builtins.rs	excluded(state)	-	server filesystem access
@@ -1968,7 +1968,7 @@ oid	name	source_file	status	class	notes
 3356	pg_ndistinct_out	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads
 3357	pg_ndistinct_recv	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads
 3358	pg_ndistinct_send	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads
-3360	pg_xact_status	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
+3360	pg_xact_status	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		lwlock + clog/procarray seams; its TransactionIdInRecentPast epoch logic reuses full_xid_from_allowable_at, PROVED in proofs/xid8snap
 3376	pg_safe_snapshot_blocking_pids	crates/backend/utils/adt/lockfuncs/src/lib.rs	excluded(state)	-	lock-manager shared state
 3378	pg_isolation_test_session_is_blocked	crates/backend/utils/adt/waitfuncs/src/lib.rs	excluded(state)	-	lock-wait shared state
 3382	pg_identify_object_as_address	crates/backend/catalog/objectaddress/src/builtins.rs	excluded(state)	-	catalog object lookup
@@ -2238,7 +2238,7 @@ oid	name	source_file	status	class	notes
 3805	jsonb_recv	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(wall: parser cascade + pointer-datum recv ABI)	-	io.rs:205; version!=1 verdict cheap but only reachable through arg_stringinfo; re-opens on slice-core recv refactor
 3806	jsonb_in	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(wall: parser cascade)	-	io.rs:196 jsonb_from_cstring
 3808	pg_get_function_arg_default	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
-3809	pg_export_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
+3809	pg_export_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		snapmgr ExportSnapshot session/filesystem state
 3810	pg_is_in_recovery	crates/backend/utils/adt/adt_misc/src/builtins.rs	excluded(state)	-	server WAL/catalog/session state
 3811	int4_cash	crates/backend/utils/adt/cash/src/builtins.rs	proved(full-i32 x frac_digits literal cells 0..=10+clamp reps; modulo pglc_localeconv seam stub, C-locale symbols; skew control load-bearing; union-coverage witness)	fast	0.4-7.0s; proofs/cash
 3812	int8_cash	crates/backend/utils/adt/cash/src/builtins.rs	proved(full-i64 x frac_digits literal cells; same seam; Err 22003 covered per cell where arithmetically reachable)	fast	0.4-4.9s; proofs/cash
@@ -2715,18 +2715,18 @@ oid	name	source_file	status	class	notes
 5052	pg_get_shmem_allocations	crates/backend/storage/ipc/shmem/src/lib.rs	excluded(state)	-	shared-memory introspection
 5053	pg_stat_get_ins_since_vacuum	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 5054	jsonb_set_lax	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(wall: CNF width / image)	-	builtins.rs:604; null_value_treatment dispatch + must-not-be-null error class = cheap slice, not a row
-5055	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5056	pg_snapshot_out	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5057	pg_snapshot_recv	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5058	pg_snapshot_send	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5059	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5060	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5061	pg_current_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5062	pg_snapshot_xmin	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5063	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5064	pg_snapshot_xip	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5065	pg_visible_in_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
-5066	pg_xact_status	crates/backend/utils/adt/xid8funcs/src/builtins.rs	untriaged		
+5055	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(kernels: strtou64 len<=6 value+end; empty-input reject verdict+22P02+level; accept-arm image = wall)	fast/wall-split	same prosrc as oid 2939; parse_snapshot lib.rs:186; strtou64 lib.rs:125 libc comment-claim MACHINE-CHECKED modulo libc strtoull model (native diff 4M checks 0 diffs, host libc); accept arm walls in CNF on PgVec push/grow machinery (TRIAGE wall class 5) even at concrete spots — refactor proposal: exact-capacity image build + fixed-array xips core; cells+spots kept as high-mem retry vehicles; proofs/xid8snap
+5056	pg_snapshot_out	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(wall: result-image + full-u64 digit-emission /10 chain)	wall	same prosrc as oid 2940; snapshot_out_bytes lib.rs:236 push_u64 /10 loop over full u64 = sloped-wall class; read-side kernels (SnapView layout) proved in proofs/xid8snap
+5057	pg_snapshot_recv	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	same prosrc as oid 2941; snapshot_recv lib.rs:277 via pqformat StringInfo; recv-direction precedent 77-127s (harness-built StringInfo); validation lattice mirrors parse (proved SnapView reads reusable). Host proofs/xid8snap
+5058	pg_snapshot_send	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	same prosrc as oid 2942; fc builtins.rs:48 pq_sendint32/64 fixed-offset BE image, length linear in nxip; send-direction reads prove per precedent. Host proofs/xid8snap
+5059	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 2943; recovery_in_progress seam + GetTopFullTransactionId session xact state
+5060	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 3348; GetTopFullTransactionIdIfAny session xact state
+5061	pg_current_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 2944; ReadNextFullTransactionId + GetActiveSnapshot server state; its epoch-widening core full_xid_from_allowable_at lib.rs:81 PROVED full-domain (fenced to transam.h caller contract) in proofs/xid8snap
+5062	pg_snapshot_xmin	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	same prosrc as oid 2945; eq_snapview_layout 0.7s: SnapView offset arithmetic (lib.rs:24-26 C-struct-offset comment claim) vs C member reads; proofs/xid8snap
+5063	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	same prosrc as oid 2946; same theorem as 2945; proofs/xid8snap
+5064	pg_snapshot_xip	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(engine: SRF protocol)		same prosrc as oid 2947; funcapi SRF machinery; the xip[i] element read itself proved in eq_snapview_layout (proofs/xid8snap)
+5065	pg_visible_in_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(linear arm nxip<=4 full-symbolic; bsearch arm nxip 31..=33 literal-split, sorted fence, modulo bsearch libc model)	fast	same prosrc as oid 2948; is_visible_fxid lib.rs:93; linear 17.7s kissat; bsearch cells 27-62s default solver (kissat false-fails unwinding asserts; load-inflated); sorted fence = superset of on-disk rep; both-arm covers; proofs/xid8snap
+5066	pg_xact_status	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 3360; lwlock + clog/procarray seams; its TransactionIdInRecentPast epoch logic reuses full_xid_from_allowable_at, PROVED in proofs/xid8snap
 5070	xid8in	crates/backend/utils/adt/scalar/src/builtins.rs	proved(len<=5 sym + 10 spots; len 6-12 wall)	fast	proofs/misc-ops
 5071	xid8toxid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64)	fast	0.11s; proofs/scalar-misc
 5081	xid8out	crates/backend/utils/adt/scalar/src/builtins.rs	proved(band+spots to u64::MAX incl 19/20-digit)	fast	proofs/misc-ops

@@ -1849,3 +1849,21 @@ datetime-cmp	wave7_proofs::eq_tstz_mi_interval_nobegin	-Z c-ffi -Z stubbing --c-
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_nobegin	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.0	plane; DEFAULT solver
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
+xid8snap	proofs::eq_full_xid_from_allowable_at	-Z c-ffi --c-lib c/pg_xid8snap.c --solver kissat --exact	green	per-commit	0.13	full u64 x u32 fenced to transam.h caller contract (epoch!=0 on decrement branch); 3 regime covers
+xid8snap	proofs::eq_snapview_layout	-Z c-ffi --c-lib c/pg_xid8snap.c --solver kissat --exact	green	per-commit	0.7	SnapView offset arithmetic vs C pg_snapshot member reads (nxip/xmin/xmax/xip[i]); covers oids 2945/2946/5062/5063 cores
+xid8snap	proofs::eq_strtou64_len6	-Z c-ffi --c-lib c/pg_xid8snap.c --solver kissat --exact	green	per-commit	2.7	value+endoff parity vs [S4] libc strtoull model; model grounded by tests/native_strtou64.rs (4M checks 0 diffs, host libc)
+xid8snap	proofs::eq_is_visible_fxid_linear	-Z c-ffi --c-lib c/pg_xid8snap.c --solver kissat --exact	green	release-gate	17.7	linear arm nxip<=4 full-symbolic; 4 covers incl both verdicts in xip window
+xid8snap	proofs::eq_is_visible_fxid_bsearch_31	-Z c-ffi --c-lib c/pg_xid8snap.c --no-assertion-reach-checks --exact	green	calibration	61.6	DEFAULT solver ONLY (kissat false-fails unwinding asserts); literal-nxip cell; measured under multi-lane load (~2.6x inflation possible) — re-measure idle
+xid8snap	proofs::eq_is_visible_fxid_bsearch_32	-Z c-ffi --c-lib c/pg_xid8snap.c --no-assertion-reach-checks --exact	green	calibration	55.6	DEFAULT solver ONLY; ditto load caveat
+xid8snap	proofs::eq_is_visible_fxid_bsearch_33	-Z c-ffi --c-lib c/pg_xid8snap.c --no-assertion-reach-checks --exact	green	calibration	26.8	DEFAULT solver ONLY; ditto load caveat
+xid8snap	proofs::cover_bsearch_case_split	-Z c-ffi --c-lib c/pg_xid8snap.c --solver kissat --exact	green	per-commit	0.01	union-coverage gate for the literal-nxip split
+xid8snap	proofs::eq_parse_snapshot_len0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	per-commit	0.9	empty-input reject: verdict+22P02+level parity; DEFAULT solver
+xid8snap	proofs::cover_parse_case_split	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	per-commit	0.01	union-coverage gate for the parse per-length split
+xid8snap	proofs::eq_parse_snapshot_len1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	WALLS locally: PgVec push/grow CNF (TRIAGE wall class 5); high-memory retry tier vehicle; see module doc
+xid8snap	proofs::eq_parse_snapshot_len2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	ditto wall class 5
+xid8snap	proofs::eq_parse_snapshot_len3	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	ditto wall class 5
+xid8snap	proofs::eq_parse_snapshot_len4	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	ditto wall class 5 (accept arm reachable from len 4)
+xid8snap	proofs::eq_parse_snapshot_len5	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	ditto wall class 5
+xid8snap	proofs::eq_parse_snapshot_len6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	ditto wall class 5
+xid8snap	proofs::spot_parse_min_accept	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	concrete spot; ALSO walls locally (class 5 is input-independent); retry tier; 18 sibling spots spot_parse_* same status
+xid8snap	proofs::control_snapview_swapped	-Z c-ffi --c-lib c/pg_xid8snap.c --exact	fail	defect-witness	1.2	negative control: C xmax vs Rust xmin; failing check MUST be `c == view.xmin()`; DEFAULT solver
