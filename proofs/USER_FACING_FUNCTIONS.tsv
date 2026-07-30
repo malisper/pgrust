@@ -2769,7 +2769,7 @@ oid	name	source_file	status	class	notes
 6160	text_to_table	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: SRF tuplestore)	-	split_text::fc_text_to_table ReturnSetInfo/tuplestore
 6161	text_to_table_null	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: SRF tuplestore)	-	same body
 6162	bit_bit_count	crates/backend/utils/adt/varbit/src/lib.rs	proved(shipped fc wrapper through LocalFcinfo, len<=8 symbolic)	fast	1.6s; proofs/varbit-rows relaunch 2026-07-29 (re-derived)
-6163	bytea_bit_count	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6163	bytea_bit_count	crates/backend/utils/adt/varlena/src/builtins.rs	proved(scalar table path, len<=7 symbolic content) + excluded(blocked:simd — pg_popcount len>=8 takes NEON popcount_optimized, Kani unsupported_construct; bitutils precedent)	fast	1.1s kissat; eq_bytea_bit_count; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6168	pg_xact_commit_timestamp_origin	crates/backend/access/transam/commit_ts/src/fmgr_builtins.rs	excluded(state: SLRU/shmem)	-	commit_ts fmgr_builtins.rs:90
 6169	pg_stat_get_replication_slot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 6170	pg_stat_reset_replication_slot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
@@ -2919,10 +2919,10 @@ oid	name	source_file	status	class	notes
 6363	pg_restore_attribute_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6364	crc32_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	fc_crc32_bytea cryptohashfuncs/src/lib.rs:55 -> traditional_crc32 table loop; cap len<=8 + fixed-len spots; VARLENA fence. Host proofs/hash or new proofs/crc
 6365	crc32c_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	lib.rs:61 -> pg_comp_crc32c; SCREEN aarch64 CRC intrinsics arm (unsupported_construct) — prove sb8 table path
-6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(fully symbolic i16; 2-byte big-endian payload image + varsize parity; modulo static-buffer allocator model)	ladder	86.1s default; eq_int2_bytea; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(fully symbolic i32; 4-byte big-endian payload image + varsize parity; modulo static-buffer allocator model)	ladder	75.8s default; eq_int4_bytea; pins the "aliases int4send" contract; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(fully symbolic i64; 8-byte big-endian payload image + varsize parity; modulo static-buffer allocator model)	ladder	78.1s default; eq_int8_bytea; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
-6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	proved(symbolic content len<=3 — 22003 arm reachable; Ok value + 22003 sqlstate/level parity, both arms covered; value-space only)	fast	1.4s kissat; eq_bytea_int2; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	proved(symbolic content len<=8; Ok value + 22003 sqlstate/level parity, both arms covered; value-space only)	fast	1.2s kissat; eq_bytea_int4; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	proved(symbolic content len<=9 — 22003 arm reachable at len 9; Ok value + 22003 sqlstate/level parity, both arms covered; value-space only)	fast	1.3s kissat; eq_bytea_int8; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6375	record_larger	crates/backend/utils/adt/rowtypes/src/lib.rs	excluded(typcache)	-	generic record ops need typcache
@@ -2930,7 +2930,7 @@ oid	name	source_file	status	class	notes
 6378	array_append_support	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6379	array_prepend_support	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6381	array_reverse	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
-6382	bytea_reverse	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6382	bytea_reverse	crates/backend/utils/adt/varlena/src/builtins.rs	proved(image cells len 0/4/8, fully symbolic content + varsize parity; symbolic len = std-Vec-wall class (per-byte PgVec push); modulo static-buffer allocator model)	ladder	87-91s default; eq_bytea_reverse_l0/_l4/_l8; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6383	dgamma	crates/backend/utils/adt/float/src/builtins.rs	blocked(libm)	-	proofs/float-arith screen
 6384	dlgamma	crates/backend/utils/adt/float/src/builtins.rs	blocked(libm)	-	proofs/float-arith screen
 6385	pg_get_acl	crates/backend/catalog/objectaddress/src/builtins.rs	excluded(state)	-	catalog object lookup
@@ -2940,8 +2940,8 @@ oid	name	source_file	status	class	notes
 6389	array_sort_order	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6390	array_sort_order_nulls_first	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6391	range_sortsupport	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
-6393	bytea_larger	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6394	bytea_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
+6393	bytea_larger	crates/backend/utils/adt/varlena/src/builtins.rs	proved(winner-input identity by pointer, len<=8 symbolic both sides, tie plane covered)	fast	2.4s kissat; eq_bytea_larger (in-tree + SUITE since the comparator wave; ledger row synced 2026-07-30); proofs/bytea-cmp
+6394	bytea_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	proved(winner-input identity by pointer, len<=8 symbolic both sides, tie plane covered)	fast	2.4s kissat; eq_bytea_smaller (in-tree + SUITE since the comparator wave; ledger row synced 2026-07-30); proofs/bytea-cmp
 6397	pg_clear_relation_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6398	pg_clear_attribute_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6399	pg_get_aios	crates/backend/storage/aio/aio_funcs/src/lib.rs	excluded(state: SRF + AIO shmem handles)	-	aio_funcs/src/lib.rs InitMaterializedSRF over live pgaio handle table; same class as 6248/6318 SRF rows

@@ -613,6 +613,93 @@ mod proofs {
     int_bytea_harness!(eq_int4_bytea, pg_int4_bytea, i32, 4);
     int_bytea_harness!(eq_int8_bytea, pg_int8_bytea, i64, 8);
 
+    // ---- int2 siblings (ledger 6367/6370): same rigs, width 2 ----
+
+    extern "C" {
+        fn pg_bytea_int2(d: *const u8, len: c_int, err: *mut c_int) -> i16;
+        fn pg_int2_bytea(a: i16, out2: *mut u8) -> c_int;
+    }
+
+    bytea_int_harness!(eq_bytea_int2, pg_bytea_int2, bytea_int2, i16, 3);
+    int_bytea_harness!(eq_int2_bytea, pg_int2_bytea, i16, 2);
+
+    // ---- bytea_bit_count (ledger 6163) ----
+    // Shipped core delegates pg_bitutils::pg_popcount, which takes the
+    // PG_NUMBER_OF_ONES table walk for len < 8 and popcount_optimized
+    // (NEON intrinsics on this host — Kani unsupported_construct, see the
+    // bitutils family) for len >= 8. Claim is therefore fenced to
+    // len <= 7: the scalar table path, fully symbolic content. The SIMD
+    // path is excluded(blocked:simd) in the ledger, bitutils precedent.
+
+    extern "C" {
+        fn pg_bytea_bit_count(d: *const u8, len: c_int) -> i64;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn eq_bytea_bit_count() {
+        let buf: [u8; 7] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 7); // scalar table path fence (< 8)
+        let c = unsafe { pg_bytea_bit_count(buf.as_ptr(), len as c_int) };
+        let r = varlena::bytea::bytea_bit_count(&buf[..len]);
+        assert!(r == c);
+    }
+
+    // ---- bytea_reverse (ledger 6382) ----
+    // Same-length image, reversed bytes. The shipped core pushes per byte
+    // into a PgVec (std-Vec-wall class at symbolic len), so the cells are
+    // LITERAL lengths 0/4/8 with fully symbolic content (per-cell literal
+    // law), under the mcx-stubs recipe.
+
+    extern "C" {
+        fn pg_bytea_reverse(d: *const u8, len: c_int, out: *mut u8) -> c_int;
+    }
+
+    macro_rules! reverse_cell {
+        ($harness:ident, $w:expr) => {
+            #[kani::proof]
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let buf: [u8; 8] = kani::any();
+                let len: usize = $w; // LITERAL cell
+                let mut cimg = [0u8; 8];
+                unsafe { pg_bytea_reverse(buf.as_ptr(), len as c_int, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-bytea-rev");
+                match varlena::bytea::bytea_reverse(ctx.mcx(), &buf[..len]) {
+                    Ok(v) => {
+                        assert!(v.varsize() == varlena::VARHDRSZ + len);
+                        let d = v.data();
+                        assert!(d.len() == len);
+                        let mut i = 0;
+                        while i < len {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Err(e) => {
+                        core::mem::forget(e);
+                        // unreachable under the mcx-stub allocator
+                        assert!(false);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    reverse_cell!(eq_bytea_reverse_l0, 0);
+    reverse_cell!(eq_bytea_reverse_l4, 4);
+    reverse_cell!(eq_bytea_reverse_l8, 8);
+
     // ---- wave negative control: rig is non-vacuous ----
     // C sees a one-shorter payload length: at n == len-1 C raises 2202E
     // while Rust returns Ok — MUST FAIL with a decodable counterexample.

@@ -444,3 +444,105 @@ pg_int8_bytea(long long a, unsigned char *out8)
 	out8[7] = (unsigned char) (u & 0xFF);
 	return 0;
 }
+
+/* ====================================================================
+ * bytea_int2 / int2_bytea siblings + bytea_bit_count + bytea_reverse
+ * (varbit W10 continuation, 2026-07-30)
+ *
+ * Provenance: REL_18_STABLE varlena.c bytea_int2 (~line 4137),
+ * int2_bytea (~4212), bytea_bit_count (~3252, delegating
+ * src/port/pg_bitutils.c pg_popcount portable table walk — table + walk
+ * vendored verbatim, same as proofs/varbit-rows pg_bit_bit_count),
+ * bytea_reverse (~3461). Shims as documented for the int4/int8 pair
+ * above (family (data,len) convention; ereport -> err flag; pq_sendint16
+ * big-endian store; palloc image -> caller buffer for reverse).
+ */
+
+static const uint8 pg_number_of_ones_bc[256] = {
+	0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+	4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8
+};
+
+long long
+pg_bytea_bit_count(const unsigned char *d, int len)
+{
+	/* pg_popcount portable path: table byte walk */
+	long long	popcnt = 0;
+	const unsigned char *buf = d;
+	int			bytes = len;
+
+	while (bytes--)
+		popcnt += pg_number_of_ones_bc[(unsigned char) *buf++];
+
+	return popcnt;			/* shim: PG_RETURN_INT64(pg_popcount(...)) */
+}
+
+short
+pg_bytea_int2(const unsigned char *d, int len, int *err)
+{
+	unsigned short result;		/* uint16 */
+
+	/* Check that the byte array is not too long */
+	if (len > (int) sizeof(result))
+	{
+		/* shim: ereport(ERROR, errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+		 * errmsg("smallint out of range")) */
+		*err = 1;
+		return 0;
+	}
+
+	/* Convert it to an integer; most significant bytes come first */
+	result = 0;
+	for (int i = 0; i < len; i++)
+	{
+		result <<= BITS_PER_BYTE;
+		result |= d[i];			/* shim: ((unsigned char *) VARDATA_ANY(v))[i] */
+	}
+
+	return (short) result;		/* shim: PG_RETURN_INT16(result) */
+}
+
+/* int2_bytea = int2send: pq_sendint16(&buf, arg) payload image */
+int
+pg_int2_bytea(short a, unsigned char *out2)
+{
+	unsigned short u = (unsigned short) a;
+
+	/* pq_sendint16: network (big-endian) byte order */
+	out2[0] = (unsigned char) ((u >> 8) & 0xFF);
+	out2[1] = (unsigned char) (u & 0xFF);
+	return 0;
+}
+
+/* bytea_reverse: palloc'd same-length image, bytes reversed.
+ * REL_18_STABLE varlena.c:
+ *   const char *p = VARDATA_ANY(v);
+ *   ... char *dst = VARDATA(result) + VARSIZE(result) - VARHDRSZ;
+ *   while (p < endp) *(--dst) = *p++;
+ * Shim: result payload -> caller buffer (len bytes). */
+int
+pg_bytea_reverse(const unsigned char *d, int len, unsigned char *out)
+{
+	const unsigned char *p = d;
+	const unsigned char *endp = d + len;
+	unsigned char *dst = out + len;
+
+	while (p < endp)
+		*(--dst) = *p++;
+
+	return 0;					/* shim: PG_RETURN_BYTEA_P(result) */
+}
