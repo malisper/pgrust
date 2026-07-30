@@ -1736,7 +1736,9 @@ pub fn timestamp_scale(timestamp: Timestamp, typmod: i32) -> PgResult<Timestamp>
 
 // C %g (precision 6) for the float8_timestamptz range error text.
 #[cold]
-fn fmt_g6(v: f64) -> String {
+// pub for proofs/datetime-b (row 1158): message-text formatter stubbed in
+// Kani harnesses (string munging walls symex; text is out of proof).
+pub fn fmt_g6(v: f64) -> String {
     let e_str = format!("{:.5e}", v);
     let exp: i32 = e_str.rsplit('e').next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let s = if exp < -4 || exp >= 6 {

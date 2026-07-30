@@ -2215,7 +2215,7 @@ oracle-compat	proofs::eq_varchar_coerce_utf8	-Z c-ffi -Z stubbing --c-lib c/pg_v
 oracle-compat	proofs::eq_char_bpchar	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	green	release-gate	12.7	row 860 full-i8; kissat (w2-varchar 2026-07-30)
 oracle-compat	proofs::eq_bpchar_name_short	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	green	unmeasured	?	row 409 short arm; unwind 66 (fixed from pre-build 11); FLEET-BOUND (local wall timeout-260s, load=17); kissat (w2-varchar 2026-07-30)
 oracle-compat	proofs::eq_bpchar_name_clip	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	green	unmeasured	?	row 409 clip arm, unwind 70; FLEET-BOUND (600s tier, not attempted under saturation); kissat (w2-varchar 2026-07-30)
-oracle-compat	proofs::eq_anychar_typmodin	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	green	per-commit	2.4	rows 2913/2915 check core; kissat (w2-varchar 2026-07-30)
+oracle-compat	proofs::eq_anychar_typmodin	-Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --exact	green	per-commit	1.5	oids 2913+2915 check core; w2-timestamp 2026-07-30
 oracle-compat	proofs::control_varchar_clip_skew	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	must-fail	defect-witness	2.4	varchar-rig non-vacuity; fired right-reason check "control: rig failed to detect a skewed typmod"; DEFAULT solver (w2-varchar 2026-07-30)
 oracle-compat	proofs::cover_varchar_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	green	calibration	49.3	varchar-rig coverage; 6/6 covers SATISFIED; DEFAULT solver (w2-varchar 2026-07-30)
 network-gist	eq_consistent_overlaps	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	17	
@@ -2279,3 +2279,34 @@ spgist-geo	proofs::eq_spg_box_quad_inner	-Z c-ffi -Z stubbing --c-lib c/pg_spgis
 spgist-geo	proofs::eq_spg_poly_quad_compress	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 5011
 spgist-geo	proofs::cover_spgist_geo_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c	covers	unmeasured	?	FLEET-BOUND: DEFAULT solver; covers must be SATISFIED
 spgist-geo	proofs::control_spgist_geo_strategy_skew	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c	must-fail	unmeasured	?	FLEET-BOUND: DEFAULT solver; MUST FAIL w/ decodable cex; verify failing CHECK NAME
+datetime-b	proofs::eq_intervaltypmodin_n0	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.7	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodin_n1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.8	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodin_n2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.7	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodin_n3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.8	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_fieldstr_fullprec	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.8	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.7	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.2	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	4.4	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d4	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	6.4	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_prec_d5	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	6.8	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodout_fullrange_prec_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.4	oid 2904; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::cover_intervaltypmodout_prec_bands	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	per-commit	0.1	oid 2904 union coverage; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_accum_core	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.0	oid 1843; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_empty	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	2.9	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_pinf	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.7	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_ninf	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.8	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_conflict	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	2.9	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::spot_interval_avg_fc_mean	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.9	oid 1844 concrete mean cell; w2-timestamp 2026-07-30
+datetime-b	rem::eq_tstypmodin_check	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.9	oid 2905; default solver; w2-timestamp 2026-07-30
+datetime-b	rem::eq_tstztypmodin_check	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	2.2	oid 2907; default solver; w2-timestamp 2026-07-30
+datetime-b	rem::eq_tstypmodout_neg	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	6.7	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstztypmodout_neg	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	5.9	oid 2908; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstypmodout_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	30.0	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstypmodout_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	20.4	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstypmodout_d3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	16.5	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstztypmodout_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.6	oid 2908; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::spot_ts_typmodout	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.8	oid 2906+2908; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_f8tstz_nonfinite 0.8 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::eq_f8tstz_range_reject 0.9 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::spot_f8tstz_value 0.7 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::eq_f8tstz_value_screen unk unmeasured calibration	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
