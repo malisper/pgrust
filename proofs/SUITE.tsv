@@ -2218,3 +2218,36 @@ oracle-compat	proofs::eq_bpchar_name_clip	-Z c-ffi -Z stubbing --c-lib c/pg_varc
 oracle-compat	proofs::eq_anychar_typmodin	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	green	per-commit	2.4	rows 2913/2915 check core; kissat (w2-varchar 2026-07-30)
 oracle-compat	proofs::control_varchar_clip_skew	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	must-fail	defect-witness	2.4	varchar-rig non-vacuity; fired right-reason check "control: rig failed to detect a skewed typmod"; DEFAULT solver (w2-varchar 2026-07-30)
 oracle-compat	proofs::cover_varchar_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_varchar.c --exact	green	calibration	49.3	varchar-rig coverage; 6/6 covers SATISFIED; DEFAULT solver (w2-varchar 2026-07-30)
+network-gist	eq_consistent_overlaps	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	17	
+network-gist	eq_consistent_eq	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	29	
+network-gist	eq_consistent_ne	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	20	
+network-gist	eq_consistent_lt	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	33	
+network-gist	eq_consistent_le	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	34	
+network-gist	eq_consistent_gt	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	39	
+network-gist	eq_consistent_ge	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	42	
+network-gist	eq_consistent_sub	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	13	
+network-gist	eq_consistent_subeq	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	17	
+network-gist	eq_consistent_sup	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	29	
+network-gist	eq_consistent_supeq	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	19	
+network-gist	cover_strategy_partition	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	per-commit	1	strategy-split union coverage (MANDATORY companion)
+network-gist	cover_consistent_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	per-commit	4	leaf/inner/family-0/xf + both-verdict covers
+network-gist	eq_union_n2	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	release-gate	17	prebuilt-GkRef refs (Kani iterator-closure defect dodge)
+network-gist	eq_union_n3	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	34	
+network-gist	cover_union_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	per-commit	5	
+network-gist	probe_bitncommon16	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	per-commit	9	v6-domain extension of network-lane bitncommon theorem
+network-gist	probe_union_c_vs_c	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	per-commit	1	defect-localization witness (C composition clean)
+network-gist	probe_union_rust_vs_c	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	red	defect-witness	10	MUST-FAIL while Kani iterator-closure provenance defect lives; flips green when toolchain fixed
+network-gist	probe_union_rust_vs_rust	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	red	defect-witness	14	as probe_union_rust_vs_c; native playback green (tests keep it honest)
+network-gist	probe_slice_across_iter_loop	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	red	defect-witness	4	minimal defect witness: from_image inside iterator closure + slice held across loop
+network-gist	probe_slice_prebuilt_refs	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	defect-witness	3	MUST-PASS twin of probe_slice_across_iter_loop
+network-gist	probe_slice_no_iter	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	defect-witness	3	MUST-PASS twin (no iterator)
+network-gist	eq_penalty	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	per-commit	7	bit-exact f32; xor/clz port rewrite vs C per-bit loop
+network-gist	cover_penalty_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	per-commit	2	all four penalty arms
+network-gist	eq_same	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	per-commit	3	wrapper-level via NETWORK_GIST_BUILTINS
+network-gist	control_same_minbits_swap	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	red	defect-witness	2	negative control; failing check MUST be '(c != 0) == r'
+network-gist	eq_compress_leaf_v4	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	397	mcx-stubs wrapper cell
+network-gist	eq_compress_leaf_v6	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	calibration	421	mcx-stubs wrapper cell; unwind 24; default solver
+network-gist	spec_compress_nonleaf_identity	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	per-commit	1	spec: non-leaf arm returns arg0
+network-gist	spec_compress_null_leafkey	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	calibration	331	spec: NULL leaf key arm
+network-gist	eq_fetch_v4	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	316	mcx-stubs wrapper cell
+network-gist	eq_fetch_v6	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	441	mcx-stubs wrapper cell
