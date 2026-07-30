@@ -164,6 +164,7 @@ dependencies = [
  "fmgr_seams",
  "format_type",
  "funcapi_srf",
+ "guc_tables",
  "hashfn",
  "lsyscache",
  "mcx",
@@ -575,6 +576,7 @@ dependencies = [
 name = "lsyscache"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "adt_scalar",
  "datum",
  "fmgr_seams",
@@ -1375,6 +1377,7 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_scan",
+ "types_slot",
  "types_snapshot",
  "types_storage",
  "types_tuple",
@@ -1681,6 +1684,17 @@ dependencies = [
  "datum",
  "types_core",
  "types_fmgr",
+]
+
+[[package]]
+name = "types_slot"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "jit_deform",
+ "mcx",
+ "types_core",
+ "types_tuple",
 ]
 
 [[package]]
