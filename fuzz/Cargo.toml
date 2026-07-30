@@ -7,6 +7,16 @@
 #
 # The decode-driving logic lives in ./core (crate `decoder_fuzz`), which builds
 # and unit-tests on stable; these targets are thin libFuzzer shells over it.
+#
+# Differential targets (2026-07-30 lane): float_in_diff / float_out_diff /
+# geo_diff run shipped Rust against verbatim vendored REL_18 PostgreSQL C
+# (core/csrc/, compiled by core/build.rs) in-process, comparing value +
+# error + errcode exactly; a libFuzzer crash artifact = a C/Rust divergence
+# reproducer. First campaign (macOS host oracle): float_in 31.6M cases,
+# float_out 23.7M, geo 24.7M — one REAL divergence found and confirmed vs
+# docker postgres:18 (open-path on_ppath overflow, see
+# core/src/diff.rs tests::on_ppath_overflow_divergence_witness and the
+# carve comments in diff.rs; float I/O: zero divergences).
 [package]
 name = "pgrust-fuzz"
 version = "0.0.0"
@@ -37,6 +47,30 @@ bench = false
 [[bin]]
 name = "wire_pqformat"
 path = "fuzz_targets/wire_pqformat.rs"
+test = false
+doc = false
+bench = false
+
+# Differential targets: shipped Rust vs vendored PostgreSQL C oracle
+# (proofs-ledger excluded(wall) rows). Any comparator mismatch panics, so a
+# libFuzzer "crash" artifact here is a C/Rust DIVERGENCE reproducer.
+[[bin]]
+name = "float_in_diff"
+path = "fuzz_targets/float_in_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "float_out_diff"
+path = "fuzz_targets/float_out_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "geo_diff"
+path = "fuzz_targets/geo_diff.rs"
 test = false
 doc = false
 bench = false

@@ -237,6 +237,11 @@ pub fn wire_pqformat(data: &[u8]) {
     }
 }
 
+// Differential targets (shipped Rust vs vendored PostgreSQL C oracle):
+// float4in/float8in, float4out/float8out, point_out/on_ppath. See diff.rs.
+pub mod diff;
+pub use diff::{float_in_diff, float_out_diff, geo_diff};
+
 #[cfg(test)]
 mod tests {
     use super::*;
