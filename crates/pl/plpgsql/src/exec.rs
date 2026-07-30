@@ -1018,7 +1018,15 @@ impl<'a> Estate<'a> {
             return Ok((RECORDOID, -1));
         }
         let src = rv.src_desc.clone().expect("RecValue carries its source tupdesc");
-        if src.tdtypeid == RECORDOID && src.tdtypmod >= 0 {
+        // C reports erh->er_typeid: the type the value ACTUALLY has, not
+        // RECORD. A rec bound from a relation's tupdesc — a trigger's NEW/OLD,
+        // a FOR-loop over a table — carries that relation's composite type,
+        // and call sites coerce against it. Reporting RECORD instead makes
+        // every composite-typed call fail "cannot cast type record to <T>".
+        if src.tdtypeid != RECORDOID {
+            return Ok((src.tdtypeid, src.tdtypmod));
+        }
+        if src.tdtypmod >= 0 {
             return Ok((RECORDOID, src.tdtypmod));
         }
         let mcx = self.eval_ctx.mcx();
@@ -1051,12 +1059,14 @@ impl<'a> Estate<'a> {
         if rectypeid != RECORDOID {
             td.tdtypeid = rectypeid;
             td.tdtypmod = -1;
-        } else {
-            td.tdtypeid = RECORDOID;
+        } else if td.tdtypeid == RECORDOID {
             if td.tdtypmod < 0 {
                 typcache::assign_record_type_typmod(&mut td)?;
             }
         }
+        // Otherwise td already carries the value's real rowtype, which is the
+        // type rec_param_type_mod reports for it (C: erh->er_typeid); stamping
+        // RECORD over it is what made composite-typed call sites fail.
         let tup = heaptuple::heap_form_tuple(mcx, &td, &values, &nulls)?;
         let img = tup.header_ptr();
         core::mem::forget(tup);
@@ -1150,8 +1160,13 @@ impl<'a> Estate<'a> {
             PlDatum::Var(_) => Ok(self.get_var(dno)),
             PlDatum::Rec(r) => {
                 if let Some(planned) = planned {
-                    // C exec_eval_datum's REC arm reports rec->rectypeid.
-                    let current = self.rec_meta(r.dno).rectypeid;
+                    // C exec_eval_datum's REC arm reports the DECLARED type
+                    // only for a non-RECORD rec; a RECORD-declared rec holding
+                    // a value reports that value's type (erh->er_typeid). The
+                    // safety check must compare the same type the plan was
+                    // prepared with, which rec_param_type_mod resolves.
+                    let recno = r.dno;
+                    let (current, _) = self.rec_param_type_mod(recno)?;
                     if current != planned {
                         return Err(param_type_mismatch(dno, current, planned));
                     }
