@@ -2257,3 +2257,1255 @@ pg_inter_sb(LSEG_ARGS1, BOX_ARGS2_B, int *result)
 	*result = box_interpt_lseg(NULL, box, lseg);
 	return pg_geo_errflag;
 }
+
+/* =====================================================================
+ * EXTENSION 3 (2026-07-30, geo-varlena slice: PATH / POLYGON header and
+ * boundbox family).
+ *
+ * Provenance:
+ *   - src/backend/utils/adt/geo_ops.c @ postgres/postgres REL_18_STABLE
+ *     (fetched 2026-07-30)
+ *   - PATH / POLYGON layouts from src/include/utils/geo_decls.h @ same
+ *     ref (int32 npts; int32 closed; int32 dummy pad / int32 npts; BOX
+ *     boundbox; then the flexible Point array).
+ *
+ * Functions copied, bodies verbatim, renamed with pg_ prefix:
+ *   path_n_lt, path_n_gt, path_n_eq, path_n_le, path_n_ge,
+ *   path_isclosed, path_isopen, path_npoints,
+ *   poly_left, poly_overleft, poly_right, poly_overright, poly_below,
+ *   poly_overbelow, poly_above, poly_overabove, poly_same,
+ *   plist_same (static), poly_npoints, poly_box.
+ *
+ * Shims (plumbing only, never logic):
+ *   - PG_GETARG_PATH_P / PG_GETARG_POLYGON_P (detoast + unpack plumbing)
+ *     -> the wrapper takes the header fields / point coordinate arrays
+ *     the verbatim body reads and stages them into stack PATH_S / POLY_S
+ *     structs mirroring the geo_decls.h layouts minus the varlena word.
+ *     This is the TRUSTED-BUILDER fence: the harness feeds both sides
+ *     field-identical images; only the Rust side parses a real varlena.
+ *   - PG_FREE_IF_COPY -> no-op (memory plumbing).
+ *   - PG_RETURN_BOOL -> int 0/1 (BoolGetDatum collapses any nonzero
+ *     int32 to 1, preserved with ? 1 : 0); PG_RETURN_INT32 -> int.
+ *   - poly_box's palloc'd BOX result -> caller out4 (hx,hy,lx,ly).
+ * POLY_CAP bounds the staged point arrays (harness cells use n <= 4).
+ */
+
+#define POLY_CAP 4
+
+typedef struct
+{
+	int32		npts;
+	int32		closed;			/* is this a closed polygon? */
+} PATH_S;
+
+typedef struct
+{
+	int32		npts;
+	BOX			boundbox;
+	Point		p[POLY_CAP];
+} POLY_S;
+
+/* geo_ops.c plist_same, body verbatim */
+static bool
+pg_plist_same(int npts, Point *p1, Point *p2)
+{
+	int			i,
+				ii,
+				j;
+
+	/* find match for first point */
+	for (i = 0; i < npts; i++)
+	{
+		if (point_eq_point(&p2[i], &p1[0]))
+		{
+
+			/* match found? then look forward through remaining points */
+			for (ii = 1, j = i + 1; ii < npts; ii++, j++)
+			{
+				if (j >= npts)
+					j = 0;
+				if (!point_eq_point(&p2[j], &p1[ii]))
+					break;
+			}
+			if (ii == npts)
+				return true;
+
+			/* match not found forwards? then look backwards */
+			for (ii = 1, j = i - 1; ii < npts; ii++, j--)
+			{
+				if (j < 0)
+					j = (npts - 1);
+				if (!point_eq_point(&p2[j], &p1[ii]))
+					break;
+			}
+			if (ii == npts)
+				return true;
+		}
+	}
+
+	return false;
+}
+
+/* stage a POLY_S from harness fields (shim, not Postgres code) */
+static void
+pg_poly_stage(POLY_S *poly, int npts, double hx, double hy, double lx,
+			  double ly, const double *xy)
+{
+	int			k;
+
+	poly->npts = npts;
+	poly->boundbox.high.x = hx;
+	poly->boundbox.high.y = hy;
+	poly->boundbox.low.x = lx;
+	poly->boundbox.low.y = ly;
+	for (k = 0; xy != NULL && k < npts && k < POLY_CAP; k++)
+	{
+		poly->p[k].x = xy[2 * k];
+		poly->p[k].y = xy[2 * k + 1];
+	}
+}
+
+/* path_n_lt .. path_n_ge, bodies verbatim on staged PATH_S */
+int
+pg_path_n_lt(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts < p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_gt(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts > p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_eq(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts == p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_le(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts <= p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_ge(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts >= p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_isclosed(int closed)
+{
+	PATH_S		path_ = {0, closed};
+	PATH_S	   *path = &path_;
+
+	return (path->closed) ? 1 : 0;
+}
+
+int
+pg_path_isopen(int closed)
+{
+	PATH_S		path_ = {0, closed};
+	PATH_S	   *path = &path_;
+
+	return (!path->closed) ? 1 : 0;
+}
+
+int
+pg_path_npoints(int npts)
+{
+	PATH_S		path_ = {npts, 0};
+	PATH_S	   *path = &path_;
+
+	return path->npts;
+}
+
+/* poly position predicates: boundbox-only exact compares, verbatim */
+int
+pg_poly_left(double ahx, double ahy, double alx, double aly,
+			 double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.x < polyb->boundbox.low.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overleft(double ahx, double ahy, double alx, double aly,
+				 double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.x <= polyb->boundbox.high.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_right(double ahx, double ahy, double alx, double aly,
+			  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.x > polyb->boundbox.high.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overright(double ahx, double ahy, double alx, double aly,
+				  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.x >= polyb->boundbox.low.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_below(double ahx, double ahy, double alx, double aly,
+			  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.y < polyb->boundbox.low.y;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overbelow(double ahx, double ahy, double alx, double aly,
+				  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.y <= polyb->boundbox.high.y;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_above(double ahx, double ahy, double alx, double aly,
+			  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.y > polyb->boundbox.high.y;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overabove(double ahx, double ahy, double alx, double aly,
+				  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.y >= polyb->boundbox.low.y;
+
+	return result ? 1 : 0;
+}
+
+/* poly_same, body verbatim (boundboxes not read; staged zero) */
+int
+pg_poly_same(int na, int nb, const double *pa, const double *pb)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, na, 0.0, 0.0, 0.0, 0.0, pa);
+	pg_poly_stage(&b_, nb, 0.0, 0.0, 0.0, 0.0, pb);
+
+	if (polya->npts != polyb->npts)
+		result = false;
+	else
+		result = pg_plist_same(polya->npts, polya->p, polyb->p);
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_npoints(int npts)
+{
+	POLY_S		poly_;
+	POLY_S	   *poly = &poly_;
+
+	pg_poly_stage(&poly_, npts, 0.0, 0.0, 0.0, 0.0, NULL);
+	poly_.npts = npts;
+
+	return poly->npts;
+}
+
+int
+pg_poly_box(double hx, double hy, double lx, double ly, double *out4)
+{
+	POLY_S		poly_;
+	POLY_S	   *poly = &poly_;
+	BOX			box_;
+	BOX		   *box = &box_;
+
+	pg_poly_stage(&poly_, 0, hx, hy, lx, ly, NULL);
+
+	*box = poly->boundbox;
+
+	out4[0] = box->high.x;
+	out4[1] = box->high.y;
+	out4[2] = box->low.x;
+	out4[3] = box->low.y;
+	return 0;
+}
+
+/* =====================================================================
+ * EXTENSION 4 (2026-07-30, geo-wire slice: the send/recv binary I/O
+ * family).
+ *
+ * Provenance:
+ *   - src/backend/utils/adt/geo_ops.c @ postgres/postgres REL_18_STABLE
+ *     (fetched 2026-07-30): point_recv, point_send, box_recv, box_send,
+ *     lseg_recv, lseg_send, line_recv, line_send, circle_recv,
+ *     circle_send, path_send, poly_send — bodies verbatim, pg_ prefix +
+ *     _w suffix on the wrappers.
+ *   - pq_getmsgint64/pq_getmsgfloat8/pq_sendfloat8/pq_sendbyte/
+ *     pq_sendint32 semantics from src/backend/libpq/pqformat.c @ same
+ *     ref: big-endian wire order, float8 <-> uint64 bit pun.
+ *
+ * Shims (plumbing only, never logic):
+ *   - StringInfo -> PQ_BUF: a caller-provided fixed frame (recv: exact
+ *     wire frame, cursor walk; send: 64-byte out image + running length).
+ *     The pq_* helpers below are reimplemented over PQ_BUF with the wire
+ *     semantics above (byte order and pun ARE part of the theorem; the
+ *     StringInfo growth machinery is not). Recv harnesses feed EXACT
+ *     frames, so the insufficient-data ereport path is out of proof
+ *     (fenced; the Rust arm's error path is likewise unreachable there).
+ *   - pq_begintypsend's 4-byte length placeholder + pq_endtypsend's
+ *     SET_VARSIZE -> pg_pq_begintypsend/pg_pq_endtypsend over PQ_BUF
+ *     (little-endian 4B header word = total << 2, as SET_VARSIZE_4B).
+ *   - palloc'd result structs -> caller out-params (values untouched).
+ *   - ereport(ERROR, 22P03 ...) in line_recv/circle_recv ->
+ *     pg_geo_errflag = 5 + immediate return (new flag value, mapped to
+ *     ERRCODE_INVALID_BINARY_REPRESENTATION by the harnesses).
+ */
+
+#include <string.h>
+
+typedef struct
+{
+	const unsigned char *in;	/* recv frame */
+	int			cursor;
+	unsigned char out[64];		/* send image (varlena header + payload) */
+	int			olen;
+} PQ_BUF;
+
+static uint64
+pg_pq_getmsguint64(PQ_BUF *buf)
+{
+	/* unrolled (loop-free: the tight harness unwind bound belongs to the
+	 * mcx registry, not this plumbing) */
+	const unsigned char *p = buf->in + buf->cursor;
+	uint64		v = ((uint64) p[0] << 56) | ((uint64) p[1] << 48) |
+		((uint64) p[2] << 40) | ((uint64) p[3] << 32) |
+		((uint64) p[4] << 24) | ((uint64) p[5] << 16) |
+		((uint64) p[6] << 8) | (uint64) p[7];
+
+	buf->cursor += 8;
+	return v;
+}
+
+static double
+pg_pq_getmsgfloat8(PQ_BUF *buf)
+{
+	union
+	{
+		double		f;
+		uint64		i;
+	}			swap;
+
+	swap.i = pg_pq_getmsguint64(buf);
+	return swap.f;
+}
+
+static int
+pg_pq_getmsgbyte(PQ_BUF *buf)
+{
+	return (int) buf->in[buf->cursor++];
+}
+
+static int32
+pg_pq_getmsgint32(PQ_BUF *buf)
+{
+	const unsigned char *p = buf->in + buf->cursor;
+	uint32		v = ((uint32) p[0] << 24) | ((uint32) p[1] << 16) |
+		((uint32) p[2] << 8) | (uint32) p[3];
+
+	buf->cursor += 4;
+	return (int32) v;
+}
+
+static void
+pg_pq_begintypsend(PQ_BUF *buf)
+{
+	/* four-byte length placeholder (pq_begintypsend) */
+	buf->out[0] = buf->out[1] = buf->out[2] = buf->out[3] = 0;
+	buf->olen = 4;
+}
+
+static void
+pg_pq_sendbyte(PQ_BUF *buf, unsigned char b)
+{
+	buf->out[buf->olen++] = b;
+}
+
+static void
+pg_pq_sendint32(PQ_BUF *buf, uint32 v)
+{
+	buf->out[buf->olen++] = (unsigned char) (v >> 24);
+	buf->out[buf->olen++] = (unsigned char) (v >> 16);
+	buf->out[buf->olen++] = (unsigned char) (v >> 8);
+	buf->out[buf->olen++] = (unsigned char) v;
+}
+
+static void
+pg_pq_sendfloat8(PQ_BUF *buf, double f)
+{
+	union
+	{
+		double		f;
+		uint64		i;
+	}			swap;
+
+	swap.f = f;
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 56);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 48);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 40);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 32);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 24);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 16);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 8);
+	buf->out[buf->olen++] = (unsigned char) swap.i;
+}
+
+static void
+pg_pq_endtypsend(PQ_BUF *buf)
+{
+	/* SET_VARSIZE(result, buf->len): 4B LE header word = total << 2 */
+	uint32		hdr = ((uint32) buf->olen) << 2;
+
+	buf->out[0] = (unsigned char) hdr;
+	buf->out[1] = (unsigned char) (hdr >> 8);
+	buf->out[2] = (unsigned char) (hdr >> 16);
+	buf->out[3] = (unsigned char) (hdr >> 24);
+}
+
+/* ---- recv wrappers: geo_ops.c bodies verbatim ---- */
+
+int
+pg_point_recv_w(const unsigned char *in, double *ox, double *oy)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	Point		point_;
+	Point	   *point = &point_;
+
+	pg_geo_errflag = 0;
+	point->x = pg_pq_getmsgfloat8(buf);
+	point->y = pg_pq_getmsgfloat8(buf);
+	*ox = point->x;
+	*oy = point->y;
+	return pg_geo_errflag;
+}
+
+int
+pg_box_recv_w(const unsigned char *in, double *out4)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	BOX			box_;
+	BOX		   *box = &box_;
+	float8		x,
+				y;
+
+	pg_geo_errflag = 0;
+
+	box->high.x = pg_pq_getmsgfloat8(buf);
+	box->high.y = pg_pq_getmsgfloat8(buf);
+	box->low.x = pg_pq_getmsgfloat8(buf);
+	box->low.y = pg_pq_getmsgfloat8(buf);
+
+	/* reorder corners if necessary... */
+	if (float8_lt(box->high.x, box->low.x))
+	{
+		x = box->high.x;
+		box->high.x = box->low.x;
+		box->low.x = x;
+	}
+	if (float8_lt(box->high.y, box->low.y))
+	{
+		y = box->high.y;
+		box->high.y = box->low.y;
+		box->low.y = y;
+	}
+
+	out4[0] = box->high.x;
+	out4[1] = box->high.y;
+	out4[2] = box->low.x;
+	out4[3] = box->low.y;
+	return pg_geo_errflag;
+}
+
+int
+pg_lseg_recv_w(const unsigned char *in, double *out4)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	LSEG		lseg_;
+	LSEG	   *lseg = &lseg_;
+
+	pg_geo_errflag = 0;
+
+	lseg->p[0].x = pg_pq_getmsgfloat8(buf);
+	lseg->p[0].y = pg_pq_getmsgfloat8(buf);
+	lseg->p[1].x = pg_pq_getmsgfloat8(buf);
+	lseg->p[1].y = pg_pq_getmsgfloat8(buf);
+
+	out4[0] = lseg->p[0].x;
+	out4[1] = lseg->p[0].y;
+	out4[2] = lseg->p[1].x;
+	out4[3] = lseg->p[1].y;
+	return pg_geo_errflag;
+}
+
+int
+pg_line_recv_w(const unsigned char *in, double *out3)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	LINE		line_;
+	LINE	   *line = &line_;
+
+	pg_geo_errflag = 0;
+
+	line->A = pg_pq_getmsgfloat8(buf);
+	line->B = pg_pq_getmsgfloat8(buf);
+	line->C = pg_pq_getmsgfloat8(buf);
+
+	if (FPzero(line->A) && FPzero(line->B))
+	{
+		pg_geo_errflag = 5;		/* ereport 22P03 */
+		return pg_geo_errflag;
+	}
+
+	out3[0] = line->A;
+	out3[1] = line->B;
+	out3[2] = line->C;
+	return pg_geo_errflag;
+}
+
+int
+pg_circle_recv_w(const unsigned char *in, double *out3)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	CIRCLE		circle_;
+	CIRCLE	   *circle = &circle_;
+
+	pg_geo_errflag = 0;
+
+	circle->center.x = pg_pq_getmsgfloat8(buf);
+	circle->center.y = pg_pq_getmsgfloat8(buf);
+	circle->radius = pg_pq_getmsgfloat8(buf);
+
+	/* We have to accept NaN. */
+	if (circle->radius < 0.0)
+	{
+		pg_geo_errflag = 5;		/* ereport 22P03 */
+		return pg_geo_errflag;
+	}
+
+	out3[0] = circle->center.x;
+	out3[1] = circle->center.y;
+	out3[2] = circle->radius;
+	return pg_geo_errflag;
+}
+
+/* ---- send wrappers: geo_ops.c bodies verbatim ---- */
+
+int
+pg_point_send_w(double x, double y, unsigned char *out, int *olen)
+{
+	Point		pt_ = {x, y};
+	Point	   *pt = &pt_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, pt->x);
+	pg_pq_sendfloat8(buf, pt->y);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_box_send_w(double hx, double hy, double lx, double ly,
+			  unsigned char *out, int *olen)
+{
+	BOX			box_ = {{hx, hy}, {lx, ly}};
+	BOX		   *box = &box_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, box->high.x);
+	pg_pq_sendfloat8(buf, box->high.y);
+	pg_pq_sendfloat8(buf, box->low.x);
+	pg_pq_sendfloat8(buf, box->low.y);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_lseg_send_w(double x1, double y1, double x2, double y2,
+			   unsigned char *out, int *olen)
+{
+	LSEG		ls_ = {{{x1, y1}, {x2, y2}}};
+	LSEG	   *ls = &ls_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, ls->p[0].x);
+	pg_pq_sendfloat8(buf, ls->p[0].y);
+	pg_pq_sendfloat8(buf, ls->p[1].x);
+	pg_pq_sendfloat8(buf, ls->p[1].y);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_line_send_w(double A, double B, double C, unsigned char *out, int *olen)
+{
+	LINE		line_ = {A, B, C};
+	LINE	   *line = &line_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, line->A);
+	pg_pq_sendfloat8(buf, line->B);
+	pg_pq_sendfloat8(buf, line->C);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_circle_send_w(double cx, double cy, double r, unsigned char *out, int *olen)
+{
+	CIRCLE		circle_ = {{cx, cy}, r};
+	CIRCLE	   *circle = &circle_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, circle->center.x);
+	pg_pq_sendfloat8(buf, circle->center.y);
+	pg_pq_sendfloat8(buf, circle->radius);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_path_send_w(int closed, int npts, const double *xy,
+			   unsigned char *out, int *olen)
+{
+	PATH_S		path_ = {npts, closed};
+	PATH_S	   *path = &path_;
+	Point		p[POLY_CAP];
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int32		i;
+	int			k;
+
+	for (k = 0; k < npts && k < POLY_CAP; k++)
+	{
+		p[k].x = xy[2 * k];
+		p[k].y = xy[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendbyte(buf, path->closed ? 1 : 0);
+	pg_pq_sendint32(buf, (uint32) path->npts);
+	for (i = 0; i < path->npts; i++)
+	{
+		pg_pq_sendfloat8(buf, p[i].x);
+		pg_pq_sendfloat8(buf, p[i].y);
+	}
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_poly_send_w(int npts, const double *xy, unsigned char *out, int *olen)
+{
+	POLY_S		poly_;
+	POLY_S	   *poly = &poly_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int32		i;
+	int			k;
+
+	pg_poly_stage(&poly_, npts, 0.0, 0.0, 0.0, 0.0, xy);
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendint32(buf, (uint32) poly->npts);
+	for (i = 0; i < poly->npts; i++)
+	{
+		pg_pq_sendfloat8(buf, poly->p[i].x);
+		pg_pq_sendfloat8(buf, poly->p[i].y);
+	}
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+/* =====================================================================
+ * EXTENSION 5 (2026-07-30, path/poly PLANE slice: the scalar-verdict
+ * planes of the ladder rows whose general bodies are ratified walls).
+ *
+ * Provenance: src/backend/utils/adt/geo_ops.c @ REL_18_STABLE (fetched
+ * 2026-07-30): path_area, path_distance, path_inter, poly_contain_poly,
+ * poly_overlap_internal, poly_contain, poly_contained, poly_overlap —
+ * bodies verbatim, pg_ prefix + _w wrappers on staged PATH_S/POLY_S
+ * (trusted-builder fence, as EXTENSION 3).
+ *
+ * OUT-OF-PLANE TRAPS (literal-planes law): the deep helpers that are
+ * structurally unreachable inside every plane harness —
+ * lseg_closept_lseg (path_distance min body), lseg_inside_poly
+ * (poly_contain containment walk), point_inside (poly_overlap interior
+ * test) — are NOT vendored; each is a trap stub setting
+ * pg_geo_errflag = 99. A harness whose plane leaks into the deep arm
+ * fails its cerr assertion LOUDLY instead of proving against a wrong
+ * model. PG_RETURN_NULL -> *isnull out-param.
+ */
+
+/* out-of-plane traps (NOT Postgres code) */
+static float8
+lseg_closept_lseg(Point *result, LSEG *on_lseg, LSEG *to_lseg)
+{
+	pg_geo_errflag = 99;
+	return 0.0;
+}
+
+static bool
+lseg_inside_poly(Point *a, Point *b, POLY_S *poly, int start)
+{
+	pg_geo_errflag = 99;
+	return true;
+}
+
+static bool
+point_inside(Point *p, int npts, Point *plist)
+{
+	pg_geo_errflag = 99;
+	return true;
+}
+
+/* path_area, body verbatim */
+int
+pg_path_area_w(int closed, int npts, const double *xy, double *out, int *isnull)
+{
+	PATH_S		path_ = {npts, closed};
+	PATH_S	   *path = &path_;
+	Point		p[POLY_CAP];
+	float8		area = 0.0;
+	int			i,
+				j;
+	int			k;
+
+	for (k = 0; xy != NULL && k < npts && k < POLY_CAP; k++)
+	{
+		p[k].x = xy[2 * k];
+		p[k].y = xy[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+	*isnull = 0;
+
+	if (!path->closed)
+	{
+		*isnull = 1;			/* PG_RETURN_NULL() */
+		return pg_geo_errflag;
+	}
+
+	for (i = 0; i < path->npts; i++)
+	{
+		j = (i + 1) % path->npts;
+		area = float8_pl(area, float8_mul(p[i].x, p[j].y));
+		area = float8_mi(area, float8_mul(p[i].y, p[j].x));
+	}
+
+	*out = float8_div(fabs(area), 2.0);
+	return pg_geo_errflag;
+}
+
+/* path_distance, body verbatim (lseg_closept_lseg = out-of-plane trap) */
+int
+pg_path_distance_w(int closed1, int n1, const double *xy1,
+				   int closed2, int n2, const double *xy2,
+				   double *out, int *isnull)
+{
+	PATH_S		p1_ = {n1, closed1};
+	PATH_S		p2_ = {n2, closed2};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+	Point		pa[POLY_CAP];
+	Point		pb[POLY_CAP];
+	float8		min = 0.0;		/* initialize to keep compiler quiet */
+	bool		have_min = false;
+	float8		tmp;
+	int			i,
+				j;
+	LSEG		seg1,
+				seg2;
+	int			k;
+
+	for (k = 0; xy1 != NULL && k < n1 && k < POLY_CAP; k++)
+	{
+		pa[k].x = xy1[2 * k];
+		pa[k].y = xy1[2 * k + 1];
+	}
+	for (k = 0; xy2 != NULL && k < n2 && k < POLY_CAP; k++)
+	{
+		pb[k].x = xy2[2 * k];
+		pb[k].y = xy2[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+	*isnull = 0;
+
+	for (i = 0; i < p1->npts; i++)
+	{
+		int			iprev;
+
+		if (i > 0)
+			iprev = i - 1;
+		else
+		{
+			if (!p1->closed)
+				continue;
+			iprev = p1->npts - 1;	/* include the closure segment */
+		}
+
+		for (j = 0; j < p2->npts; j++)
+		{
+			int			jprev;
+
+			if (j > 0)
+				jprev = j - 1;
+			else
+			{
+				if (!p2->closed)
+					continue;
+				jprev = p2->npts - 1;	/* include the closure segment */
+			}
+
+			statlseg_construct(&seg1, &pa[iprev], &pa[i]);
+			statlseg_construct(&seg2, &pb[jprev], &pb[j]);
+
+			tmp = lseg_closept_lseg(NULL, &seg1, &seg2);
+			if (!have_min || float8_lt(tmp, min))
+			{
+				min = tmp;
+				have_min = true;
+			}
+		}
+	}
+
+	if (!have_min)
+	{
+		*isnull = 1;			/* PG_RETURN_NULL() */
+		return pg_geo_errflag;
+	}
+
+	*out = min;
+	return pg_geo_errflag;
+}
+
+/* path_inter, body verbatim */
+int
+pg_path_inter_w(int closed1, int n1, const double *xy1,
+				int closed2, int n2, const double *xy2, int *result)
+{
+	PATH_S		p1_ = {n1, closed1};
+	PATH_S		p2_ = {n2, closed2};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+	Point		pa[POLY_CAP];
+	Point		pb[POLY_CAP];
+	BOX			b1,
+				b2;
+	int			i,
+				j;
+	LSEG		seg1,
+				seg2;
+	int			k;
+
+	for (k = 0; xy1 != NULL && k < n1 && k < POLY_CAP; k++)
+	{
+		pa[k].x = xy1[2 * k];
+		pa[k].y = xy1[2 * k + 1];
+	}
+	for (k = 0; xy2 != NULL && k < n2 && k < POLY_CAP; k++)
+	{
+		pb[k].x = xy2[2 * k];
+		pb[k].y = xy2[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+
+	b1.high.x = b1.low.x = pa[0].x;
+	b1.high.y = b1.low.y = pa[0].y;
+	for (i = 1; i < p1->npts; i++)
+	{
+		b1.high.x = float8_max(pa[i].x, b1.high.x);
+		b1.high.y = float8_max(pa[i].y, b1.high.y);
+		b1.low.x = float8_min(pa[i].x, b1.low.x);
+		b1.low.y = float8_min(pa[i].y, b1.low.y);
+	}
+	b2.high.x = b2.low.x = pb[0].x;
+	b2.high.y = b2.low.y = pb[0].y;
+	for (i = 1; i < p2->npts; i++)
+	{
+		b2.high.x = float8_max(pb[i].x, b2.high.x);
+		b2.high.y = float8_max(pb[i].y, b2.high.y);
+		b2.low.x = float8_min(pb[i].x, b2.low.x);
+		b2.low.y = float8_min(pb[i].y, b2.low.y);
+	}
+	if (!box_ov(&b1, &b2))
+	{
+		*result = 0;
+		return pg_geo_errflag;
+	}
+
+	/* pairwise check lseg intersections */
+	for (i = 0; i < p1->npts; i++)
+	{
+		int			iprev;
+
+		if (i > 0)
+			iprev = i - 1;
+		else
+		{
+			if (!p1->closed)
+				continue;
+			iprev = p1->npts - 1;	/* include the closure segment */
+		}
+
+		for (j = 0; j < p2->npts; j++)
+		{
+			int			jprev;
+
+			if (j > 0)
+				jprev = j - 1;
+			else
+			{
+				if (!p2->closed)
+					continue;
+				jprev = p2->npts - 1;	/* include the closure segment */
+			}
+
+			statlseg_construct(&seg1, &pa[iprev], &pa[i]);
+			statlseg_construct(&seg2, &pb[jprev], &pb[j]);
+			if (lseg_interpt_lseg(NULL, &seg1, &seg2))
+			{
+				*result = 1;
+				return pg_geo_errflag;
+			}
+		}
+	}
+
+	/* if we dropped through, no two segs intersected */
+	*result = 0;
+	return pg_geo_errflag;
+}
+
+/* poly_contain_poly, body verbatim (lseg_inside_poly = trap) */
+static bool
+pg_poly_contain_poly(POLY_S *contains_poly, POLY_S *contained_poly)
+{
+	int			i;
+	LSEG		s;
+
+	if (!box_contain_box(&contains_poly->boundbox, &contained_poly->boundbox))
+		return false;
+
+	s.p[0] = contained_poly->p[contained_poly->npts - 1];
+
+	for (i = 0; i < contained_poly->npts; i++)
+	{
+		s.p[1] = contained_poly->p[i];
+		if (!lseg_inside_poly(s.p, s.p + 1, contains_poly, 0))
+			return false;
+		s.p[0] = s.p[1];
+	}
+
+	return true;
+}
+
+int
+pg_poly_contain_w(int na, const double *bba, const double *pa,
+				  int nb, const double *bbb, const double *pb, int *result)
+{
+	POLY_S		a_,
+				b_;
+
+	pg_poly_stage(&a_, na, bba[0], bba[1], bba[2], bba[3], pa);
+	pg_poly_stage(&b_, nb, bbb[0], bbb[1], bbb[2], bbb[3], pb);
+
+	pg_geo_errflag = 0;
+	*result = pg_poly_contain_poly(&a_, &b_) ? 1 : 0;
+	return pg_geo_errflag;
+}
+
+int
+pg_poly_contained_w(int na, const double *bba, const double *pa,
+					int nb, const double *bbb, const double *pb, int *result)
+{
+	POLY_S		a_,
+				b_;
+
+	pg_poly_stage(&a_, na, bba[0], bba[1], bba[2], bba[3], pa);
+	pg_poly_stage(&b_, nb, bbb[0], bbb[1], bbb[2], bbb[3], pb);
+
+	pg_geo_errflag = 0;
+	/* poly_contained(a, b) = poly_contain_poly(b, a) */
+	*result = pg_poly_contain_poly(&b_, &a_) ? 1 : 0;
+	return pg_geo_errflag;
+}
+
+/* poly_overlap_internal, body verbatim (point_inside = trap) */
+static bool
+pg_poly_overlap_internal(POLY_S *polya, POLY_S *polyb)
+{
+	bool		result;
+
+	/* Quick check by bounding box */
+	result = box_ov(&polya->boundbox, &polyb->boundbox);
+
+	/*
+	 * Brute-force algorithm - try to find intersected edges, if so then
+	 * polygons are overlapped else check is one polygon inside other or not
+	 * by testing single point of them.
+	 */
+	if (result)
+	{
+		int			ia,
+					ib;
+		LSEG		sa,
+					sb;
+
+		/* Init first of polya's edge with last point */
+		sa.p[0] = polya->p[polya->npts - 1];
+		result = false;
+
+		for (ia = 0; ia < polya->npts && !result; ia++)
+		{
+			/* Second point of polya's edge is a current one */
+			sa.p[1] = polya->p[ia];
+
+			/* Init first of polyb's edge with last point */
+			sb.p[0] = polyb->p[polyb->npts - 1];
+
+			for (ib = 0; ib < polyb->npts && !result; ib++)
+			{
+				sb.p[1] = polyb->p[ib];
+				result = lseg_interpt_lseg(NULL, &sa, &sb);
+				sb.p[0] = sb.p[1];
+			}
+
+			/*
+			 * move current endpoint to the first point of next edge
+			 */
+			sa.p[0] = sa.p[1];
+		}
+
+		if (!result)
+		{
+			result = (point_inside(polya->p, polyb->npts, polyb->p) ||
+					  point_inside(polyb->p, polya->npts, polya->p));
+		}
+	}
+
+	return result;
+}
+
+int
+pg_poly_overlap_w(int na, const double *bba, const double *pa,
+				  int nb, const double *bbb, const double *pb, int *result)
+{
+	POLY_S		a_,
+				b_;
+
+	pg_poly_stage(&a_, na, bba[0], bba[1], bba[2], bba[3], pa);
+	pg_poly_stage(&b_, nb, bbb[0], bbb[1], bbb[2], bbb[3], pb);
+
+	pg_geo_errflag = 0;
+	*result = pg_poly_overlap_internal(&a_, &b_) ? 1 : 0;
+	return pg_geo_errflag;
+}
+
+/* box_poly (EXTENSION 5 addendum): body verbatim; the palloc'd POLYGON
+ * image -> caller out buffer (104 bytes: 4B varlena header + npts +
+ * boundbox + 4 points; SET_VARSIZE = LE total<<2 as in EXTENSION 4).
+ * box_construct is the vendored verbatim inline (EXTENSION 2). */
+int
+pg_box_poly_w(double hx, double hy, double lx, double ly, unsigned char *out)
+{
+	BOX			box_ = {{hx, hy}, {lx, ly}};
+	BOX		   *box = &box_;
+	struct
+	{
+		int32		vl_len_;
+		int32		npts;
+		BOX			boundbox;
+		Point		p[4];
+	}			poly_,
+			   *poly = &poly_;
+	int			size;
+
+	pg_geo_errflag = 0;
+
+	/* map four corners of the box to a polygon */
+	size = 40 + sizeof(poly->p[0]) * 4;	/* offsetof(POLYGON, p) + 4 Points */
+
+	poly->npts = 4;
+
+	poly->p[0].x = box->low.x;
+	poly->p[0].y = box->low.y;
+	poly->p[1].x = box->low.x;
+	poly->p[1].y = box->high.y;
+	poly->p[2].x = box->high.x;
+	poly->p[2].y = box->high.y;
+	poly->p[3].x = box->high.x;
+	poly->p[3].y = box->low.y;
+
+	box_construct(&poly->boundbox, &box->high, &box->low);
+
+	/* SET_VARSIZE(poly, size): LE 4B header word = total << 2 */
+	poly->vl_len_ = (int32) (((uint32) size) << 2);
+	memcpy(out, &poly_, 104);
+	return pg_geo_errflag;
+}

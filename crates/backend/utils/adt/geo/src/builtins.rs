@@ -613,7 +613,9 @@ close2! {
 // path
 macro_rules! path_cmp {
     ($($fc:ident => $op:tt;)*) => {$(
-        fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // pub: visibility-only, exposes the shipped wrapper to the Kani
+        // equivalence harnesses (proofs/geo-cmp).
+        pub fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: module contract.
             let a = unsafe { arg_path(fcinfo, 0) }?;
             // SAFETY: module contract.
@@ -630,7 +632,8 @@ path_cmp! {
     fc_path_n_ge => >=;
 }
 
-fn fc_path_inter(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_inter(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let a = unsafe { arg_path(fcinfo, 0) }?;
     // SAFETY: module contract.
@@ -638,19 +641,22 @@ fn fc_path_inter(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
     Ok(Datum::from_bool(crate::path::path_inter(&a, &b)?))
 }
 
-fn fc_path_isclosed(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_isclosed(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     Ok(Datum::from_bool(crate::path::path_isclosed(&p)))
 }
 
-fn fc_path_isopen(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_isopen(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     Ok(Datum::from_bool(crate::path::path_isopen(&p)))
 }
 
-fn fc_path_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     Ok(Datum::from_i32(crate::path::path_npoints(&p)))
@@ -670,7 +676,8 @@ fn fc_path_open(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
     Ok(varlena_result(v))
 }
 
-fn fc_path_area(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_area(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     match crate::path::path_area(&p)? {
@@ -685,7 +692,8 @@ fn fc_path_length(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     Ok(Datum::from_f64(crate::path::path_length(&p)?))
 }
 
-fn fc_path_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let a = unsafe { arg_path(fcinfo, 0) }?;
     // SAFETY: module contract.
@@ -751,7 +759,9 @@ fn fc_poly_path(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
 // polygon
 macro_rules! poly2 {
     ($($fc:ident => $core:path;)*) => {$(
-        fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // pub: visibility-only, exposes the shipped wrapper to the Kani
+        // equivalence harnesses (proofs/geo-cmp).
+        pub fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: module contract.
             let a = unsafe { arg_poly(fcinfo, 0) }?;
             // SAFETY: module contract.
@@ -774,7 +784,9 @@ poly2! {
 
 macro_rules! poly2r {
     ($($fc:ident => $core:path;)*) => {$(
-        fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // pub: visibility-only, exposes the shipped wrapper to the Kani
+        // equivalence harnesses (proofs/geo-cmp).
+        pub fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: module contract.
             let a = unsafe { arg_poly(fcinfo, 0) }?;
             // SAFETY: module contract.
@@ -816,7 +828,8 @@ fn fc_poly_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     }
 }
 
-fn fc_poly_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_poly_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_poly(fcinfo, 0) }?;
     Ok(Datum::from_i32(crate::poly::poly_npoints(&p)))
@@ -829,13 +842,15 @@ fn fc_poly_center(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     ret_point(fcinfo, c)
 }
 
-fn fc_poly_box(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_poly_box(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_poly(fcinfo, 0) }?;
     ret_box(fcinfo, crate::poly::poly_box(&p))
 }
 
-fn fc_box_poly(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_box_poly(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let b = unsafe { arg_box(fcinfo, 0) };
     let pts = [

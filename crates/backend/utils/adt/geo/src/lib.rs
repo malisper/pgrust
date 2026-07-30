@@ -271,6 +271,18 @@ impl<'a> PolyRef<'a> {
     }
 }
 
+impl<'a> PolyRef<'a> {
+    /// Proofs-only constructor (proofs/geo-cmp plane lane): assemble a view
+    /// from already-decoded parts, bypassing the varlena image byte decode.
+    /// Behavior-identical to `from_payload` on a well-formed image whose
+    /// header fields equal these arguments; `pts` is the raw point bytes.
+    #[doc(hidden)]
+    pub fn from_parts(boundbox: BOX, npts: usize, pts: &'a [u8]) -> PolyRef<'a> {
+        debug_assert!(pts.len() >= npts * POINT_SIZE);
+        PolyRef { boundbox, npts, pts }
+    }
+}
+
 impl Pts for PolyRef<'_> {
     #[inline]
     fn n(&self) -> usize {

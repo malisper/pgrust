@@ -1769,6 +1769,49 @@ geo-cmp	ext::proofs_ext::eq_lseg_perp_grid	-Z c-ffi -Z stubbing --c-lib c/pg_geo
 geo-cmp	ext::proofs_ext::eq_point_slope_arms	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	90.1	name repaired to landed harness name (slice->hslice / _full / fence->arms source rename); verified in cargo kani list 2026-07-30
 geo-cmp	ext::proofs_ext::eq_point_slope_grid	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	3.4	
 geo-cmp	ext::proofs_ext::control_circle_overleft_vs_overright	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks	must-fail	defect-witness	2.6	fails on value + both errflag directions
+geo-cmp	ext3::proofs_ext3::eq_path_n_lt	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	24.4	
+geo-cmp	ext3::proofs_ext3::eq_path_n_gt	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	23.0	
+geo-cmp	ext3::proofs_ext3::eq_path_n_eq	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	34.9	
+geo-cmp	ext3::proofs_ext3::eq_path_n_le	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	22.7	
+geo-cmp	ext3::proofs_ext3::eq_path_n_ge	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	24.3	
+geo-cmp	ext3::proofs_ext3::eq_path_isclosed	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	12.7	
+geo-cmp	ext3::proofs_ext3::eq_path_isopen	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	12.7	
+geo-cmp	ext3::proofs_ext3::eq_path_npoints	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	release-gate	12.8	
+geo-cmp	ext3::proofs_ext3::eq_poly_npoints	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	3.6	
+geo-cmp	ext3::proofs_ext3::eq_poly_left	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	5.6	
+geo-cmp	ext3::proofs_ext3::eq_poly_overleft	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	5.5	
+geo-cmp	ext3::proofs_ext3::eq_poly_right	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	6.0	
+geo-cmp	ext3::proofs_ext3::eq_poly_overright	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	5.8	
+geo-cmp	ext3::proofs_ext3::eq_poly_below	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	6.3	
+geo-cmp	ext3::proofs_ext3::eq_poly_overbelow	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	5.5	
+geo-cmp	ext3::proofs_ext3::eq_poly_above	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	5.4	
+geo-cmp	ext3::proofs_ext3::eq_poly_overabove	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	5.8	
+geo-cmp	ext3::proofs_ext3::eq_poly_same_n1	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks	green	calibration	148.4	DEFAULT solver only; kissat re-enumerates SAT batches (inversion)
+geo-cmp	ext3::proofs_ext3::eq_poly_same_nmismatch	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	171.8	
+geo-cmp	ext3::proofs_ext3::eq_poly_box_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	84.1	mcx-stubs recipe; modulo static-buffer allocator model
+geo-cmp	ext3::proofs_ext3::control_poly_npoints_skew	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks	must-fail	defect-witness	2.3	fails on assertion.2 (npts builder skew) — varlena builder load-bearing
+geo-cmp	ext4::proofs_ext4::eq_point_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	48.4	
+geo-cmp	ext4::proofs_ext4::eq_box_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	66.8	
+geo-cmp	ext4::proofs_ext4::eq_lseg_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	60.3	
+geo-cmp	ext4::proofs_ext4::eq_line_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	70.9	both arms cover-SATISFIED
+geo-cmp	ext4::proofs_ext4::eq_circle_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	60.5	both arms cover-SATISFIED
+geo-cmp	ext4::proofs_ext4::eq_point_send_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	78.0	
+geo-cmp	ext4::proofs_ext4::eq_box_send_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	98.4	
+geo-cmp	ext4::proofs_ext4::eq_lseg_send_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	125.3	
+geo-cmp	ext4::proofs_ext4::eq_line_send_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	143.5	
+geo-cmp	ext4::proofs_ext4::eq_circle_send_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	51.0	
+geo-cmp	ext4::proofs_ext4::eq_path_send_n1	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	67.0	
+geo-cmp	ext4::proofs_ext4::eq_path_send_n2	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	68.0	
+geo-cmp	ext4::proofs_ext4::eq_poly_send_n1	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	83.0	
+geo-cmp	ext4::proofs_ext4::eq_poly_send_n2	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	94.4	
+geo-cmp	ext4::proofs_ext4::control_point_recv_byteorder_skew	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks	must-fail	defect-witness	37.6	fails on assertion.2 (BE order skew) — wire byte order load-bearing
+geo-cmp	ext5::proofs_ext5::eq_path_area_open_plane	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	calibration	59.0	
+geo-cmp	ext5::proofs_ext5::eq_path_distance_nullplane	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	2.4	core-level; C closept trap in-rig
+geo-cmp	ext5::proofs_ext5::eq_path_inter_n1_open	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	1.3	core-level
+geo-cmp	ext5::proofs_ext5::eq_poly_contain_bboxfail	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	2.9	from_parts literal plane; C deep-walk traps in-rig
+geo-cmp	ext5::proofs_ext5::eq_poly_contained_bboxfail	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	2.4	
+geo-cmp	ext5::proofs_ext5::eq_poly_overlap_bboxfail	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	2.0	
+geo-cmp	ext5::proofs_ext5::eq_box_poly_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	must-fail	defect-witness	135.2	DIVERGENCE WITNESS (candidate, box_poly boundbox -0.0/NaN classes): stays FAILED until adjudicated; native diff tests/boxpoly_native.rs
 mbconv	proofs::wiring_conv_builtins	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --exact	green	release-gate	223	84-entry CONV_BUILTINS foid+fn-ptr identity; sole CONV_BUILTINS reference; heavyweight by design
 mbconv	proofs::eq_check_encoding_conversion_args	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --exact	green	per-commit	1.2	
 mbconv	proofs::control_mismatched_table_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	must-fail	defect-witness	33.7	koi8r_to_win1251 Rust vs koi8r_to_win866 C shim; FAILED as required
