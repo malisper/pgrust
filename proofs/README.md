@@ -24,32 +24,54 @@ catalog, completeness-audited in `LEDGER-AUDIT-2026-07-28.md`):
   `proved(...)`, bounds in each row), plus 26 more covered by exhaustive
   or mass-sampled *native differential* testing where the solver walls
   (`tested(differential)` — weaker than proof, recorded as such).
-- **The campaign found real divergences.** pgrust porting bugs found by
-  the proofs and fixed in this tree include: `pg_utf8_islegal`
-  out-of-contract behavior; two numeric bugs (digit comparison; the
-  `numeric_smaller`/`numeric_larger` tie keeping the wrong argument's
-  display scale); `PG_char_to_encoding` rejecting non-UTF8 names
-  wholesale where C cleans byte-wise; `hstore_recv` accepting
-  invalid-encoding/NUL bytes C rejects (plus a companion
-  `hashoidvector` validation gap); NaN-unaware GiST box union and
-  `gist_box_same` (regressions of upstream's back-patched bug #14238
-  fix — see `gist-geo/ADJUDICATION-NAN-PLANES.md`); and the `money`
-  division `MIN/-1` case, which panicked the backend (now a clean
-  SQLSTATE 22003 like `int8div`).
-- **Two genuine bugs in upstream PostgreSQL C** were isolated on the way
-  (both reproduced against real running PostgreSQL 18.4 on two
-  platforms): `macaddr_in` accepts >8-hex-digit fields via C99 `sscanf
-  %x` mod-2^32 wraparound, and `cash_div_int8/4/2` misses the
-  `INT64_MIN / -1` overflow guard that the 2024 money-overflow sweep
-  added everywhere else (x86-64 survives via the SIGFPE handler as an
-  odd error; aarch64 silently returns a wrong value).
+- **The campaign found 12 real divergence findings: 8 pgrust bugs and
+  4 upstream PostgreSQL bugs.** (One site — `money` division at
+  `MIN/-1` — contributed one finding to each column: the pgrust side
+  panicked and the C side is itself defective, so all three observed
+  behaviors differed.)
+- The **eight pgrust porting bugs**, all fixed in this tree:
+  1. `pg_utf8_islegal` out-of-contract behavior;
+  2. `numeric` digit comparison;
+  3. the `numeric_smaller`/`numeric_larger` tie keeping the wrong
+     argument's display scale;
+  4. `PG_char_to_encoding` rejecting non-UTF8 names wholesale where C
+     cleans byte-wise;
+  5. `hstore_recv` accepting invalid-encoding/NUL bytes C rejects;
+  6. a `hashoidvector` validation gap (the oidvector validity check C
+     ereports was only a debug assert);
+  7. NaN-unaware GiST box comparisons — one root cause surfacing in two
+     functions, the box-union `adjust_box` and `gist_box_same`, both
+     regressions of upstream's back-patched bug #14238 fix and
+     adjudicated together in `gist-geo/ADJUDICATION-NAN-PLANES.md`;
+  8. the `money` division `MIN/-1` case, which panicked the backend
+     (now a clean SQLSTATE 22003 like `int8div`).
+- **Four genuine bugs in upstream PostgreSQL C** were isolated by the
+  same testing program, each ground-truthed against real running
+  PostgreSQL 18.4 (the first two directly off proof counterexamples;
+  the other two surfaced as cross-platform splits when the proof suite
+  was replicated on Linux-aarch64, then confirmed differentially on
+  live servers on both platforms):
+  1. `macaddr_in` accepts >8-hex-digit fields via C99 `sscanf %x`
+     mod-2^32 wraparound;
+  2. `cash_div_int8/4/2` misses the `INT64_MIN / -1` overflow guard
+     that the 2024 money-overflow sweep added everywhere else (x86-64
+     survives via the SIGFPE handler as an odd error; aarch64 silently
+     returns a wrong value) — the C side of the `MIN/-1` site above;
+  3. `hashchar`/`hashcharextended` widen a bare `char` without the
+     `(uint8)` cast the "char" comparison operators use deliberately,
+     so C PostgreSQL itself returns different hash values on
+     signed-char vs unsigned-char ABIs (x86-64 vs Linux-aarch64),
+     splitting hash partition routing across architectures — see
+     `char/ADJUDICATION-CHAR-SIGNEDNESS.md`;
+  4. `tidin` parses TID fields with `strtoul` and no
+     `endptr == nptr` no-conversion check, so C PostgreSQL accepts
+     `'(,5)'` as `(0,5)` on glibc but rejects it on BSD libc —
+     platform-dependent acceptance.
 - Several more divergence *candidates* were adjudicated as ratified
-  non-surfaces rather than bugs: platform splits that exist inside C
-  PostgreSQL itself (`char` signedness hashing on signed-char vs
-  unsigned-char ABIs — `char/ADJUDICATION-CHAR-SIGNEDNESS.md`; `tidin`
-  glibc-vs-BSD `strtoul` variance; integer shift-count UB), and
-  version-line differences (`pg_lsn_out` PG18 vs PG19 format). Each is
-  recorded in the ledger row that found it.
+  non-surfaces rather than bugs: platform splits harmless at the datum
+  level (the `char` I/O-and-cast widening seam), integer shift-count
+  UB, and version-line differences (`pg_lsn_out` PG18 vs PG19 format).
+  Each is recorded in the ledger row that found it.
 - The campaign also surfaced **verification-tool defects** (CBMC's
   non-canonical NAN constant; a per-call-nondeterministic `f64::sqrt`
   model; a Kani 0.67 `Box` provenance defect) — each has a standing
@@ -58,8 +80,9 @@ catalog, completeness-audited in `LEDGER-AUDIT-2026-07-28.md`):
 
 A caveat we record deliberately: equivalence proofs find *porting*
 errors, never *inherited* ones — where pgrust faithfully ports a C bug,
-the proof is green. The two upstream bugs above were caught only where
-the divergence was on the pgrust side of history.
+the proof is green. The four upstream bugs above were caught only where
+the divergence surfaced on the pgrust side of history or as a
+platform split the cross-platform suite replication exposed.
 
 ## Layout
 
