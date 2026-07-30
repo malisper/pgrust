@@ -2044,7 +2044,7 @@ oid	name	source_file	status	class	notes
 3476	to_regoperator	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
 3478	jsonb_object_field	crates/backend/utils/adt/jsonb/src/builtins.rs	proved(lookup core: sorted-key binary search + (type,window) identity; n<=3, symbolic keys incl tiebreak lanes; materialization out)	fast	43-139s release-gate; proofs/jsonb-probe
 3479	to_regprocedure	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
-3480	gin_compare_jsonb	crates/backend/utils/adt/jsonb/src/builtins.rs	candidate	fast	fc builtins.rs:134 -> gin.rs:39 -> varstrfastcmp_c (memcmp + length tiebreak); circuit already GREEN as eq_bttextcmp; wrapper-level two symbolic packed text varlenas. Highest yield/cost row. Host proofs/jsonb-probe
+3480	gin_compare_jsonb	crates/backend/utils/adt/jsonb/src/builtins.rs	proved(core (ptr,len) pairs, symbolic len<=8 both sides; exact int32 value; varstr_cmp C-collation arm verbatim; fmgr text unwrap tested-tier)	fast	7.0s solver (run-w2.sh, load~20); harness proofs::eq_gin_compare_jsonb in proofs/jsonb-probe; C c/pg_gin_cmp.c; covers: lt/eq/gt + mismatch and tiebreak arms
 3490	jsonb_to_record	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(typcache/record-registry)	-	as 3204
 3491	jsonb_to_recordset	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(SRF/engine + typcache)	-	as 3205
 3492	to_regoper	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)

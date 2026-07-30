@@ -2145,3 +2145,4 @@ scalar-misc	xid8snap::eq_pg_snapshot_out_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg
 scalar-misc	xid8snap::eq_pg_snapshot_out_spots	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
 scalar-misc	xid8snap::eq_strtou64_cap8	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	6.0	wave-5 run 2026-07-30 idle
 scalar-misc	xid8snap::eq_pg_snapshot_in_cap6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+jsonb-probe	proofs::eq_gin_compare_jsonb	-Z c-ffi -Z stubbing --c-lib c/pg_gin_cmp.c --exact	green	per-commit	7.0	wave-2 2026-07-30: oid 3480 core (ptr,len) pairs len<=8 symbolic; exact int32 (glibc memcmp convention); run-w2.sh
