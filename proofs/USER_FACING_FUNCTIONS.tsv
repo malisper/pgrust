@@ -1706,9 +1706,9 @@ oid	name	source_file	status	class	notes
 2958	uuid_gt	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full pairs)	fast	0.11s; proofs/uuid
 2959	uuid_ne	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full pairs)	fast	0.11s; proofs/uuid
 2960	uuid_cmp	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full pairs, sign-equiv)	fast	0.15s; memcmp magnitude = ratified non-surface (btree contract is sign); proofs/uuid
-2961	uuid_recv	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
-2962	uuid_send	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
-2963	uuid_hash	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
+2961	uuid_recv	crates/backend/utils/adt/uuid/src/builtins.rs	wall(symex/unwind: mcx AcctWeak-retain + StringInfo::enlarge_slow truncate at unwind(24); 14GB RSS kill; the FAILED verdict is an unwind artifact, not a divergence)	wall	wave-5 2026-07-30; core-level direct-StringInfo shape still walls — record per runqueue: blocked:stringinfo-symex, needs slice-core refactor; proofs/uuid
+2962	uuid_send	crates/backend/utils/adt/uuid/src/builtins.rs	wall(CNF: symex completes 56757 VCCs; SAT residue >300s kissat, >6GB RSS default solver; AcctWeak-retain unwind-24 truncation lines present)	wall	wave-5 2026-07-30; both solvers tried per inversion trap; image-build via PgVec = result-image class; proofs/uuid
+2963	uuid_hash	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16], hash kernel in-theorem, wrapper-level)	fast	2.8s; proofs/uuid
 2971	booltext	crates/backend/utils/adt/bool/src/builtins.rs	candidate	ladder	bool/src/lib.rs:102 cstring_to_text of two literal images; mcx-stubs. Host proofs/bool
 2978	pg_stat_get_function_calls	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 2979	pg_stat_get_function_total_time	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
@@ -1993,7 +1993,7 @@ oid	name	source_file	status	class	notes
 3409	time_hash_extended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i64 x full seed)	fast	3.9s; proofs/datetime-b lane D
 3410	timetz_hash_extended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full (i64,i32) x full seed)	slow	31.2s; proofs/datetime-b lane D
 3411	timestamp_hash_extended	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 x full-u64 seed)	fast	3.6s; proofs/datetime-cmp wave7
-3412	uuid_hash_extended	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
+3412	uuid_hash_extended	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16] + full symbolic seed, wrapper-level)	fast	9.4s; proofs/uuid
 3413	pg_lsn_hash_extended	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64 lsn + full symbolic seed, wrapper-level)	fast	4.4s; proofs/hash-rows wave5
 3414	hashenumextended	crates/backend/utils/adt/adt_enum/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 3415	pg_get_statisticsobjdef	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
@@ -2010,7 +2010,7 @@ oid	name	source_file	status	class	notes
 3426	pg_stat_get_db_checksum_failures	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 3427	pg_stats_ext_mcvlist_items	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads
 3428	pg_stat_get_db_checksum_last_failure	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
-3432	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
+3432	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:rng)	-	pure PRNG output, nothing beyond the seam to prove; proofs/uuid wave-5
 3434	gtsvector_options	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3435	gist_point_sortsupport	crates/backend/access/gist/gistproc/src/lib.rs	excluded(non-surface: sortsupport-by-design)	-	:806 panic!; sorted builds ride SortComparator::GistPointZorder
 3436	pg_promote	crates/backend/utils/adt/adt_misc/src/builtins.rs	excluded(state)	-	server WAL/catalog/session state
@@ -2900,8 +2900,8 @@ oid	name	source_file	status	class	notes
 6339	int4random	crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs	excluded(state)	-	session PRNG state
 6340	int8random	crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs	excluded(state)	-	session PRNG state
 6341	numeric_random	crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs	excluded(state)	-	session PRNG state
-6342	uuid_extract_timestamp	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
-6343	uuid_extract_version	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
+6342	uuid_extract_timestamp	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16])	fast	2.2s; proofs/uuid
+6343	uuid_extract_version	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16])	fast	0.03s; proofs/uuid
 6344	pg_sync_replication_slots	crates/backend/replication/slotfuncs/src/builtins.rs	excluded(state)	-	replication slot shared state
 6345	range_contains_elem_support	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 6346	elem_contained_by_range_support	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
@@ -2963,9 +2963,9 @@ oid	name	source_file	status	class	notes
 6425	timestamptz_hash	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64; hashint8 fold + hash_uint32 in-theorem)	fast	3.6s; proofs/datetime-cmp wave7
 6426	timestamptz_hash_extended	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 x full-u64 seed)	fast	3.6s; proofs/datetime-cmp wave7
 6427	pg_get_sequence_data	crates/backend/commands/sequence/src/builtins.rs	candidate	seam	pending state-seam probe (sequence state)
-6428	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
-6429	uuidv7	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
-6430	uuidv7_interval	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
+6428	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:rng)	-	pure PRNG output, nothing beyond the seam to prove; proofs/uuid wave-5
+6429	uuidv7	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:clock)	-	pure assembly core proved 2.2s (modulo RNG-seam model, sub_ms<1e6 contract fence, macOS 10-bit SUBMS arm; Linux 12-bit arm needs a linux-host rerun); rng-skew control fails as designed; proofs/uuid wave-5
+6430	uuidv7_interval	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:clock)	-	pure assembly core proved 2.2s (modulo RNG-seam model, sub_ms<1e6 contract fence, macOS 10-bit SUBMS arm; Linux 12-bit arm needs a linux-host rerun); rng-skew control fails as designed; proofs/uuid wave-5
 3383	brin_minmax_opcinfo	crates/backend/access/brin/brin_minmax/src/lib.rs	proved(full-u32 typoid)	per-type	0.12s; ledger extraction gap — row added post-hoc; proofs/brin-minmax
 3384	brin_minmax_add_value	crates/backend/access/brin/brin_minmax/src/lib.rs	proved(per-type int4/date/uuid; catalog seam both sides + skew control; full symbolic values)	per-type	50-57s release-gate; proofs/brin-minmax
 3385	brin_minmax_consistent	crates/backend/access/brin/brin_minmax/src/lib.rs	proved(per-type x strategy 1..5; full symbolic)	per-type	12-39s; proofs/brin-minmax

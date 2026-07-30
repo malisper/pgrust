@@ -1860,3 +1860,12 @@ hash-rows	wave5::eq_hashxid8	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --sol
 hash-rows	wave5::eq_hashxid8extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	7.6	wave-5 run 2026-07-30 idle
 hash-rows	wave5::eq_pg_lsn_hash	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	3.6	wave-5 run 2026-07-30 idle
 hash-rows	wave5::eq_pg_lsn_hash_extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	4.4	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_hash	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --c-lib ../hash/pg_hashfn.c --solver kissat --exact	green	per-commit	2.8	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_hash_extended	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --c-lib ../hash/pg_hashfn.c --solver kissat --exact	green	per-commit	9.4	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_extract_version	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	green	per-commit	0.03	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_extract_timestamp	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	green	per-commit	2.2	wave-5 run 2026-07-30 idle
+uuid	wave5::eq_uuid_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	info	release-gate	wall	wall: unwind-24 truncation (AcctWeak retain, enlarge_slow) + 14GB RSS; FAILED = artifact
+uuid	wave5::cover_uuid_recv_both_arms	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --exact	info	release-gate	wall	timeout 120s, same truncation class as recv_core
+uuid	wave5::eq_uuid_send	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	info	release-gate	wall	CNF wall: symex 56757 VCCs completes; >300s kissat; >6GB default
+uuid	wave5::eq_generate_uuidv7	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	green	per-commit	2.2	wave-5 run 2026-07-30 idle
+uuid	wave5::control_generate_uuidv7_rng_skew	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --exact	must-fail	control	0.9	fails on rng skew as designed
