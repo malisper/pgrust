@@ -624,6 +624,7 @@ fn reindex_is_processing_index(indexId: Oid) -> bool {
     types_rel::reindex::ReindexIsProcessingIndex(indexId)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn reindex_in_progress(r: &RelationData<'_>) -> Box<PgError> {
@@ -636,12 +637,14 @@ fn reindex_in_progress(r: &RelationData<'_>) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn column_not_in_index() -> Box<PgError> {
     Box::new(PgError::error("column is not in index"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn lossy_sysscan() -> Box<PgError> {
@@ -650,6 +653,7 @@ fn lossy_sysscan() -> Box<PgError> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn parallel_inplace_update() -> Box<PgError> {
@@ -659,6 +663,7 @@ fn parallel_inplace_update() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_overwrite_tries() -> Box<PgError> {

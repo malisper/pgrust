@@ -166,6 +166,7 @@ pub unsafe fn gintuple_get_key(
     Ok(res)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_row_too_big(newsize: usize, relname: &str) -> Box<PgError> {

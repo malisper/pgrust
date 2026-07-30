@@ -356,6 +356,7 @@ fn inclusion_get_strategy_procinfo(
     Ok(finfo)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_opclass(procnum: u16, attno: u16) -> Box<PgError> {

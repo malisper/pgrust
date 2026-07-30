@@ -122,6 +122,7 @@ fn cfi() -> PgResult<()> {
 const RP0: ReadPointer =
     ReadPointer { eflags: 0, eof_reached: false, current: 0, file: 0, offset: 0 };
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn seek_failed() -> Box<PgError> {

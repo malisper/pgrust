@@ -649,6 +649,7 @@ pub fn fc_array_cat(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     ::types_fmgr::byref_result(mcx, &out)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cat_incompatible(detail: &str) -> Box<PgError> {

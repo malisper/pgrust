@@ -217,6 +217,7 @@ pub(crate) fn bt_moveright(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn fell_off_the_end(rel: &Relation<'_>) -> Box<PgError> {
@@ -403,6 +404,7 @@ pub fn order_procinfo(rel: &Relation<'_>, attno: usize) -> PgResult<FmgrInfo> {
     Ok(fi)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_support_function(

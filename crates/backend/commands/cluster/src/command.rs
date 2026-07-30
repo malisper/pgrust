@@ -644,6 +644,7 @@ fn cluster_is_permitted_for_relation<'mcx>(
     Ok(false)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_err(msg: &str) -> Box<PgError> {

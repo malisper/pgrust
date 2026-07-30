@@ -113,6 +113,7 @@ pub fn varatt_is_external_ondisk(attr: &[u8]) -> bool {
     attr.len() >= 2 && attr[0] == ondisk_marker_byte() && attr[1] == VARTAG_ONDISK
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn truncated_pointer() -> Box<PgError> {
@@ -149,6 +150,7 @@ fn tcinfo(datum: &[u8]) -> PgResult<u32> {
     Ok(u32::from_ne_bytes([w[0], w[1], w[2], w[3]]))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn truncated_compressed() -> Box<PgError> {

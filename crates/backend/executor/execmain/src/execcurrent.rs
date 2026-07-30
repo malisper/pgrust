@@ -529,18 +529,21 @@ pub(crate) fn cursor_capture_current_seam(
 }
 // --- end WS-CA wave-10 -----------------------------------------------------------
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_cursor_state(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_CURSOR_STATE))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_positioned(cursor_name: &str) -> Box<PgError> {
     invalid_cursor_state(format!("cursor \"{cursor_name}\" is not positioned on a row"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_simply_updatable(cursor_name: &str, table_name: &str) -> Box<PgError> {

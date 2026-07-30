@@ -931,6 +931,7 @@ fn merge_with_existing_constraint<'mcx>(
     Ok(true)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn merge_conflict(ccname: &str, relname: &str, kind: &str) -> Box<PgError> {
@@ -1023,6 +1024,7 @@ pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(core::str::from_utf8(bytes_in(mcx, s.as_bytes())?).expect("was UTF-8"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn default_type_mismatch(attname: &str, atttypid: Oid, exprtype: Oid) -> Box<PgError> {
@@ -1037,6 +1039,7 @@ fn default_type_mismatch(attname: &str, atttypid: Oid, exprtype: Oid) -> Box<PgE
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn check_references_other_table(relname: &str) -> Box<PgError> {
@@ -1048,6 +1051,7 @@ fn check_references_other_table(relname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn check_constraint_exists(name: &str) -> Box<PgError> {

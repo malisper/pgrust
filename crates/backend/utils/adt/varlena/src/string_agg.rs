@@ -63,12 +63,14 @@ impl StringAggState {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_aggregate_context() -> Box<PgError> {
     Box::new(PgError::error("string_agg_transfn called in non-aggregate context"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_aggregate_call_context() -> Box<PgError> {

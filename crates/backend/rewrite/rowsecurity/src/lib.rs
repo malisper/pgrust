@@ -583,6 +583,7 @@ fn mcx_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(core::str::from_utf8(v.leak()).expect("utf8"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unrecognized_policy_command(cmd: i32) -> Box<PgError> {

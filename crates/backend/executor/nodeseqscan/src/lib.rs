@@ -3681,6 +3681,7 @@ fn exec_open_scan_relation<'mcx>(
     Ok(rel.alias())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unpopulated_matview(rel: &Relation<'_>) -> Box<PgError> {

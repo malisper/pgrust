@@ -1280,6 +1280,7 @@ fn prevpower2(n: usize) -> usize {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn oom_tuples(mcx: Mcx<'_>, add: usize) -> Box<PgError> {

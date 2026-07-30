@@ -264,6 +264,7 @@ pub(crate) fn bt_preprocess_keys(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn keys_out_of_order() -> Box<PgError> {
@@ -1363,6 +1364,7 @@ fn bt_setup_array_cmp(
     Ok((orderproc, Some(fmgr_info(cmp_proc)?)))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_cross_type_proc(

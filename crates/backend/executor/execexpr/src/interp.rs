@@ -64,6 +64,7 @@ fn missing_slot(src: SlotSrc) -> ! {
     panic!("execexpr: expression references the {src:?} slot but none was supplied")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_role_oid(roleid: ::types_core::Oid) -> Box<PgError> {
@@ -2147,6 +2148,7 @@ fn json_value_item_cstring<'m>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_json_item(column_name: Option<&str>) -> Box<PgError> {
@@ -2495,6 +2497,7 @@ fn eval_json_coercion_finish(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn behavior_coercion_error(
@@ -3075,6 +3078,7 @@ pub unsafe fn agg_datum_replace(
 }
 
 // CheckVarSlotCompatibility (execExprInterp.c): C-exact messages.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn var_slot_dropped(attnum: u16, tdtypeid: ::types_core::Oid) -> Box<PgError> {
@@ -3085,6 +3089,7 @@ fn var_slot_dropped(attnum: u16, tdtypeid: ::types_core::Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn var_slot_wrong_type(

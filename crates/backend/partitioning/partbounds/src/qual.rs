@@ -956,6 +956,7 @@ pub fn check_default_partition_contents<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn default_violated(mcx: Mcx<'_>, default_rel: &Relation<'_>) -> Box<PgError> {
@@ -1215,6 +1216,7 @@ fn deconstruct_variadic_array<'mcx>(
     arrayfuncs::deconstruct_array(mcx, flat, typlen as i32, typbyval, typalign as u8, true)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn hash_param_error(msg: &'static str) -> Box<PgError> {
@@ -1223,6 +1225,7 @@ fn hash_param_error(msg: &'static str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn hash_param_error_owned(msg: String) -> Box<PgError> {

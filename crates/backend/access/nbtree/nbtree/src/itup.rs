@@ -190,6 +190,7 @@ pub unsafe fn bt_tuple_set_downlink(itup: *mut u8, blkno: ::types_core::BlockNum
     set_t_tid(itup, tid);
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_row_too_large(size: usize) -> Box<PgError> {

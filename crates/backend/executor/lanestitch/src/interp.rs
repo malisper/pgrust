@@ -23,6 +23,7 @@ pub(crate) fn division_by_zero() -> Box<PgError> {
 // (int2 -> "smallint", int4 -> "integer", int8 -> "bigint"); the stitched
 // tier never fabricates these — refuse-and-replay routes through here so the
 // replay raises C's exact message on C's row.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn out_of_range(width: u8) -> Box<PgError> {

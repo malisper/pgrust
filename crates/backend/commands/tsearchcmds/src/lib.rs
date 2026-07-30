@@ -121,6 +121,7 @@ fn name_list_to_string(names: &NodeList<'_>) -> String {
     out
 }
 
+#[track_caller]
 #[cold]
 fn undefined_ts_object(noun: &str, name: &str) -> Box<PgError> {
     Box::new(

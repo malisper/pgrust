@@ -376,6 +376,7 @@ pub fn StoreViewQuery<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_not_supported(msg: &str) -> Box<PgError> {

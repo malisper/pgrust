@@ -33,6 +33,7 @@ fn type_is_rowtype(typid: Oid) -> PgResult<bool> {
     Ok(lsyscache::typ::get_typtype(typid)? == b'c' as i8)
 }
 
+#[track_caller]
 #[cold]
 fn not_rowtype() -> Box<PgError> {
     Box::new(
@@ -252,6 +253,7 @@ pub fn fc_hstore_populate_record(
     Ok(d)
 }
 
+#[track_caller]
 #[cold]
 fn embedded_nul() -> Box<PgError> {
     Box::new(

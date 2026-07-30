@@ -1021,6 +1021,7 @@ fn locate_agg_walk_query_fields<'mcx>(
     nodes_core::range_table_walker(&q.rtable, w, 0)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn agg_in_recursive_term(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -1045,6 +1046,7 @@ fn grouping_sets_location(grouping_sets: &NodeList<'_>) -> ParseLoc {
     -1
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn grouping_sets_limit_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -1973,6 +1975,7 @@ fn parse_expr_kind_name(kind: ParseExprKind) -> &'static str {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn windowing_error(
@@ -1992,6 +1995,7 @@ fn windowing_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn grouping_error(
@@ -2011,6 +2015,7 @@ fn grouping_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn srf_in_agg_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -2032,6 +2037,7 @@ fn srf_in_agg_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgEr
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ungrouped_var_error(

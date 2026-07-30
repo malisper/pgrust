@@ -31,6 +31,7 @@ pub(crate) fn retval_mismatch_final_stmt(rettype: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn retval_mismatch(rettype: Oid, detail: String) -> Box<PgError> {
     let tn = format_type::format_type_be(rettype).unwrap_or_else(|_| "???".into());

@@ -27,6 +27,7 @@ struct ArrayOutCache {
     finfo: FmgrInfo,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unterminated_specifier() -> Box<PgError> {
@@ -37,6 +38,7 @@ fn unterminated_specifier() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn number_out_of_range() -> Box<PgError> {
@@ -45,6 +47,7 @@ fn number_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn argument_zero() -> Box<PgError> {
@@ -54,6 +57,7 @@ fn argument_zero() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn width_position_unterminated() -> Box<PgError> {
@@ -63,6 +67,7 @@ fn width_position_unterminated() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_few_arguments() -> Box<PgError> {
@@ -72,6 +77,7 @@ fn too_few_arguments() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unrecognized_specifier(fmt: &[u8], cp: usize) -> Box<PgError> {
@@ -95,6 +101,7 @@ fn unrecognized_specifier(fmt: &[u8], cp: usize) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_identifier() -> Box<PgError> {
@@ -104,6 +111,7 @@ fn null_identifier() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn indeterminate_input(what: &str) -> Box<PgError> {

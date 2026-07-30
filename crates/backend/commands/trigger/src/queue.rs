@@ -1481,6 +1481,7 @@ fn restore_role(restore: Option<(Oid, i32)>) {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn outside_query() -> Box<PgError> {
@@ -1490,6 +1491,7 @@ fn outside_query() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn fetch_failed(which: u32) -> Box<PgError> {

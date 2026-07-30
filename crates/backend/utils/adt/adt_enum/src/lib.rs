@@ -246,6 +246,7 @@ fn invalid_input(enumtypoid: Oid, name: &str) -> PgResult<Box<PgError>> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_internal(enumval: Oid) -> Box<PgError> {
@@ -267,6 +268,7 @@ fn unsafe_new_value(label: &[u8], enumtypid: Oid) -> PgResult<Box<PgError>> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_actual_enum_type() -> Box<PgError> {

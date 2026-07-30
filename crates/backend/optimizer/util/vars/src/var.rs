@@ -408,6 +408,7 @@ pub fn locate_var_of_level(node: Node<'_>, levelsup: i32) -> PgResult<i32> {
     Ok(cx.var_location)
 }
 
+#[track_caller]
 #[cold]
 fn upper_level_error(what: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("Upper-level {what} found where not expected")))

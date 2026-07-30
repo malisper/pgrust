@@ -193,6 +193,7 @@ fn method_failed(surface: &str, e: &PgError) -> ! {
     panic!("expandedrecord {surface}: {}", e.message());
 }
 
+#[track_caller]
 #[cold]
 fn not_composite(type_id: Oid) -> Box<PgError> {
     let name = format_type::format_type_be(type_id).unwrap_or_else(|_| type_id.to_string());
@@ -202,6 +203,7 @@ fn not_composite(type_id: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn bad_fnumber(fnumber: i32) -> Box<PgError> {
     Box::new(PgError::error(format!(

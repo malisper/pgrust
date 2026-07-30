@@ -402,6 +402,7 @@ pub fn RangeVarAdjustRelationPersistence(relpersistence: u8, nspid: Oid) -> PgRe
     }
 }
 
+#[track_caller]
 #[cold]
 fn invalid_table_definition(msg: &str) -> Box<PgError> {
     Box::new(

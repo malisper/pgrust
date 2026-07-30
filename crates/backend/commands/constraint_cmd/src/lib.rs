@@ -11,6 +11,7 @@ use types_trigger::{
 };
 use types_trigger_call::trigger_data_from_fcinfo;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn protocol_err(msg: &str) -> Box<PgError> {

@@ -703,6 +703,7 @@ fn pgfdw_xact_callback(event: XactEvent, _arg: Datum) -> PgResult<()> {
     r
 }
 
+#[track_caller]
 #[cold]
 fn connection_lost_error(serverid: Oid) -> Box<PgError> {
     let scratch = mcx::MemoryContext::new("postgres_fdw connection error");

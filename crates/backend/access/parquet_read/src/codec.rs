@@ -10,6 +10,7 @@ use crate::meta::{unsupported, CodecId};
 /// kernels never need tail special-casing.
 pub(crate) const PAD: usize = 64;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn decompress_failed(codec: &str, detail: String) -> Box<PgError> {

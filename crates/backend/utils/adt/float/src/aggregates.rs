@@ -37,6 +37,7 @@ pub fn check_float8_array<const N: usize>(image: &[u8], caller: &str) -> PgResul
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bad_transarray(caller: &str, n: usize) -> Box<PgError> {

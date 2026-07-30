@@ -48,6 +48,7 @@ pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptH
     }
 }
 
+#[track_caller]
 #[cold]
 fn cannot_subscript(
     pstate: &ParseState<'_, '_>,
@@ -72,6 +73,7 @@ fn cannot_subscript(
     )
 }
 
+#[track_caller]
 #[cold]
 fn subscript_not_integer(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
     Box::new(
@@ -202,6 +204,7 @@ fn array_subscript_transform<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 fn jsonb_no_slices(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
     Box::new(
@@ -218,6 +221,7 @@ fn jsonb_no_slices(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgErr
     )
 }
 
+#[track_caller]
 #[cold]
 fn jsonb_bad_subscript_type(
     pstate: &ParseState<'_, '_>,
@@ -320,6 +324,7 @@ fn jsonb_subscript_transform<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 fn hstore_one_subscript(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
     Box::new(
@@ -336,6 +341,7 @@ fn hstore_one_subscript(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<
     )
 }
 
+#[track_caller]
 #[cold]
 fn hstore_subscript_not_text(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
     Box::new(

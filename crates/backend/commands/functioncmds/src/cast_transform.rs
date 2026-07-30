@@ -49,6 +49,7 @@ const Anum_pg_transform_trftosql: usize = 5;
 
 const PROCEDURE_RELATION_ID: Oid = 1255;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn objdef_err(msg: &str) -> Box<PgError> {

@@ -236,6 +236,7 @@ pub fn RemoveAttrDefaultById<'mcx>(mcx: Mcx<'mcx>, attrdef_id: Oid) -> PgResult<
 }
 
 // Aligned with C's ATTNUM cache-lookup elog.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn attr_lookup_failed(attnum: AttrNumber, relid: Oid) -> Box<PgError> {

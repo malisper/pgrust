@@ -594,6 +594,7 @@ pub fn get_hash_partition_greatest_modulus(bound: &PartitionBoundInfoData<'_>) -
     bound.indexes.len() as i32
 }
 
+#[track_caller]
 #[cold]
 fn modulus_factor_error(
     new_modulus: i32,
@@ -614,6 +615,7 @@ fn modulus_factor_error(
     )
 }
 
+#[track_caller]
 #[cold]
 fn overlap_error(relname: &str, with_name: &str) -> Box<PgError> {
     Box::new(

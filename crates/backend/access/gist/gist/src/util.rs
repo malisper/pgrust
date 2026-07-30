@@ -86,6 +86,7 @@ pub(crate) fn copy_itup<'mcx>(mcx: Mcx<'mcx>, itup: ITup) -> PgResult<ItupBuf<'m
     Ok(buf)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_corrupted(msg: std::string::String) -> Box<PgError> {

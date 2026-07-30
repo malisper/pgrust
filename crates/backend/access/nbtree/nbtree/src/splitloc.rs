@@ -188,6 +188,7 @@ pub(crate) unsafe fn bt_findsplitloc<'mcx>(
     Ok(bestsplitloc(&state, perfectpenalty, strategy))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_feasible_split(rel: &Relation<'_>) -> Box<PgError> {

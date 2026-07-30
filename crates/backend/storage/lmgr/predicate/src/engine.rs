@@ -206,6 +206,7 @@ fn NPREDICATELOCKTARGETENTS(max_prepared_xacts: i32) -> i64 {
         * (init_small::globals::MaxBackends() as i64 + max_prepared_xacts as i64)
 }
 
+#[track_caller]
 #[cold]
 fn out_of_shared_memory() -> Box<PgError> {
     Box::new(
@@ -215,6 +216,7 @@ fn out_of_shared_memory() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn serialization_failure(reason: &str) -> Box<PgError> {
     Box::new(
@@ -315,6 +317,7 @@ unsafe fn RWConflictExists(
     false
 }
 
+#[track_caller]
 #[cold]
 fn rw_conflict_pool_exhausted(potential: bool) -> Box<PgError> {
     let msg = if potential {
@@ -2846,6 +2849,7 @@ const SIZEOF_TWOPHASE_PREDICATE_RECORD: usize = 24;
 // mirrors TWOPHASE_RM_LOCK_ID for the same reason).
 const TWOPHASE_RM_PREDICATELOCK_ID: u8 = 4;
 
+#[track_caller]
 #[cold]
 fn recover_out_of_shared_memory() -> Box<PgError> {
     // predicatelock_twophase_recover's plain form (no per-xact-locks hint).

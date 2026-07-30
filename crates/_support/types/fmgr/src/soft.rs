@@ -75,6 +75,7 @@ impl FunctionCallInfoBaseData {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn input_returned_non_null(fn_oid: Oid) -> Box<PgError> {
@@ -83,6 +84,7 @@ fn input_returned_non_null(fn_oid: Oid) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn input_returned_null(fn_oid: Oid) -> Box<PgError> {
@@ -91,6 +93,7 @@ fn input_returned_null(fn_oid: Oid) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn direct_input_returned_null(func: PGFunction) -> Box<PgError> {

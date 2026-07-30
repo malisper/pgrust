@@ -86,6 +86,7 @@ unsafe fn wcstombs_l(dest: *mut c_char, src: *const wchar_t, n: size_t, loc: loc
     result
 }
 
+#[track_caller]
 #[cold]
 fn report_newlocale_failure(localename: &str) -> Box<PgError> {
     // BSD-derived platforms may not set errno; assume ENOENT then.
@@ -402,6 +403,7 @@ pub(crate) fn strtitle_libc_sb(dest: &mut [u8], src: &[u8], locale: &PgLocale) -
     src.len()
 }
 
+#[track_caller]
 #[cold]
 fn oom() -> Box<PgError> {
     PgError::error("out of memory")
@@ -409,6 +411,7 @@ fn oom() -> Box<PgError> {
         .into()
 }
 
+#[track_caller]
 #[cold]
 fn invalid_multibyte_for_locale() -> Box<PgError> {
     PgError::error("invalid multibyte character for locale")

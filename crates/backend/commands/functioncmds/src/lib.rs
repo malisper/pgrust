@@ -52,6 +52,7 @@ pub(crate) fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> 
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_at(
@@ -64,12 +65,14 @@ fn err_at(
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate).with_cursor_position(pos))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn conflicting_options() -> Box<PgError> {
     err("conflicting or redundant options".to_string(), ERRCODE_SYNTAX_ERROR)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_procedure_attribute(source_text: &str, location: types_core::ParseLoc) -> Box<PgError> {
@@ -1670,12 +1673,14 @@ pub fn ExecuteDoStmt<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn func_lookup_failed(funcid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn proc_lookup_failed(funcid: Oid) -> Box<PgError> {

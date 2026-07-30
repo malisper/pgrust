@@ -502,6 +502,7 @@ fn makeJsonTablePathScan<'mcx>(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn jsontable_err(
@@ -525,6 +526,7 @@ fn jsontable_err(
     Box::new(e)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate_name_err(

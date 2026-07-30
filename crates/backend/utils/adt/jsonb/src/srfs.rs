@@ -17,6 +17,7 @@ use types_core::catalog::{JSONBOID, RECORDOID, TEXTOID};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_fmgr::{byref_result, varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_param(msg: String) -> Box<PgError> {

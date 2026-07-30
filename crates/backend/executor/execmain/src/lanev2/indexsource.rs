@@ -513,6 +513,7 @@ fn engine_mirror(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn indexsource_misuse(why: &str) -> Box<PgError> {

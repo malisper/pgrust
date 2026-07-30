@@ -26,6 +26,7 @@ pub struct RangeIOData {
     pub typioparam: Oid,
 }
 
+#[track_caller]
 #[cold]
 fn no_binary_io(recv: bool, elem_typid: Oid) -> Box<PgError> {
     let what = if recv { "input" } else { "output" };
@@ -64,6 +65,7 @@ fn is_space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
+#[track_caller]
 #[cold]
 fn invalid_flags_err() -> Box<PgError> {
     Box::new(

@@ -749,6 +749,7 @@ fn range_datum_bsearch(
 }
 
 // ExecBuildSlotPartitionKeyDescription + the "no partition found" report.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_partition_error(

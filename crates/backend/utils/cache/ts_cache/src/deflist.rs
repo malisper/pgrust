@@ -21,6 +21,7 @@ enum DsState {
     InWValue,
 }
 
+#[track_caller]
 #[cold]
 fn bad_format(input: &[u8]) -> Box<PgError> {
     PgError::error(format!(

@@ -201,6 +201,7 @@ fn page_set_prunable(page: &mut PageMut<'_>, xid: TransactionId) {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invisible_tuple(op: &str) -> Box<PgError> {

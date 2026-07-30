@@ -83,6 +83,7 @@ impl<'mcx> VecBuilder<'mcx> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn dim_error() -> Box<PgError> {
     PgError::error("vector must have at least 1 dimension")
@@ -90,6 +91,7 @@ fn dim_error() -> Box<PgError> {
         .into()
 }
 
+#[track_caller]
 #[cold]
 fn max_dim_error() -> Box<PgError> {
     PgError::error(format!(
@@ -151,6 +153,7 @@ fn vector_isspace(ch: u8) -> bool {
     matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
+#[track_caller]
 #[cold]
 fn invalid_text(lit: &[u8], detail: Option<&str>) -> Box<PgError> {
     let mut e = PgError::error(format!(

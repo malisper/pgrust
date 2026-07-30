@@ -20,6 +20,7 @@ pub const LIKE_ABORT: i32 = -1;
 // C's locale-0 callers (bytealike, lowered ILIKE): deterministic, never folded.
 const LOCALE_NONE: PgLocale = pg_locale::C_LOCALE;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn like_pattern_ends_with_escape() -> Box<PgError> {
@@ -28,6 +29,7 @@ fn like_pattern_ends_with_escape() -> Box<PgError> {
         .into()
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_escape_string() -> Box<PgError> {
@@ -37,6 +39,7 @@ fn invalid_escape_string() -> Box<PgError> {
         .into()
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn indeterminate_collation(op: &str) -> Box<PgError> {
@@ -46,6 +49,7 @@ fn indeterminate_collation(op: &str) -> Box<PgError> {
         .into()
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ilike_nondeterministic() -> Box<PgError> {

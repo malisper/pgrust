@@ -438,6 +438,7 @@ fn colname_member(colnames: &NodeList<'_>, name: &str) -> bool {
     colnames.iter().any(|n| n.as_string().is_some_and(|s| s.sval == name))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn syntax_err(pstate: &ParseState<'_, '_>, msg: String, location: ParseLoc) -> Box<PgError> {
@@ -1094,6 +1095,7 @@ fn raw_list_location(list: &NodeList<'_>) -> ParseLoc {
     -1
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate_cte_name(pstate: &ParseState<'_, '_>, name: &str, location: i32) -> Box<PgError> {
@@ -1111,6 +1113,7 @@ fn duplicate_cte_name(pstate: &ParseState<'_, '_>, name: &str, location: i32) ->
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_recursion(
@@ -1132,6 +1135,7 @@ fn invalid_recursion(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn mutual_recursion(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -1149,6 +1153,7 @@ fn mutual_recursion(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgEr
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn recursive_decoration(
@@ -1170,6 +1175,7 @@ fn recursive_decoration(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn recursive_type_mismatch(
@@ -1198,6 +1204,7 @@ fn recursive_type_mismatch(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn recursive_collation_mismatch(
@@ -1233,6 +1240,7 @@ fn collation_name_or_null(mcx: Mcx<'_>, colloid: Oid) -> PgResult<String> {
         .unwrap_or_else(|| "(null)".to_string()))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn elog_error(msg: &str) -> Box<PgError> {

@@ -88,6 +88,7 @@ fn validate_relation_kind(r: &Relation<'_>) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_open_relation(r: &RelationData<'_>) -> Box<PgError> {

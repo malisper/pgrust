@@ -91,12 +91,14 @@ unsafe fn osa_shutdown(arg: *mut ()) {
     drop(unsafe { Box::from_raw(arg as *mut OsaGroupState) });
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_agg_context() -> Box<PgError> {
     Box::new(PgError::error("ordered-set aggregate called in non-aggregate context"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn elog_error(msg: &'static str) -> Box<PgError> {

@@ -296,6 +296,7 @@ fn begin_copy_query<'mcx>(
     Ok((qd, tupdesc))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_not_supported(msg: &str) -> Box<PgError> {
@@ -717,6 +718,7 @@ pub fn copy_attribute_out_text(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_copy_from_relkind(rel: &Relation<'_>) -> Box<PgError> {

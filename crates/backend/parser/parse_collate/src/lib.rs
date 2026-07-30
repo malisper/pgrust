@@ -1065,6 +1065,7 @@ fn merge_collation_state(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 fn collation_mismatch_error(
     ctx: &AssignCollationsCtx<'_, '_, '_>,

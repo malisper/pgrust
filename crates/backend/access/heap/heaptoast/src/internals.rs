@@ -22,6 +22,7 @@ pub(crate) const F_INT4EQ: Oid = 65;
 pub(crate) const F_INT4LE: Oid = 149;
 pub(crate) const F_INT4GE: Oid = 150;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_lz4_support() -> Box<PgError> {
@@ -31,6 +32,7 @@ fn no_lz4_support() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_compression_method(cmethod: i8) -> Box<PgError> {
@@ -392,6 +394,7 @@ pub fn toast_open_indexes<'mcx>(
     Err(no_valid_index(toastrel.rd_id))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_valid_index(relid: Oid) -> Box<PgError> {

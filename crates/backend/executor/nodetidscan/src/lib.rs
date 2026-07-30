@@ -47,6 +47,7 @@ fn is_ctid_var(node: Node<'_>) -> bool {
     node.as_var().is_some_and(|v| v.varattno == SELF_ITEM_POINTER_ATTR)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn elog_internal(message: &'static str) -> Box<PgError> {

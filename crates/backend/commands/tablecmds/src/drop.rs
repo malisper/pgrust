@@ -155,6 +155,7 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) 
 }
 
 // DropErrorMsgWrongType (tablecmds.c).
+#[track_caller]
 #[cold]
 fn DropErrorMsgWrongType(relname: &str, wrongkind: u8, rightkind: u8) -> Box<PgError> {
     let rentry = drop_msg_entry(rightkind).expect("relkind is in dropmsgstringarray");

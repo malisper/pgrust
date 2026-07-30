@@ -203,6 +203,7 @@ pub fn name_bpchar<'mcx>(mcx: Mcx<'mcx>, name: &[u8]) -> PgResult<Varlena<'mcx>>
     varlena::cstring_to_text(mcx, &name[..end])
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn typmod_array_err(msg: &'static str, sqlstate: types_error::SqlState) -> Box<PgError> {
@@ -240,6 +241,7 @@ fn array_get_integer_typmods<'mcx>(mcx: Mcx<'mcx>, arr: &[u8]) -> PgResult<PgVec
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_type_modifier() -> Box<PgError> {
@@ -413,6 +415,7 @@ pub fn bpcharge(arg1: &[u8], arg2: &[u8], collid: Oid) -> PgResult<bool> {
     Ok(bpcharcmp(arg1, arg2, collid)? >= 0)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn hash_collation_err() -> Box<PgError> {

@@ -161,6 +161,7 @@ fn clamp_row_est(nrows: f64) -> f64 {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn negative_time() -> Box<PgError> {

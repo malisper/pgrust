@@ -1722,12 +1722,14 @@ pub fn contains_multiexpr_param<'mcx>(node: Node<'mcx>) -> PgResult<bool> {
     w.visit(node)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn internal(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_not_supported(msg: &str) -> Box<PgError> {

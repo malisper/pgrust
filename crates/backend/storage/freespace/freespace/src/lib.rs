@@ -543,6 +543,7 @@ fn fsm_does_block_exist(rel: &RelationData<'_>, blknumber: BlockNumber) -> PgRes
         )?)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_fsm_request_size(needed: Size) -> Box<PgError> {

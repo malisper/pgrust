@@ -76,6 +76,7 @@ fn validate_relation_kind(r: &Relation<'_>) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_an_index(r: &RelationData<'_>) -> Box<PgError> {
@@ -98,6 +99,7 @@ fn reindex_is_processing_index(indexId: Oid) -> bool {
     types_rel::reindex::ReindexIsProcessingIndex(indexId)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn reindex_in_progress(r: &RelationData<'_>) -> Box<PgError> {
@@ -111,6 +113,7 @@ fn reindex_in_progress(r: &RelationData<'_>) -> Box<PgError> {
 }
 
 // CHECK_*_PROCEDURE: required callbacks exist per IndexAmKind by construction; optional ones keep the C elog.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_procedure(pname: &str, r: &RelationData<'_>) -> Box<PgError> {

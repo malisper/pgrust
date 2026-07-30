@@ -162,6 +162,7 @@ fn mk_def_elem<'mcx>(
     })
 }
 
+#[track_caller]
 #[cold]
 fn invalid_numeric_value(kind: &str, name: &str, value: &str) -> Box<PgError> {
     Box::new(

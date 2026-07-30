@@ -168,6 +168,7 @@ fn not_an_enum(type_id: Oid) -> PgResult<Box<PgError>> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn value_not_found(arg: Oid, type_id: Oid) -> Box<PgError> {

@@ -91,6 +91,7 @@ pub fn read_objtype_from_string(objtype: &str) -> PgResult<Option<ObjectType>> {
     Err(param_err(format!("unrecognized object type \"{objtype}\"")))
 }
 
+#[track_caller]
 #[cold]
 fn param_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
@@ -141,6 +142,7 @@ fn deconstruct_text_array<'mcx>(
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 fn null_element_err() -> Box<PgError> {
     param_err("name or argument lists may not contain nulls".to_string())

@@ -49,6 +49,7 @@ const MAGIC_ENCRYPTED: &[u8; 4] = b"PARE";
 /// run single-digit MB.
 const MAX_FOOTER: u64 = 256 << 20;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_parquet(path: &str, what: &str) -> Box<PgError> {
@@ -58,6 +59,7 @@ fn not_parquet(path: &str, what: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn io_error(path: &str, op: &str, e: std::io::Error) -> Box<PgError> {

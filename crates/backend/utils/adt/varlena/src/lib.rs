@@ -1064,6 +1064,7 @@ pub fn split_guc_list(rawstring: &str, separator: u8) -> Option<Vec<String>> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn invalid_surrogate_pair() -> Box<PgError> {
     Box::new(
@@ -1072,6 +1073,7 @@ fn invalid_surrogate_pair() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn invalid_codepoint(unicode: u32) -> Box<PgError> {
     Box::new(
@@ -1080,6 +1082,7 @@ fn invalid_codepoint(unicode: u32) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn invalid_unicode_escape() -> Box<PgError> {
     Box::new(

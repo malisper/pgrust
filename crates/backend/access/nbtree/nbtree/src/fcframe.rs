@@ -165,6 +165,7 @@ fn with_proc_scratch<R>(f: impl for<'s> FnOnce(::mcx::Mcx<'s>) -> PgResult<R>) -
     })
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn proc_returned_null(fn_oid: ::types_core::Oid) -> Box<PgError> {
@@ -182,6 +183,7 @@ unsafe fn inline_image(d: Datum) -> bool {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn returned_null(key: &ScanKeyData) -> Box<PgError> {

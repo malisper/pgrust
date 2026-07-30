@@ -307,6 +307,7 @@ pub fn SysCacheGetAttrNotNull(cache_id: i32, tup: &CatCTuple, attnum: i32) -> Pg
     Ok(d)
 }
 
+#[track_caller]
 #[cold]
 fn notnull_error(cache_id: i32, attnum: i32) -> Box<PgError> {
     let reloid = CACHEINFO[cache_id as usize].reloid;

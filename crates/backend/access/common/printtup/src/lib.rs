@@ -353,6 +353,7 @@ pub fn SendRowDescriptionMessage(
     pq_endmessage_reuse(buf)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unsupported_format_code(format: i16) -> Box<PgError> {

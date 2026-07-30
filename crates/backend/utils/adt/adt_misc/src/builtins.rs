@@ -15,6 +15,7 @@ fn is_ident_cont(c: u8) -> bool {
     c.is_ascii_digit() || c == b'$' || is_ident_start(c)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_ident_err(qualname: &[u8], detail: Option<&str>) -> Box<PgError> {
@@ -1122,6 +1123,7 @@ fn tablespace_warning(msg: String) -> PgResult<()> {
         .finish(types_error::ErrorLocation::new("misc.c", 0, "pg_tablespace_databases"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn open_dir_err(e: &std::io::Error, location: &str) -> Box<PgError> {
@@ -1133,6 +1135,7 @@ fn open_dir_err(e: &std::io::Error, location: &str) -> Box<PgError> {
         .into()
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn read_dir_err(e: &std::io::Error, location: &str) -> Box<PgError> {

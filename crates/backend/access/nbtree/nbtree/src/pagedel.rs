@@ -861,6 +861,7 @@ fn bt_unlink_halfdead_page(
     Ok(Some(leafbuf))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn corrupt(msg: String) -> Box<PgError> {

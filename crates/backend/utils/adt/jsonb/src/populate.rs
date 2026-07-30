@@ -516,6 +516,7 @@ struct JHashSem<'v, 'h> {
     save_json_start: Option<usize>,
 }
 
+#[track_caller]
 #[cold]
 fn cannot_call_on(function_name: &str, what: &str) -> Box<PgError> {
     Box::new(
@@ -1310,6 +1311,7 @@ impl PopulateRecordCache {
     }
 }
 
+#[track_caller]
 #[cold]
 fn not_a_row_type(funcname: &str) -> Box<PgError> {
     Box::new(
@@ -1320,6 +1322,7 @@ fn not_a_row_type(funcname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn cannot_determine_row_type(funcname: &str) -> Box<PgError> {
     Box::new(
@@ -1665,6 +1668,7 @@ impl<'v> JsonSem<'v> for RecordsetSem<'_, 'v> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn srf_context_error() -> Box<PgError> {
     Box::new(
@@ -1673,6 +1677,7 @@ fn srf_context_error() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn materialize_required() -> Box<PgError> {
     Box::new(

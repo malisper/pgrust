@@ -260,6 +260,7 @@ impl core::ops::IndexMut<usize> for GucRegistry {
     }
 }
 
+#[track_caller]
 #[cold]
 fn oom() -> Box<PgError> {
     ereport(ERROR)

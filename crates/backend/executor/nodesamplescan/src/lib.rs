@@ -282,6 +282,7 @@ impl<'mcx> SampleScanState<'mcx> {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_param() -> Box<PgError> {
@@ -291,6 +292,7 @@ fn null_param() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_repeatable() -> Box<PgError> {
@@ -300,6 +302,7 @@ fn null_repeatable() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unpopulated_matview(rel: &::types_rel::Relation<'_>) -> Box<PgError> {

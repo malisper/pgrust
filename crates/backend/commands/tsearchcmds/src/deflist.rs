@@ -23,6 +23,7 @@ pub fn alloc_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(unsafe { core::str::from_utf8_unchecked(v.leak()) })
 }
 
+#[track_caller]
 #[cold]
 fn requires_parameter(name: &str) -> Box<PgError> {
     Box::new(
@@ -31,6 +32,7 @@ fn requires_parameter(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn unrecognized_arg(name: &str) -> Box<PgError> {
     Box::new(PgError::error(format!(
@@ -129,6 +131,7 @@ pub fn serialize_deflist<'mcx>(
     Ok(buf)
 }
 
+#[track_caller]
 #[cold]
 fn invalid_list(input: &[u8]) -> Box<PgError> {
     Box::new(

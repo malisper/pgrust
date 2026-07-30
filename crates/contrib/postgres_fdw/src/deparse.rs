@@ -1843,6 +1843,7 @@ pub fn deparse_direct_delete_sql<'mcx>(
     )
 }
 
+#[track_caller]
 #[cold]
 fn direct_modify_join_unported() -> Box<PgError> {
     Box::new(

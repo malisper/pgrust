@@ -104,6 +104,7 @@ pub fn ascii_safe_strlcpy(dest: &mut [u8], src: &[u8]) {
     dest[i] = 0;
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn conversion_not_supported(enc: pg_enc) -> Box<PgError> {
@@ -116,6 +117,7 @@ fn conversion_not_supported(enc: pg_enc) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_encoding_name(name: &str) -> Box<PgError> {
@@ -125,6 +127,7 @@ fn invalid_encoding_name(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_encoding_code(enc: i32) -> Box<PgError> {

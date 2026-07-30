@@ -29,6 +29,7 @@ const Anum_pg_trigger_oid: i32 = 1;
 const Anum_pg_trigger_tgconstraint: AttrNumber = 11;
 const Anum_pg_trigger_tgdeferrable: i32 = 12;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {

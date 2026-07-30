@@ -8,6 +8,7 @@ use types_nodes::rawnodes::TypeName;
 use types_nodes::NodeTag;
 use types_nodes::{parsenodes::DefElem, Node};
 
+#[track_caller]
 #[cold]
 fn syntax_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_SYNTAX_ERROR))

@@ -917,6 +917,7 @@ pub fn fc_overlaps_timestamp(
     overlaps_common(fcinfo, |fc, i, j| fc.arg_i64(i) > fc.arg_i64(j))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn step_size_err(msg: &'static str) -> Box<PgError> {

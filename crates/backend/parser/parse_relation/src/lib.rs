@@ -883,6 +883,7 @@ fn GetColumnDefCollation(
     Ok(result)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn coldeflist_error(
@@ -1329,6 +1330,7 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cte_without_returning(
@@ -1346,6 +1348,7 @@ fn cte_without_returning(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_tablefunc_columns(
@@ -1366,6 +1369,7 @@ fn too_many_tablefunc_columns(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablefunc_too_many_aliases(func: &str, available: usize, specified: usize) -> Box<PgError> {
@@ -2707,6 +2711,7 @@ fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ambiguous_table_ref(
@@ -2724,6 +2729,7 @@ fn ambiguous_table_ref(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ambiguous_table_relid(
@@ -2741,6 +2747,7 @@ fn ambiguous_table_relid(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ambiguous_column_ref(
@@ -2758,6 +2765,7 @@ fn ambiguous_column_ref(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bad_lateral_ref<'p, 'mcx>(
@@ -2792,6 +2800,7 @@ enum SysColContext {
     MergeWhen,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bad_system_column_context(
@@ -2821,6 +2830,7 @@ fn bad_system_column_context(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn dropped_column(nsitem: &ParseNamespaceItem<'_>, colname: &str) -> Box<PgError> {
@@ -2837,6 +2847,7 @@ fn dropped_column(nsitem: &ParseNamespaceItem<'_>, colname: &str) -> Box<PgError
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_table(
@@ -2858,6 +2869,7 @@ fn undefined_table(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unsupported_function_return_type(
@@ -2880,6 +2892,7 @@ fn unsupported_function_return_type(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_aliases(aliasname: &str, available: usize, specified: usize) -> Box<PgError> {
@@ -2895,6 +2908,7 @@ fn too_many_aliases(aliasname: &str, available: usize, specified: usize) -> Box<
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_join_columns() -> Box<PgError> {
@@ -2907,6 +2921,7 @@ fn too_many_join_columns() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_join_aliases(aliasname: &str, available: usize, specified: usize) -> Box<PgError> {
@@ -2922,6 +2937,7 @@ fn too_many_join_aliases(aliasname: &str, available: usize, specified: usize) ->
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate_table_name(aliasname: &str) -> Box<PgError> {
@@ -2934,6 +2950,7 @@ fn duplicate_table_name(aliasname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bad_perminfo_index(rte: &RangeTblEntry<'_>) -> Box<PgError> {
@@ -2946,6 +2963,7 @@ fn bad_perminfo_index(rte: &RangeTblEntry<'_>) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn perminfo_relid_mismatch(rte: &RangeTblEntry<'_>, perminfo_relid: Oid) -> Box<PgError> {

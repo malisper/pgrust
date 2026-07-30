@@ -657,6 +657,7 @@ pub fn circle_out(circle: &CIRCLE, out: &mut Vec<u8>) {
     out.push(RDELIM_C);
 }
 
+#[track_caller]
 #[cold]
 fn invalid_binary(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION))

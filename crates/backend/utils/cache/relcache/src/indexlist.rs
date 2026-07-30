@@ -8,6 +8,7 @@ use types_rel::{
 
 use crate::{cache_mcx, store};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_open(relid: Oid) -> Box<PgError> {

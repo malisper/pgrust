@@ -538,6 +538,7 @@ fn findDependentObjects<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_drop_required(obj_desc: &str, other_desc: &str) -> Box<PgError> {
@@ -548,6 +549,7 @@ fn cannot_drop_required(obj_desc: &str, other_desc: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn dependent_objects_exist(

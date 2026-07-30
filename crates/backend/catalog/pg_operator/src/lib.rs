@@ -58,6 +58,7 @@ fn OidIsValid(oid: Oid) -> bool {
     oid != InvalidOid
 }
 
+#[track_caller]
 #[cold]
 fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
@@ -133,6 +134,7 @@ pub fn validOperatorName(name: &str) -> bool {
     bytes != b"!="
 }
 
+#[track_caller]
 #[cold]
 fn invalid_operator_name(name: &str) -> Box<PgError> {
     err(ERRCODE_INVALID_NAME, format!("\"{name}\" is not a valid operator name"))

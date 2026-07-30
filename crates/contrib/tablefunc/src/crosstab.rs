@@ -13,6 +13,7 @@ use types_tuple::TupleDescData;
 
 use crate::tupbuild::AttInMetadata;
 
+#[track_caller]
 #[cold]
 fn err(msg: &str, detail: &str, sqlstate: types_error::SqlState) -> Box<PgError> {
     let mut e = PgError::error(msg.to_string()).with_sqlstate(sqlstate);

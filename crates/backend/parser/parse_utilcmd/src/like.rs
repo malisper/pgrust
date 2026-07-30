@@ -554,6 +554,7 @@ pub fn expandTableLikeClause<'mcx>(
     Ok(result)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn whole_row_error(detail: String) -> Box<PgError> {
@@ -576,6 +577,7 @@ fn compression_method_name(c: u8) -> &'static str {
 
 // Clean 0A000 for unported generateClonedIndexStmt lanes (user-reachable
 // via CREATE TABLE (LIKE ... INCLUDING INDEXES)).
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cloned_index_unported(what: &str) -> Box<PgError> {

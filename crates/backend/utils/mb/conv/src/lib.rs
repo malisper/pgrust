@@ -198,6 +198,7 @@ impl Dst {
     }
 }
 
+#[track_caller]
 #[cold]
 fn invalid_encoding_number(encoding: pg_enc) -> Box<PgError> {
     Box::new(
@@ -823,6 +824,7 @@ const ISO8859_FAMILY: [pg_enc; 13] = [
     PG_ISO_8859_8,
 ];
 
+#[track_caller]
 #[cold]
 fn unexpected_encoding(encoding: pg_enc, family: &str) -> Box<PgError> {
     Box::new(

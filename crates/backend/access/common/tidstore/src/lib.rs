@@ -360,6 +360,7 @@ impl TidStoreIterResult<'_> {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn offset_out_of_range(off: OffsetNumber) -> Box<PgError> {

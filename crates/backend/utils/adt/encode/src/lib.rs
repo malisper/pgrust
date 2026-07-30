@@ -54,6 +54,7 @@ pub fn pg_find_encoding(name: &[u8]) -> Option<Codec> {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unrecognized_encoding(name: &[u8]) -> Box<PgError> {
@@ -66,6 +67,7 @@ fn unrecognized_encoding(name: &[u8]) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_large(which: &str) -> Box<PgError> {
@@ -209,6 +211,7 @@ fn b64_encode(src: &[u8], out: &mut PgVec<'_, u8>) {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn b64_unexpected_eq() -> Box<PgError> {
@@ -231,6 +234,7 @@ fn b64_invalid_symbol(s: &[u8]) -> PgResult<Box<PgError>> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn b64_invalid_end() -> Box<PgError> {
@@ -332,6 +336,7 @@ fn b64_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn esc_invalid_bytea() -> Box<PgError> {

@@ -48,12 +48,14 @@ pub struct ObjectIdentity {
     pub objargs: Vec<String>,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn lookup_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cache_lookup_failed(relid: Oid) -> Box<PgError> {

@@ -27,6 +27,7 @@ enum PrewarmType {
     Buffer,
 }
 
+#[track_caller]
 #[cold]
 fn param_err(msg: impl Into<String>) -> Box<PgError> {
     Box::new(PgError::error(msg.into()).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))

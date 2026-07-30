@@ -20,12 +20,14 @@ use crate::internals::{
 };
 use crate::TOAST_MAX_CHUNK_SIZE;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn corrupted(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATA_CORRUPTED))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn toasted_toast_chunk(valueid: Oid, relname: &str) -> Box<PgError> {

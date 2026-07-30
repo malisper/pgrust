@@ -605,12 +605,14 @@ impl Clone for FmgrInfo {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn returned_null_oid(fn_oid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("function {fn_oid} returned NULL")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn returned_null_direct(func: PGFunction) -> Box<PgError> {

@@ -182,6 +182,7 @@ pub(crate) fn startup_error_context(e: Box<PgError>, fname: &str, src: &str) -> 
 // sql_function_parse_error_callback (pg_proc.c:1000): a positioned error is
 // transposed onto the original CREATE FUNCTION text (or demoted to an
 // internal-query report); only position-less errors get the context line.
+#[track_caller]
 #[cold]
 fn validator_error_context(e: Box<PgError>, fname: &str, src: &str) -> Box<PgError> {
     let mut err = *e;
@@ -192,6 +193,7 @@ fn validator_error_context(e: Box<PgError>, fname: &str, src: &str) -> Box<PgErr
 }
 
 // sql_exec_error_callback (functions.c:1928).
+#[track_caller]
 #[cold]
 fn exec_error_context(
     e: Box<PgError>,
@@ -642,6 +644,7 @@ pub fn fmgr_sql(
     }
 }
 
+#[track_caller]
 #[cold]
 fn set_context_error() -> Box<PgError> {
     efn(

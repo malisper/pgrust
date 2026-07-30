@@ -76,6 +76,7 @@ fn split_qualified_name(s: &str) -> Option<Vec<String>> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn invalid_name_syntax() -> Box<PgError> {
     Box::new(
@@ -113,6 +114,7 @@ fn make_range_var(names: &[String]) -> PgResult<RangeVar<'_>> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn too_many_dotted_names(names: &[String]) -> Box<PgError> {
     Box::new(
@@ -177,6 +179,7 @@ pub fn currtid_internal<'mcx>(
     result
 }
 
+#[track_caller]
 #[cold]
 fn no_storage_for_currtid(nsp: &str, relname: &str) -> Box<PgError> {
     Box::new(
@@ -187,6 +190,7 @@ fn no_storage_for_currtid(nsp: &str, relname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn view_unsupported(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))

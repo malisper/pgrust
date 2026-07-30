@@ -44,6 +44,7 @@ struct ProviderRegistry {
     providers: [Option<LabelProvider>; MAX_LABEL_PROVIDERS],
 }
 
+#[track_caller]
 #[cold]
 fn invalid_parameter(message: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, message).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))

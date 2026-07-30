@@ -13,6 +13,7 @@ pub const Anum_pg_parameter_acl_oid: i32 = 1;
 pub const Anum_pg_parameter_acl_parname: i32 = 2;
 pub const Anum_pg_parameter_acl_paracl: i32 = 3;
 
+#[track_caller]
 #[cold]
 fn undefined_err(parameter: &str) -> Box<PgError> {
     Box::new(

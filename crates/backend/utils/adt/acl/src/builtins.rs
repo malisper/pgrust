@@ -162,6 +162,7 @@ fn fc_aclcontains(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     Ok(Datum::from_bool(crate::ops::aclcontains(&acl, &aip)))
 }
 
+#[track_caller]
 #[cold]
 fn no_longer_supported(what: &str) -> Box<PgError> {
     Box::new(
@@ -312,6 +313,7 @@ pub fn convert_table_name_str(mcx: mcx::Mcx<'_>, rawname: &str) -> PgResult<Oid>
     catalog_namespace::RangeVarGetRelid(&rv, 0, false)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_table_oid(oid: Oid) -> Box<PgError> {
@@ -676,6 +678,7 @@ fn convert_sequence_priv_string(priv_type: &str) -> PgResult<u64> {
     convert_any_priv_string(priv_type, SEQUENCE_PRIV_MAP)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_a_sequence(name: &str) -> Box<PgError> {

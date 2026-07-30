@@ -219,6 +219,7 @@ pub fn RelationPutHeapTuple(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn row_too_big(len: usize) -> Box<PgError> {

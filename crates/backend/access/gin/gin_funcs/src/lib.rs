@@ -14,6 +14,7 @@ use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PG
 use ::types_nodes::parsenodes::ObjectType;
 use ::types_rel::{Relation, RowExclusiveLock, RELKIND_INDEX};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn recovery_in_progress_error() -> Box<PgError> {
@@ -24,6 +25,7 @@ fn recovery_in_progress_error() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_a_gin_index(indexRel: &Relation<'_>) -> Box<PgError> {
@@ -33,6 +35,7 @@ fn not_a_gin_index(indexRel: &Relation<'_>) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn other_temp_index() -> Box<PgError> {

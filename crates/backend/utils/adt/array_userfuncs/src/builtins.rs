@@ -45,6 +45,7 @@ fn cached_elem_meta(flinfo: &mut FmgrInfo, element_type: Oid) -> PgResult<ElemMe
     Ok(*flinfo.fn_extra_ref::<ElemMeta>().unwrap())
 }
 
+#[track_caller]
 #[cold]
 fn could_not_determine_input_type() -> Box<PgError> {
     Box::new(
@@ -53,6 +54,7 @@ fn could_not_determine_input_type() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn multidim_search_unsupported() -> Box<PgError> {
     Box::new(

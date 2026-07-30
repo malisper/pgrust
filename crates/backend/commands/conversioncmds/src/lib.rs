@@ -26,6 +26,7 @@ fn name_list_to_string(names: &NodeList<'_>) -> String {
     out
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid(msg: String, sqlstate: SqlState) -> Box<PgError> {

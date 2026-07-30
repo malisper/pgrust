@@ -372,6 +372,7 @@ fn array_image<'a>(d: Datum, slot: &ResMcx) -> PgResult<&'a [u8]> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn xsd_infinite(what: &str) -> Box<PgError> {
     Box::new(
@@ -381,6 +382,7 @@ fn xsd_infinite(what: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn ts_out_of_range() -> Box<PgError> {
     Box::new(

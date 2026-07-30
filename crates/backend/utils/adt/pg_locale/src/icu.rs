@@ -45,6 +45,7 @@ thread_local! {
     static UBUF2: RefCell<Vec<UChar>> = const { RefCell::new(Vec::new()) };
 }
 
+#[track_caller]
 #[cold]
 fn icu_error(msg: String) -> Box<PgError> {
     PgError::error(msg).into()

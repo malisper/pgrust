@@ -166,6 +166,7 @@ fn reserve_item_pointer(buf: &mut PgVec<'_, u8>) -> PgResult<usize> {
     Ok(pos)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unrecognized_item_type(typ: ItemType) -> Box<PgError> {

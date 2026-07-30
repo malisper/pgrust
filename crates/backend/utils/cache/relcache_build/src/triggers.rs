@@ -241,6 +241,7 @@ fn varlena_bytes<'a>(d: datum::Datum) -> &'a [u8] {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn corrupt(relid: Oid, field: &str) -> Box<PgError> {

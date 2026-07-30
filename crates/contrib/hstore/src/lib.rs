@@ -345,6 +345,7 @@ fn fc_hstore_from_arrays(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     ret_hstore(fcinfo, &build_hstore(&pairs))
 }
 
+#[track_caller]
 #[cold]
 fn null_key_err() -> Box<PgError> {
     Box::new(

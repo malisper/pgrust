@@ -91,6 +91,7 @@ fn unported(what: &str) -> ! {
 // unported: user-reachable unported-feature legs raise a clean
 // ERRCODE_FEATURE_NOT_SUPPORTED error instead of panicking; invariant breaks
 // keep the loud `unported` panic above.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_unported(what: &str) -> Box<PgError> {
@@ -4087,6 +4088,7 @@ fn permission_denied(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Box<PgError>> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_args(nargs: usize) -> Box<PgError> {
@@ -4099,6 +4101,7 @@ fn too_many_args(nargs: usize) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_TOO_MANY_ARGUMENTS))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn retset_error() -> Box<PgError> {

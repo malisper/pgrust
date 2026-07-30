@@ -841,6 +841,7 @@ fn notice_with_detail(msg: String, detail: String) -> PgResult<()> {
     elog_seams::ereport::call(PgError::new(NOTICE, msg).with_detail(detail))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_columns() -> Box<PgError> {
@@ -862,12 +863,14 @@ pub(crate) fn duplicate_column(colname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wrong_parent(msg: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_parents() -> Box<PgError> {
@@ -877,6 +880,7 @@ fn too_many_parents() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_column_definition(msg: String) -> Box<PgError> {
@@ -885,6 +889,7 @@ fn invalid_column_definition(msg: String) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn child_generation_expression(attname: &str) -> Box<PgError> {
@@ -898,6 +903,7 @@ fn child_generation_expression(attname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn generation_kind_conflict(attname: &str, parent: u8, child: u8) -> Box<PgError> {
@@ -918,6 +924,7 @@ fn generation_kind_conflict(attname: &str, parent: u8, child: u8) -> Box<PgError
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn conflicting_inherited_defaults(colname: &str, generated: bool) -> Box<PgError> {
@@ -939,6 +946,7 @@ fn conflicting_inherited_defaults(colname: &str, generated: bool) -> Box<PgError
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn column_conflict(
@@ -1733,6 +1741,7 @@ fn drop_parent_dependency<'mcx>(
     dep_rel.close(types_rel::RowExclusiveLock)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn child_con_conflict(conname: &str, child_name: &str, kind: &str) -> Box<PgError> {

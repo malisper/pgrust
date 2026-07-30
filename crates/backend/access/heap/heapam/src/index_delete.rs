@@ -262,6 +262,7 @@ fn index_delete_check_htid(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_corrupted(msg: String) -> Box<PgError> {

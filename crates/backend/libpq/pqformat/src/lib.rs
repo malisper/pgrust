@@ -337,6 +337,7 @@ pub fn pq_getmsgend(msg: &StringInfo<'_>) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn protocol_violation(msg: &'static str) -> Box<PgError> {
@@ -345,6 +346,7 @@ fn protocol_violation(msg: &'static str) -> Box<PgError> {
         .into()
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unsupported_integer_size(b: i32) -> Box<PgError> {

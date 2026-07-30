@@ -153,6 +153,7 @@ pub fn GetDefaultOpClass(type_id: Oid, am_id: Oid) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn multiple_default_opclasses(type_id: Oid) -> Box<PgError> {

@@ -384,6 +384,7 @@ fn postgres_get_foreign_plan<'mcx>(
 
 // ---------- execution (phase 2: src/exec.rs over src/connection.rs) ----------
 
+#[track_caller]
 #[cold]
 fn remote_estimate_unported() -> Box<PgError> {
     Box::new(
@@ -395,6 +396,7 @@ fn remote_estimate_unported() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn join_upper_unported() -> Box<PgError> {
     Box::new(

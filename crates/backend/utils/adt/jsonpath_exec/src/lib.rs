@@ -2525,6 +2525,7 @@ fn compare_strings(s1: &[u8], s2: &[u8]) -> i32 {
     }
 }
 
+#[track_caller]
 #[cold]
 fn tz_cast_error(type1: &str, type2: &str) -> Box<PgError> {
     Box::new(

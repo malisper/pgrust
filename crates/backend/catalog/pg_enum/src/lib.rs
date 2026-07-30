@@ -94,6 +94,7 @@ fn oid_key(attno: AttrNumber, value: Oid) -> ScanKeyData {
     key
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_label(lab: &str) -> Box<PgError> {
@@ -542,6 +543,7 @@ fn binary_upgrade_incompatible_neighbor() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn label_exists(label: &str) -> Box<PgError> {
@@ -551,6 +553,7 @@ fn label_exists(label: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_existing_label(label: &str) -> Box<PgError> {

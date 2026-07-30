@@ -27,6 +27,7 @@ use ::types_spgist::state::{
 };
 use ::types_spgist::{spgConfigIn, spgConfigOut};
 
+#[track_caller]
 #[cold]
 fn unrecognized_range_strategy(strategy: u16) -> Box<PgError> {
     Box::new(PgError::error(format!("unrecognized range strategy: {strategy}")))

@@ -31,6 +31,7 @@ const SizeOfItemId: usize = core::mem::size_of::<::types_storage::bufpage::ItemI
 #[repr(align(8))]
 struct TempPage([u8; BLCKSZ]);
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn dedup_add_failed(what: &str) -> Box<PgError> {

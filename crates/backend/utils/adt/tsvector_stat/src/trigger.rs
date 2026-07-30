@@ -22,12 +22,14 @@ use ::types_tuple::HeapTupleData;
 
 use crate::{detoasted_image, TEXTOID, TSVECTOROID};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn internal_err(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("tsvector_update_trigger: {msg}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn col_err(sqlstate: ::types_error::SqlState, msg: String) -> Box<PgError> {

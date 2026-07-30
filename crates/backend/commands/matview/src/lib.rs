@@ -676,6 +676,7 @@ fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
     key
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn internal(msg: String) -> Box<PgError> {

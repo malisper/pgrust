@@ -296,6 +296,7 @@ pub fn init_array_result_arr<'mcx>(
     })
 }
 
+#[track_caller]
 #[cold]
 fn diff_dimensionality() -> Box<PgError> {
     Box::new(

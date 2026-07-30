@@ -109,6 +109,7 @@ fn entry_result(fcinfo: &Fcinfo, e: &GISTENTRY) -> PgResult<Datum> {
     byref_result(fcinfo.result_mcx(), bytes)
 }
 
+#[track_caller]
 #[cold]
 fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
     Box::new(PgError::error(format!(

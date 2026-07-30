@@ -38,6 +38,7 @@ struct AggCats {
     key: Option<TypeCat>,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_aggregate_context(name: &str) -> Box<PgError> {
@@ -46,6 +47,7 @@ fn non_aggregate_context(name: &str) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_arg_type(argno: usize) -> Box<PgError> {
@@ -57,6 +59,7 @@ fn no_arg_type(argno: usize) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_object_key() -> Box<PgError> {
@@ -210,6 +213,7 @@ pub fn fc_json_agg_finalfn(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     finalize(fcinfo, "json_agg_finalfn", b"]")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate_json_object_key(key: &[u8]) -> Box<PgError> {

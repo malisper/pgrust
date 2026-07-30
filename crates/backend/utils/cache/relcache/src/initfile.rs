@@ -213,6 +213,7 @@ fn finish_relcache_entries() -> PgResult<()> {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cache_lookup_failed(relid: Oid) -> Box<PgError> {
@@ -976,6 +977,7 @@ fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
     Ok(true)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn could_not_write(e: std::io::Error) -> Box<PgError> {

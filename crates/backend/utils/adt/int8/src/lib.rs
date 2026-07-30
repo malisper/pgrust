@@ -49,6 +49,7 @@ macro_rules! overflow_fns {
 
 overflow_fns!(pg_add_s64_overflow, pg_sub_s64_overflow, pg_mul_s64_overflow, i64);
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bigint_out_of_range() -> Box<PgError> {
@@ -57,6 +58,7 @@ fn bigint_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn integer_out_of_range() -> Box<PgError> {
@@ -65,6 +67,7 @@ fn integer_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn smallint_out_of_range() -> Box<PgError> {
@@ -73,18 +76,21 @@ fn smallint_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn oid_out_of_range() -> Box<PgError> {
     Box::new(PgError::error("OID out of range").with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn division_by_zero() -> Box<PgError> {
     Box::new(PgError::error("division by zero").with_sqlstate(ERRCODE_DIVISION_BY_ZERO))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_preceding_following() -> Box<PgError> {

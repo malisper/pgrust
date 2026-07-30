@@ -33,6 +33,7 @@ pub fn builtin_meta(elmtype: Oid) -> (i32, bool, u8) {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn array_alloc_exceeded() -> Box<PgError> {

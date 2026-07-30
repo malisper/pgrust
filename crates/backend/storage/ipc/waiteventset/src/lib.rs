@@ -60,6 +60,7 @@ static POSTMASTER_WAKER: AtomicU64 = AtomicU64::new(0);
 
 // Only the epoll/kqueue backends raise OS errors; the wasm stub never does.
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn os_error(level: ErrorLevel, msg: &str) -> Box<PgError> {
@@ -69,6 +70,7 @@ fn os_error(level: ErrorLevel, msg: &str) -> Box<PgError> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wes_error(msg: &str) -> Box<PgError> {

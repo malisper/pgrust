@@ -145,6 +145,7 @@ pub fn btoidvectorcmp(a: &oidvector, a_values: &[Oid], b: &oidvector, b_values: 
     0
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_valid_oidvector() -> Box<PgError> {

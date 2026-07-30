@@ -406,6 +406,7 @@ pub fn lookup_type_cache(type_id: Oid, flags: i32) -> PgResult<Rc<TypeCacheEntry
     }
 }
 
+#[track_caller]
 #[cold]
 fn type_does_not_exist(type_id: Oid) -> Box<PgError> {
     Box::new(
@@ -414,6 +415,7 @@ fn type_does_not_exist(type_id: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn shell_type(t: &PgTypeTypcacheShape) -> Box<PgError> {
     let name = String::from_utf8_lossy(t.typname.name_str()).into_owned();
@@ -834,6 +836,7 @@ fn resolve_hash_proc(e: &TypeCacheEntry, procnum: i16) -> PgResult<Oid> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn missing_btorder_proc(opcintype: Oid, opfamily: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(
@@ -1168,6 +1171,7 @@ pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64>
     }
 }
 
+#[track_caller]
 #[cold]
 fn record_type_not_registered() -> Box<PgError> {
     Box::new(

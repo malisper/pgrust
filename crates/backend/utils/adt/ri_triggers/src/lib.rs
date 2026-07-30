@@ -1429,6 +1429,7 @@ fn errtableconstraint<'mcx>(
     e
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn match_full_mixing_error<'mcx>(

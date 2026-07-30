@@ -159,6 +159,7 @@ pub fn array_bitmap_copy(
     }
 }
 
+#[track_caller]
 #[cold]
 fn wrong_subscripts() -> Box<PgError> {
     Box::new(
@@ -167,6 +168,7 @@ fn wrong_subscripts() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn subscript_out_of_range() -> Box<PgError> {
     Box::new(
@@ -175,6 +177,7 @@ fn subscript_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn array_size_exceeded() -> Box<PgError> {
     Box::new(
@@ -432,6 +435,7 @@ fn extract_slice(
     let _ = dest_offset;
 }
 
+#[track_caller]
 #[cold]
 fn fixed_length_slice_update() -> Box<PgError> {
     Box::new(
@@ -440,6 +444,7 @@ fn fixed_length_slice_update() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn slice_bounds_missing() -> Box<PgError> {
     Box::new(
@@ -452,6 +457,7 @@ fn slice_bounds_missing() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn source_array_too_small() -> Box<PgError> {
     Box::new(
@@ -459,6 +465,7 @@ fn source_array_too_small() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn upper_lt_lower() -> Box<PgError> {
     Box::new(

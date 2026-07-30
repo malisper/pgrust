@@ -78,11 +78,13 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("xloginsert.c", 0, func)
 }
 
+#[track_caller]
 #[cold]
 fn too_much_wal_data(detail: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, format!("too much WAL data: {detail}")))
 }
 
+#[track_caller]
 #[cold]
 fn misordered_block_ids(prev: u8, cur: u8) -> Box<PgError> {
     Box::new(PgError::new(

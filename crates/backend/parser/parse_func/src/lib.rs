@@ -944,6 +944,7 @@ fn hypothetical_args_mismatch_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ordered_set_min_direct_args_error(
@@ -983,6 +984,7 @@ fn ordered_set_min_direct_args_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn named_arg_error(pstate: &ParseState<'_, '_>, msg: String, location: ParseLoc) -> Box<PgError> {
@@ -1094,6 +1096,7 @@ fn build_window_func<'mcx>(
     Ok(wfunc.seal())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_not_supported(
@@ -1830,6 +1833,7 @@ fn func_signature_string(parts: &[&str], argnames: &[&str], argtypes: &[Oid]) ->
     Ok(sig)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn variadic_not_array(pstate: &ParseState<'_, '_>, fargs: &NodeList<'_>) -> Box<PgError> {
@@ -1910,6 +1914,7 @@ fn expr_location(node: Node<'_>) -> ParseLoc {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_arguments(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -1924,6 +1929,7 @@ fn too_many_arguments(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<Pg
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wrong_object_type(
@@ -1942,6 +1948,7 @@ fn wrong_object_type(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wrong_object_type_hint(
@@ -1962,6 +1969,7 @@ fn wrong_object_type_hint(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ambiguous_function(
@@ -2001,6 +2009,7 @@ fn ambiguous_function(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_function(
@@ -2101,6 +2110,7 @@ fn lookup_func_name_internal(
     }
 }
 
+#[track_caller]
 #[cold]
 fn func_name_not_unique(parts: &[&str]) -> Box<PgError> {
     Box::new(

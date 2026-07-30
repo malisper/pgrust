@@ -219,6 +219,7 @@ fn validate_pkattnums(
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 fn invalid_attnum(n: i32) -> Box<PgError> {
     Box::new(
@@ -417,6 +418,7 @@ fn get_sql_update(
     Ok(buf)
 }
 
+#[track_caller]
 #[cold]
 fn source_not_found() -> Box<PgError> {
     Box::new(

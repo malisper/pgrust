@@ -15,6 +15,7 @@ use types_trigger::{
 use types_trigger_call::trigger_data_from_fcinfo;
 use types_tuple::{HeapTupleData, HEAP_XACT_MASK, SizeofHeapTupleHeader};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn protocol_err(msg: &str) -> Box<PgError> {

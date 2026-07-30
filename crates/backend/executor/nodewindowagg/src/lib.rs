@@ -245,12 +245,14 @@ pub struct WindowAggStateData<'mcx> {
     status: WaStatus,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wfunc_lookup_failed(fnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for aggregate {fnoid}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wfunc_permission_denied(fnoid: Oid) -> Box<PgError> {
@@ -260,6 +262,7 @@ fn wfunc_permission_denied(fnoid: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ntile_arg_error() -> Box<PgError> {
@@ -269,6 +272,7 @@ fn ntile_arg_error() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn nth_value_arg_error() -> Box<PgError> {
@@ -278,6 +282,7 @@ fn nth_value_arg_error() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn frame_offset_null(starting: bool) -> Box<PgError> {
@@ -288,6 +293,7 @@ fn frame_offset_null(starting: bool) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn frame_offset_negative(starting: bool) -> Box<PgError> {
@@ -298,6 +304,7 @@ fn frame_offset_negative(starting: bool) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn moving_transfn_returned_null() -> Box<PgError> {

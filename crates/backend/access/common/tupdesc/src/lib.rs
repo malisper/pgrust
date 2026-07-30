@@ -602,12 +602,14 @@ fn datum_is_equal(v1: Datum, v2: Datum, attbyval: bool, attlen: i16) -> bool {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_lookup_failed(oidtypeid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for type {oidtypeid}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unsupported_type(oidtypeid: Oid) -> Box<PgError> {

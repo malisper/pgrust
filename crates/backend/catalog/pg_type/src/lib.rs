@@ -141,6 +141,7 @@ pub struct TypeCreateParams<'a> {
     pub defaultTypeBin: Option<&'a str>,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
@@ -603,6 +604,7 @@ pub fn makeMultirangeTypeName(rangeTypeName: &str, typeNamespace: Oid) -> PgResu
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn multirange_name_taken(name: &str, range_type_name: &str) -> Box<PgError> {

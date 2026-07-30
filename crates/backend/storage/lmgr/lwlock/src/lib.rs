@@ -171,12 +171,14 @@ impl HeldLWLocks {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_too_many_lwlocks() -> Box<PgError> {
     Box::new(PgError::new(ERROR, "too many LWLocks taken"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_lock_not_held(lock: &LWLock) -> Box<PgError> {

@@ -111,6 +111,7 @@ impl DrPrintsimple {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unsupported_type(oid: ::types_core::Oid) -> Box<PgError> {

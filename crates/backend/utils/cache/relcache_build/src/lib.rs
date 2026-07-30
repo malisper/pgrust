@@ -69,6 +69,7 @@ pub(crate) fn req(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -
     Ok(d)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unexpected_null(attno: i32) -> Box<PgError> {

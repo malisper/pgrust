@@ -20,6 +20,7 @@ use crate::{cache_mcx, store, with_state, InProgressEnt};
 pub const GLOBALTABLESPACE_OID: Oid = 1664;
 pub const HEAP_TABLE_AM_OID: Oid = 2;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_relpersistence(c: u8) -> Box<PgError> {

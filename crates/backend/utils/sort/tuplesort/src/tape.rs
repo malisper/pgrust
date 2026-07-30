@@ -864,6 +864,7 @@ impl<'m> TapeState<'m> {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_runs() -> Box<PgError> {
@@ -876,6 +877,7 @@ fn too_many_runs() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unexpected_tape(msg: &'static str) -> Box<PgError> {

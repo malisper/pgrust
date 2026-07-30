@@ -84,6 +84,7 @@ pub struct RangeInfo {
     pub own_typalign: u8,
 }
 
+#[track_caller]
 #[cold]
 fn not_a_range_type(rngtypid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("type {rngtypid} is not a range type")))

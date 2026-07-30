@@ -14,6 +14,7 @@ use types_tuple::varatt::{
     varatt_is_1b_e, varatt_is_external_expanded, varsize_any, vartag_external, VARTAG_EXPANDED_RW,
 };
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_datum_pointer() -> Box<PgError> {
@@ -22,6 +23,7 @@ fn invalid_datum_pointer() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_typlen(typlen: i16) -> Box<PgError> {

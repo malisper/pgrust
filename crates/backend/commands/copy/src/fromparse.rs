@@ -32,6 +32,7 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("copyfromparse.c", 0, funcname)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bad_copy_format(msg: &str) -> Box<PgError> {
@@ -41,6 +42,7 @@ fn bad_copy_format(msg: &str) -> Box<PgError> {
 const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
 const PQ_LARGE_MESSAGE_LIMIT: i32 = 0x3fffffff - 1;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unexpected_default_marker(attname: &str) -> Box<PgError> {
@@ -51,6 +53,7 @@ fn unexpected_default_marker(attname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unexpected_eof() -> Box<PgError> {
@@ -1254,6 +1257,7 @@ fn hex_val(c: u8) -> u32 {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn literal_cr(is_csv: bool) -> Box<PgError> {
@@ -1275,6 +1279,7 @@ fn literal_cr(is_csv: bool) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn literal_nl(is_csv: bool) -> Box<PgError> {
@@ -1293,24 +1298,28 @@ fn literal_nl(is_csv: bool) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn marker_not_alone() -> Box<PgError> {
     bad_copy_format("end-of-copy marker is not alone on its line")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unexpected_eof_in_copy_data() -> Box<PgError> {
     bad_copy_format("unexpected EOF in COPY data")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn extra_data() -> Box<PgError> {
     bad_copy_format("extra data after last expected column")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_data(attname: &str) -> Box<PgError> {

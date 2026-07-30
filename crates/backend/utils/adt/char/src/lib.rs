@@ -91,6 +91,7 @@ pub fn i4tochar(arg1: i32) -> PgResult<i8> {
     Ok(arg1 as i8)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn out_of_range() -> Box<PgError> {
