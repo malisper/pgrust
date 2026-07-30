@@ -16,9 +16,9 @@ oid	name	source_file	status	class	notes
 48	tidin	crates/backend/utils/adt/scalar/src/builtins.rs	divergence(PLATFORM-DEPENDENT: glibc PG accepts empty fields '(,5)'->(0,5), BSD/macOS PG rejects — strtoul errno-on-no-conversion variance; pgrust matches BSD arm) + proved(len<=10 fenced + spots)	fast	ground-truthed on real PG 18 both platforms 2026-07-28; ruling pending: match glibc-target vs ratify; upstream-report-worthy (platform-dependent acceptance); proofs/misc-ops
 49	tidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved(block<1e4 x full-u16 + 12 spots; >=1e4 band = CBMC memcpy artifact, witnessed)	fast	proofs/misc-ops
 50	xidin	crates/backend/utils/adt/scalar/src/builtins.rs	proved(same core as oidin)	fast	proofs/misc-ops
-51	xidout	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	xidout core lib.rs:47 %10 digit emission u32 into retained scratch; oidout 1799 rig (band [0,1e7)+spots); host proofs/misc-ops
-52	cidin	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	uint32in_subr = oidin/xidin core (50 proved 'same core as oidin'); free sibling; host proofs/misc-ops
-53	cidout	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	pg_ultoa_n, shared fc body with oidout 1799 (proved); free sibling
+51	xidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved([0,1e7) magnitude bands (r1/d5/d6/d7a/d7b) + coverage + spots d8-d10 incl u32::MAX; remainder sloped wall)	fast	0.6-18s per band; SPEC-ANCHOR: C ref is pg_ultoa_n (C xidout itself is snprintf %lu — no CBMC model); proofs/scalar-misc wave5
+52	cidin	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	wave-5 triage: uint32in_subr uses strtoul(s,e,0) BASE-0 (0x/octal accepted) — platform-flavored edge semantics; needs ratified libc base-0 model + ground-truth pass before harnessing (NEXT-200 misfiled as plain digit-band ladder); proofs/scalar-misc
+53	cidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved([0,1e7) magnitude bands (r1/d5/d6/d7a/d7b) + coverage + spots d8-d10 incl u32::MAX; remainder sloped wall)	fast	2.4-12.4s per band; same pg_ultoa_n spec-anchor; wrapper TLS scratch in-theorem; proofs/scalar-misc wave5
 54	oidvectorin	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	builtins.rs:494 uint32in_subr loop + 24B oidvector header image; per-(dim<=2,len<=5) cells; mcx-stubs; PgVec leak -> forget; soft-error plane rides uint32in_subr (proved family)
 55	oidvectorout	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	builtins.rs:527 pg_ultoa_n per element + ' ' at digit-dependent offsets; banded digit-count x dim<=2 cells (tidout 49 precedent); valid-oidvector fence (release-effective, 457 lesson)
 56	boollt	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-bool2)	fast	proofs/bool; <1s; kissat
@@ -32,7 +32,7 @@ oid	name	source_file	status	class	notes
 66	int4lt	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain)	fast	<=0.03s; proofs/int-cmp
 67	texteq	crates/backend/utils/adt/varlena/src/builtins.rs	proved(wrapper-level varlena; C-collation fence; len<=8/side sym)	fast	1-5s; proofs/text-cmp
 68	xideq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level)	fast	0.12s; eq-only, modular ordering out of scope; proofs/scalar-misc
-69	cideq	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	u32 eq wrapper-level = xideq 68 (proved 0.12s); minutes; host proofs/scalar-misc
+69	cideq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level)	fast	0.35s; proofs/scalar-misc wave5
 70	charne	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 72	charle	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 73	chargt	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
@@ -646,7 +646,7 @@ oid	name	source_file	status	class	notes
 1178	timestamptz_date	crates/backend/utils/adt/adt_date/src/builtins.rs	excluded(wall: timestamp2tm + date2j both directions)	-	lib.rs:535
 1179	jsonb_path_query_tz	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
 1180	jsonb_path_query_array_tz	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
-1181	xid_age	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	seam	core = IsNormal lattice + wrapping_sub, FAST; xact_seams::get_stable_latest_transaction_id seam both sides + skew control (state-seam probe pattern); C xid.c xid_age
+1181	xid_age	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level, modulo GetStableLatestTransactionId seam model)	fast	0.29s; seam-skew control fails as designed; proofs/scalar-misc wave5
 1188	timestamp_mi	crates/backend/utils/adt/adt_date/src/builtins.rs	wall(divider: checked-sub feeds justify_hours /USECS_PER_DAY; probe 240s rc=124) + proved(spots: sentinels/inf-inf-err/sub-overflow/justify-carry 11.4s) + tested(differential 2M+grid)	wall	also discharges 2031 (same C fn + wrapper); proofs/datetime-cmp
 1189	timestamptz_pl_interval	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(planes: m0d0 LITERAL + NOBEGIN/NOEND; add-overflow + IS_VALID Err 22008 parity; julian arms OUT, loud-trapped both sides)	fast	1.3-2.0s/plane; NOT full-domain (j2date wall); proofs/datetime-cmp wave7
 1190	timestamptz_mi_interval	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(planes: m0d0 LITERAL + NOBEGIN/NOEND; Err 22008 parity; julian arms OUT)	fast	1.3-2.0s/plane; proofs/datetime-cmp wave7
@@ -1265,8 +1265,8 @@ oid	name	source_file	status	class	notes
 2221	regtypeout	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
 2230	pg_stat_clear_snapshot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 2232	pg_get_function_identity_arguments	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
-2233	hashtid	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	hash_bytes over fixed 6 raw tid bytes; trivial; host proofs/hash-rows
-2234	hashtidextended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	= 2233 + full symbolic seed
+2233	hashtid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full symbolic 6-byte tid image, wrapper-level)	fast	2.3s; C hashes the 4-byte block fold of all 6 bytes — len-skew control in family; proofs/hash-rows wave5
+2234	hashtidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full symbolic 6-byte tid image + full symbolic seed, wrapper-level)	fast	6.7s; proofs/hash-rows wave5
 2246	fmgr_internal_validator	crates/backend/executor/sql_functions/src/lib.rs	excluded(state: catalog + MemoryContext)	-	sql_functions/src/lib.rs:1177
 2247	fmgr_c_validator	crates/backend/catalog/pg_proc/src/lib.rs	excluded(state)	-	pg_proc catalog state
 2248	fmgr_sql_validator	crates/backend/executor/sql_functions/src/lib.rs	excluded(state: catalog + parser)	-	sql_functions/src/lib.rs:1196
@@ -1391,7 +1391,7 @@ oid	name	source_file	status	class	notes
 2416	unknownrecv	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	lib.rs:522 + trailing-NUL push
 2417	unknownsend	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(wall: derived-length copy)	-	lib.rs:529; length from position(NUL) = pstrdup class; concrete spot proofs only
 2418	oidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	builtins.rs:108 arg_stringinfo, logic wholly in wrapper (= xidrecv 2440 class); core-level would be bare pq_getmsgint
-2419	oidsend	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	= xidsend 2441 shared shape, fixed 4-byte send; one harness covers 2419/2441/2443. Host proofs/scalar-misc
+2419	oidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level, modulo static-buffer allocator model)	slow	70.4s kissat; wave-5 2026-07-30; proofs/scalar-misc
 2420	oidvectorrecv	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 2421	oidvectorsend	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 2422	namerecv	crates/backend/utils/adt/name/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	name/builtins.rs:196 + format! errdetail (fmt trap)
@@ -1411,11 +1411,11 @@ oid	name	source_file	status	class	notes
 2436	boolrecv	crates/backend/utils/adt/bool/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	bool/src/builtins.rs:15 arg_stringinfo
 2437	boolsend	crates/backend/utils/adt/bool/src/builtins.rs	candidate	ladder	boolsend bool/src/lib.rs:95; fixed 1-byte send image; mcx-stubs. Host proofs/bool
 2438	tidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	builtins.rs:354 arg_stringinfo (= xidrecv 2440 class); core-level re-open: two pq_getmsgint + fixed 6B image
-2439	tidsend	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	fc_tidsend scalar/src/builtins.rs:362; fixed 6-byte image. Host proofs/scalar-misc
+2439	tidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full symbolic 6-byte tid image, wrapper-level, modulo static-buffer allocator model)	slow	94.1s kissat; wave-5 2026-07-30; proofs/scalar-misc
 2440	xidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	scalar/src/builtins.rs:159
-2441	xidsend	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	scalar/src/builtins.rs:165 fixed 4-byte send. Host proofs/scalar-misc
+2441	xidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level, modulo static-buffer allocator model)	slow	86.8s kissat; same registered fc_xidsend body as cidsend; wave-5 2026-07-30; proofs/scalar-misc
 2442	cidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	shared fc with xidrecv
-2443	cidsend	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	shared fc body with xidsend; one harness both oids. Host proofs/scalar-misc
+2443	cidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level, modulo static-buffer allocator model)	slow	86.8s kissat; same registered fc_xidsend body as xidsend; wave-5 2026-07-30; proofs/scalar-misc
 2444	regprocrecv	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
 2445	regprocsend	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
 2446	regprocedurerecv	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
@@ -1687,14 +1687,14 @@ oid	name	source_file	status	class	notes
 2936	database_to_xml	crates/backend/utils/adt/xmlmap/src/builtins.rs	excluded(state)	-	catalog-to-xml SQL execution
 2937	database_to_xmlschema	crates/backend/utils/adt/xmlmap/src/builtins.rs	excluded(state)	-	catalog-to-xml SQL execution
 2938	database_to_xml_and_xmlschema	crates/backend/utils/adt/xmlmap/src/builtins.rs	excluded(state)	-	catalog-to-xml SQL execution
-2939	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(kernels: strtou64 len<=6 value+end; empty-input reject verdict+22P02+level; accept-arm image = wall)	fast/wall-split	parse_snapshot lib.rs:186; strtou64 lib.rs:125 libc comment-claim MACHINE-CHECKED modulo libc strtoull model (native diff 4M checks 0 diffs, host libc); accept arm walls in CNF on PgVec push/grow machinery (TRIAGE wall class 5) even at concrete spots — refactor proposal: exact-capacity image build + fixed-array xips core; cells+spots kept as high-mem retry vehicles; proofs/xid8snap
+2939	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	wall(pg_snapshot_in cap6 600s); strtou64 core proved(len<=8, modulo glibc-strtoul model, shim X4) 6.0s	wall	wave-5 2026-07-30; proofs/scalar-misc xid8snap; UNRECONCILED vs lane pick-b (proofs/xid8snap): pick-b additionally proved kernels strtou64 len<=6 value+end + empty-input reject verdict/22P02/level and called the row proved(wall-split); accept-arm image walls on BOTH lanes — needs adjudication
 2940	pg_snapshot_out	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(wall: result-image + full-u64 digit-emission /10 chain)	wall	snapshot_out_bytes lib.rs:236 push_u64 /10 loop over full u64 = sloped-wall class; read-side kernels (SnapView layout) proved in proofs/xid8snap
 2941	pg_snapshot_recv	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	snapshot_recv lib.rs:277 via pqformat StringInfo; recv-direction precedent 77-127s (harness-built StringInfo); validation lattice mirrors parse (proved SnapView reads reusable). Host proofs/xid8snap
 2942	pg_snapshot_send	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	fc builtins.rs:48 pq_sendint32/64 fixed-offset BE image, length linear in nxip; send-direction reads prove per precedent. Host proofs/xid8snap
-2943	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)	-	GetTopFullTransactionId ASSIGNS an xid (side effect) + RecoveryInProgress
+2943	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state:live-xact)	-	live transaction/snapshot state, nothing value-level to prove; proofs/scalar-misc wave-5 triage
 2944	pg_current_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		ReadNextFullTransactionId + GetActiveSnapshot server state; its epoch-widening core full_xid_from_allowable_at lib.rs:81 PROVED full-domain (fenced to transam.h caller contract) in proofs/xid8snap
 2945	pg_snapshot_xmin	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	eq_snapview_layout 0.7s: SnapView offset arithmetic (lib.rs:24-26 C-struct-offset comment claim) vs C member reads; proofs/xid8snap
-2946	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	same theorem as 2945; proofs/xid8snap
+2946	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(nxip<=2 symbolic snapshot + epoch-core fence (transam.h Assert precondition), wrapper-level)	fast	4.4s; proofs/scalar-misc xid8snap wave5
 2947	pg_snapshot_xip	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(engine: SRF protocol)		funcapi SRF machinery; the xip[i] element read itself proved in eq_snapview_layout (proofs/xid8snap)
 2948	pg_visible_in_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(linear arm nxip<=4 full-symbolic; bsearch arm nxip 31..=33 literal-split, sorted fence, modulo bsearch libc model)	fast	is_visible_fxid lib.rs:93; linear 17.7s kissat; bsearch cells 27-62s default solver (kissat false-fails unwinding asserts; load-inflated); sorted fence = superset of on-disk rep; both-arm covers; proofs/xid8snap
 2952	uuid_in	crates/backend/utils/adt/uuid/src/builtins.rs	proved(cstr lens 32/36/38, verdict+bytes)	fast	19-22s under 30s cap; msg text stubbed (value-space only); proofs/uuid
@@ -1708,7 +1708,7 @@ oid	name	source_file	status	class	notes
 2960	uuid_cmp	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full pairs, sign-equiv)	fast	0.15s; memcmp magnitude = ratified non-surface (btree contract is sign); proofs/uuid
 2961	uuid_recv	crates/backend/utils/adt/uuid/src/builtins.rs	candidate	ladder	uuid_recv lib.rs:255 fixed 16B pq_getmsgbytes copy; CORE-level StringInfo (date_recv 2468 precedent); host proofs/uuid
 2962	uuid_send	crates/backend/utils/adt/uuid/src/builtins.rs	candidate	ladder	uuid_send lib.rs:262 fixed 16B send image; int4send precedent; mcx-stubs; host proofs/uuid
-2963	uuid_hash	crates/backend/utils/adt/uuid/src/builtins.rs	candidate	fast	hash_bytes over fixed 16B; trivial; host proofs/hash-rows
+2963	uuid_hash	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16], hash kernel in-theorem, wrapper-level)	fast	2.8s; proofs/uuid
 2971	booltext	crates/backend/utils/adt/bool/src/builtins.rs	candidate	ladder	bool/src/lib.rs:102 cstring_to_text of two literal images; mcx-stubs. Host proofs/bool
 2978	pg_stat_get_function_calls	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 2979	pg_stat_get_function_total_time	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
@@ -1887,9 +1887,9 @@ oid	name	source_file	status	class	notes
 3236	pg_lsn_ne	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64xu64)	fast	<0.1s; proofs/pg_lsn
 3237	pg_lsn_mi	crates/backend/utils/adt/pg_lsn/src/builtins.rs	blocked(numeric fixed-buffer core (DigitBuf))	-	pg_lsn_mi lib.rs:117: u64 diff -> to_string/%10 emission -> numeric_in -> NumericImage; error-free by construction; joins the DigitBuf lane
 3238	pg_lsn_recv	crates/backend/utils/adt/pg_lsn/src/builtins.rs	candidate	ladder	pg_lsn_recv lib.rs:81 bare pq_getmsgint64; CORE-level StringInfo (date_recv precedent); minutes; host proofs/pg_lsn
-3239	pg_lsn_send	crates/backend/utils/adt/pg_lsn/src/builtins.rs	candidate	ladder	pg_lsn_send lib.rs:85 fixed 8B send = int8send 2409 (proved); free sibling; host proofs/pg_lsn
+3239	pg_lsn_send	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64, wrapper-level, modulo static-buffer allocator model)	slow	140.4s kissat, unwinding assertions pass; byte-skew control fails as designed (102s); proofs/pg_lsn wave5
 3251	pg_lsn_cmp	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64xu64)	fast	0.04s; proofs/pg_lsn
-3252	pg_lsn_hash	crates/backend/utils/adt/pg_lsn/src/builtins.rs	candidate	fast	builtins.rs:101 sign-conditional hi/lo xor fold + hash_bytes_uint32 = hashxid8 6421 shape (candidate, same body); host proofs/hash-rows
+3252	pg_lsn_hash	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64 lsn (rides as i64 datum), wrapper-level)	fast	3.6s; proofs/hash-rows wave5
 3255	bttextsortsupport	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(port gap: unported)	-	builtins.rs:561 panics "abbreviated-key SortSupport unported"
 3259	generate_series	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state: SRF fn_extra + DigitBuf)	-	GenerateSeriesNumeric series.rs:29/50
 3260	generate_series	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state: SRF fn_extra + DigitBuf)	-	same PGFunction, 2-arg form series.rs:41
@@ -1960,7 +1960,7 @@ oid	name	source_file	status	class	notes
 3343	jsonb_delete	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(wall: CNF width / image)	-	fc_jsonb_delete_array builtins.rs:486
 3344	cash_mul_int8	crates/backend/utils/adt/cash/src/builtins.rs	proved(full-i64x2, wrapper-level; value+verdict+sqlstate-22003)	fast	5.0s; proofs/cash
 3345	cash_div_int8	crates/backend/utils/adt/cash/src/builtins.rs	proved(16-bit-dividend x full-i64; full-i64/-1 fenced!=MIN; full-i64/0 22012) + divergence(candidate: MIN/-1 — pgrust PANICS (crash-and-restart); C x86-64 PG18.4 = clean ERROR floating-point exception via SIGFPE handler, session SURVIVES; C aarch64 = SILENT WRONG VALUE (unchanged negative); all three differ, pgrust is the only backend-killer; int8div 22003 on both arches = fix precedent; coordinator-verified 2026-07-29)	ladder	0.3-30s; proofs/cash
-3348	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)	-	GetTopFullTransactionIdIfAny session xact state
+3348	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state:live-xact)	-	live transaction/snapshot state, nothing value-level to prove; proofs/scalar-misc wave-5 triage
 3352	pg_get_partkeydef	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 3353	pg_ls_logdir	crates/backend/utils/adt/genfile/src/builtins.rs	excluded(state)	-	server filesystem access
 3354	pg_ls_waldir	crates/backend/utils/adt/genfile/src/builtins.rs	excluded(state)	-	server filesystem access
@@ -1993,8 +1993,8 @@ oid	name	source_file	status	class	notes
 3409	time_hash_extended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i64 x full seed)	fast	3.9s; proofs/datetime-b lane D
 3410	timetz_hash_extended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full (i64,i32) x full seed)	slow	31.2s; proofs/datetime-b lane D
 3411	timestamp_hash_extended	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 x full-u64 seed)	fast	3.6s; proofs/datetime-cmp wave7
-3412	uuid_hash_extended	crates/backend/utils/adt/uuid/src/builtins.rs	candidate	fast	= 2963 + full symbolic seed
-3413	pg_lsn_hash_extended	crates/backend/utils/adt/pg_lsn/src/builtins.rs	candidate	fast	= 3252 + full symbolic seed
+3412	uuid_hash_extended	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16] + full symbolic seed, wrapper-level)	fast	9.4s; proofs/uuid
+3413	pg_lsn_hash_extended	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64 lsn + full symbolic seed, wrapper-level)	fast	4.4s; proofs/hash-rows wave5
 3414	hashenumextended	crates/backend/utils/adt/adt_enum/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 3415	pg_get_statisticsobjdef	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 3416	jsonb_hash_extended	crates/backend/utils/adt/jsonb/src/builtins.rs	blocked(fixed-frame hash core: mirror ops::compare_containers_fixed)	ladder	ops.rs:425 allocating iterator; provable TODAY: hash_scalar_value_extended ops.rs:384 + hash_numeric_extended ops.rs:338 + container_size==0 shortcut; unblock = 15-line jsonb_hash_fixed<N> over FixedJsonbIterator iter.rs:229
@@ -2010,7 +2010,7 @@ oid	name	source_file	status	class	notes
 3426	pg_stat_get_db_checksum_failures	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 3427	pg_stats_ext_mcvlist_items	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads
 3428	pg_stat_get_db_checksum_last_failure	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
-3432	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state)	-	pg_strong_random entropy
+3432	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:rng)	-	pure PRNG output, nothing beyond the seam to prove; proofs/uuid wave-5
 3434	gtsvector_options	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3435	gist_point_sortsupport	crates/backend/access/gist/gistproc/src/lib.rs	excluded(non-surface: sortsupport-by-design)	-	:806 panic!; sorted builds ride SortComparator::GistPointZorder
 3436	pg_promote	crates/backend/utils/adt/adt_misc/src/builtins.rs	excluded(state)	-	server WAL/catalog/session state
@@ -2319,7 +2319,7 @@ oid	name	source_file	status	class	notes
 3934	tsrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3937	tstzrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3938	tstzrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
-3939	mxid_age	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	seam	= xid_age 1181 shape; multixact::ReadNextMultiXactId seam both sides + skew control; core MultiXactIdIsValid + wrapping_sub FAST
+3939	mxid_age	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level, modulo ReadNextMultiXactId seam model)	fast	0.29s; proofs/scalar-misc wave5
 3940	jsonb_extract_path_text	crates/backend/utils/adt/jsonb/src/builtins.rs	candidate	ladder	same core as 3217 (as_text=true) + value_as_text getfield.rs:16 Bool/String arms only (Numeric/Binary arms wall); cheap sibling
 3941	daterange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3942	daterange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
@@ -2715,15 +2715,15 @@ oid	name	source_file	status	class	notes
 5052	pg_get_shmem_allocations	crates/backend/storage/ipc/shmem/src/lib.rs	excluded(state)	-	shared-memory introspection
 5053	pg_stat_get_ins_since_vacuum	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 5054	jsonb_set_lax	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(wall: CNF width / image)	-	builtins.rs:604; null_value_treatment dispatch + must-not-be-null error class = cheap slice, not a row
-5055	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(kernels: strtou64 len<=6 value+end; empty-input reject verdict+22P02+level; accept-arm image = wall)	fast/wall-split	same prosrc as oid 2939; parse_snapshot lib.rs:186; strtou64 lib.rs:125 libc comment-claim MACHINE-CHECKED modulo libc strtoull model (native diff 4M checks 0 diffs, host libc); accept arm walls in CNF on PgVec push/grow machinery (TRIAGE wall class 5) even at concrete spots — refactor proposal: exact-capacity image build + fixed-array xips core; cells+spots kept as high-mem retry vehicles; proofs/xid8snap
+5055	pg_snapshot_in	crates/backend/utils/adt/xid8funcs/src/builtins.rs	wall(pg_snapshot_in cap6 600s); strtou64 core proved(len<=8, modulo glibc-strtoul model, shim X4) 6.0s	wall	wave-5 2026-07-30; proofs/scalar-misc xid8snap; UNRECONCILED vs lane pick-b (proofs/xid8snap): pick-b additionally proved kernels strtou64 len<=6 value+end + empty-input reject verdict/22P02/level and called the row proved(wall-split); accept-arm image walls on BOTH lanes — needs adjudication
 5056	pg_snapshot_out	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(wall: result-image + full-u64 digit-emission /10 chain)	wall	same prosrc as oid 2940; snapshot_out_bytes lib.rs:236 push_u64 /10 loop over full u64 = sloped-wall class; read-side kernels (SnapView layout) proved in proofs/xid8snap
 5057	pg_snapshot_recv	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	same prosrc as oid 2941; snapshot_recv lib.rs:277 via pqformat StringInfo; recv-direction precedent 77-127s (harness-built StringInfo); validation lattice mirrors parse (proved SnapView reads reusable). Host proofs/xid8snap
 5058	pg_snapshot_send	crates/backend/utils/adt/xid8funcs/src/builtins.rs	candidate	ladder	same prosrc as oid 2942; fc builtins.rs:48 pq_sendint32/64 fixed-offset BE image, length linear in nxip; send-direction reads prove per precedent. Host proofs/xid8snap
-5059	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 2943; recovery_in_progress seam + GetTopFullTransactionId session xact state
-5060	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 3348; GetTopFullTransactionIdIfAny session xact state
+5059	pg_current_xact_id	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state:live-xact)	-	live transaction/snapshot state, nothing value-level to prove; proofs/scalar-misc wave-5 triage
+5060	pg_current_xact_id_if_assigned	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state:live-xact)	-	live transaction/snapshot state, nothing value-level to prove; proofs/scalar-misc wave-5 triage
 5061	pg_current_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 2944; ReadNextFullTransactionId + GetActiveSnapshot server state; its epoch-widening core full_xid_from_allowable_at lib.rs:81 PROVED full-domain (fenced to transam.h caller contract) in proofs/xid8snap
 5062	pg_snapshot_xmin	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	same prosrc as oid 2945; eq_snapview_layout 0.7s: SnapView offset arithmetic (lib.rs:24-26 C-struct-offset comment claim) vs C member reads; proofs/xid8snap
-5063	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(layout projection, symbolic snapshot, post-detoast fence)	fast	same prosrc as oid 2946; same theorem as 2945; proofs/xid8snap
+5063	pg_snapshot_xmax	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(nxip<=2 symbolic snapshot + epoch-core fence (transam.h Assert precondition), wrapper-level)	fast	4.4s; proofs/scalar-misc xid8snap wave5
 5064	pg_snapshot_xip	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(engine: SRF protocol)		same prosrc as oid 2947; funcapi SRF machinery; the xip[i] element read itself proved in eq_snapview_layout (proofs/xid8snap)
 5065	pg_visible_in_snapshot	crates/backend/utils/adt/xid8funcs/src/builtins.rs	proved(linear arm nxip<=4 full-symbolic; bsearch arm nxip 31..=33 literal-split, sorted fence, modulo bsearch libc model)	fast	same prosrc as oid 2948; is_visible_fxid lib.rs:93; linear 17.7s kissat; bsearch cells 27-62s default solver (kissat false-fails unwinding asserts; load-inflated); sorted fence = superset of on-disk rep; both-arm covers; proofs/xid8snap
 5066	pg_xact_status	crates/backend/utils/adt/xid8funcs/src/builtins.rs	excluded(state)		same prosrc as oid 3360; lwlock + clog/procarray seams; its TransactionIdInRecentPast epoch logic reuses full_xid_from_allowable_at, PROVED in proofs/xid8snap
@@ -2731,7 +2731,7 @@ oid	name	source_file	status	class	notes
 5071	xid8toxid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64)	fast	0.11s; proofs/scalar-misc
 5081	xid8out	crates/backend/utils/adt/scalar/src/builtins.rs	proved(band+spots to u64::MAX incl 19/20-digit)	fast	proofs/misc-ops
 5082	xid8recv	crates/backend/utils/adt/scalar/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	builtins.rs:216 arg_stringinfo (= xidrecv class); core would be bare pq_getmsgint64
-5083	xid8send	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	fixed 8-byte send = int8send 2409 (proved 112.8s); free sibling
+5083	xid8send	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64, wrapper-level, modulo static-buffer allocator model)	slow	106.4s kissat; uint32send-skew control fails as designed 94.4s; wave-5 2026-07-30; proofs/scalar-misc
 5084	xid8eq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64xu64, wrapper-level)	fast	0.11-0.15s; proofs/scalar-misc
 5085	xid8ne	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64xu64, wrapper-level)	fast	0.11-0.15s; proofs/scalar-misc
 5086	anycompatible_in	crates/backend/utils/adt/pseudotypes/src/builtins.rs	proved(err-parity: verdict+sqlstate+level; all args ignored)	fast	~0.6s default solver; proofs/pseudotypes eq_anycompatible_in; wrapper-level via LocalFcinfo (call1, null Datum); C MAKE_SQLSTATE computed vs shipped with_sqlstate — 0A000 encoding in-theorem; message text/location out of proof; Err-arm cover! + shell_in must-fail control
@@ -2900,8 +2900,8 @@ oid	name	source_file	status	class	notes
 6339	int4random	crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs	excluded(state)	-	session PRNG state
 6340	int8random	crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs	excluded(state)	-	session PRNG state
 6341	numeric_random	crates/backend/utils/adt/pseudorandomfuncs/src/builtins.rs	excluded(state)	-	session PRNG state
-6342	uuid_extract_timestamp	crates/backend/utils/adt/uuid/src/builtins.rs	candidate	ladder	lib.rs:268: variant/version lattice + v7 arm i64*1000 const-mul FAST full-sym; v1 arm tms/10 full-64-bit dividend = sloped — band or spots; split per version
-6343	uuid_extract_version	crates/backend/utils/adt/uuid/src/builtins.rs	candidate	fast	lib.rs:310 two mask/shift reads; trivial full-domain; host proofs/uuid
+6342	uuid_extract_timestamp	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16])	fast	2.2s; proofs/uuid
+6343	uuid_extract_version	crates/backend/utils/adt/uuid/src/builtins.rs	proved(full [u8;16])	fast	0.03s; proofs/uuid
 6344	pg_sync_replication_slots	crates/backend/replication/slotfuncs/src/builtins.rs	excluded(state)	-	replication slot shared state
 6345	range_contains_elem_support	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 6346	elem_contained_by_range_support	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
@@ -2954,18 +2954,18 @@ oid	name	source_file	status	class	notes
 6416	hashdateextended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i32 x full seed)	fast	4.2s; proofs/datetime-b lane D
 6417	hashbool	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 6418	hashboolextended	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
-6419	hashxid	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hash_uint32 = hashoid 453 (PROVED full-domain) same fc body; free sibling; 6423 hashcid identical
-6420	hashxidextended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hash_uint32_extended scalar/src/builtins.rs:178 (hashfn proved). Host proofs/hash-rows
-6421	hashxid8	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hashxid8 scalar/src/builtins.rs:268 — sign-conditional hi/lo xor fold, full i64; highest-value of batch. Host proofs/hash-rows
-6422	hashxid8extended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	builtins.rs:277 — same fold + seeded mix
-6423	hashcid	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hash_uint32 builtins.rs:173 shared body w/ hashxid; one harness both oids
-6424	hashcidextended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	shared body with 6420
+6419	hashxid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level)	fast	0.7s; shared fc_hash_uint32 body with hashcid; proofs/hash-rows wave5
+6420	hashxidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 + full symbolic seed, wrapper-level)	fast	3.3s; shared fc_hash_uint32_extended body with hashcidextended; proofs/hash-rows wave5
+6421	hashxid8	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-i64 sign-conditional hi/lo fold, wrapper-level)	fast	4.6s; proofs/hash-rows wave5
+6422	hashxid8extended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-i64 sign-conditional hi/lo fold + full symbolic seed, wrapper-level)	fast	7.6s; proofs/hash-rows wave5
+6423	hashcid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level)	fast	0.8s; shared fc_hash_uint32 body with hashxid; proofs/hash-rows wave5
+6424	hashcidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 + full symbolic seed, wrapper-level)	fast	3.6s; shared body with 6420; proofs/hash-rows wave5
 6425	timestamptz_hash	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64; hashint8 fold + hash_uint32 in-theorem)	fast	3.6s; proofs/datetime-cmp wave7
 6426	timestamptz_hash_extended	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 x full-u64 seed)	fast	3.6s; proofs/datetime-cmp wave7
 6427	pg_get_sequence_data	crates/backend/commands/sequence/src/builtins.rs	candidate	seam	pending state-seam probe (sequence state)
-6428	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state)	-	pg_strong_random entropy
-6429	uuidv7	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state)	-	wall_ns clock + TLS previous_ns monotonic guard + entropy; packing core generate_uuidv7 seamable but ns/1e6 is a loop-free full-width divider (band-immune)
-6430	uuidv7_interval	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state)	-	= 6429 + timestamptz_pl_interval shift; -fwrapv infinity-shift wrap comment worth a native differential, not a proof
+6428	gen_random_uuid	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:rng)	-	pure PRNG output, nothing beyond the seam to prove; proofs/uuid wave-5
+6429	uuidv7	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:clock)	-	pure assembly core proved 2.2s (modulo RNG-seam model, sub_ms<1e6 contract fence, macOS 10-bit SUBMS arm; Linux 12-bit arm needs a linux-host rerun); rng-skew control fails as designed; proofs/uuid wave-5
+6430	uuidv7_interval	crates/backend/utils/adt/uuid/src/builtins.rs	excluded(state:clock)	-	pure assembly core proved 2.2s (modulo RNG-seam model, sub_ms<1e6 contract fence, macOS 10-bit SUBMS arm; Linux 12-bit arm needs a linux-host rerun); rng-skew control fails as designed; proofs/uuid wave-5
 3383	brin_minmax_opcinfo	crates/backend/access/brin/brin_minmax/src/lib.rs	proved(full-u32 typoid)	per-type	0.12s; ledger extraction gap — row added post-hoc; proofs/brin-minmax
 3384	brin_minmax_add_value	crates/backend/access/brin/brin_minmax/src/lib.rs	proved(per-type int4/date/uuid; catalog seam both sides + skew control; full symbolic values)	per-type	50-57s release-gate; proofs/brin-minmax
 3385	brin_minmax_consistent	crates/backend/access/brin/brin_minmax/src/lib.rs	proved(per-type x strategy 1..5; full symbolic)	per-type	12-39s; proofs/brin-minmax

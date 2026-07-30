@@ -2080,3 +2080,68 @@ xid8snap	proofs::eq_parse_snapshot_len5	-Z c-ffi -Z stubbing --c-lib c/pg_xid8sn
 xid8snap	proofs::eq_parse_snapshot_len6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	ditto wall class 5
 xid8snap	proofs::spot_parse_min_accept	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	green	unmeasured	?	concrete spot; ALSO walls locally (class 5 is input-independent); retry tier; 18 sibling spots spot_parse_* same status
 xid8snap	proofs::control_snapview_swapped	-Z c-ffi --c-lib c/pg_xid8snap.c --exact	fail	defect-witness	1.2	negative control: C xmax vs Rust xmin; failing check MUST be `c == view.xmin()`; DEFAULT solver
+hash-rows	wave5::eq_hashtid	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	2.3	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashtidextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	6.7	wave-5 run 2026-07-30 idle
+hash-rows	wave5::control_hashtid_len_skew	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --exact	must-fail	control	0.5	default solver; fails on C 4-of-6-byte skew as designed
+hash-rows	wave5::eq_hashxid	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	0.7	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashxidextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	3.3	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashcid	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	0.8	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashcidextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	3.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashxid8	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	4.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashxid8extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	7.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_pg_lsn_hash	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	3.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_pg_lsn_hash_extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	4.4	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_hash	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --c-lib ../hash/pg_hashfn.c --solver kissat --exact	green	per-commit	2.8	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_hash_extended	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --c-lib ../hash/pg_hashfn.c --solver kissat --exact	green	per-commit	9.4	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_extract_version	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	green	per-commit	0.03	wave-5 run 2026-07-30 idle
+uuid	proofs::eq_uuid_extract_timestamp	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	green	per-commit	2.2	wave-5 run 2026-07-30 idle
+uuid	wave5::eq_uuid_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	info	release-gate	wall	wall: unwind-24 truncation (AcctWeak retain, enlarge_slow) + 14GB RSS; FAILED = artifact
+uuid	wave5::cover_uuid_recv_both_arms	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --exact	info	release-gate	wall	timeout 120s, same truncation class as recv_core
+uuid	wave5::eq_uuid_send	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	info	release-gate	wall	CNF wall: symex 56757 VCCs completes; >300s kissat; >6GB default
+uuid	wave5::eq_generate_uuidv7	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	green	per-commit	2.2	wave-5 run 2026-07-30 idle
+uuid	wave5::control_generate_uuidv7_rng_skew	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --exact	must-fail	control	0.9	fails on rng skew as designed
+pg_lsn	wave5::eq_pg_lsn_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	info	release-gate	wall	wall: unwind-16 truncation (AcctWeak retain, enlarge_slow) + 6.9GB RSS kill; FAILED = artifact
+pg_lsn	wave5::eq_pg_lsn_send	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	release-gate	140.4	wave-5 run 2026-07-30 idle; unwinding assertions pass
+pg_lsn	wave5::control_pg_lsn_send_skew	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --exact	must-fail	control	102.4	fails on img byte skew as designed
+scalar-misc	wave5::eq_cideq	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	per-commit	0.35	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xid_age	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	per-commit	0.29	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_mxid_age	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	per-commit	0.29	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::control_xid_age_seam_skew	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	must-fail	control	0.26	fails on seam skew as designed
+scalar-misc	wave5::eq_xidout_r1_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	2.0	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidout_d5	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	4.7	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidout_d6	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	9.2	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidout_d7a	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	17.9	info row proved green
+scalar-misc	wave5::eq_xidout_d7b	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	16.2	info row proved green
+scalar-misc	wave5::eq_xidout_spots	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	0.55	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::cover_xidout_split	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --exact	green	per-commit	0.01	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_r1_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	6.1	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_d5	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	4.3	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_d6	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	7.6	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_d7a	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	11.8	info row proved green
+scalar-misc	wave5::eq_cidout_d7b	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	12.4	info row proved green
+scalar-misc	wave5::eq_cidout_spots	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	2.4	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::cover_cidout_split	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --exact	green	per-commit	0.04	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_oidsend	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	70.4	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidsend	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	86.8	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xid8send	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	106.4	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_tidsend	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	94.1	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::control_xid8send_vs_c_uint32send	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	must-fail	control	94.4	fails on u32-vs-u64 image skew as designed
+scalar-misc	wave5::eq_oidrecv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	info	release-gate	wall	symex wall 300s both solvers, 0 VCCs
+scalar-misc	wave5::eq_xid8recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	wave5::eq_tidrecv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	wave5::cover_recv_core_both_arms	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	info	per-commit	wall	timeout 120s, recv symex class
+scalar-misc	wave5::control_oidrecv_core_cursor_skew	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	must-fail	control	62.8	fails on cursor skew as designed (completes where eq walls)
+scalar-misc	xid8snap::eq_full_xid_from_allowable_at	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	0.12	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_snapshot_xmin	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	4.5	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_snapshot_xmax	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	4.4	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_visible_in_snapshot_linear	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	20.3	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_visible_in_snapshot_bsearch	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	green	release-gate	143.4	info row proved green
+scalar-misc	xid8snap::control_visible_xmax_skew	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --exact	must-fail	control	1.5	fails on xmax skew as designed
+scalar-misc	xid8snap::eq_pg_snapshot_send_n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	info	release-gate	wall	symex wall 300s both solvers, 0 VCCs
+scalar-misc	xid8snap::eq_pg_snapshot_send_n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	xid8snap::eq_pg_snapshot_send_n2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	xid8snap::eq_pg_snapshot_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib c/pg_scalar_misc.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	symex wall 600s
+scalar-misc	xid8snap::eq_pg_snapshot_out_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+scalar-misc	xid8snap::eq_pg_snapshot_out_spots	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+scalar-misc	xid8snap::eq_strtou64_cap8	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	6.0	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_snapshot_in_cap6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
