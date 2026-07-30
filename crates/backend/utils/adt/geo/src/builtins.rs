@@ -638,19 +638,23 @@ fn fc_path_inter(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
     Ok(Datum::from_bool(crate::path::path_inter(&a, &b)?))
 }
 
-fn fc_path_isclosed(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub: visibility-only, exposes the shipped wrapper to the Kani
+// equivalence harnesses (proofs/geo-cmp ext3).
+pub fn fc_path_isclosed(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     Ok(Datum::from_bool(crate::path::path_isclosed(&p)))
 }
 
-fn fc_path_isopen(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub: visibility-only (proofs/geo-cmp ext3).
+pub fn fc_path_isopen(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     Ok(Datum::from_bool(crate::path::path_isopen(&p)))
 }
 
-fn fc_path_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub: visibility-only (proofs/geo-cmp ext3).
+pub fn fc_path_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     Ok(Datum::from_i32(crate::path::path_npoints(&p)))
@@ -751,7 +755,9 @@ fn fc_poly_path(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
 // polygon
 macro_rules! poly2 {
     ($($fc:ident => $core:path;)*) => {$(
-        fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // pub: visibility-only, exposes the shipped wrapper to the Kani
+        // equivalence harnesses (proofs/geo-cmp ext3).
+        pub fn $fc(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: module contract.
             let a = unsafe { arg_poly(fcinfo, 0) }?;
             // SAFETY: module contract.
@@ -816,7 +822,8 @@ fn fc_poly_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     }
 }
 
-fn fc_poly_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub: visibility-only (proofs/geo-cmp ext3).
+pub fn fc_poly_npoints(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_poly(fcinfo, 0) }?;
     Ok(Datum::from_i32(crate::poly::poly_npoints(&p)))
