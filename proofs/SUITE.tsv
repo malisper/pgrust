@@ -1850,3 +1850,4 @@ datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_nobegin	-Z c-ffi -Z stubb
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.0	plane; DEFAULT solver
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
 numeric-probe	proofs::eq_numeric_sign_nd4	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --c-lib c/pg_numeric_tail.c --solver kissat --exact	green	per-commit	6.7	oid 1706; measured 2026-07-30
+numeric-probe	proofs::eq_numeric_scale_nd4	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --c-lib c/pg_numeric_tail.c --solver kissat --exact	green	per-commit	4.9	oid 3281; measured 2026-07-30

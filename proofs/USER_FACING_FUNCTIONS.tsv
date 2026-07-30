@@ -1910,7 +1910,7 @@ oid	name	source_file	status	class	notes
 3278	array_position_start	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 3279	array_positions	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 3280	gist_circle_distance	crates/backend/access/gist/gistproc/src/lib.rs	candidate	ladder	:897 -> gist_bbox_distance :765; same arm split, no leaf point_dt
-3281	numeric_scale	crates/backend/utils/adt/numeric/src/builtins.rs	candidate	fast	fc_numeric_scale builtins.rs:1006 — is_special -> NULL else Num::dscale() lib.rs:189; pure packed-header decode both forms; cheapest candidate. Host proofs/numeric-probe
+3281	numeric_scale	crates/backend/utils/adt/numeric/src/builtins.rs	proved(wrapper-level, nd<=4 full lattice both header forms; NULL-on-special arm + value parity; shipped packed-header decode in-theorem)	fast	4.9s kissat 2026-07-30; proofs/numeric-probe eq_numeric_scale_nd4
 3282	gist_point_fetch	crates/backend/access/gist/gistproc/src/lib.rs	proved(no-op identity)	fast	CI cluster; proofs/gist-geo
 3288	gist_poly_distance	crates/backend/access/gist/gistproc/src/lib.rs	candidate	ladder	:849 = 3280 + *recheck=true claim
 3290	dist_cpoint	crates/backend/utils/adt/geo/src/builtins.rs	proved(collinear slice; value bit-exact incl negative clamp)	slow	166-169s; wrapper-level by-ref, full f64 domain incl NaN/Inf/±0/subnormals unless sliced; proofs/geo-cmp ext; NAN shim pinned canonical (CBMC NAN model defect, native-replayed)
