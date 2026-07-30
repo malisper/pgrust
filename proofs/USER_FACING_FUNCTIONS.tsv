@@ -1542,7 +1542,7 @@ oid	name	source_file	status	class	notes
 2629	inetor	crates/backend/utils/adt/network/src/builtins.rs	proved(core; full struct + mismatch Err parity)	fast	14s; proofs/network
 2630	inetpl	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
 2632	inetmi_int8	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
-2633	inetmi	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
+2633	inetmi	crates/backend/utils/adt/network/src/builtins.rs	proved(core; v4/v6/xf split; i64 result + 22023 mismatch + 22003 overflow Err parity; value-space, msg/Location stubbed)	fast	0.19-1.9s; proofs/network; cover_inetmi_arms 3/3 SATISFIED; network-2026-07-30
 2647	now	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	alias of 1299
 2648	statement_timestamp	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	builtins.rs:131
 2649	clock_timestamp	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	builtins.rs:138
