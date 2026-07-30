@@ -189,6 +189,29 @@ pub(crate) fn loc(line: i32, func: &'static str) -> ErrorLocation {
     ErrorLocation::new("postgres.c", line, func)
 }
 
+/// A query string that survived `pg_client_to_server` but is not valid UTF-8:
+/// the bytes are in the DATABASE encoding (C carries them fine), but the
+/// engine processes SQL text as `&str`, so a non-UTF8 database encoding
+/// cannot be honored for non-ASCII query text. Fail loudly and honestly
+/// (0A000 naming the database encoding) instead of the old misleading
+/// XX000 "invalid byte sequence in query string".
+#[cold]
+#[inline(never)]
+pub(crate) fn non_utf8_query_error() -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::new(
+            ERROR,
+            format!(
+                "query strings with non-ASCII characters are not supported yet in databases \
+                 with encoding \"{}\"",
+                mbutils::GetDatabaseEncodingName()
+            ),
+        )
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Use a database with encoding \"UTF8\"."),
+    )
+}
+
 pub(crate) fn get_current_timestamp() -> types_core::TimestampTz {
     // DST P2 (contract §1.2, census dedupe (c)): the private SystemTime
     // duplicate deleted; the seam is the one GetCurrentTimestamp path.

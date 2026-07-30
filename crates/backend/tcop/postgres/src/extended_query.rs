@@ -763,12 +763,11 @@ pub(crate) fn owned_msg_string<'mcx>(
     msg: &mut StringInfo<'_>,
 ) -> PgResult<PgString<'mcx>> {
     let s = pqformat::pq_getmsgstring(mcx, msg)?;
-    let text = core::str::from_utf8(s.as_bytes()).map_err(|_| {
-        ereport(ERROR)
-            .errcode(ERRCODE_PROTOCOL_VIOLATION)
-            .errmsg("invalid string in message")
-            .into_error()
-    })?;
+    // Non-UTF8 here means the string is in a non-UTF8 database encoding the
+    // UTF-8 engine cannot honor (see non_utf8_query_error); C would carry
+    // these bytes, so the honest report is 0A000, not a protocol violation.
+    let text =
+        core::str::from_utf8(s.as_bytes()).map_err(|_| crate::non_utf8_query_error())?;
     PgString::from_str_in(text, mcx).map_err(Into::into)
 }
 

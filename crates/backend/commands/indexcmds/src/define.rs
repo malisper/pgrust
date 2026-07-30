@@ -438,7 +438,6 @@ pub fn DefineIndex<'mcx>(
     skip_build: bool,
     quiet: bool,
 ) -> PgResult<Oid> {
-    let _ = (is_alter_table, quiet);
     let concurrent = stmt.concurrent
         && lsyscache::get_rel_persistence(tableId)? != RELPERSISTENCE_TEMP;
     if stmt.reset_default_tblspc {
@@ -883,6 +882,33 @@ pub fn DefineIndex<'mcx>(
 
     let safe_index =
         indexInfo.ii_Expressions.is_nil() && indexInfo.ii_Predicate.is_nil();
+
+    // C indexcmds.c:1177-1198: report index creation if appropriate (delayed
+    // till after most of the error checks). errmsg_internal: not translated.
+    if stmt.isconstraint && !quiet {
+        let constraint_type = if stmt.primary {
+            "PRIMARY KEY"
+        } else if stmt.unique {
+            "UNIQUE"
+        } else if !stmt.excludeOpNames.is_nil() {
+            "EXCLUDE"
+        } else {
+            return Err(Box::new(PgError::new(ERROR, "unknown constraint type")));
+        };
+        elog_seams::ereport::call(
+            PgError::new(
+                types_error::DEBUG1,
+                format!(
+                    "{} {} will create implicit index \"{}\" for table \"{}\"",
+                    if is_alter_table { "ALTER TABLE / ADD" } else { "CREATE TABLE /" },
+                    constraint_type,
+                    indexRelationName,
+                    rel.name()
+                ),
+            )
+            .with_location("indexcmds.c", 1195, "DefineIndex"),
+        )?;
+    }
 
     let mut flags = (if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 })
         | (if stmt.isconstraint { INDEX_CREATE_ADD_CONSTRAINT } else { 0 });

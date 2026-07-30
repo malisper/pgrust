@@ -159,7 +159,7 @@ fn spool_begin<'mcx>(
 
 /// btbuildempty (nbtree.c): unlogged indexes' INIT_FORKNUM metapage.
 pub fn btbuildempty(index: &Relation<'_>) -> PgResult<()> {
-    let allequalimage = bt_allequalimage(index)?;
+    let allequalimage = bt_allequalimage(index, false)?;
     let mut bulkstate = bulkwrite::smgr_bulk_start_rel(index, ForkNumber::INIT_FORKNUM)?;
     let mut metabuf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
     {
@@ -183,7 +183,7 @@ fn leafbuild<'mcx>(
     }
 
     let mut inskey = nbtree::bt_mkscankey(index, None)?;
-    inskey.allequalimage = bt_allequalimage(index)?;
+    inskey.allequalimage = bt_allequalimage(index, true)?;
 
     let mut wstate = BTWriteState {
         index,
@@ -600,8 +600,35 @@ fn write_opaque(page: &mut PageMut<'_>, opaque: &BTPageOpaqueData) {
     }
 }
 
-// _bt_allequalimage (nbtutils.c), sans the DEBUG1 message.
-fn bt_allequalimage(rel: &Relation<'_>) -> PgResult<bool> {
+// _bt_allequalimage (nbtutils.c). `debugmessage` as in C: only the CREATE
+// INDEX build path (leafbuild, C _bt_leafbuild) reports the verdict.
+fn bt_allequalimage(rel: &Relation<'_>, debugmessage: bool) -> PgResult<bool> {
+    let allequalimage = bt_allequalimage_check(rel)?;
+    if debugmessage {
+        // C nbtutils.c:4291-4299 (elog(DEBUG1, ...): not translated).
+        let (msg, lineno) = if allequalimage {
+            (
+                format!("index \"{}\" can safely use deduplication", rel.name()),
+                4294,
+            )
+        } else {
+            (
+                format!("index \"{}\" cannot use deduplication", rel.name()),
+                4297,
+            )
+        };
+        elog_seams::ereport::call(
+            types_error::PgError::new(types_error::DEBUG1, msg).with_location(
+                "nbtutils.c",
+                lineno,
+                "_bt_allequalimage",
+            ),
+        )?;
+    }
+    Ok(allequalimage)
+}
+
+fn bt_allequalimage_check(rel: &Relation<'_>) -> PgResult<bool> {
     // INCLUDE indexes can never support deduplication (nbtutils.c:4264).
     if rel.indnatts() != rel.indnkeyatts() {
         return Ok(false);

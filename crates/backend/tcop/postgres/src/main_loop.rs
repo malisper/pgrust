@@ -681,8 +681,11 @@ fn leak_str_in<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx str> {
     let mut v: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     mcx::vec_append_bytes(&mut v, bytes)?;
     let slice: &'mcx mut [u8] = v.leak();
-    core::str::from_utf8(slice)
-        .map_err(|_| Box::new(PgError::new(ERROR, "invalid byte sequence in query string".to_string())))
+    // Invalid bytes for the database encoding were already rejected by
+    // pq_getmsgstring's pg_client_to_server (pg_verify_mbstr, C-shaped
+    // 22021); reaching here non-UTF8 means the database encoding itself
+    // is one the UTF-8 engine cannot honor.
+    core::str::from_utf8(slice).map_err(|_| crate::non_utf8_query_error())
 }
 
 // on_proc_exit handler to log end of session (postgres.c log_disconnections).

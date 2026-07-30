@@ -552,6 +552,9 @@ pub fn typenameTypeMod<'mcx>(
 }
 
 pub struct CreateStmtCxt<'mcx> {
+    // C cxt->stmtType: "CREATE [FOREIGN] TABLE" or "ALTER [FOREIGN] TABLE",
+    // for the implicit-sequence DEBUG1 report (and error messages).
+    pub stmt_type: &'static str,
     pub blist: NodeList<'mcx>,
     pub alist: NodeList<'mcx>,
     pub ckconstraints: NodeList<'mcx>,
@@ -564,8 +567,9 @@ pub struct CreateStmtCxt<'mcx> {
 }
 
 impl<'mcx> CreateStmtCxt<'mcx> {
-    fn new() -> Self {
+    fn new(stmt_type: &'static str) -> Self {
         CreateStmtCxt {
+            stmt_type,
             blist: NodeList::nil(),
             alist: NodeList::nil(),
             ckconstraints: NodeList::nil(),
@@ -1642,7 +1646,11 @@ pub fn transformCreateStmt<'mcx>(
                 .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
         ));
     }
-    let mut cxt = CreateStmtCxt::new();
+    let mut cxt = CreateStmtCxt::new(if is_foreign {
+        "CREATE FOREIGN TABLE"
+    } else {
+        "CREATE TABLE"
+    });
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
     let mut ixconstraints = NodeList::nil();
@@ -2761,6 +2769,19 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
         (snamespace_default, sname)
     };
 
+    // C parse_utilcmd.c:483-486: report the implicit sequence.
+    // errmsg_internal: not translated.
+    elog_seams::ereport::call(
+        PgError::new(
+            types_error::DEBUG1,
+            format!(
+                "{} will create implicit sequence \"{}\" for serial column \"{}.{}\"",
+                cxt.stmt_type, sname, relname, colname
+            ),
+        )
+        .with_location("parse_utilcmd.c", 483, "generateSerialExtraStmts"),
+    )?;
+
     // C: the sequence copies the table's persistence, LOGGED/UNLOGGED
     // override it (rejected on TEMP tables).
     let mut seqpersistence =
@@ -2979,8 +3000,14 @@ pub fn transformAlterTableCmd<'mcx>(
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
-    let mut cxt = CreateStmtCxt::new();
-    let arena_relname = || -> PgResult<&'mcx str> {
+    let mut cxt = CreateStmtCxt::new(
+        if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+            "ALTER FOREIGN TABLE"
+        } else {
+            "ALTER TABLE"
+        },
+    );
+    let arena_relname =|| -> PgResult<&'mcx str> {
         let mut s = PgString::new_in(mcx);
         s.try_push_str(relname)?;
         Ok(leak_str(s))

@@ -9281,6 +9281,7 @@ dependencies = [
  "catalog",
  "clauses",
  "datum",
+ "elog_seams",
  "execindexing",
  "fmgr_seams",
  "guc_tables",
