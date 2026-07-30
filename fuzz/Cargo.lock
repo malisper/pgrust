@@ -226,6 +226,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_geo"
+version = "0.1.0"
+dependencies = [
+ "adt_float",
+ "datum",
+ "mcx",
+ "postgres_seams",
+ "pqformat",
+ "stack_depth",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_int"
 version = "0.1.0"
 dependencies = [
@@ -473,6 +489,9 @@ dependencies = [
  "datum",
  "hashfn",
  "hyperloglog",
+ "init_small",
+ "ip",
+ "libc",
  "mcx",
  "pqformat",
  "stringinfo",
@@ -515,6 +534,7 @@ dependencies = [
  "mcx",
  "pg_locale",
  "pg_locale_seams",
+ "postgres_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -683,6 +703,7 @@ dependencies = [
  "mcx",
  "nodes_core",
  "numutils",
+ "pg_clock",
  "pgtz",
  "pqformat",
  "strftime",
@@ -758,6 +779,7 @@ dependencies = [
  "hyperloglog",
  "libc",
  "mcx",
+ "pg_clock",
  "pg_strong_random",
  "pqformat",
  "stringinfo",
@@ -848,10 +870,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "aio_core"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "bufmgr_seams",
+ "condition_variable",
+ "datum",
+ "elog",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc_seams",
+ "latch",
+ "libc",
+ "lmgr_proc",
+ "lwlock",
+ "miscinit",
+ "resowner",
+ "shmem",
+ "smgr_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_resowner",
+ "types_storage",
+ "vfs",
+ "waitevent_seams",
+]
+
+[[package]]
 name = "aio_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -899,6 +962,7 @@ dependencies = [
  "fmgr_seams",
  "format_type",
  "funcapi_srf",
+ "guc_tables",
  "hashfn",
  "lsyscache",
  "mcx",
@@ -1102,6 +1166,7 @@ dependencies = [
 name = "bufmgr"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "aio_seams",
  "bufmgr_seams",
  "catalog_storage_seams",
@@ -1125,6 +1190,7 @@ dependencies = [
  "postgres_seams",
  "procsignal_seams",
  "relmapper_seams",
+ "relpath_seams",
  "resowner",
  "seam_core",
  "smgr_seams",
@@ -1365,6 +1431,7 @@ dependencies = [
  "init_small",
  "latch",
  "lmgr_proc",
+ "pg_clock",
  "postgres_seams",
  "s_lock_seams",
  "types_core",
@@ -1394,8 +1461,11 @@ version = "0.0.0"
 dependencies = [
  "crc32c",
  "elog",
+ "libc",
+ "pg_clock",
  "types_core",
  "types_error",
+ "vfs",
 ]
 
 [[package]]
@@ -1518,6 +1588,9 @@ dependencies = [
 name = "decoder_fuzz"
 version = "0.0.0"
 dependencies = [
+ "adt_float",
+ "adt_geo",
+ "cc",
  "crc32c",
  "mbutils",
  "mcx",
@@ -1600,6 +1673,7 @@ dependencies = [
  "elog",
  "hashfn",
  "mcx",
+ "s_lock_seams",
  "types_core",
  "types_error",
  "types_hash",
@@ -1618,6 +1692,7 @@ dependencies = [
  "libc",
  "mbutils_seams",
  "mcx",
+ "pg_clock",
  "pgstat_seams",
  "pqcomm_seams",
  "syslogger_seams",
@@ -1727,6 +1802,7 @@ dependencies = [
  "types_error",
  "types_resowner",
  "types_storage",
+ "vfs",
  "waitevent_seams",
  "xact_seams",
 ]
@@ -1865,6 +1941,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -1957,6 +2034,21 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+]
+
+[[package]]
+name = "generator"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3b854b0e584ead1a33f18b2fcad7cf7be18b3875c78816b753639aa501513ae"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link",
+ "windows-result",
 ]
 
 [[package]]
@@ -2093,6 +2185,7 @@ dependencies = [
 name = "guc_tables"
 version = "0.0.0"
 dependencies = [
+ "guc_seams",
  "types_error",
  "types_guc",
 ]
@@ -2139,10 +2232,15 @@ dependencies = [
  "ifaddr",
  "ip",
  "libc",
+ "mbutils_seams",
+ "mcx",
  "pgstrcasecmp",
+ "regex",
+ "regex_core_seams",
  "types_core",
  "types_error",
  "types_startup",
+ "walsender_seams",
 ]
 
 [[package]]
@@ -2178,6 +2276,7 @@ dependencies = [
  "bufmgr_seams",
  "elog",
  "freespace",
+ "init_small",
  "inval",
  "pruneheap_seams",
  "standby",
@@ -2261,12 +2360,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "injection_point"
+version = "0.0.0"
+dependencies = [
+ "condition_variable",
+ "elog",
+ "pgsync",
+ "types_error",
+ "waitevent",
+]
+
+[[package]]
 name = "instrument"
 version = "0.1.0"
 dependencies = [
  "bufmgr",
  "fd",
+ "transam_xlog_seams",
  "types_core",
+]
+
+[[package]]
+name = "interrupt"
+version = "0.0.0"
+dependencies = [
+ "guc_file_seams",
+ "init_small_seams",
+ "ipc",
+ "ipc_seams",
+ "latch_seams",
+ "libc",
+ "mcxt_seams",
+ "procsignal_seams",
+ "types_error",
+ "types_guc",
 ]
 
 [[package]]
@@ -2374,11 +2501,15 @@ dependencies = [
  "init_small",
  "latch_seams",
  "lmgr_proc_seams",
+ "loom",
+ "pgsync",
  "procsignal_seams",
  "timeout_seams",
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
+ "waitevent_seams",
  "waiteventset_seams",
 ]
 
@@ -2391,15 +2522,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "launcher"
-version = "0.0.0"
-dependencies = [
- "guc_tables",
- "init_small",
- "launcher_seams",
-]
-
-[[package]]
 name = "launcher_seams"
 version = "0.0.0"
 dependencies = [
@@ -2407,6 +2529,12 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
@@ -2442,6 +2570,7 @@ dependencies = [
  "lock",
  "lock_seams",
  "mcx",
+ "postgres_seams",
  "procarray_seams",
  "subtrans_seams",
  "types_core",
@@ -2576,6 +2705,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "log"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "logical_message"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "xact",
+ "xloginsert",
+ "xlogreader_seams",
+]
+
+[[package]]
 name = "logical_seams"
 version = "0.0.0"
 dependencies = [
@@ -2594,9 +2742,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lsyscache"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "adt_scalar",
  "datum",
  "fmgr_seams",
@@ -2637,6 +2799,15 @@ dependencies = [
  "types_core",
  "types_error",
  "waitevent_seams",
+]
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
 ]
 
 [[package]]
@@ -2714,12 +2885,14 @@ dependencies = [
 name = "md"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "elog",
  "fd",
  "guc_tables",
  "init_small",
  "libc",
  "pgstat",
+ "pgsync",
  "relpath_seams",
  "sync_seams",
  "tablespace_seams",
@@ -2730,9 +2903,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
 name = "miscinit"
 version = "0.0.0"
 dependencies = [
+ "dfmgr",
  "elog",
  "fd",
  "guc_seams",
@@ -2747,6 +2927,9 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parallel_seams",
+ "pg_path",
+ "pg_prng",
+ "pg_strong_random",
  "pqcomm_seams",
  "procarray_seams",
  "shmem_seams",
@@ -2884,6 +3067,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "numutils"
 version = "0.1.0"
 dependencies = [
@@ -2950,6 +3142,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "xlogreader_seams",
 ]
 
 [[package]]
@@ -3022,6 +3215,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_clock"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "pg_database_seams"
 version = "0.0.0"
 dependencies = [
@@ -3056,6 +3256,7 @@ dependencies = [
  "mcx",
  "pg_database_seams",
  "pg_locale_seams",
+ "pgsync",
  "syscache_seams",
  "types_core",
  "types_error",
@@ -3149,11 +3350,13 @@ dependencies = [
  "catalog_seams",
  "datum",
  "elog",
+ "fd",
  "guc_tables",
  "hashbrown",
  "init_small",
  "inval_seams",
  "ipc_seams",
+ "libc",
  "mcx",
  "miscinit",
  "pgstat_seams",
@@ -3184,6 +3387,7 @@ name = "pgstatfuncs"
 version = "0.1.0"
 dependencies = [
  "acl_seams",
+ "adt_network",
  "adt_numeric",
  "backend_progress",
  "backend_status",
@@ -3194,6 +3398,7 @@ dependencies = [
  "funcapi",
  "heaptuple",
  "init_small",
+ "ip",
  "launcher_seams",
  "libc",
  "lmgr_proc",
@@ -3209,6 +3414,8 @@ dependencies = [
  "types_storage",
  "varlena",
  "waitevent",
+ "walreceiverfuncs_seams",
+ "walsender_seams",
  "xlogprefetcher_seams",
 ]
 
@@ -3220,6 +3427,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgsync"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "pg_clock",
+ "pg_strong_random",
+]
+
+[[package]]
 name = "pgtz"
 version = "0.1.0"
 dependencies = [
@@ -3227,7 +3443,6 @@ dependencies = [
  "fd",
  "init_small",
  "localtime",
- "mcx",
  "pg_path",
  "pgstrcasecmp",
  "pgtz_seams",
@@ -3243,6 +3458,12 @@ dependencies = [
  "seam_core",
  "types_error",
 ]
+
+[[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkg-config"
@@ -3342,6 +3563,7 @@ dependencies = [
  "init_small",
  "ip",
  "ipc_seams",
+ "latch_seams",
  "libc",
  "mcx",
  "miscinit_seams",
@@ -3407,6 +3629,7 @@ dependencies = [
  "slru",
  "snapmgr",
  "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_guc",
@@ -3442,6 +3665,7 @@ dependencies = [
  "lsyscache_seams",
  "mbutils_seams",
  "mcx",
+ "numutils",
  "pqformat",
  "pquery_seams",
  "stringinfo",
@@ -3483,8 +3707,10 @@ dependencies = [
  "procsignal",
  "subtrans_seams",
  "superuser_seams",
+ "timestamp_seams",
  "transam_seams",
  "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_rel",
@@ -3493,6 +3719,7 @@ dependencies = [
  "varsup",
  "xact",
  "xact_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -3503,6 +3730,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_storage",
 ]
 
 [[package]]
@@ -3519,6 +3747,8 @@ dependencies = [
  "lmgr_proc",
  "mcxt_seams",
  "parallel_seams",
+ "pgsync",
+ "postgres_seams",
  "procsignal_seams",
  "s_lock_seams",
  "shmem_seams",
@@ -3527,6 +3757,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "walsender_seams",
 ]
 
 [[package]]
@@ -3535,6 +3766,7 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -3628,6 +3860,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-automata"
+version = "0.4.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
 name = "regex_core"
 version = "0.0.0"
 dependencies = [
@@ -3665,6 +3914,7 @@ dependencies = [
  "guc_tables",
  "mbutils",
  "mcx",
+ "memchr",
  "pkg-config",
  "postgres_seams",
  "regex",
@@ -3797,9 +4047,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "repl_gram"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "repl_scanner",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "repl_scanner"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "parser_small1",
+ "types_core",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
 name = "resowner"
 version = "0.1.0"
 dependencies = [
+ "aio_seams",
  "datum",
  "elog",
  "hashfn",
@@ -3839,6 +4112,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewriteheap_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "rmgr"
 version = "0.0.0"
 dependencies = [
@@ -3852,9 +4133,11 @@ dependencies = [
  "gist_xlog",
  "hash_xlog",
  "heapam_xlog",
+ "logical_message",
  "mcx",
  "multixact",
  "nbtree_xlog",
+ "origin_seams",
  "relmapper",
  "rmgrdesc",
  "sequence_xlog",
@@ -3907,6 +4190,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
+name = "rustversion"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
 name = "ryu"
 version = "0.1.0"
 
@@ -3923,6 +4212,12 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
 ]
+
+[[package]]
+name = "scoped-tls"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
 name = "seam_core"
@@ -3954,6 +4249,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3967,11 +4271,16 @@ dependencies = [
  "elog",
  "init_small",
  "latch",
+ "libc",
+ "lmgr_proc_seams",
+ "pg_clock",
  "postgres_seams",
  "s_lock_seams",
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
+ "waiteventset_seams",
 ]
 
 [[package]]
@@ -4005,12 +4314,15 @@ dependencies = [
  "backend_status",
  "datum",
  "elog",
+ "guc_tables",
  "init_small",
  "latch",
  "libc",
  "lmgr_proc",
  "miscinit_seams",
+ "pmsignal",
  "postgres_seams",
+ "postmaster_seams",
  "procarray",
  "procsignal",
  "superuser_seams",
@@ -4063,6 +4375,7 @@ dependencies = [
  "guc",
  "guc_tables",
  "init_small",
+ "injection_point",
  "ipc_seams",
  "libc",
  "lmgr_proc",
@@ -4073,6 +4386,8 @@ dependencies = [
  "miscinit_seams",
  "pgstat",
  "procarray",
+ "procsignal",
+ "procsignal_seams",
  "s_lock_seams",
  "slot_seams",
  "standby_seams",
@@ -4084,6 +4399,7 @@ dependencies = [
  "types_tuple",
  "varlena",
  "walsender_config",
+ "walsender_seams",
  "wchar",
  "xlogrecovery_seams",
 ]
@@ -4093,6 +4409,7 @@ name = "slot_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
  "types_error",
 ]
 
@@ -4113,9 +4430,16 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "vfs",
  "waitevent_seams",
  "xlogutils_seams",
 ]
+
+[[package]]
+name = "smallvec"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "smgr"
@@ -4163,6 +4487,9 @@ name = "snapmgr"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "fd",
+ "init_small",
+ "libc",
  "lmgr_proc",
  "mcx",
  "predicate_seams",
@@ -4260,6 +4587,7 @@ dependencies = [
  "elog",
  "guc_tables",
  "init_small",
+ "injection_point",
  "inval",
  "lmgr_proc",
  "lock",
@@ -4309,12 +4637,14 @@ dependencies = [
 name = "storage_xlog"
 version = "0.1.0"
 dependencies = [
+ "freespace",
  "init_small",
  "smgr",
  "transam_xlog",
  "types_core",
  "types_error",
  "types_storage",
+ "visibilitymap",
  "xlogreader_seams",
  "xlogutils",
 ]
@@ -4491,6 +4821,7 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_scan",
+ "types_slot",
  "types_snapshot",
  "types_storage",
  "types_tuple",
@@ -4546,6 +4877,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "thread_local"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "tidbitmap"
 version = "0.1.0"
 dependencies = [
@@ -4574,11 +4914,14 @@ version = "0.0.0"
 dependencies = [
  "init_small",
  "latch",
+ "pg_clock",
+ "pgsync",
  "timeout_seams",
  "timestamp_seams",
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
 ]
 
 [[package]]
@@ -4645,6 +4988,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+dependencies = [
+ "pin-project-lite",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+dependencies = [
+ "matchers",
+ "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
+ "sharded-slab",
+ "smallvec",
+ "thread_local",
+ "tracing",
+ "tracing-core",
+ "tracing-log",
+]
+
+[[package]]
 name = "transam"
 version = "0.0.0"
 dependencies = [
@@ -4676,28 +5068,38 @@ dependencies = [
  "commit_ts_seams",
  "controldata_utils",
  "crc32c",
+ "datum",
  "elog",
  "fd",
+ "guc_seams",
  "guc_tables",
  "init_small",
+ "injection_point",
+ "ipc_seams",
  "latch",
  "libc",
  "lmgr_proc",
  "lmgr_proc_seams",
  "lwlock",
+ "mcx",
  "multixact_seams",
  "origin_seams",
+ "pg_clock",
  "pgstat",
  "pgstat_seams",
+ "postgres_seams",
  "predicate_seams",
  "procarray",
  "procarray_seams",
  "relcache_seams",
  "relmapper",
  "reorderbuffer_seams",
+ "rewriteheap_seams",
  "s_lock_seams",
  "slot_seams",
+ "smgr_seams",
  "snapbuild_seams",
+ "snapmgr_seams",
  "standby_seams",
  "startup_seams",
  "subtrans_seams",
@@ -4712,9 +5114,12 @@ dependencies = [
  "types_storage",
  "varsup",
  "varsup_seams",
+ "walreceiverfuncs_seams",
+ "walsender_seams",
  "walsummarizer_seams",
  "xact_seams",
  "xlogarchive_seams",
+ "xlogbackup",
  "xloginsert_seams",
  "xlogreader_seams",
  "xlogrecovery_seams",
@@ -4877,6 +5282,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -4961,6 +5367,14 @@ name = "types_array"
 version = "0.1.0"
 dependencies = [
  "types_core",
+]
+
+[[package]]
+name = "types_bloom"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_fmgr",
 ]
 
 [[package]]
@@ -5050,6 +5464,7 @@ dependencies = [
  "mcx",
  "types_core",
  "types_error",
+ "types_storage",
  "types_tuple",
 ]
 
@@ -5084,6 +5499,7 @@ name = "types_rel"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "types_bloom",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -5161,6 +5577,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mcx",
+ "pgsync",
  "types_core",
  "types_error",
 ]
@@ -5221,6 +5638,12 @@ dependencies = [
  "types_error",
  "wchar",
 ]
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "varlena"
@@ -5309,10 +5732,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vfs"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "visibilitymap"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_seams",
  "guc_tables",
  "init_small",
  "inval",
@@ -5325,6 +5756,16 @@ dependencies = [
  "types_storage",
  "xloginsert_seams",
  "xlogutils_seams",
+]
+
+[[package]]
+name = "waiter"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "loom",
+ "pg_clock",
+ "pgsync",
 ]
 
 [[package]]
@@ -5362,9 +5803,11 @@ dependencies = [
  "init_small",
  "latch",
  "libc",
+ "pg_clock",
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
  "waitevent_seams",
  "waiteventset_seams",
 ]
@@ -5394,10 +5837,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "walreceiverfuncs_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "walsender_config"
 version = "0.0.0"
 dependencies = [
  "guc_tables",
+]
+
+[[package]]
+name = "walsender_seams"
+version = "0.0.0"
+dependencies = [
+ "repl_gram",
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -5412,6 +5873,30 @@ dependencies = [
 [[package]]
 name = "wchar"
 version = "0.1.0"
+
+[[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-result"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "wparser_def"
@@ -5461,7 +5946,7 @@ dependencies = [
  "guc_tables",
  "init_small",
  "inval",
- "launcher",
+ "launcher_seams",
  "libpq_pqsignal",
  "lmgr",
  "lmgr_proc",
@@ -5559,6 +6044,19 @@ name = "xlogarchive_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "xlogbackup"
+version = "0.0.0"
+dependencies = [
+ "localtime",
+ "mcx",
+ "pgtz",
+ "strftime",
+ "stringinfo",
  "types_core",
  "types_error",
 ]
