@@ -461,11 +461,34 @@ pub fn path_image<'m>(
     Ok(Varlena::from_image(img))
 }
 
-/// Build a POLYGON varlena image; the boundbox is computed from the points.
+/// Build a POLYGON varlena image; the boundbox is computed from the points
+/// (C make_bound_box, as in poly_in/path_poly/circle_poly).
 pub fn poly_image<'m>(
     mcx: Mcx<'m>,
     npts: usize,
+    get: impl FnMut(usize) -> PgResult<Point>,
+) -> PgResult<Varlena<'m>> {
+    poly_image_impl(mcx, npts, get, None)
+}
+
+/// Build a POLYGON varlena image with an explicitly supplied boundbox,
+/// bypassing the make_bound_box recompute. C box_poly (geo_ops.c:4557)
+/// stores box_construct(&box->high, &box->low) rather than recomputing
+/// from the corner points; for -0.0/NaN inputs the two differ.
+pub fn poly_image_with_boundbox<'m>(
+    mcx: Mcx<'m>,
+    npts: usize,
+    get: impl FnMut(usize) -> PgResult<Point>,
+    boundbox: &BOX,
+) -> PgResult<Varlena<'m>> {
+    poly_image_impl(mcx, npts, get, Some(boundbox))
+}
+
+fn poly_image_impl<'m>(
+    mcx: Mcx<'m>,
+    npts: usize,
     mut get: impl FnMut(usize) -> PgResult<Point>,
+    boundbox: Option<&BOX>,
 ) -> PgResult<Varlena<'m>> {
     let total = POLYGON_HEADER_SIZE + npts * POINT_SIZE;
     let mut img: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
@@ -484,7 +507,9 @@ pub fn poly_image<'m>(
         let off = POLYGON_HEADER_SIZE + i * POINT_SIZE;
         img[off..off + POINT_SIZE].copy_from_slice(&p.to_datum_bytes());
     }
-    if npts > 0 {
+    if let Some(bb) = boundbox {
+        img[8..40].copy_from_slice(&bb.to_datum_bytes());
+    } else if npts > 0 {
         let bb = bound_box(&PolyRef::from_payload(&img[4..]));
         img[8..40].copy_from_slice(&bb.to_datum_bytes());
     }
