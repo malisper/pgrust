@@ -1900,3 +1900,17 @@ scalar-misc	wave5::eq_xid8recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_mis
 scalar-misc	wave5::eq_tidrecv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
 scalar-misc	wave5::cover_recv_core_both_arms	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	info	per-commit	wall	timeout 120s, recv symex class
 scalar-misc	wave5::control_oidrecv_core_cursor_skew	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	must-fail	control	62.8	fails on cursor skew as designed (completes where eq walls)
+scalar-misc	xid8snap::eq_full_xid_from_allowable_at	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	0.12	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_snapshot_xmin	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	4.5	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_snapshot_xmax	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	4.4	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_visible_in_snapshot_linear	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	20.3	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_visible_in_snapshot_bsearch	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	green	release-gate	143.4	info row proved green
+scalar-misc	xid8snap::control_visible_xmax_skew	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --exact	must-fail	control	1.5	fails on xmax skew as designed
+scalar-misc	xid8snap::eq_pg_snapshot_send_n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	info	release-gate	wall	symex wall 300s both solvers, 0 VCCs
+scalar-misc	xid8snap::eq_pg_snapshot_send_n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	xid8snap::eq_pg_snapshot_send_n2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	xid8snap::eq_pg_snapshot_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib c/pg_scalar_misc.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	symex wall 600s
+scalar-misc	xid8snap::eq_pg_snapshot_out_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+scalar-misc	xid8snap::eq_pg_snapshot_out_spots	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+scalar-misc	xid8snap::eq_strtou64_cap8	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	6.0	wave-5 run 2026-07-30 idle
+scalar-misc	xid8snap::eq_pg_snapshot_in_cap6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
