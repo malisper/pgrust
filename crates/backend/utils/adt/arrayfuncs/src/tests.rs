@@ -1242,3 +1242,407 @@ fn array_nulls_guc_governs_unquoted_null() {
     crate::set_array_nulls(true);
     assert_eq!(out, r#"{"NULL","NULL"}"#);
 }
+
+// ---- C-locale whitespace conformance for array_in / array_out -------------
+//
+// C's array_in and array_out both decide "is this whitespace?" with
+// scanner_isspace (src/backend/parser/scansup.c), whose set is scan.l's
+// {space} class == the C-locale isspace set {HT, LF, VT, FF, CR, SP}.  Rust's
+// `u8::is_ascii_whitespace` omits VT (0x0b), so any local re-derivation of the
+// set silently drops VT at every position below.  Expectations here are the
+// EXECUTED output of PostgreSQL 18.4 (Debian, aarch64) over a generated case
+// matrix; control characters crossed the wire only as chr(N).  Each row is
+// `id, literal, expected`, where expected is `OK:<hex of array_out bytes>` or
+// `ERR:<sqlstate>`.  The NBSP (U+00A0) and NEL (U+0085) rows are negative
+// controls: they are whitespace to `char::is_whitespace` but not to C.
+mod c_locale_whitespace {
+    use super::*;
+
+    fn hex(b: &[u8]) -> String {
+        let mut s = String::new();
+        for x in b {
+            s.push_str(&format!("{x:02x}"));
+        }
+        s
+    }
+
+    fn run_in(mcx: Mcx<'_>, lit: &str, int4: bool) -> String {
+        let m = if int4 { meta_int4() } else { meta_text() };
+        let mut ip = if int4 { int4_in() } else { text_in() };
+        match array_in(mcx, lit, &m, &mut ip, -1, None) {
+            Err(e) => format!(
+                "ERR:{}",
+                core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap()
+            ),
+            Ok(None) => "ERR:soft".to_string(),
+            Ok(Some(img)) => {
+                let mut op = if int4 { int4_out() } else { text_out() };
+                let o = array_out(mcx, &img, &m, &mut op).unwrap();
+                format!("OK:{}", hex(&o[..o.len() - 1]))
+            }
+        }
+    }
+
+    // array_out an array whose single element is `elem`, then read the literal
+    // back: `OUT:<hex of literal> RT:EQ` when the element survives verbatim.
+    fn run_out(mcx: Mcx<'_>, elem: &str) -> String {
+        let m = meta_text();
+        let d = build_varlena(mcx, elem.as_bytes()).unwrap();
+        let img = construct_array(mcx, &[d], ::types_core::TEXTOID, -1, false, b'i').unwrap();
+        let mut op = text_out();
+        let lit_c = array_out(mcx, &img, &m, &mut op).unwrap();
+        let lit_b = &lit_c[..lit_c.len() - 1];
+        let outhex = hex(lit_b);
+        let lit = core::str::from_utf8(lit_b).unwrap();
+        let mut ip = text_in();
+        match array_in(mcx, lit, &m, &mut ip, -1, None) {
+            Err(e) => format!(
+                "OUT:{outhex} RT:ERR:{}",
+                core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap()
+            ),
+            Ok(None) => format!("OUT:{outhex} RT:ERR:soft"),
+            Ok(Some(back)) => {
+                let (ds, ns) =
+                    deconstruct_array(mcx, &back, -1, false, b'i', true).unwrap();
+                let got: &[u8] = if ds.len() == 1 && !ns[0] { varlena_payload(ds[0]) } else { b"" };
+                if got == elem.as_bytes() {
+                    format!("OUT:{outhex} RT:EQ")
+                } else {
+                    format!("OUT:{outhex} RT:NE:{}", hex(got))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn array_in_text_whitespace_matrix_matches_c() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            ("t_lead_SP", " {a}", "OK:7b617d"),
+            ("t_lead_HT", "\u{9}{a}", "OK:7b617d"),
+            ("t_lead_LF", "\u{a}{a}", "OK:7b617d"),
+            ("t_lead_VT", "\u{b}{a}", "OK:7b617d"),
+            ("t_lead_FF", "\u{c}{a}", "OK:7b617d"),
+            ("t_lead_CR", "\u{d}{a}", "OK:7b617d"),
+            ("t_lead_NBSP", "\u{a0}{a}", "ERR:22P02"),
+            ("t_lead_NEL", "\u{85}{a}", "ERR:22P02"),
+            ("t_trail_SP", "{a} ", "OK:7b617d"),
+            ("t_trail_HT", "{a}\u{9}", "OK:7b617d"),
+            ("t_trail_LF", "{a}\u{a}", "OK:7b617d"),
+            ("t_trail_VT", "{a}\u{b}", "OK:7b617d"),
+            ("t_trail_FF", "{a}\u{c}", "OK:7b617d"),
+            ("t_trail_CR", "{a}\u{d}", "OK:7b617d"),
+            ("t_trail_NBSP", "{a}\u{a0}", "ERR:22P02"),
+            ("t_trail_NEL", "{a}\u{85}", "ERR:22P02"),
+            ("t_after_lbrace_SP", "{ a}", "OK:7b617d"),
+            ("t_after_lbrace_HT", "{\u{9}a}", "OK:7b617d"),
+            ("t_after_lbrace_LF", "{\u{a}a}", "OK:7b617d"),
+            ("t_after_lbrace_VT", "{\u{b}a}", "OK:7b617d"),
+            ("t_after_lbrace_FF", "{\u{c}a}", "OK:7b617d"),
+            ("t_after_lbrace_CR", "{\u{d}a}", "OK:7b617d"),
+            ("t_after_lbrace_NBSP", "{\u{a0}a}", "OK:7bc2a0617d"),
+            ("t_after_lbrace_NEL", "{\u{85}a}", "OK:7bc285617d"),
+            ("t_before_rbrace_SP", "{a }", "OK:7b617d"),
+            ("t_before_rbrace_HT", "{a\u{9}}", "OK:7b617d"),
+            ("t_before_rbrace_LF", "{a\u{a}}", "OK:7b617d"),
+            ("t_before_rbrace_VT", "{a\u{b}}", "OK:7b617d"),
+            ("t_before_rbrace_FF", "{a\u{c}}", "OK:7b617d"),
+            ("t_before_rbrace_CR", "{a\u{d}}", "OK:7b617d"),
+            ("t_before_rbrace_NBSP", "{a\u{a0}}", "OK:7b61c2a07d"),
+            ("t_before_rbrace_NEL", "{a\u{85}}", "OK:7b61c2857d"),
+            ("t_around_delim_SP", "{a , b}", "OK:7b612c627d"),
+            ("t_around_delim_HT", "{a\u{9},\u{9}b}", "OK:7b612c627d"),
+            ("t_around_delim_LF", "{a\u{a},\u{a}b}", "OK:7b612c627d"),
+            ("t_around_delim_VT", "{a\u{b},\u{b}b}", "OK:7b612c627d"),
+            ("t_around_delim_FF", "{a\u{c},\u{c}b}", "OK:7b612c627d"),
+            ("t_around_delim_CR", "{a\u{d},\u{d}b}", "OK:7b612c627d"),
+            ("t_around_delim_NBSP", "{a\u{a0},\u{a0}b}", "OK:7b61c2a02cc2a0627d"),
+            ("t_around_delim_NEL", "{a\u{85},\u{85}b}", "OK:7b61c2852cc285627d"),
+            ("t_in_quotes_SP", "{\"a b\"}", "OK:7b22612062227d"),
+            ("t_in_quotes_HT", "{\"a\u{9}b\"}", "OK:7b22610962227d"),
+            ("t_in_quotes_LF", "{\"a\u{a}b\"}", "OK:7b22610a62227d"),
+            ("t_in_quotes_VT", "{\"a\u{b}b\"}", "OK:7b22610b62227d"),
+            ("t_in_quotes_FF", "{\"a\u{c}b\"}", "OK:7b22610c62227d"),
+            ("t_in_quotes_CR", "{\"a\u{d}b\"}", "OK:7b22610d62227d"),
+            ("t_in_quotes_NBSP", "{\"a\u{a0}b\"}", "OK:7b61c2a0627d"),
+            ("t_in_quotes_NEL", "{\"a\u{85}b\"}", "OK:7b61c285627d"),
+            ("t_after_quote_SP", "{\"a\" ,b}", "OK:7b612c627d"),
+            ("t_after_quote_HT", "{\"a\"\u{9},b}", "OK:7b612c627d"),
+            ("t_after_quote_LF", "{\"a\"\u{a},b}", "OK:7b612c627d"),
+            ("t_after_quote_VT", "{\"a\"\u{b},b}", "OK:7b612c627d"),
+            ("t_after_quote_FF", "{\"a\"\u{c},b}", "OK:7b612c627d"),
+            ("t_after_quote_CR", "{\"a\"\u{d},b}", "OK:7b612c627d"),
+            ("t_after_quote_NBSP", "{\"a\"\u{a0},b}", "ERR:22P02"),
+            ("t_after_quote_NEL", "{\"a\"\u{85},b}", "ERR:22P02"),
+            ("t_quoted_only_SP", "{\" \"}", "OK:7b2220227d"),
+            ("t_quoted_only_HT", "{\"\u{9}\"}", "OK:7b2209227d"),
+            ("t_quoted_only_LF", "{\"\u{a}\"}", "OK:7b220a227d"),
+            ("t_quoted_only_VT", "{\"\u{b}\"}", "OK:7b220b227d"),
+            ("t_quoted_only_FF", "{\"\u{c}\"}", "OK:7b220c227d"),
+            ("t_quoted_only_CR", "{\"\u{d}\"}", "OK:7b220d227d"),
+            ("t_quoted_only_NBSP", "{\"\u{a0}\"}", "OK:7bc2a07d"),
+            ("t_quoted_only_NEL", "{\"\u{85}\"}", "OK:7bc2857d"),
+            ("t_brace_only_SP", "{ }", "OK:7b7d"),
+            ("t_brace_only_HT", "{\u{9}}", "OK:7b7d"),
+            ("t_brace_only_LF", "{\u{a}}", "OK:7b7d"),
+            ("t_brace_only_VT", "{\u{b}}", "OK:7b7d"),
+            ("t_brace_only_FF", "{\u{c}}", "OK:7b7d"),
+            ("t_brace_only_CR", "{\u{d}}", "OK:7b7d"),
+            ("t_brace_only_NBSP", "{\u{a0}}", "OK:7bc2a07d"),
+            ("t_brace_only_NEL", "{\u{85}}", "OK:7bc2857d"),
+            ("t_empty_elem_SP", "{a, ,b}", "ERR:22P02"),
+            ("t_empty_elem_HT", "{a,\u{9},b}", "ERR:22P02"),
+            ("t_empty_elem_LF", "{a,\u{a},b}", "ERR:22P02"),
+            ("t_empty_elem_VT", "{a,\u{b},b}", "ERR:22P02"),
+            ("t_empty_elem_FF", "{a,\u{c},b}", "ERR:22P02"),
+            ("t_empty_elem_CR", "{a,\u{d},b}", "ERR:22P02"),
+            ("t_empty_elem_NBSP", "{a,\u{a0},b}", "OK:7b612cc2a02c627d"),
+            ("t_empty_elem_NEL", "{a,\u{85},b}", "OK:7b612cc2852c627d"),
+            ("t_esc_mid_SP", "{a\\ b}", "OK:7b22612062227d"),
+            ("t_esc_mid_HT", "{a\\\u{9}b}", "OK:7b22610962227d"),
+            ("t_esc_mid_LF", "{a\\\u{a}b}", "OK:7b22610a62227d"),
+            ("t_esc_mid_VT", "{a\\\u{b}b}", "OK:7b22610b62227d"),
+            ("t_esc_mid_FF", "{a\\\u{c}b}", "OK:7b22610c62227d"),
+            ("t_esc_mid_CR", "{a\\\u{d}b}", "OK:7b22610d62227d"),
+            ("t_esc_mid_NBSP", "{a\\\u{a0}b}", "OK:7b61c2a0627d"),
+            ("t_esc_mid_NEL", "{a\\\u{85}b}", "OK:7b61c285627d"),
+            ("t_esc_trail_SP", "{a\\ }", "OK:7b226120227d"),
+            ("t_esc_trail_HT", "{a\\\u{9}}", "OK:7b226109227d"),
+            ("t_esc_trail_LF", "{a\\\u{a}}", "OK:7b22610a227d"),
+            ("t_esc_trail_VT", "{a\\\u{b}}", "OK:7b22610b227d"),
+            ("t_esc_trail_FF", "{a\\\u{c}}", "OK:7b22610c227d"),
+            ("t_esc_trail_CR", "{a\\\u{d}}", "OK:7b22610d227d"),
+            ("t_esc_trail_NBSP", "{a\\\u{a0}}", "OK:7b61c2a07d"),
+            ("t_esc_trail_NEL", "{a\\\u{85}}", "OK:7b61c2857d"),
+            ("t_esc_in_quotes_SP", "{\"a\\ b\"}", "OK:7b22612062227d"),
+            ("t_esc_in_quotes_HT", "{\"a\\\u{9}b\"}", "OK:7b22610962227d"),
+            ("t_esc_in_quotes_LF", "{\"a\\\u{a}b\"}", "OK:7b22610a62227d"),
+            ("t_esc_in_quotes_VT", "{\"a\\\u{b}b\"}", "OK:7b22610b62227d"),
+            ("t_esc_in_quotes_FF", "{\"a\\\u{c}b\"}", "OK:7b22610c62227d"),
+            ("t_esc_in_quotes_CR", "{\"a\\\u{d}b\"}", "OK:7b22610d62227d"),
+            ("t_esc_in_quotes_NBSP", "{\"a\\\u{a0}b\"}", "OK:7b61c2a0627d"),
+            ("t_esc_in_quotes_NEL", "{\"a\\\u{85}b\"}", "OK:7b61c285627d"),
+            ("t_nested_SP", "{{a } ,{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_HT", "{{a\u{9}}\u{9},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_LF", "{{a\u{a}}\u{a},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_VT", "{{a\u{b}}\u{b},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_FF", "{{a\u{c}}\u{c},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_CR", "{{a\u{d}}\u{d},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_NBSP", "{{a\u{a0}}\u{a0},{b}}", "ERR:22P02"),
+            ("t_nested_NEL", "{{a\u{85}}\u{85},{b}}", "ERR:22P02"),
+            ("t_null_ws_SP", "{NULL }", "OK:7b4e554c4c7d"),
+            ("t_null_ws_HT", "{NULL\u{9}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_LF", "{NULL\u{a}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_VT", "{NULL\u{b}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_FF", "{NULL\u{c}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_CR", "{NULL\u{d}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_NBSP", "{NULL\u{a0}}", "OK:7b4e554c4cc2a07d"),
+            ("t_null_ws_NEL", "{NULL\u{85}}", "OK:7b4e554c4cc2857d"),
+            ("t_null_ws_lead_SP", "{ NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_HT", "{\u{9}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_LF", "{\u{a}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_VT", "{\u{b}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_FF", "{\u{c}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_CR", "{\u{d}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_NBSP", "{\u{a0}NULL}", "OK:7bc2a04e554c4c7d"),
+            ("t_null_ws_lead_NEL", "{\u{85}NULL}", "OK:7bc2854e554c4c7d"),
+            ("t_elem_all_ws_SP", "{a, }", "ERR:22P02"),
+            ("t_elem_all_ws_HT", "{a,\u{9}}", "ERR:22P02"),
+            ("t_elem_all_ws_LF", "{a,\u{a}}", "ERR:22P02"),
+            ("t_elem_all_ws_VT", "{a,\u{b}}", "ERR:22P02"),
+            ("t_elem_all_ws_FF", "{a,\u{c}}", "ERR:22P02"),
+            ("t_elem_all_ws_CR", "{a,\u{d}}", "ERR:22P02"),
+            ("t_elem_all_ws_NBSP", "{a,\u{a0}}", "OK:7b612cc2a07d"),
+            ("t_elem_all_ws_NEL", "{a,\u{85}}", "OK:7b612cc2857d"),
+            ("t_dim_lead_SP", " [1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_HT", "\u{9}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_LF", "\u{a}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_VT", "\u{b}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_FF", "\u{c}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_CR", "\u{d}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_NBSP", "\u{a0}[1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_lead_NEL", "\u{85}[1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_before_eq_SP", "[1:2] ={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_HT", "[1:2]\u{9}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_LF", "[1:2]\u{a}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_VT", "[1:2]\u{b}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_FF", "[1:2]\u{c}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_CR", "[1:2]\u{d}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_NBSP", "[1:2]\u{a0}={a,b}", "ERR:22P02"),
+            ("t_dim_before_eq_NEL", "[1:2]\u{85}={a,b}", "ERR:22P02"),
+            ("t_dim_after_eq_SP", "[1:2]= {a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_HT", "[1:2]=\u{9}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_LF", "[1:2]=\u{a}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_VT", "[1:2]=\u{b}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_FF", "[1:2]=\u{c}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_CR", "[1:2]=\u{d}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_NBSP", "[1:2]=\u{a0}{a,b}", "ERR:22P02"),
+            ("t_dim_after_eq_NEL", "[1:2]=\u{85}{a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_SP", "[1 :2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_HT", "[1\u{9}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_LF", "[1\u{a}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_VT", "[1\u{b}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_FF", "[1\u{c}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_CR", "[1\u{d}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_NBSP", "[1\u{a0}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_NEL", "[1\u{85}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_SP", "[ 1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_HT", "[\u{9}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_LF", "[\u{a}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_VT", "[\u{b}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_FF", "[\u{c}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_CR", "[\u{d}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_NBSP", "[\u{a0}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_NEL", "[\u{85}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_SP", "[1:2 ]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_HT", "[1:2\u{9}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_LF", "[1:2\u{a}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_VT", "[1:2\u{b}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_FF", "[1:2\u{c}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_CR", "[1:2\u{d}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_NBSP", "[1:2\u{a0}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_NEL", "[1:2\u{85}]={a,b}", "ERR:22P02"),
+            ("t_dim_between_SP", "[1:1] [1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_HT", "[1:1]\u{9}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_LF", "[1:1]\u{a}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_VT", "[1:1]\u{b}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_FF", "[1:1]\u{c}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_CR", "[1:1]\u{d}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_NBSP", "[1:1]\u{a0}[1:2]={{a,b}}", "ERR:22P02"),
+            ("t_dim_between_NEL", "[1:1]\u{85}[1:2]={{a,b}}", "ERR:22P02"),
+            ("t_dim_both_ends_SP", "[1:2]= {a,b} ", "OK:7b612c627d"),
+            ("t_dim_both_ends_HT", "[1:2]=\u{9}{a,b}\u{9}", "OK:7b612c627d"),
+            ("t_dim_both_ends_LF", "[1:2]=\u{a}{a,b}\u{a}", "OK:7b612c627d"),
+            ("t_dim_both_ends_VT", "[1:2]=\u{b}{a,b}\u{b}", "OK:7b612c627d"),
+            ("t_dim_both_ends_FF", "[1:2]=\u{c}{a,b}\u{c}", "OK:7b612c627d"),
+            ("t_dim_both_ends_CR", "[1:2]=\u{d}{a,b}\u{d}", "OK:7b612c627d"),
+            ("t_dim_both_ends_NBSP", "[1:2]=\u{a0}{a,b}\u{a0}", "ERR:22P02"),
+            ("t_dim_both_ends_NEL", "[1:2]=\u{85}{a,b}\u{85}", "ERR:22P02"),
+        ];
+        let mut bad = Vec::new();
+        for (id, lit, want) in cases {
+            let got = run_in(mcx, lit, false);
+            if got != *want {
+                bad.push(format!("{id}: want {want}, got {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} cell(s) diverge from PostgreSQL 18.4:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn array_in_int4_whitespace_matrix_matches_c() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            ("i_lead_SP", " {1}", "OK:7b317d"),
+            ("i_lead_HT", "\u{9}{1}", "OK:7b317d"),
+            ("i_lead_LF", "\u{a}{1}", "OK:7b317d"),
+            ("i_lead_VT", "\u{b}{1}", "OK:7b317d"),
+            ("i_lead_FF", "\u{c}{1}", "OK:7b317d"),
+            ("i_lead_CR", "\u{d}{1}", "OK:7b317d"),
+            ("i_lead_NBSP", "\u{a0}{1}", "ERR:22P02"),
+            ("i_lead_NEL", "\u{85}{1}", "ERR:22P02"),
+            ("i_trail_SP", "{1} ", "OK:7b317d"),
+            ("i_trail_HT", "{1}\u{9}", "OK:7b317d"),
+            ("i_trail_LF", "{1}\u{a}", "OK:7b317d"),
+            ("i_trail_VT", "{1}\u{b}", "OK:7b317d"),
+            ("i_trail_FF", "{1}\u{c}", "OK:7b317d"),
+            ("i_trail_CR", "{1}\u{d}", "OK:7b317d"),
+            ("i_trail_NBSP", "{1}\u{a0}", "ERR:22P02"),
+            ("i_trail_NEL", "{1}\u{85}", "ERR:22P02"),
+            ("i_before_rbrace_SP", "{1 }", "OK:7b317d"),
+            ("i_before_rbrace_HT", "{1\u{9}}", "OK:7b317d"),
+            ("i_before_rbrace_LF", "{1\u{a}}", "OK:7b317d"),
+            ("i_before_rbrace_VT", "{1\u{b}}", "OK:7b317d"),
+            ("i_before_rbrace_FF", "{1\u{c}}", "OK:7b317d"),
+            ("i_before_rbrace_CR", "{1\u{d}}", "OK:7b317d"),
+            ("i_before_rbrace_NBSP", "{1\u{a0}}", "ERR:22P02"),
+            ("i_before_rbrace_NEL", "{1\u{85}}", "ERR:22P02"),
+            ("i_around_delim_SP", "{1 , 2}", "OK:7b312c327d"),
+            ("i_around_delim_HT", "{1\u{9},\u{9}2}", "OK:7b312c327d"),
+            ("i_around_delim_LF", "{1\u{a},\u{a}2}", "OK:7b312c327d"),
+            ("i_around_delim_VT", "{1\u{b},\u{b}2}", "OK:7b312c327d"),
+            ("i_around_delim_FF", "{1\u{c},\u{c}2}", "OK:7b312c327d"),
+            ("i_around_delim_CR", "{1\u{d},\u{d}2}", "OK:7b312c327d"),
+            ("i_around_delim_NBSP", "{1\u{a0},\u{a0}2}", "ERR:22P02"),
+            ("i_around_delim_NEL", "{1\u{85},\u{85}2}", "ERR:22P02"),
+            ("i_in_quotes_SP", "{\"1 \"}", "OK:7b317d"),
+            ("i_in_quotes_HT", "{\"1\u{9}\"}", "OK:7b317d"),
+            ("i_in_quotes_LF", "{\"1\u{a}\"}", "OK:7b317d"),
+            ("i_in_quotes_VT", "{\"1\u{b}\"}", "OK:7b317d"),
+            ("i_in_quotes_FF", "{\"1\u{c}\"}", "OK:7b317d"),
+            ("i_in_quotes_CR", "{\"1\u{d}\"}", "OK:7b317d"),
+            ("i_in_quotes_NBSP", "{\"1\u{a0}\"}", "ERR:22P02"),
+            ("i_in_quotes_NEL", "{\"1\u{85}\"}", "ERR:22P02"),
+            ("i_quoted_lead_SP", "{\" 1\"}", "OK:7b317d"),
+            ("i_quoted_lead_HT", "{\"\u{9}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_LF", "{\"\u{a}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_VT", "{\"\u{b}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_FF", "{\"\u{c}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_CR", "{\"\u{d}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_NBSP", "{\"\u{a0}1\"}", "ERR:22P02"),
+            ("i_quoted_lead_NEL", "{\"\u{85}1\"}", "ERR:22P02"),
+        ];
+        let mut bad = Vec::new();
+        for (id, lit, want) in cases {
+            let got = run_in(mcx, lit, true);
+            if got != *want {
+                bad.push(format!("{id}: want {want}, got {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} cell(s) diverge from PostgreSQL 18.4:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn array_out_quotes_every_c_whitespace_and_round_trips() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            ("o_elem_SP", " ", "OUT:7b2220227d RT:EQ"),
+            ("o_mid_SP", "a b", "OUT:7b22612062227d RT:EQ"),
+            ("o_lead_SP", " a", "OUT:7b222061227d RT:EQ"),
+            ("o_trail_SP", "a ", "OUT:7b226120227d RT:EQ"),
+            ("o_elem_HT", "\u{9}", "OUT:7b2209227d RT:EQ"),
+            ("o_mid_HT", "a\u{9}b", "OUT:7b22610962227d RT:EQ"),
+            ("o_lead_HT", "\u{9}a", "OUT:7b220961227d RT:EQ"),
+            ("o_trail_HT", "a\u{9}", "OUT:7b226109227d RT:EQ"),
+            ("o_elem_LF", "\u{a}", "OUT:7b220a227d RT:EQ"),
+            ("o_mid_LF", "a\u{a}b", "OUT:7b22610a62227d RT:EQ"),
+            ("o_lead_LF", "\u{a}a", "OUT:7b220a61227d RT:EQ"),
+            ("o_trail_LF", "a\u{a}", "OUT:7b22610a227d RT:EQ"),
+            ("o_elem_VT", "\u{b}", "OUT:7b220b227d RT:EQ"),
+            ("o_mid_VT", "a\u{b}b", "OUT:7b22610b62227d RT:EQ"),
+            ("o_lead_VT", "\u{b}a", "OUT:7b220b61227d RT:EQ"),
+            ("o_trail_VT", "a\u{b}", "OUT:7b22610b227d RT:EQ"),
+            ("o_elem_FF", "\u{c}", "OUT:7b220c227d RT:EQ"),
+            ("o_mid_FF", "a\u{c}b", "OUT:7b22610c62227d RT:EQ"),
+            ("o_lead_FF", "\u{c}a", "OUT:7b220c61227d RT:EQ"),
+            ("o_trail_FF", "a\u{c}", "OUT:7b22610c227d RT:EQ"),
+            ("o_elem_CR", "\u{d}", "OUT:7b220d227d RT:EQ"),
+            ("o_mid_CR", "a\u{d}b", "OUT:7b22610d62227d RT:EQ"),
+            ("o_lead_CR", "\u{d}a", "OUT:7b220d61227d RT:EQ"),
+            ("o_trail_CR", "a\u{d}", "OUT:7b22610d227d RT:EQ"),
+            ("o_elem_NBSP", "\u{a0}", "OUT:7bc2a07d RT:EQ"),
+            ("o_mid_NBSP", "a\u{a0}b", "OUT:7b61c2a0627d RT:EQ"),
+            ("o_lead_NBSP", "\u{a0}a", "OUT:7bc2a0617d RT:EQ"),
+            ("o_trail_NBSP", "a\u{a0}", "OUT:7b61c2a07d RT:EQ"),
+            ("o_elem_NEL", "\u{85}", "OUT:7bc2857d RT:EQ"),
+            ("o_mid_NEL", "a\u{85}b", "OUT:7b61c285627d RT:EQ"),
+            ("o_lead_NEL", "\u{85}a", "OUT:7bc285617d RT:EQ"),
+            ("o_trail_NEL", "a\u{85}", "OUT:7b61c2857d RT:EQ"),
+        ];
+        let mut bad = Vec::new();
+        for (id, lit, want) in cases {
+            let got = run_out(mcx, lit);
+            if got != *want {
+                bad.push(format!("{id}: want {want}, got {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} cell(s) diverge from PostgreSQL 18.4:\n{}", bad.len(), bad.join("\n"));
+    }
+
+}
