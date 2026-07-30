@@ -3026,3 +3026,31 @@ xid8snap	proofs::spot_parse_xip_below_xmin	-Z c-ffi -Z stubbing --c-lib c/pg_xid
 xid8snap	proofs::spot_parse_xmax_lt_xmin	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
 xid8snap	proofs::spot_parse_zero_xmax	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
 xid8snap	proofs::spot_parse_zero_xmin	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+arrayfuncs-hdr	proofs::eq_array_ndims	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	79	w2-arrayjson 2026-07-30, load 10-28 throughout family
+arrayfuncs-hdr	proofs::eq_array_lower_n0	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	84	
+arrayfuncs-hdr	proofs::eq_array_lower_n1	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	138	
+arrayfuncs-hdr	proofs::eq_array_lower_n2	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	183	
+arrayfuncs-hdr	proofs::eq_array_lower_n6	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	170	
+arrayfuncs-hdr	proofs::eq_array_length_n0	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	102	
+arrayfuncs-hdr	proofs::eq_array_length_n1	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	174	
+arrayfuncs-hdr	proofs::eq_array_length_n2	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	156	
+arrayfuncs-hdr	proofs::eq_array_length_n6	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	161	
+arrayfuncs-hdr	proofs::eq_array_upper_n0	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	70	
+arrayfuncs-hdr	proofs::eq_array_upper_n1	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	159	
+arrayfuncs-hdr	proofs::eq_array_upper_n2	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	140	
+arrayfuncs-hdr	proofs::eq_array_upper_n6	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	151	
+arrayfuncs-hdr	proofs::eq_array_cardinality_n0	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	69	
+arrayfuncs-hdr	proofs::eq_array_cardinality_n1	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	152	
+arrayfuncs-hdr	proofs::eq_array_cardinality_n2	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	248	
+arrayfuncs-hdr	proofs::eq_array_cardinality_n6	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	unmeasured	wall	timeout-450s at load 9-28 and at idle load ~5 retry — genuine chained-i64-multiply sloped wall; FLEET-BOUND
+arrayfuncs-hdr	proofs::eq_array_dims_nullplane	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	68	value plane = native diff (result-image fmt wall)
+arrayfuncs-hdr	proofs::control_array_lower_reqdim_skew_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --exact	must-fail	defect-witness	61	fails on exactly 'rv.as_i32() == c'; DEFAULT solver; single-property control (kani check-attribution artifact with multi-assert controls, see src comment + tests/control_replay.rs)
+json-text	proofs::eq_json_out_len0	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	244	w2-arrayjson 2026-07-30
+json-text	proofs::eq_json_out_len1	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	302	
+json-text	proofs::eq_json_out_len8	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	110	
+json-text	proofs::eq_json_send_len0	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	115	
+json-text	proofs::eq_json_send_len1	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	113	
+json-text	proofs::eq_json_send_len8	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	122	
+json-text	proofs::eq_json_build_object_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	103	
+json-text	proofs::eq_json_build_array_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	103	
+json-text	proofs::control_json_send_input_skew_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --exact	must-fail	defect-witness	72	fails on exactly 'b.varsize() == c_total'; DEFAULT solver; seam-skew load-bearing witness = tests/native_seam_skew.rs (tiny-proof-heap masks in-kani seam skew via alloc exhaustion)

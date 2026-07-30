@@ -1,0 +1,7 @@
+proofs::eq_json_out_len0 VERIFICATION:- SUCCESSFUL Verification Time: 243.71898s
+proofs::eq_json_out_len1 VERIFICATION:- SUCCESSFUL Verification Time: 302.40408s
+proofs::eq_json_out_len8 VERIFICATION:- SUCCESSFUL Verification Time: 110.05132s
+proofs::eq_json_send_len0 VERIFICATION:- SUCCESSFUL Verification Time: 114.822716s
+proofs::eq_json_send_len1 VERIFICATION:- SUCCESSFUL Verification Time: 113.133224s
+proofs::eq_json_send_len8 VERIFICATION:- SUCCESSFUL Verification Time: 121.65313s
+proofs::control_json_send_seam_skew_must_fail VERIFICATION:- FAILED Verification Time: 74.9272s
