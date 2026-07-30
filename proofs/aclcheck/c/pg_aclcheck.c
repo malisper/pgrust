@@ -2114,3 +2114,65 @@ pg_aclitemout(const AclItem *aip, char *out, int *err)
 		++p;
 	return (int) (p - out);
 }
+
+/* =====================================================================
+ * Probe wrapper (harness plumbing, not vendored logic): exposes the
+ * static pg_class_aclmask_ext_ core so the IsSystemClass temp-toast
+ * divergence witness can bypass the priv-string parse layer (whose std
+ * string machinery walls Kani symex at the full-pipeline probe).
+ * how: 0 = ACLMASK_ALL, 1 = ACLMASK_ANY.
+ * ===================================================================== */
+int
+pg_class_aclmask_probe(Oid table_oid, Oid roleid, AclMode mask, int how,
+					   AclMode *out, int *err)
+{
+	*out = pg_class_aclmask_ext_(table_oid, roleid, mask,
+								 how ? ACLMASK_ANY : ACLMASK_ALL, NULL, err);
+	return 0;
+}
+
+/* Diagnostic getters (harness plumbing): validate that Rust-side writes to
+ * the extern seam globals are visible to C code across the goto-link
+ * boundary, and expose the raw C-side strip decision. */
+int
+pgq_get_cat_found(void)
+{
+	return pgq_cat_found;
+}
+
+int
+pgq_get_temp_toast(void)
+{
+	return pgq_temp_toast;
+}
+
+int
+pgq_is_system_class(Oid relid, Oid relnamespace)
+{
+	return IsSystemClass(relid, relnamespace) ? 1 : 0;
+}
+
+/* More diagnostic getters (harness plumbing). */
+int
+pgq_c_superuser(Oid roleid)
+{
+	return superuser_arg(roleid) ? 1 : 0;
+}
+
+int
+pgq_get_relnamespace(void)
+{
+	return (int) pgq_cat_relnamespace;
+}
+
+int
+pgq_get_relkind(void)
+{
+	return pgq_cat_relkind;
+}
+
+int
+pgq_get_acl_isnull(void)
+{
+	return pgq_cat_acl_isnull;
+}
