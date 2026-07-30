@@ -2158,3 +2158,8 @@ datetime-b	proofs::eq_intervaltypmodout_prec_d5	-Z c-ffi -Z stubbing --c-lib c/p
 datetime-b	proofs::eq_intervaltypmodout_fullrange_prec_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	3.4	oid 2904; default solver; w2-timestamp 2026-07-30
 datetime-b	proofs::cover_intervaltypmodout_prec_bands	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	per-commit	0.1	oid 2904 union coverage; w2-timestamp 2026-07-30
 datetime-b	proofs::eq_interval_avg_accum_core	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.0	oid 1843; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_empty	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	2.9	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_pinf	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.7	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_ninf	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.8	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_interval_avg_fc_conflict	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	2.9	oid 1844; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::spot_interval_avg_fc_mean	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.9	oid 1844 concrete mean cell; w2-timestamp 2026-07-30
