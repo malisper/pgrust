@@ -123,3 +123,25 @@ ntop_spot_proofs::control_ntop_host_vs_show | must-fail | control | timeout 75 c
 # - convert_network_to_scalar: float-arm selectivity support, excluded
 #   class (TRIAGE); network_scan_first/last are planner-internal
 #   compositions of already-harnessed cores (no pg_proc oid).
+#
+# ---------- recv/send section (csrc/net_recvsend.c) — network-2026-07-30 ----------
+# Binary I/O rows 2496/2497/2498/2499, CORE-LEVEL over real shipped
+# StringInfo (mcx stub set). Measured: symbolic message LENGTH walls symex
+# (>450s at both cap 20/unwind 22 and cap 8/unwind 10) — literal-length
+# grid only; unwind >= 18 in every recv cell (16-byte ipaddr memcmp;
+# unwind(<18) FABRICATES counterexamples — CI-decode lesson reproduced).
+# DEFAULT solver (mixed-arm; kissat measured worse on send v4: 113s vs 86s).
+recvsend_proofs::eq_inet_recv_len2 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_inet_recv_len2 --exact   # PROVED 140.9s
+recvsend_proofs::eq_inet_recv_len8 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_inet_recv_len8 --exact   # PROVED 146.0s
+recvsend_proofs::eq_inet_recv_len10 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_inet_recv_len10 --exact   # PROVED 142.5s
+recvsend_proofs::eq_inet_recv_full20 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_inet_recv_full20 --exact   # PROVED 194.1s
+recvsend_proofs::eq_cidr_recv_len2 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_cidr_recv_len2 --exact   # PROVED 124.7s
+recvsend_proofs::eq_cidr_recv_len8 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_cidr_recv_len8 --exact   # PROVED 159.7s
+recvsend_proofs::eq_cidr_recv_len10 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_cidr_recv_len10 --exact   # PROVED 143.1s
+recvsend_proofs::eq_cidr_recv_full20 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_cidr_recv_full20 --exact   # PROVED 262.7s
+recvsend_proofs::eq_network_send_v4 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_network_send_v4 --exact   # PROVED 86.5s (unwind 14 tight; 26 costs 311s)
+recvsend_proofs::eq_network_send_v6 | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::eq_network_send_v6 --exact   # PROVED 323.5s (symex depth-bound at mandatory unwind 26)
+recvsend_proofs::cover_recv_arms | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --solver kissat --harness recvsend_proofs::cover_recv_arms --exact   # 6/6 covers SATISFIED
+recvsend_proofs::cover_send_family_cases | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --solver kissat --harness recvsend_proofs::cover_send_family_cases --exact   # 2/2 covers SATISFIED
+recvsend_proofs::control_send_flag_skew | must-fail | control | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::control_send_flag_skew --exact   # VERIFICATION FAILED ("flag-skew control") 296.7s
+recvsend_proofs::probe_inet_recv_symlen | info | ladder | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --harness recvsend_proofs::probe_inet_recv_symlen --exact   # wall(timeout-450s) re-validated on clean disk 2026-07-30 — symbolic-length plane is a real symex wall

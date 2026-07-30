@@ -294,7 +294,7 @@ oid	name	source_file	status	class	notes
 408	name_bpchar	crates/backend/utils/adt/varchar/src/builtins.rs	excluded(wall: derived-length copy)	-	lib.rs:201 NUL-scan over [u8;64] name -> cstring_to_text (= namesend 2423 class); per-NUL-position cells re-open
 409	bpchar_name	crates/backend/utils/adt/varchar/src/builtins.rs	candidate	fast	bpchar_name lib.rs:188 FIXED [u8;64] output frame (no derived-length wall); mbcliplen + trailing-space trim; per-length <=8 + encoding pin; host proofs/strings-scalar
 421	dist_pathp	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: 53-bit)	-	dist_ppath_internal
-422	hashinet	crates/backend/utils/adt/network/src/builtins.rs	candidate	fast	hashinet_bytes lib.rs:711 fixed <=18B buffer fill + hash_bytes; family/bits fence per proofs/network; host proofs/hash-rows rig
+422	hashinet	crates/backend/utils/adt/network/src/builtins.rs	proved(composed; v4/v6 split; shipped hashinet byte-view vs C-assembled VARDATA_ANY view, composed with proved hash_bytes ≡ hash_any (proofs/hash))	fast	1.9-2.9s; proofs/network; control_hashinet_view_skew FAILED as required; network-2026-07-30
 425	hashint4extended	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 432	hash_numeric	crates/backend/utils/adt/numeric/src/builtins.rs	proved(wrapper-level on proved hash_bytes kernels; stripped per-nd 0..4 + union coverage; out-of-contract unstripped nd<=2)	fast	76-128s release-gate+; proofs/numeric-probe
 436	macaddr_in	crates/backend/utils/adt/mac/src/builtins.rs	divergence(RATIFIED 2026-07-28: pgrust rejects >8-hexdigit wrap inputs C mod-2^32-accepts; C behavior = upstream sscanf bug, unreported; upstream report drafted) + proved(len<=4 full + witnesses; len 5-18 wall)	fast	Michael ruling: ratify rejection; witness harness = intentional expected-fail; proofs/mac
@@ -347,10 +347,10 @@ oid	name	source_file	status	class	notes
 516	array_smaller	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 598	inet_abbrev	crates/backend/utils/adt/network/src/builtins.rs	excluded(wall: result-image)	-	pg_inet_net_ntop per-octet digit emission at data-dependent offsets; = cidr_abbrev 599 class; banded-octet cells re-open
 599	cidr_abbrev	crates/backend/utils/adt/network/src/builtins.rs	excluded(wall: result-image)	-	cidr_ntop::pg_inet_cidr_ntop network/src/lib.rs:411; data-dependent text image + per-octet digit emission
-605	inet_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	candidate	fast	inet_set_masklen lib.rs:304 bits validate + struct copy; full-sym; err plane; host proofs/network (netmask 696 precedent)
+605	inet_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	proved(core; TOTAL: fenced inet x full-i32 bits; Ok struct eq incl -1 alias + unmasked copy; 22023 Err parity, value-space)	fast	0.65s; proofs/network; cover_set_masklen_arms 3/3; network-2026-07-30
 619	oidvectorne	crates/backend/utils/adt/scalar/src/builtins.rs	proved(sym dim<=4 both args + sym elements + lbound; layout-valid fence, value-space)	fast	0.5-1.5s, no case-split needed; proofs/scalar-misc
 626	hash_array	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
-635	cidr_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	candidate	fast	cidr_set_masklen lib.rs:314 -> cidr_set_masklen_internal mask trim (pow2 /8 %8 shifts); full-sym; host proofs/network
+635	cidr_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	proved(core; TOTAL: fenced inet x full-i32 bits; Ok struct eq incl -1 alias + partial-byte mask + zeroed tail; 22023 Err parity, value-space)	fast	1.0s; proofs/network; cover_set_masklen_arms 3/3; network-2026-07-30
 636	pg_indexam_has_property	crates/backend/utils/adt/adt_amutils/src/lib.rs	candidate	ladder	indexam_property adt_amutils/src/lib.rs:379 + am_flags table :96 + lookup_prop_name :69; amoid path = ONE pg_am seam (:497) state-seam pattern; machine-checked amcan* table transcription. Host new proofs/amutils-seam
 637	pg_index_has_property	crates/backend/utils/adt/adt_amutils/src/lib.rs	blocked(seam stack: pg_index + indoption + opclass/amop)	-	relid path :357/:364; viable only after bundled-seam rig
 638	pg_index_column_has_property	crates/backend/utils/adt/adt_amutils/src/lib.rs	blocked(seam stack)	-	as 637 + GIST/SPGIST am_property arms :273 + get_opfamily_proc
@@ -415,7 +415,7 @@ oid	name	source_file	status	class	notes
 776	hashoidvectorextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(dim<=4 per-length + coverage; valid-oidvector fence)	fast	FIXED 2026-07-28: release-effective check_valid_oidvector gate added; proofs/hash-rows
 777	hash_aclitem_extended	crates/backend/utils/adt/acl/src/builtins.rs	proved(full item x seed, wrapper-level)	seam	3.0s; proofs/state-seam-probe
 778	hashmacaddrextended	crates/backend/utils/adt/mac/src/builtins.rs	proved(full block + seed, wrapper-level)	fast	1-13s; proofs/hash-rows
-779	hashinetextended	crates/backend/utils/adt/network/src/builtins.rs	candidate	fast	= 422 + full symbolic seed; one harness both
+779	hashinetextended	crates/backend/utils/adt/network/src/builtins.rs	proved(composed; v4/v6 split; symbolic seed; composed with proved hash_bytes_extended ≡ hash_any_extended (proofs/hash))	fast	3.8-6.3s; proofs/network; network-2026-07-30
 780	hash_numeric_extended	crates/backend/utils/adt/numeric/src/builtins.rs	proved(same + fully symbolic i64 seed)	fast	release-gate+; proofs/numeric-probe
 781	hashmacaddr8extended	crates/backend/utils/adt/mac8/src/builtins.rs	proved(full block + seed, wrapper-level)	fast	1-13s; proofs/hash-rows
 782	hash_array_extended	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
@@ -983,7 +983,7 @@ oid	name	source_file	status	class	notes
 1711	ceil	crates/backend/utils/adt/numeric/src/builtins.rs	candidate(DigitBuf wall broken 2026-07-30)	ladder	numeric_ceil ops.rs:554 — from_view + trunc(0) + add_var; DigitBuf seam: var.rs digit_buf_heap_realloc/digit_buf_put stub seams landed, from_view symbolic-nd proven cheap (min_scale 16s / trim_scale 241s demonstrators) — residual cost is the row's own arithmetic, re-triage per TRIAGE retained-buffer remedy
 1712	floor	crates/backend/utils/adt/numeric/src/builtins.rs	candidate(DigitBuf wall broken 2026-07-30)	ladder	numeric_floor ops.rs:569 — from_view + trunc(0) + sub_var; DigitBuf seam: var.rs digit_buf_heap_realloc/digit_buf_put stub seams landed, from_view symbolic-nd proven cheap (min_scale 16s / trim_scale 241s demonstrators) — residual cost is the row's own arithmetic, re-triage per TRIAGE retained-buffer remedy
 1714	pg_convert_from	crates/backend/utils/mb/mbutils/src/builtins.rs	excluded(blocked: conversion-proc dispatch + image)	-	convert_common mbutils/src/builtins.rs:32
-1715	inet_to_cidr	crates/backend/utils/adt/network/src/builtins.rs	candidate	fast	inet_to_cidr lib.rs:294 bits check + cidr_set_masklen_internal; full-sym; host proofs/network
+1715	inet_to_cidr	crates/backend/utils/adt/network/src/builtins.rs	proved(core; full fenced inet domain, full output struct; both sides' invalid-bit-length arms asserted unreachable)	fast	0.73s; proofs/network; network-2026-07-30
 1716	pg_get_expr	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 1717	pg_convert_to	crates/backend/utils/mb/mbutils/src/builtins.rs	excluded(blocked: conversion-proc dispatch + image)	-	same core
 1718	numeric_eq	crates/backend/utils/adt/numeric/src/builtins.rs	proved(special lattice full; ndigits<=4/side ~16 decimal digits; verdict parity)	fast	19-22s; proofs/numeric-probe
@@ -1468,10 +1468,10 @@ oid	name	source_file	status	class	notes
 2493	cash_send	crates/backend/utils/adt/cash/src/builtins.rs	proved(full-i64 -> 12-byte bytea image incl varsize header; modulo pqformat model)	slow	104s release-gate; proofs/cash
 2494	macaddr_recv	crates/backend/utils/adt/mac/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	mac/src/builtins.rs:88
 2495	macaddr_send	crates/backend/utils/adt/mac/src/builtins.rs	candidate	ladder	macaddr_send mac/src/lib.rs:297; 6 fixed pq_sendbytes. Host proofs/mac
-2496	inet_recv	crates/backend/utils/adt/network/src/builtins.rs	candidate	ladder	network_recv lib.rs:237 CORE-level over real StringInfo (date_recv precedent); bounded 16-iter byte loop, exact unwind; family/bits/len err planes in-theorem
-2497	inet_send	crates/backend/utils/adt/network/src/builtins.rs	candidate	ladder	network_send lib.rs:277 fixed per-family image (4+4 / 4+16 B); pq_sendbyte loop exact unwind; mcx-stubs; int4send precedent
-2498	cidr_recv	crates/backend/utils/adt/network/src/builtins.rs	candidate	ladder	= 2496 is_cidr arm + address_ok + detail-carrying err plane
-2499	cidr_send	crates/backend/utils/adt/network/src/builtins.rs	candidate	ladder	= 2497 with is_cidr byte set
+2496	inet_recv	crates/backend/utils/adt/network/src/builtins.rs	proved(core; literal msg-len grid {2,8,10,20} x fully-symbolic content over real shipped StringInfo; Ok struct+cursor parity, Err verdict/level/sqlstate-class parity 08P01 vs 22P03; modulo static-buffer allocator model; msg text/Location out of proof; sym-len remainder wall(symex))	slow	125-263s/cell; unwind>=18 mandatory (16B memcmp); cover_recv_arms 6/6; proofs/network; network-2026-07-30
+2497	inet_send	crates/backend/utils/adt/network/src/builtins.rs	proved(core; v4/v6 split, is_cidr flag SYMBOLIC (covers 2499 too); full image eq incl 4B varlena header via shipped pq_begintypsend/endtypsend; modulo static-buffer allocator model)	slow	86.5s v4 (unwind 14) / 323.5s v6 (unwind 26, symex depth-bound; kissat worse 113s); control_send_flag_skew FAILED as required; proofs/network; network-2026-07-30
+2498	cidr_recv	crates/backend/utils/adt/network/src/builtins.rs	proved(core; same grid as inet_recv incl the cidr bits-right-of-mask arm; modulo static-buffer allocator model; sym-len remainder wall(symex))	slow	125-263s/cell; proofs/network; network-2026-07-30
+2499	cidr_send	crates/backend/utils/adt/network/src/builtins.rs	proved(core; same harness pair as inet_send — flag symbolic; full image eq; modulo static-buffer allocator model)	slow	see inet_send 2497; proofs/network; network-2026-07-30
 2502	anyarray_recv	crates/backend/utils/adt/pseudotypes/src/builtins.rs	proved(err-parity: verdict+sqlstate+level; all args ignored)	fast	~0.6s default solver; proofs/pseudotypes eq_anyarray_recv; wrapper-level via LocalFcinfo (call1, null Datum); C MAKE_SQLSTATE computed vs shipped with_sqlstate — 0A000 encoding in-theorem; message text/location out of proof; Err-arm cover! + shell_in must-fail control
 2504	pg_get_ruledef_ext	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 2505	pg_get_viewdef_name_ext	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
@@ -1542,7 +1542,7 @@ oid	name	source_file	status	class	notes
 2629	inetor	crates/backend/utils/adt/network/src/builtins.rs	proved(core; full struct + mismatch Err parity)	fast	14s; proofs/network
 2630	inetpl	crates/backend/utils/adt/network/src/builtins.rs	proved(v4+v6 family cells; Ok struct eq + 22003 sqlstate/level Err parity)	fast	0.66s v4; proofs/network; CI cluster FAIL @994f9977 = memcmp unwind(9) truncation artifact (unwind 18 fix in-tree, re-verified); CI-decode 2026-07-30
 2632	inetmi_int8	crates/backend/utils/adt/network/src/builtins.rs	proved(v4+v6 family cells; Ok struct eq + 22003 Err parity)	fast	0.79s v4; proofs/network; CI cluster FAIL = memcmp unwind artifact (fixed); CI-decode 2026-07-30
-2633	inetmi	crates/backend/utils/adt/network/src/builtins.rs	candidate	fast	inetmi lib.rs:685 two's-complement byte fold, bounded, pure bit ops; family-mismatch + range err planes; host proofs/network
+2633	inetmi	crates/backend/utils/adt/network/src/builtins.rs	proved(core; v4/v6/xf split; i64 result + 22023 mismatch + 22003 overflow Err parity; value-space, msg/Location stubbed)	fast	0.19-1.9s; proofs/network; cover_inetmi_arms 3/3 SATISFIED; network-2026-07-30
 2647	now	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	alias of 1299
 2648	statement_timestamp	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	builtins.rs:131
 2649	clock_timestamp	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	builtins.rs:138

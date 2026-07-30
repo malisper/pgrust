@@ -1026,6 +1026,36 @@ network	eq_inet_merge	-Z c-ffi -Z stubbing --c-lib csrc/net_shim.c --c-lib csrc/
 network	eq_inet_merge_mismatch	-Z c-ffi -Z stubbing --c-lib csrc/net_shim.c --c-lib csrc/net_ops.c --solver kissat	green	unmeasured	?	
 network	cover_merge_cases	-Z c-ffi -Z stubbing --c-lib csrc/net_shim.c --c-lib csrc/net_ops.c --solver kissat	green	unmeasured	?	union coverage
 network	control_network_sub_vs_c_subeq	-Z c-ffi -Z stubbing --c-lib csrc/net_shim.c --c-lib csrc/net_ops.c	must-fail	defect-witness	?	DEFAULT solver mandated
+network	arith_proofs::eq_inetmi_v4	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	green	per-commit	0.19	DEFAULT solver (mixed-arm); network-2026-07-30
+network	arith_proofs::eq_inetmi_v6	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	green	per-commit	1.9	
+network	arith_proofs::eq_inetmi_xf	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	green	per-commit	1.8	
+network	arith_proofs::cover_inetmi_arms	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	3.3	3/3 covers SATISFIED
+network	arith_proofs::cover_arith_family_cases	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	0.02	
+network	arith_proofs::cover_inetpl_arms	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	0.24	2/2 covers SATISFIED
+network	arith_proofs::eq_inet_to_cidr	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	green	per-commit	0.73	
+network	arith_proofs::eq_inet_set_masklen	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	green	per-commit	0.65	
+network	arith_proofs::eq_cidr_set_masklen	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	green	per-commit	1.0	
+network	arith_proofs::cover_set_masklen_arms	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	1	3/3 covers SATISFIED
+network	arith_proofs::eq_hashinet_v4	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	1.9	composed with proved hash_bytes ≡ hash_any (proofs/hash)
+network	arith_proofs::eq_hashinet_v6	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	2.9	
+network	arith_proofs::eq_hashinetextended_v4	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	3.8	symbolic seed
+network	arith_proofs::eq_hashinetextended_v6	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --exact	green	per-commit	6.3	
+network	arith_proofs::control_inetpl_vs_c_inetmi_int8	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	must-fail	defect-witness	0.25	DEFAULT solver; sign-flip control FAILED as required
+network	arith_proofs::control_hashinet_view_skew	-Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --exact	must-fail	defect-witness	0.48	DEFAULT solver; length-skew control FAILED as required
+network	recvsend_proofs::eq_inet_recv_len2	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	140.9	DEFAULT solver; unwind>=18 mandatory (16B memcmp); mcx stub set
+network	recvsend_proofs::eq_inet_recv_len8	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	146.0	
+network	recvsend_proofs::eq_inet_recv_len10	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	142.5	
+network	recvsend_proofs::eq_inet_recv_full20	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	194.1	
+network	recvsend_proofs::eq_cidr_recv_len2	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	124.7	
+network	recvsend_proofs::eq_cidr_recv_len8	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	159.7	
+network	recvsend_proofs::eq_cidr_recv_len10	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	143.1	
+network	recvsend_proofs::eq_cidr_recv_full20	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	262.7	
+network	recvsend_proofs::eq_network_send_v4	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	86.5	unwind 14 tight (26 costs 311s); kissat worse (113s)
+network	recvsend_proofs::eq_network_send_v6	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	green	release-gate	323.5	symex depth-bound at mandatory unwind 26
+network	recvsend_proofs::cover_recv_arms	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --solver kissat --exact	green	per-commit	30	6/6 covers SATISFIED (all C arms)
+network	recvsend_proofs::cover_send_family_cases	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --solver kissat --exact	green	per-commit	1	2/2 covers SATISFIED
+network	recvsend_proofs::control_send_flag_skew	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	must-fail	defect-witness	296.7	DEFAULT solver; flag-skew control FAILED as required
+network	recvsend_proofs::probe_inet_recv_symlen	-Z c-ffi -Z stubbing --c-lib csrc/net_recvsend.c --exact	wall	info	450	wall-witness: symbolic-length plane timeout-450s (re-validated on clean disk)
 numeric-probe	proofs::eq_numeric_cmp_nd1	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --solver kissat --exact	green	release-gate	28	17-28s under load
 numeric-probe	proofs::eq_numeric_cmp_nd2	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --solver kissat --exact	green	release-gate	28	17-28s under load
 numeric-probe	proofs::eq_numeric_cmp_nd3	-Z c-ffi -Z stubbing --c-lib c/pg_numeric_cmp.c --c-lib c/pg_numeric_rows.c --solver kissat --exact	green	release-gate	28	17-28s under load
