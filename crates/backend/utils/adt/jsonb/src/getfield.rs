@@ -128,14 +128,21 @@ pub enum PathResult<'mcx> {
     Input,
 }
 
-/// C: jsonb_get_element. `path` elements are the text payloads of the #>
-/// rhs array (nulls pre-screened by the caller, as in get_jsonb_path_all).
-pub fn get_element<'mcx>(
-    mcx: Mcx<'mcx>,
-    payload: &[u8],
-    path: &[&[u8]],
-    as_text: bool,
-) -> PgResult<PathResult<'mcx>> {
+/// C: jsonb_get_element's path-resolution walk verdict (everything before
+/// result materialization). pub for proofs (jsonb-probe path rows;
+/// behavior-identical code motion out of `get_element`).
+pub enum PathVerdict<'a> {
+    Null,
+    Item(JsonbItem<'a>),
+    /// Empty path, non-scalar root (C hands back the input datum).
+    Input,
+}
+
+/// C: jsonb_get_element, path-resolution walk. `path` elements are the text
+/// payloads of the #> rhs array (nulls pre-screened by the caller, as in
+/// get_jsonb_path_all). pub for proofs (jsonb-probe; code motion, behavior
+/// identical — `get_element` is now verdict + materialization).
+pub fn resolve_path<'a>(payload: &'a [u8], path: &[&[u8]]) -> PathVerdict<'a> {
     let root_header = container_header(payload);
     let mut have_object = root_header & JB_FOBJECT != 0;
     let mut have_array = root_header & JB_FARRAY != 0 && root_header & JB_FSCALAR == 0;
@@ -148,15 +155,7 @@ pub fn get_element<'mcx>(
     }
 
     if path.is_empty() && jbvp.is_none() {
-        if as_text {
-            let mut out = StringInfo::new_in(mcx)?;
-            jsonb_to_cstring_into(mcx, &mut out, container, payload.len() + 4)?;
-            return Ok(PathResult::Text(varlena::cstring_to_text(
-                mcx,
-                out.as_bytes(),
-            )?));
-        }
-        return Ok(PathResult::Input);
+        return PathVerdict::Input;
     }
 
     for (i, subscr) in path.iter().enumerate() {
@@ -169,7 +168,7 @@ pub fn get_element<'mcx>(
             // trim_ascii) and one sign are allowed; trailing junk, trailing
             // whitespace and out-of-int-range are not.
             let Some(lindex) = pg_string::strtoint10_strict(subscr) else {
-                return Ok(PathResult::Null);
+                return PathVerdict::Null;
             };
             let index = if lindex >= 0 {
                 lindex as u32
@@ -177,18 +176,18 @@ pub fn get_element<'mcx>(
                 let nelements = container_size(container);
                 debug_assert!(container_is_array(container));
                 if lindex == i32::MIN || lindex.unsigned_abs() > nelements {
-                    return Ok(PathResult::Null);
+                    return PathVerdict::Null;
                 }
                 nelements - lindex.unsigned_abs()
             };
             get_ith_value(container, index)
         } else {
             // Scalar mid-path: extraction yields null.
-            return Ok(PathResult::Null);
+            return PathVerdict::Null;
         };
 
         let Some(v) = v else {
-            return Ok(PathResult::Null);
+            return PathVerdict::Null;
         };
         if i == path.len() - 1 {
             jbvp = Some(v);
@@ -210,16 +209,43 @@ pub fn get_element<'mcx>(
         }
     }
 
-    let jbvp = jbvp.expect("path walk ended without a value");
-    if as_text {
-        match jbvp {
-            JsonbItem::Null => Ok(PathResult::Null),
-            v => match value_as_text(mcx, &v)? {
-                Some(t) => Ok(PathResult::Text(t)),
-                None => Ok(PathResult::Null),
-            },
+    PathVerdict::Item(jbvp.expect("path walk ended without a value"))
+}
+
+/// C: jsonb_get_element — the shipped verdict walk above plus result
+/// materialization.
+pub fn get_element<'mcx>(
+    mcx: Mcx<'mcx>,
+    payload: &[u8],
+    path: &[&[u8]],
+    as_text: bool,
+) -> PgResult<PathResult<'mcx>> {
+    match resolve_path(payload, path) {
+        PathVerdict::Input => {
+            if as_text {
+                let mut out = StringInfo::new_in(mcx)?;
+                jsonb_to_cstring_into(mcx, &mut out, payload, payload.len() + 4)?;
+                Ok(PathResult::Text(varlena::cstring_to_text(
+                    mcx,
+                    out.as_bytes(),
+                )?))
+            } else {
+                Ok(PathResult::Input)
+            }
         }
-    } else {
-        Ok(PathResult::Jsonb(item_to_jsonb_image(mcx, jbvp)?))
+        PathVerdict::Null => Ok(PathResult::Null),
+        PathVerdict::Item(jbvp) => {
+            if as_text {
+                match jbvp {
+                    JsonbItem::Null => Ok(PathResult::Null),
+                    v => match value_as_text(mcx, &v)? {
+                        Some(t) => Ok(PathResult::Text(t)),
+                        None => Ok(PathResult::Null),
+                    },
+                }
+            } else {
+                Ok(PathResult::Jsonb(item_to_jsonb_image(mcx, jbvp)?))
+            }
+        }
     }
 }
