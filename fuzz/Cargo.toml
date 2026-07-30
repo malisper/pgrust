@@ -74,3 +74,20 @@ path = "fuzz_targets/geo_diff.rs"
 test = false
 doc = false
 bench = false
+
+# libm math family (2026-07-30 lane): the 38 blocked(libm)/blocked(seam:
+# libm-oracle) ledger rows. Both sides call the REAL platform libm — the
+# thing a Kani seam would have defined away.
+[[bin]]
+name = "float_math_diff"
+path = "fuzz_targets/float_math_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "float_math2_diff"
+path = "fuzz_targets/float_math2_diff.rs"
+test = false
+doc = false
+bench = false
