@@ -258,18 +258,15 @@ pub fn get_worker<'mcx>(
     }
 }
 
-// C: get_path_all's strtoint conversion — leading whitespace and sign
-// accepted, trailing junk or out-of-int-range yields the INT_MIN sentinel.
+// C: get_path_all's strtoint conversion.  Leading C-locale whitespace (which
+// includes VT, unlike Rust's trim_ascii) and one sign are accepted; trailing
+// junk, trailing whitespace or out-of-int-range yields the INT_MIN sentinel
+// that "will never match".  A subscript that really is -2147483648 lands on
+// the same sentinel in C too, so the collision is faithful.
 pub fn path_index(s: &[u8]) -> i32 {
+    // C: `if (*tpath[i] != '\0')`, else the INT_MIN sentinel.
     if s.is_empty() {
         return i32::MIN;
     }
-    let t = s.trim_ascii_start();
-    let Ok(text) = core::str::from_utf8(t) else {
-        return i32::MIN;
-    };
-    match text.parse::<i64>() {
-        Ok(v) if v >= i32::MIN as i64 && v <= i32::MAX as i64 => v as i32,
-        _ => i32::MIN,
-    }
+    pg_string::strtoint10_strict(s).unwrap_or(i32::MIN)
 }

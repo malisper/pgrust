@@ -30,6 +30,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 varlena = { path = "../varlena" }
 wchar = { path = "../../../../common/wchar" }
+pg_string = { path = "../../../../common/string" }
 mbutils = { path = "../../mb/mbutils" }
 stack_depth = { path = "../../misc/stack_depth" }
 
