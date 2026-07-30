@@ -25,7 +25,7 @@ pub use recovery::{
 pub use state::{TwoPhaseShmemInit, TwoPhaseShmemSize, TwoPhaseStateResetAfterCrash, GIDSIZE};
 
 fn here(function: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("twophase.c", 0, function)
+    types_error::ErrorLocation::new(file!(), line!() as i32, function)
 }
 
 pub fn init_seams() {

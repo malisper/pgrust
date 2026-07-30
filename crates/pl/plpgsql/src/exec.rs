@@ -565,6 +565,7 @@ fn get_error_context_stack() -> String {
 
 // _SPI_error_callback (spi.c): position becomes internal query/position;
 // otherwise a parse-mode-shaped context line.
+#[track_caller]
 #[cold]
 fn spi_ctx_err(
     mut e: Box<PgError>,
@@ -611,6 +612,7 @@ pub(crate) fn exec_err(code: SqlState, msg: String) -> Box<PgError> {
 
 // The compiled-param safety check's report (plpgsql_param_eval_recfield /
 // plpgsql_param_eval_generic, pl_exec.c:6798-6803): paramid is dno+1.
+#[track_caller]
 #[cold]
 fn param_type_mismatch(dno: Dno, current: Oid, planned: Oid) -> Box<PgError> {
     let cur = format_type::format_type_be(current)
@@ -2912,7 +2914,7 @@ impl<'a> Estate<'a> {
         if level == ERROR {
             return Err(Box::new(b.into_error()));
         }
-        b.finish(types_error::ErrorLocation::new("pl_exec.c", 0, "exec_move_row_from_fields"))
+        b.finish(types_error::ErrorLocation::new(file!(), line!() as i32, "exec_move_row_from_fields"))
     }
 
     // exec_move_row_from_fields REC-target arm: a RECORD rec adopts the
@@ -3529,7 +3531,7 @@ impl<'a> Estate<'a> {
                         let _ = spi::SPI_freetuptable(tuptab);
                         return Err(Box::new(b.into_error()));
                     }
-                    b.finish(types_error::ErrorLocation::new("pl_exec.c", 0, "exec_stmt_execsql"))?;
+                    b.finish(types_error::ErrorLocation::new(file!(), line!() as i32, "exec_stmt_execsql"))?;
                 }
                 self.move_row_from_tuptable(target, tuptab, 0)?;
                 let _ = spi::SPI_freetuptable(tuptab);
@@ -4568,6 +4570,7 @@ pub(crate) fn convert_values_by_position(
     dst: &RecDesc,
     msg: &str,
 ) -> PgResult<(Vec<Datum>, Vec<bool>)> {
+    #[track_caller]
     #[cold]
     fn mismatch(msg: &str, detail: String) -> Box<PgError> {
         Box::new(

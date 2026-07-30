@@ -415,8 +415,12 @@ pub fn crc_of_image(image: &[u8]) -> u32 {
     fin_crc32c(pg_comp_crc32c(CRC32C_INIT, &image[..OFFSETOF_CRC]))
 }
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("controldata_utils.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn c_path(path: &str) -> std::ffi::CString {

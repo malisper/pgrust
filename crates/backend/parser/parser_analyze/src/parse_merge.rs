@@ -278,7 +278,7 @@ fn merge_with_recursive() -> Box<types_error::PgError> {
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg("WITH RECURSIVE is not supported for MERGE statement".to_string())
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_merge.c", 0, "transformMergeStmt")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformMergeStmt")),
     )
 }
 
@@ -293,7 +293,7 @@ fn unreachable_when_clause() -> Box<types_error::PgError> {
                     .to_string(),
             )
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_merge.c", 0, "transformMergeStmt")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformMergeStmt")),
     )
 }
 
@@ -312,7 +312,7 @@ fn merge_bad_relkind(rel: &types_rel::Relation<'_>) -> Box<types_error::PgError>
                     .unwrap_or_default(),
             )
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_merge.c", 0, "transformMergeStmt")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformMergeStmt")),
     )
 }
 
@@ -327,6 +327,6 @@ fn duplicate_source_alias(name: &str) -> Box<types_error::PgError> {
                 "The name is used both as MERGE target table and data source.".to_string(),
             )
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_merge.c", 0, "transformMergeStmt")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformMergeStmt")),
     )
 }

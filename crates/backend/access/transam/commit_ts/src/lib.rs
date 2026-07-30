@@ -93,8 +93,12 @@ fn read_entry(page: &[u8], entryno: u32) -> (TimestampTz, RepOriginId) {
     (time, nodeid)
 }
 
+#[track_caller]
 fn loc(routine: &'static str) -> ErrorLocation {
-    ErrorLocation::new("commit_ts.c", 0, routine)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, routine)
 }
 
 pub fn TransactionTreeSetCommitTsData(

@@ -156,6 +156,7 @@ impl<'mcx> Parser<'mcx> {
         Ok(merged)
     }
 
+    #[track_caller]
     #[cold]
     fn udeescape_error(&self, e: parser_small1::udeescape::UdeescapeError) -> Box<PgError> {
         let err = self.errposition_error(e.message.to_string(), e.location);

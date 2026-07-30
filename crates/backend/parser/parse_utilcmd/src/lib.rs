@@ -29,6 +29,7 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: parse_utilcmd {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_does_not_exist(name: &str) -> Box<PgError> {
@@ -38,6 +39,7 @@ fn type_does_not_exist(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_is_only_a_shell(name: &str) -> Box<PgError> {
@@ -49,6 +51,7 @@ fn type_is_only_a_shell(name: &str) -> Box<PgError> {
 
 // Clean 0A000 for unported-feature lanes (user-reachable stubs must raise,
 // not panic); errposition attaches when the surrounding code has a pstate.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unported_feature_at(
@@ -333,6 +336,7 @@ fn typeNameToString(tn: &TypeName<'_>) -> String {
     s
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_type_name(s: &str) -> Box<PgError> {
@@ -342,6 +346,7 @@ fn invalid_type_name(s: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn shell_type(name: &str) -> Box<PgError> {
@@ -470,6 +475,7 @@ pub fn typenameTypeMod<'mcx>(
         ));
     }
 
+    #[track_caller]
     #[cold]
     fn bad_typmod_expr() -> Box<PgError> {
         Box::new(
@@ -3275,6 +3281,7 @@ pub fn transformAlterTableCmd<'mcx>(
     Ok(cxt)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn alter_undefined_column(colname: &str, relname: &str) -> Box<PgError> {
@@ -3287,6 +3294,7 @@ fn alter_undefined_column(colname: &str, relname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 #[cold]
@@ -3300,6 +3308,7 @@ fn cursor_at(mut e: Box<PgError>, src: Option<&[u8]>, location: i32) -> Box<PgEr
     e
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn multiple_pkeys(relname: &str, _location: i32) -> Box<PgError> {
@@ -3312,6 +3321,7 @@ fn multiple_pkeys(relname: &str, _location: i32) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn conflicting_no_inherit(colname: &str) -> Box<PgError> {
@@ -3327,6 +3337,7 @@ fn conflicting_no_inherit(colname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn key_column_missing(colname: &str, _location: i32) -> Box<PgError> {
@@ -3339,6 +3350,7 @@ fn key_column_missing(colname: &str, _location: i32) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate_key_column(colname: &str, primary: bool, _location: i32) -> Box<PgError> {
@@ -3352,6 +3364,7 @@ fn duplicate_key_column(colname: &str, primary: bool, _location: i32) -> Box<PgE
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_supported_on_foreign_tables(what: &str, src: Option<&str>, location: i32) -> Box<PgError> {
@@ -3366,6 +3379,7 @@ fn not_supported_on_foreign_tables(what: &str, src: Option<&str>, location: i32)
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn column_syntax_error(
@@ -3384,6 +3398,7 @@ fn column_syntax_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {

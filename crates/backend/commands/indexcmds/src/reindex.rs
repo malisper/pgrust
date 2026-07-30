@@ -253,7 +253,7 @@ fn ReindexTable<'mcx>(
                     "table \"{}\" has no indexes that can be reindexed concurrently",
                     rv.relname
                 ))
-                .finish(types_error::ErrorLocation::new("indexcmds.c", 0, "ReindexTable"))?;
+                .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "ReindexTable"))?;
         }
         return Ok(());
     }
@@ -270,7 +270,7 @@ fn ReindexTable<'mcx>(
     if !result {
         elog::ereport(types_error::NOTICE)
             .errmsg(format!("table \"{}\" has no indexes to reindex", rv.relname))
-            .finish(types_error::ErrorLocation::new("indexcmds.c", 0, "ReindexTable"))?;
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "ReindexTable"))?;
     }
     Ok(())
 }

@@ -57,8 +57,11 @@ std::thread_local! {
     };
 }
 
+#[track_caller]
 fn loc(func: &'static str) -> ::types_error::ErrorLocation {
-    ::types_error::ErrorLocation::new("src/backend/utils/adt/xml.c", 0, func)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ::types_error::ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 // C ereports WARNINGs inside the handler (xml.c:2253); elog from a

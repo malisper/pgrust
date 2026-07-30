@@ -97,7 +97,7 @@ fn report_errno(elevel: ErrorLevel, saved_errno: i32, msg: String) -> PgResult<(
     };
     builder
         .errmsg(msg)
-        .finish(ErrorLocation::new("dsm_impl.c", 0, "dsm_impl_op"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "dsm_impl_op"))
 }
 
 pub fn dsm_impl_op(

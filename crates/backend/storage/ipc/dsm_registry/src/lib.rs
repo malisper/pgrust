@@ -14,8 +14,12 @@ use lwlock::{main_lock, LWLock, LWLockAcquire, LWLockRelease, LW_EXCLUSIVE};
 use types_error::{ErrorLocation, PgResult, ERROR};
 use types_storage::{dsm_handle, DSM_HANDLE_INVALID, DSM_REGISTRY_LOCK};
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("dsm_registry.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 const DSM_REGISTRY_NAME_LEN: usize = 64;

@@ -82,8 +82,12 @@ fn err(msg: impl Into<String>, sqlstate: SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg.into()).with_sqlstate(sqlstate))
 }
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("subscriptioncmds.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn conflicting_def_elem(defel: &DefElem<'_>) -> Box<PgError> {

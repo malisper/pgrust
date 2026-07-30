@@ -644,5 +644,5 @@ pub fn AutoVacWorkerFailed() {
 #[cold]
 #[inline(never)]
 fn loc(routine: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("src/backend/postmaster/autovacuum.c", 0, routine)
+    types_error::ErrorLocation::new(file!(), line!() as i32, routine)
 }

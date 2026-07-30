@@ -21,7 +21,7 @@ fn info(msg: String) -> PgResult<()> {
     ereport(INFO)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg)
-        .finish(ErrorLocation::new("spgvalidate.c", 0, "spgvalidate"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "spgvalidate"))
 }
 
 pub fn spgvalidate(opclassoid: Oid) -> PgResult<bool> {

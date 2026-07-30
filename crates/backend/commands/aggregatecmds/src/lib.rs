@@ -177,7 +177,7 @@ pub fn DefineAggregate<'mcx>(
                 ereport(WARNING)
                     .errcode(ERRCODE_SYNTAX_ERROR)
                     .errmsg(format!("aggregate attribute \"{other}\" not recognized"))
-                    .finish(ErrorLocation::new("aggregatecmds.c", 0, "DefineAggregate"))?;
+                    .finish(ErrorLocation::new(file!(), line!() as i32, "DefineAggregate"))?;
             }
         }
     }

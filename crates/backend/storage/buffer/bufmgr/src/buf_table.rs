@@ -287,7 +287,7 @@ pub fn BufTableDelete(tag: &buftag, hashcode: u32) -> PgResult<()> {
             if ent.key.blockNum == EMPTY_BLOCK {
                 return Err(Box::new(
                     types_error::PgError::new(ERROR, "shared buffer hash table corrupted")
-                        .with_error_location(ErrorLocation::new("buf_table.c", 0, "BufTableDelete")),
+                        .with_error_location(ErrorLocation::new(file!(), line!() as i32, "BufTableDelete")),
                 ));
             }
             if ent.key == *tag {

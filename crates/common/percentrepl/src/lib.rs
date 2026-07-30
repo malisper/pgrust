@@ -4,7 +4,7 @@ use elog::ereport;
 use types_error::{ErrorLocation, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 
 fn loc() -> ErrorLocation {
-    ErrorLocation::new("percentrepl.c", 0, "replace_percent_placeholders")
+    ErrorLocation::new(file!(), line!() as i32, "replace_percent_placeholders")
 }
 
 // C varargs (letters, ...) becomes a (letter, value) slice; None values mirror

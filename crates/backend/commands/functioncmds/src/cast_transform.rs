@@ -124,12 +124,12 @@ pub fn CreateCast<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateCastStmt<'mcx>) -> PgResult
         ereport(WARNING)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("cast will be ignored because the source data type is a domain")
-            .finish(ErrorLocation::new("functioncmds.c", 0, "CreateCast"))?;
+            .finish(ErrorLocation::new(file!(), line!() as i32, "CreateCast"))?;
     } else if targettyptype == TYPTYPE_DOMAIN {
         ereport(WARNING)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("cast will be ignored because the target data type is a domain")
-            .finish(ErrorLocation::new("functioncmds.c", 0, "CreateCast"))?;
+            .finish(ErrorLocation::new(file!(), line!() as i32, "CreateCast"))?;
     }
 
     let castmethod = if stmt.func.is_some() {

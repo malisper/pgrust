@@ -26,8 +26,12 @@ const fn maxalign(len: usize) -> usize {
     (len + (ALIGN - 1)) & !(ALIGN - 1)
 }
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("tqueue.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 // u64 words so tuples deform in place 8-aligned (mq_ring's MAXALIGN reason).

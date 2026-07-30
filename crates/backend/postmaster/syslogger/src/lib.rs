@@ -65,8 +65,12 @@ const SECS_PER_MINUTE: i64 = 60;
 const PG_WAIT_ACTIVITY: u32 = 0x0500_0000;
 const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("syslogger.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 static LOGGING_COLLECTOR: AtomicBool = AtomicBool::new(false);

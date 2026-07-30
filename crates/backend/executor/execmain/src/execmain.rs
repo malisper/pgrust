@@ -1671,6 +1671,6 @@ fn cannot_lock_rows_in(what: &str, rel: &::types_rel::Relation<'_>) -> Box<PgErr
     Box::new(
         PgError::error(format!("cannot lock rows in {what} \"{relname}\""))
             .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
-            .with_error_location(ErrorLocation::new("execMain.c", 0, "CheckValidRowMarkRel")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "CheckValidRowMarkRel")),
     )
 }

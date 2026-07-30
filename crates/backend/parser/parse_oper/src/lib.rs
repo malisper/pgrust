@@ -400,7 +400,7 @@ fn coercion_error(
             .errmsg(format!("operator requires run-time type coercion: {sig}"))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "compatible_oper")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "compatible_oper")),
     )
 }
 
@@ -613,7 +613,7 @@ fn saop_error(pstate: &ParseState<'_, '_>, msg: &str, location: ParseLoc) -> Box
             .errmsg(msg.to_string())
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_scalar_array_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_scalar_array_op")),
     )
 }
 
@@ -635,7 +635,7 @@ fn no_array_type_error(
             .errmsg(format!("could not find array type for data type {tname}"))
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_scalar_array_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_scalar_array_op")),
     )
 }
 
@@ -697,7 +697,7 @@ fn missing_op_error(argtype: Oid, ordering: bool) -> Box<PgError> {
     }
     Box::new(
         b.into_error()
-            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "get_sort_group_operators")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "get_sort_group_operators")),
     )
 }
 
@@ -742,7 +742,7 @@ fn op_error(
                 )
                 .errposition(parser_errposition(pstate, location, encoding))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_oper.c", 0, "op_error")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "op_error")),
         );
     }
     let hint = if !OidIsValid(arg1) || !OidIsValid(arg2) {
@@ -759,7 +759,7 @@ fn op_error(
             .errhint(hint.to_string())
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "op_error")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "op_error")),
     )
 }
 
@@ -783,7 +783,7 @@ fn shell_error(
             .errmsg(format!("operator is only a shell: {sig}"))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_op")),
     )
 }
 
@@ -796,6 +796,6 @@ fn postfix_error() -> Box<PgError> {
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg("postfix operators are not supported".to_string())
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_op")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_op")),
     )
 }

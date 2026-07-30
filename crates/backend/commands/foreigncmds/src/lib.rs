@@ -648,7 +648,7 @@ pub fn CreateForeignServer<'mcx>(
             ::elog::ereport(NOTICE)
                 .errcode(ERRCODE_DUPLICATE_OBJECT)
                 .errmsg(format!("server \"{servername}\" already exists, skipping"))
-                .finish(types_error::ErrorLocation::new("foreigncmds.c", 0, "CreateForeignServer"))?;
+                .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "CreateForeignServer"))?;
             rel.close(RowExclusiveLock)?;
             return Ok(InvalidOid);
         }
@@ -867,7 +867,7 @@ pub fn CreateUserMapping<'mcx>(
                     "user mapping for \"{}\" already exists for server \"{servername}\", skipping",
                     MappingUserName(mcx, use_id)?
                 ))
-                .finish(types_error::ErrorLocation::new("foreigncmds.c", 0, "CreateUserMapping"))?;
+                .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "CreateUserMapping"))?;
             rel.close(RowExclusiveLock)?;
             // C: return InvalidObjectAddress on the IF NOT EXISTS skip.
             return Ok(ObjectAddress::set(InvalidOid, InvalidOid));

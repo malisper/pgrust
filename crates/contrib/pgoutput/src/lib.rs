@@ -65,8 +65,12 @@ const LIBRARY: &str = "pgoutput";
 // pg_publication_rel.prqual attribute number (row filter).
 const Anum_pg_publication_rel_prqual: i32 = 4;
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("pgoutput.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 #[cold]

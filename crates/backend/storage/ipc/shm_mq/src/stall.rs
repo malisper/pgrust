@@ -279,7 +279,7 @@ pub fn report_queue_stall(mq: &ShmMq, role: &str, pending: usize, waited_ms: i64
     // LOG never unwinds; the wait continues untouched either way.
     let _ = ereport(LOG)
         .errmsg(msg)
-        .finish(ErrorLocation::new("shm_mq.c", 0, "shm_mq_stall_report"));
+        .finish(ErrorLocation::new(file!(), line!() as i32, "shm_mq_stall_report"));
 }
 
 /// LOG channel for layered wait sites' stall reports (the Gather leader wait
@@ -287,7 +287,7 @@ pub fn report_queue_stall(mq: &ShmMq, role: &str, pending: usize, waited_ms: i64
 pub fn log_stall_report(msg: String) {
     let _ = ereport(LOG)
         .errmsg(msg)
-        .finish(ErrorLocation::new("shm_mq.c", 0, "mq_stall_report"));
+        .finish(ErrorLocation::new(file!(), line!() as i32, "mq_stall_report"));
 }
 
 /// Default "the caller left the park loop" gap: four recheck periods.

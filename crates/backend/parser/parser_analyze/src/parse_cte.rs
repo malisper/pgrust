@@ -139,7 +139,7 @@ fn analyzeCTE<'mcx>(
                     mbutils::GetDatabaseEncoding(),
                 ))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
         ));
     }
 
@@ -226,7 +226,7 @@ fn analyzeCTE<'mcx>(
                             .to_string(),
                     )
                     .into_error()
-                    .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+                    .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
             ));
         }
         if sos.rarg.expect("setop rarg").node_tag() != NodeTag::T_RangeTblRef {
@@ -238,7 +238,7 @@ fn analyzeCTE<'mcx>(
                             .to_string(),
                     )
                     .into_error()
-                    .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+                    .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
             ));
         }
     }
@@ -426,7 +426,7 @@ fn checkColumnList<'mcx>(
                             mbutils::GetDatabaseEncoding(),
                         ))
                         .into_error()
-                        .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+                        .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
                 ));
             }
         }
@@ -448,7 +448,7 @@ fn syntax_err(pstate: &ParseState<'_, '_>, msg: String, location: ParseLoc) -> B
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
     )
 }
 
@@ -463,7 +463,7 @@ fn operator_lookup_err(mark_type: Oid, which: &str) -> PgResult<Box<PgError>> {
                 format_type::format_type_be(mark_type)?
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
     ))
 }
 
@@ -526,7 +526,7 @@ pub(crate) fn analyzeCTETargetList<'mcx>(
                     mbutils::GetDatabaseEncoding(),
                 ))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTETargetList")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTETargetList")),
         ));
     }
 
@@ -1109,7 +1109,7 @@ fn duplicate_cte_name(pstate: &ParseState<'_, '_>, name: &str, location: i32) ->
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "transformWithClause")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformWithClause")),
     )
 }
 
@@ -1131,7 +1131,7 @@ fn invalid_recursion(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "checkWellFormedRecursion")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "checkWellFormedRecursion")),
     )
 }
 
@@ -1149,7 +1149,7 @@ fn mutual_recursion(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgEr
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "TopologicalSort")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "TopologicalSort")),
     )
 }
 
@@ -1171,7 +1171,7 @@ fn recursive_decoration(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "checkWellFormedRecursion")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "checkWellFormedRecursion")),
     )
 }
 
@@ -1200,7 +1200,7 @@ fn recursive_type_mismatch(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
     )
 }
 
@@ -1229,7 +1229,7 @@ fn recursive_collation_mismatch(
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_cte.c", 0, "analyzeCTE")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "analyzeCTE")),
     )
 }
 

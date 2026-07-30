@@ -25,8 +25,12 @@ use types_tuple::{varatt, HeapTupleData, TupleDescData};
 
 const LIBRARY: &str = "test_decoding";
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("test_decoding.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 #[cold]

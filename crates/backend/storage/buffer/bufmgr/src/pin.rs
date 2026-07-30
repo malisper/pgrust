@@ -267,7 +267,7 @@ pub fn CheckBufferIsPinnedOnce(buffer: Buffer) -> PgResult<()> {
     if count != 1 {
         return Err(Box::new(
             types_error::PgError::new(ERROR, format!("incorrect local pin count: {count}"))
-                .with_error_location(ErrorLocation::new("bufmgr.c", 0, "CheckBufferIsPinnedOnce")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "CheckBufferIsPinnedOnce")),
         ));
     }
     Ok(())
@@ -330,6 +330,6 @@ fn CheckForBufferLeaks() {
 pub(crate) fn bad_buffer_id(buffer: Buffer, funcname: &'static str) -> Box<types_error::PgError> {
     Box::new(
         types_error::PgError::new(ERROR, format!("bad buffer ID: {buffer}"))
-            .with_error_location(ErrorLocation::new("bufmgr.c", 0, funcname)),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, funcname)),
     )
 }

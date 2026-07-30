@@ -405,7 +405,7 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
                     "vacuum morsel scan coverage guard tripped on \"{}\": {e:?}; relfrozenxid advancement suppressed",
                     vacrel.rel.name()
                 ))
-                .finish(::types_error::ErrorLocation::new("vacuumlazy.c", 0, "scan_rounds"))?;
+                .finish(::types_error::ErrorLocation::new(file!(), line!() as i32, "scan_rounds"))?;
         }
         for l in &locals {
             vacrel.folds.counters.fold(&l.counters);

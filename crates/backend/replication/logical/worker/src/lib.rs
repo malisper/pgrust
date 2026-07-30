@@ -44,8 +44,12 @@ pub(crate) fn apply_worker_exit_requested() -> bool {
     APPLY_WORKER_EXIT.get()
 }
 
+#[track_caller]
 pub(crate) fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("src/backend/replication/logical/worker.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn get_ts() -> TimestampTz {

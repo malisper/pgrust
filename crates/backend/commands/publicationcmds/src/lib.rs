@@ -119,11 +119,13 @@ fn errpos(src: Option<&str>, location: types_core::ParseLoc) -> i32 {
     )
 }
 
+#[track_caller]
 #[cold]
 fn simple_err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+#[track_caller]
 #[cold]
 fn conflicting_options(src: Option<&str>, def: &DefElem<'_>) -> Box<PgError> {
     Box::new(
@@ -445,6 +447,7 @@ struct RowFilterWalker<'s> {
 }
 
 impl<'s> RowFilterWalker<'s> {
+    #[track_caller]
     #[cold]
     fn fail(&self, detail: &str, node: Node<'_>) -> Box<PgError> {
         Box::new(

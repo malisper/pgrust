@@ -31,8 +31,11 @@ use walreceiver::client::{self, ExecStatus, PgConn};
 
 const SRCFILE: &str = "src/backend/replication/logical/slotsync.c";
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new(SRCFILE, 0, func)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 const InvalidXLogRecPtr: XLogRecPtr = 0;

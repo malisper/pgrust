@@ -906,7 +906,7 @@ fn ordered_set_direct_args_error(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -940,7 +940,7 @@ fn hypothetical_args_mismatch_error(
             ))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -980,7 +980,7 @@ fn ordered_set_min_direct_args_error(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -995,7 +995,7 @@ fn named_arg_error(pstate: &ParseState<'_, '_>, msg: String, location: ParseLoc)
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -1078,7 +1078,7 @@ fn build_window_func<'mcx>(
                 .errmsg("window functions cannot return sets")
                 .errposition(parser_errposition(pstate, location, encoding))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
         ));
     }
 
@@ -1115,7 +1115,7 @@ fn feature_not_supported(
     }
     Box::new(
         b.into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -1166,7 +1166,7 @@ pub fn func_select_candidate<'c, C: CandidateArgs>(
                 .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
                 .errmsg(format!("cannot pass more than {FUNC_MAX_ARGS} arguments to a function"))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_func.c", 0, "func_select_candidate")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "func_select_candidate")),
         ));
     }
 
@@ -1845,7 +1845,7 @@ fn variadic_not_array(pstate: &ParseState<'_, '_>, fargs: &NodeList<'_>) -> Box<
             .errmsg("VARIADIC argument must be an array")
             .errposition(parser_errposition(pstate, loc, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -1925,7 +1925,7 @@ fn too_many_arguments(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<Pg
             .errmsg(format!("cannot pass more than {FUNC_MAX_ARGS} arguments to a function"))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -1944,7 +1944,7 @@ fn wrong_object_type(
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -1965,7 +1965,7 @@ fn wrong_object_type_hint(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -2005,7 +2005,7 @@ fn ambiguous_function(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 
@@ -2053,7 +2053,7 @@ fn undefined_function(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
     )
 }
 

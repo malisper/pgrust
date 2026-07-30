@@ -56,8 +56,11 @@ thread_local! {
     static STATE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("pqcomm_stdio.rs", 0, funcname)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

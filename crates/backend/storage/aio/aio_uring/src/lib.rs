@@ -207,7 +207,7 @@ mod imp {
                 .errmsg_internal(format!(
                     "io_uring buffer reads unavailable ({what}: errno {e}); falling back to posix_fadvise readahead"
                 ))
-                .finish(ErrorLocation::new("method_io_uring.c", 0, "uring_buf_read"));
+                .finish(ErrorLocation::new(file!(), line!() as i32, "uring_buf_read"));
         }
     }
 

@@ -43,6 +43,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: indexcmds {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn virtual_generated_err(primary: bool, isconstraint: bool) -> Box<PgError> {
@@ -59,6 +60,7 @@ fn virtual_generated_err(primary: bool, isconstraint: bool) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {

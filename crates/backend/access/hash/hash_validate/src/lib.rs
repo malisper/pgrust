@@ -17,7 +17,7 @@ fn info(msg: String) -> PgResult<()> {
     ereport(INFO)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg)
-        .finish(ErrorLocation::new("hashvalidate.c", 0, "hashvalidate"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "hashvalidate"))
 }
 
 pub fn hashvalidate(opclassoid: Oid) -> PgResult<bool> {

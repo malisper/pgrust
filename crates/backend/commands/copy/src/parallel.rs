@@ -2846,7 +2846,7 @@ fn ceremony(
             if !drain_rg(rt, rg) {
                 ereport(WARNING)
                     .errmsg("parallel COPY leaked a pinned resource group during teardown")
-                    .finish(types_error::ErrorLocation::new("copyfrom.c", 0, "ceremony"))?;
+                    .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "ceremony"))?;
             }
         }
     }

@@ -60,6 +60,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: index.c {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {

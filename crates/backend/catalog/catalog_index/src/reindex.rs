@@ -298,7 +298,7 @@ pub fn reindex_index<'mcx>(
                     .unwrap_or_default()
             ))
             .errdetail_internal(pg_rusage::pg_rusage_show(&ru0).as_str().to_string())
-            .finish(types_error::ErrorLocation::new("index.c", 0, "reindex_index"))?;
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "reindex_index"))?;
     }
 
     guc::AtEOXact_GUC(false, save_nestlevel);

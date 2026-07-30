@@ -327,8 +327,12 @@ fn arg_lsn(fcinfo: &Fcinfo, i: usize) -> XLogRecPtr {
     fcinfo.arg_i64(i) as u64
 }
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("slotfuncs.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn lsn_pair(lsn: XLogRecPtr) -> (u32, u32) {

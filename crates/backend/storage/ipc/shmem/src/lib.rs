@@ -30,8 +30,12 @@ const PG_CACHE_LINE_SIZE: usize = 128;
 // colliding keys, so overlength is asserted here instead.
 pub const SHMEM_INDEX_KEYSIZE: usize = 48;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("shmem.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 struct ShmemIndexEnt {

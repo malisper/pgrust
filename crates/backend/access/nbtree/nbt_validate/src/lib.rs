@@ -25,7 +25,7 @@ fn info(msg: String) -> PgResult<()> {
     ereport(INFO)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg)
-        .finish(ErrorLocation::new("nbtvalidate.c", 0, "btvalidate"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "btvalidate"))
 }
 
 pub fn btvalidate(opclassoid: Oid) -> PgResult<bool> {

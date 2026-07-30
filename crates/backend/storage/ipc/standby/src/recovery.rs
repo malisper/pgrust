@@ -21,8 +21,12 @@ use types_storage::storage::ProcSignalReason;
 use types_storage::RelFileLocator;
 use ProcSignalReason::*;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("standby.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 // wait_classes.h + wait_event_types.h (PG 18.3).

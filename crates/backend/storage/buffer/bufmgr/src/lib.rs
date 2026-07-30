@@ -167,7 +167,7 @@ pub fn ReadBufferExtended(
                 "cannot access temporary tables of other sessions",
             )
             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .with_error_location(ErrorLocation::new("bufmgr.c", 0, "ReadBufferExtended")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ReadBufferExtended")),
         ));
     }
     let (buffer, hit) = read::ReadBuffer_common(
@@ -214,7 +214,7 @@ pub fn ReadBufferBatched(
                 "cannot access temporary tables of other sessions",
             )
             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .with_error_location(ErrorLocation::new("bufmgr.c", 0, "ReadBufferExtended")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ReadBufferExtended")),
         ));
     }
     let (buffer, hit) = read::ReadBuffer_batched(

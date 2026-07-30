@@ -327,7 +327,7 @@ pub fn analyze_rel(
                             "skipping \"{}\" --- cannot analyze this foreign table",
                             onerel.name()
                         ))
-                        .finish(types_error::ErrorLocation::new("analyze.c", 0, "analyze_rel"))?;
+                        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "analyze_rel"))?;
                     onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
                     return Ok(());
                 }
@@ -340,7 +340,7 @@ pub fn analyze_rel(
                         "skipping \"{}\" --- cannot analyze non-tables or special system tables",
                         onerel.name()
                     ))
-                    .finish(types_error::ErrorLocation::new("analyze.c", 0, "analyze_rel"))?;
+                    .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "analyze_rel"))?;
             }
             onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
             return Ok(());

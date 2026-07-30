@@ -1136,7 +1136,7 @@ pub fn intervaltypmodin(tl: &[i32]) -> PgResult<i32> {
                     .errmsg(format!(
                         "INTERVAL({precision}) precision reduced to maximum allowed, {MAX_INTERVAL_PRECISION}"
                     ))
-                    .finish(ErrorLocation::new("timestamp.c", 0, "intervaltypmodin"))?;
+                    .finish(ErrorLocation::new(file!(), line!() as i32, "intervaltypmodin"))?;
                 Ok(INTERVAL_TYPMOD(MAX_INTERVAL_PRECISION, range))
             } else {
                 Ok(INTERVAL_TYPMOD(precision, range))

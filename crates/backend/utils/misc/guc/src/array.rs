@@ -154,7 +154,7 @@ pub fn TransformGUCArray(array: &[String]) -> PgResult<Vec<(String, String)>> {
                 ereport(WARNING)
                     .errcode(ERRCODE_SYNTAX_ERROR)
                     .errmsg(format!("could not parse setting for parameter \"{name}\""))
-                    .finish(types_error::ErrorLocation::new("guc.c", 0, "TransformGUCArray"))?;
+                    .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "TransformGUCArray"))?;
             }
         }
     }

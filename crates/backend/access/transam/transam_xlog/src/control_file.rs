@@ -39,8 +39,12 @@ pub fn control_file_update(f: impl FnOnce(&mut ControlFileData)) {
     unsafe { f(&mut *CONTROL_FILE.0.get()) }
 }
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("xlog.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 // Test-only: marks the zeroed in-process image as read so control-file

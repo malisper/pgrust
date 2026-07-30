@@ -422,7 +422,7 @@ fn wal_read_raise_error() -> PgResult<()> {
     ereport(ERROR)
         .errcode_for_file_access()
         .errmsg("could not read from WAL: requested WAL segment slice is unavailable")
-        .finish(ErrorLocation::new("xlogreader.c", 0, "WALReadRaiseError"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "WALReadRaiseError"))
 }
 
 // static void WalSndLoop(WalSndSendDataCallback send_data): shared by the

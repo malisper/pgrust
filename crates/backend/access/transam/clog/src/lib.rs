@@ -721,7 +721,7 @@ pub fn clog_redo(record: &mut XLogReaderState) -> PgResult<()> {
     } else {
         ereport(PANIC)
             .errmsg(format!("clog_redo: unknown op code {info}"))
-            .finish(ErrorLocation::new("clog.c", 0, "clog_redo"))?;
+            .finish(ErrorLocation::new(file!(), line!() as i32, "clog_redo"))?;
         unreachable!("clog_redo PANIC returned");
     }
 }

@@ -844,7 +844,7 @@ fn insert_tuple(
                 ))
                 .errdetail("Building will take significantly more time.".to_string())
                 .errhint("Increase maintenance_work_mem to speed up builds.".to_string())
-                .finish(types_error::ErrorLocation::new("hnswbuild.c", 0, "InsertTuple"))?;
+                .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "InsertTuple"))?;
             flush_pages(bs)?;
         }
         let mut support = bs.support.clone();

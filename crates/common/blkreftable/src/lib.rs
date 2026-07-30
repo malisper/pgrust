@@ -534,6 +534,7 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
         Ok(())
     }
 
+    #[track_caller]
     #[cold]
     fn ends_unexpectedly(&self) -> Box<PgError> {
         PgError::error(format!(

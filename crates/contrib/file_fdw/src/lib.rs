@@ -53,8 +53,12 @@ const VALID_OPTIONS: &[(&str, Oid)] = &[
     ("force_null", ATTRIBUTE_RELATION_ID),
 ];
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("file_fdw.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 // FileFdwPlanState (file_fdw.c). As in C it rides RelOptInfo.fdw_private

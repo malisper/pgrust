@@ -19,8 +19,12 @@ const WE: WaitEvents = WaitEvents {
     receive: WAIT_EVENT_LIBPQWALRECEIVER_RECEIVE,
 };
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("src/backend/replication/libpqwalreceiver/libpqwalreceiver.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn pchomp(s: &str) -> String {

@@ -114,7 +114,7 @@ fn no_distinct_ordering_operator(pstate: &ParseState<'_, '_>, expr: Node<'_>) ->
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_agg.c", 0, "transformAggregateCall")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformAggregateCall")),
     )
 }
 
@@ -1678,7 +1678,7 @@ fn srf_not_top_level(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgE
             .errmsg("set-returning functions must appear at top level of FROM")
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_clause.c", 0, "transformRangeFunction")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformRangeFunction")),
     )
 }
 
@@ -1705,7 +1705,7 @@ pub fn setTargetTable<'mcx>(
                     "relation \"{relname}\" cannot be the target of a modifying statement"
                 ))
                 .into_error()
-                .with_error_location(ErrorLocation::new("parse_clause.c", 0, "setTargetTable")),
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "setTargetTable")),
         ));
     }
     if let Some(old) = pstate.p_target_relation.take() {
@@ -2900,7 +2900,7 @@ fn cube_limit_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgEr
             .errmsg("CUBE is limited to 12 elements")
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_clause.c", 0, "transformGroupingSet")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformGroupingSet")),
     )
 }
 
@@ -3675,7 +3675,7 @@ fn contains_variables(
             .errmsg(format!("argument of {construct_name} must not contain variables"))
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_clause.c", 0, "checkExprIsVarFree")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "checkExprIsVarFree")),
     )
 }
 
@@ -3758,6 +3758,6 @@ fn null_row_count_with_ties() -> Box<PgError> {
             .errcode(ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE)
             .errmsg("row count cannot be null in FETCH FIRST ... WITH TIES clause".to_string())
             .into_error()
-            .with_error_location(ErrorLocation::new("parse_clause.c", 0, "transformLimitClause")),
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformLimitClause")),
     )
 }

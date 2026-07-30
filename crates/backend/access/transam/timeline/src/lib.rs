@@ -24,8 +24,12 @@ const WAIT_EVENT_TIMELINE_HISTORY_READ: u32 = PG_WAIT_IO + 59;
 const WAIT_EVENT_TIMELINE_HISTORY_SYNC: u32 = PG_WAIT_IO + 60;
 const WAIT_EVENT_TIMELINE_HISTORY_WRITE: u32 = PG_WAIT_IO + 61;
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("timeline.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 // The shared errno TLS cell + unlink, through the fd-crate front (DST P1).

@@ -17,8 +17,12 @@ const MEMORY_CONTEXT_IDENT_DISPLAY_SIZE: usize = 1024;
 const COLS: usize = 10;
 const INT4OID: types_core::Oid = 23;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("src/backend/utils/adt/mcxtfuncs.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 fn text_datum(mcx: Mcx<'_>, s: &[u8]) -> PgResult<Datum> {

@@ -24,8 +24,12 @@ use no_ssl_stub as tls_impl;
 const WAIT_EVENT_CLIENT_READ: u32 = 0x0600_0000;
 const WAIT_EVENT_CLIENT_WRITE: u32 = 0x0600_0000 | 1;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("be-secure.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

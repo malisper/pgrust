@@ -65,8 +65,12 @@ fn shared() -> &'static CustomTables {
         .unwrap_or_else(|| panic!("wait event custom shmem not initialized"))
 }
 
+#[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
-    ErrorLocation::new("wait_event.c", 0, func)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
 fn with_spin<R>(lock: &Spinlock, f: impl FnOnce() -> R) -> R {

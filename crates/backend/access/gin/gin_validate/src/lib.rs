@@ -18,7 +18,7 @@ fn info(msg: String) -> PgResult<()> {
     ereport(INFO)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg)
-        .finish(ErrorLocation::new("ginvalidate.c", 0, "ginvalidate"))
+        .finish(ErrorLocation::new(file!(), line!() as i32, "ginvalidate"))
 }
 
 pub fn ginvalidate(opclassoid: Oid) -> PgResult<bool> {

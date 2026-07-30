@@ -71,8 +71,12 @@ const XLOG_SMGR_TRUNCATE: u8 = 0x20;
 const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 const SMGR_TRUNCATE_VM: u32 = 0x0002;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("walsummarizer.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 struct WalSummarizerData {

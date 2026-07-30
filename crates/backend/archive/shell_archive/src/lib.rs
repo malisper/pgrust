@@ -12,8 +12,12 @@ use percentrepl::replace_percent_placeholders;
 const PG_WAIT_IPC: u32 = 0x0800_0000;
 const WAIT_EVENT_ARCHIVE_COMMAND: u32 = PG_WAIT_IPC + 2;
 
+#[track_caller]
 fn loc(funcname: &'static str) -> ErrorLocation {
-    ErrorLocation::new("shell_archive.c", 0, funcname)
+    // pgrust is Rust: report where in OUR source this was raised.
+    // #[track_caller] resolves to the call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 fn archive_command() -> String {

@@ -1645,8 +1645,11 @@ fn compute_parallel_delay(shared: &VacuumSharedCost) -> f64 {
 
 #[cold]
 #[inline(never)]
+#[track_caller]
 fn loc(routine: &'static str) -> ::types_error::ErrorLocation {
-    ::types_error::ErrorLocation::new("vacuum.c", 0, routine)
+    // pgrust is Rust: report OUR source site (call site via track_caller).
+    let site = core::panic::Location::caller();
+    ::types_error::ErrorLocation::new(site.file(), site.line() as i32, routine)
 }
 
 #[cold]
