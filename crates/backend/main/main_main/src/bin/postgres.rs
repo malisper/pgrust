@@ -198,6 +198,24 @@ mod alloc_track {
 }
 
 fn main() {
+    // ipc::proc_exit ends the process by unwinding a ProcExitThread payload
+    // rather than calling exit(2) — a thread must never _exit the shared
+    // process. Nothing used to catch it here, so Rust's default panic path
+    // turned even a CLEAN shutdown into exit code 101: `docker stop` and any
+    // k8s liveness/restart policy read that as a crash. Carry the intended
+    // code through instead. Real panics are re-raised untouched.
+    match std::panic::catch_unwind(run) {
+        Ok(()) => {}
+        Err(payload) => {
+            if let Some(p) = payload.downcast_ref::<::ipc::ProcExitThread>() {
+                std::process::exit(p.code);
+            }
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+fn run() {
     // Transport provider resolution (§2.4 seam): one argv peek, once, before
     // any seam install — set-once at boot is the house pattern. Everything
     // but `--stdio-wire` / `--sim-net` (all the C dispatch options included)
