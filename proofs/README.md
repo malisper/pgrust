@@ -164,6 +164,31 @@ cd proofs
 ./run-suite.sh all            # everything incl. calibration and unmeasured
 ```
 
+## Validating the manifest
+
+Two checkers guard `SUITE.tsv`. Run the cheap one on every edit:
+
+```sh
+cd proofs
+./lint-suite-rows.py          # offline row-shape lint: <1s, no cargo/solver
+./check-suite-names.py        # harness names vs `cargo kani list` (compiles
+                              # every family; --cache DIR to reuse listings)
+```
+
+`lint-suite-rows.py` is the authoring-time gate: column count, required
+columns non-empty, `expected`/`tier` vocabulary, numeric `time_s`,
+unexpanded `<...>` placeholders, prose or shell metacharacters in the flags
+column, `--c-lib` paths that exist, and harness fields holding packed data
+instead of a name. Every one of those classes has shipped into the manifest
+and been discovered only on a CI cluster solve run, where a malformed row looks
+exactly like a divergence (see `FLEET-SOLVING.md`).
+
+`check-suite-names.py` validates names against ground truth and prints a
+**census**: rows considered = checked + skipped + errored, asserted. If a
+family's listing fails it is retried, and if it still fails its rows are
+counted as UNVERIFIED under an INCOMPLETE CENSUS banner — a shrinking
+denominator is never allowed to look like a green.
+
 Harnesses run **strictly serially** (one kani/cbmc solve at a time —
 mandatory memory protocol), each under `timeout` plus a 6 GiB RSS
 watchdog polling the solver process tree every 15s. Scoreboard goes to
