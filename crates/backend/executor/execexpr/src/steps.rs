@@ -145,7 +145,11 @@ pub enum Step {
     // `frame` is an argless FuncFrame carried only for its armed result mcx.
     ArrayExprStep {
         elems: NonNull<NullableDatum>,
-        nelems: u16,
+        // C execExpr.h arrayexpr.nelems is `int`: ARRAY[] element count is
+        // NOT bounded by any 16-bit limit. This was u16, so a literal with
+        // 65536 elements truncated to 0 and silently produced an EMPTY array
+        // (array_length -> NULL) instead of the right answer.
+        nelems: u32,
         frame: u32,
         elmtype: Oid,
         elmlen: i16,
@@ -157,7 +161,10 @@ pub enum Step {
     // anonymous-RECORD tupdesc, arena-lived for the plan.
     RowExprStep {
         elems: NonNull<NullableDatum>,
-        nelems: u16,
+        // C rowexpr.nelems is `int` too (see ArrayExprStep above). In practice
+        // the blessed tupdesc bounds this well below 65535, but the field must
+        // not be the thing that silently wraps.
+        nelems: u32,
         frame: u32,
         desc: NonNull<::types_tuple::TupleDescData<'static>>,
         out: OutRef,
@@ -262,7 +269,7 @@ pub enum Step {
     HstoreSbsrefAssign { state: NonNull<crate::hstoresubs::HstoreSbsState>, out: OutRef },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
-    MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
+    MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u32, least: bool, out: OutRef },
     NextValueExpr { seqid: Oid, seqtypid: Oid, out: OutRef },
     // C EEOP_JSON_CONSTRUCTOR: arg subexprs write jcstate's slots; constant
     // metadata + split scratch behind one plan-mcx pointer.

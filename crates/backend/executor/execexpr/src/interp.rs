@@ -1892,7 +1892,7 @@ fn eval_hashed_scalar_array_op(
 fn eval_row_expr(
     frames: &mut [crate::steps::FuncFrame<'_>],
     elems: core::ptr::NonNull<NullableDatum>,
-    nelems: u16,
+    nelems: u32,
     frame: u32,
     desc: core::ptr::NonNull<::types_tuple::TupleDescData<'static>>,
 ) -> PgResult<(Datum, bool)> {
@@ -2829,7 +2829,7 @@ fn eval_field_store_form(
 fn eval_array_expr(
     frames: &mut [crate::steps::FuncFrame<'_>],
     elems: core::ptr::NonNull<NullableDatum>,
-    nelems: u16,
+    nelems: u32,
     frame: u32,
     elmtype: ::types_core::Oid,
     elmlen: i16,
@@ -3654,7 +3654,7 @@ fn step_io_coerce(calls: core::ptr::NonNull<crate::steps::IoCoerceCalls>, out: O
 fn step_min_max(
     call: &FuncCall,
     slots: core::ptr::NonNull<NullableDatum>,
-    nelems: u16,
+    nelems: u32,
     least: bool,
     out: OutRef,
 ) -> PgResult<()> {

@@ -857,12 +857,17 @@ pub fn send_message_to_frontend(edata: &PgError) {
         if let Some(filename) = location.and_then(|l| l.filename.as_deref()) {
             send_field(&mut body, PG_DIAG_SOURCE_FILE, filename);
         }
-        if location.map_or(0, |l| l.lineno) > 0 {
-            send_field(
-                &mut body,
-                PG_DIAG_SOURCE_LINE,
-                &location.unwrap().lineno.to_string(),
-            );
+        // C's ereport/elog macros always pass __LINE__, so every server
+        // message carries PG_DIAG_SOURCE_LINE and clients treat it as
+        // guaranteed: asyncpg does an unguarded
+        // `del dct['server_source_line']`, which raised KeyError inside its
+        // notice callback and then hung the connection to timeout. Emit the
+        // field whenever we emit a location at all, so the message SHAPE
+        // matches C even where the ported site has not been given its C line
+        // yet. A 0 there means exactly that — unknown, and greppable — rather
+        // than a fabricated plausible-looking line number.
+        if let Some(l) = location {
+            send_field(&mut body, PG_DIAG_SOURCE_LINE, &l.lineno.to_string());
         }
         if let Some(funcname) = location.and_then(|l| l.funcname.as_deref()) {
             send_field(&mut body, PG_DIAG_SOURCE_FUNCTION, funcname);
