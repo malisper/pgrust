@@ -859,7 +859,12 @@ pub fn fc_box_poly(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
         Point { x: b.high.x, y: b.high.y },
         Point { x: b.high.x, y: b.low.y },
     ];
-    let v = io::poly_image(fcinfo.result_mcx(), 4, |i| Ok(pts[i]))?;
+    // C box_poly (geo_ops.c:4557) sets the cached boundbox by
+    // box_construct(&box->high, &box->low) — a copy-with-ordering of the
+    // input box, NOT a make_bound_box recompute over the corners. The two
+    // differ for -0.0 and NaN coordinates; match C byte-for-byte.
+    let bb = crate::boxes::box_construct(&b.high, &b.low);
+    let v = io::poly_image_with_boundbox(fcinfo.result_mcx(), 4, |i| Ok(pts[i]), &bb)?;
     Ok(varlena_result(v))
 }
 
