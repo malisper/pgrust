@@ -63,6 +63,11 @@ fn release_family() -> bool {
     std::env::var("PROFILE").as_deref() == Ok("release")
 }
 
+fn wasm_target() -> bool {
+    // Build scripts see the TARGET arch via CARGO_CFG_TARGET_ARCH.
+    std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32")
+}
+
 // Absent RE2: a hard error on release-family builds, a loud warning on dev.
 fn re2_missing(reason: &str) {
     if release_family() {
@@ -84,6 +89,20 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(have_re2)");
     println!("cargo:rerun-if-changed=src/re2_shim.cc");
     println!("cargo:rerun-if-env-changed=PGRUST_FORCE_NO_RE2");
+    if wasm_target() {
+        // wasm32 carve-out: libre2 is native C++ linked through the cc shim
+        // and cannot be built for wasm32-wasip1 at all, so the release-family
+        // "must carry RE2" invariant (a ruling about NATIVE shipped binaries)
+        // is unsatisfiable here. The wasm module is Spencer-only by necessity
+        // — deterministically, for every profile — and wasm/wasm-build.sh
+        // documents that as deliberate (it sets PGRUST_FORCE_NO_RE2 for the
+        // same reason). Loud, not silent:
+        println!(
+            "cargo:warning=regexp_alt: wasm32 target — RE2 is unavailable \
+             (native C++), building the Spencer-only regex engine"
+        );
+        return;
+    }
     if std::env::var_os("PGRUST_FORCE_NO_RE2").is_some() {
         // Dev-only hatch. A release-family Spencer-only binary must never
         // exist, deliberate or not (coordinator ruling on the W2a evidence).
