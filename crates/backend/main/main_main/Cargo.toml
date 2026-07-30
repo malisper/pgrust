@@ -13,6 +13,7 @@ name = "postgres"
 path = "src/bin/postgres.rs"
 
 [dependencies]
+ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }

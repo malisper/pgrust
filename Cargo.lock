@@ -8797,6 +8797,7 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "init_small",
+ "ipc",
  "libc",
  "libmimalloc-sys",
  "mcx",
@@ -11878,6 +11879,7 @@ dependencies = [
  "mcx",
  "pg_database_seams",
  "pg_locale_seams",
+ "pgsync",
  "syscache_seams",
  "types_core",
  "types_error",

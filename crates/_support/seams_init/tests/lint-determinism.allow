@@ -199,6 +199,8 @@ fs	crates/backend/utils/adt/genfile/src/lib.rs	1
 # --- crates/backend/utils/cache/relcache (12 sites) ---
 # --- crates/backend/utils/cache/relmapper (2 sites) ---
 # --- crates/backend/utils/error/elog (7 sites) ---
+
+once	crates/backend/utils/adt/pg_locale/src/lconv.rs	1	DST-REVIEW(money-locale): PGLC_localeconv's per-(lc_monetary,lc_numeric) cache latch — P3 row-19 PURE init closure (`Mutex::new(HashMap::new())`: allocates an empty map, no env read, no I/O, no lock acquisition, no choke crossing). The locale read itself happens under the pgsync::Mutex on miss, not in the once-init.
 fs	crates/backend/utils/error/elog/src/report.rs	7
 # --- crates/backend/tcop/postgres sim harness (6 sites, cfg pgrust_sim) ---
 fs	crates/backend/tcop/postgres/src/sim_net.rs	11	DST-REVIEW(sim-converge): +5 = the sent-log artifact dump (std::fs::write, the transcript-dump pattern) + the at-cut pack exporter (create_dir_all x2 / write / host-image read for the dual-plane freshness rule) — host-side artifact/pack plumbing, never sim-world state. Prior: DST-REVIEW(p4-simnet): SIM-HARNESS domain, whole file behind cfg(pgrust_sim) at the mod decl (zero product codegen; scanner sees the file, not the gate) — host-image mirror reads (std::fs read_dir/read) feeding the SimVfs seed + the two determinism-artifact dumps (transcript/op log)
