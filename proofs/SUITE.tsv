@@ -2145,3 +2145,12 @@ scalar-misc	xid8snap::eq_pg_snapshot_out_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg
 scalar-misc	xid8snap::eq_pg_snapshot_out_spots	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
 scalar-misc	xid8snap::eq_strtou64_cap8	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	6.0	wave-5 run 2026-07-30 idle
 scalar-misc	xid8snap::eq_pg_snapshot_in_cap6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+enum-cmp	proofs::eq_enum_lt	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	4.1	default solver; measured 2026-07-30 load~11-19
+enum-cmp	proofs::eq_enum_le	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	3.7	default solver; measured 2026-07-30 load~11-19
+enum-cmp	proofs::eq_enum_ge	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	3.9	default solver; measured 2026-07-30 load~11-19
+enum-cmp	proofs::eq_enum_gt	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	3.9	default solver; measured 2026-07-30 load~11-19
+enum-cmp	proofs::eq_enum_cmp	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	5.1	default solver; measured 2026-07-30 load~11-19
+enum-cmp	proofs::eq_enum_smaller	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	3.6	default solver; measured 2026-07-30 load~11-19
+enum-cmp	proofs::eq_enum_larger	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	7.1	default solver; measured 2026-07-30 load~11-19
+enum-cmp	proofs::control_enum_cmp_oracle_skew	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	must-fail	defect-witness	?	fails on control assertion.3 (value parity under cmp-oracle skew) — cmp seam model load-bearing
+enum-cmp	proofs::control_enum_lookup_typeoid_skew	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	must-fail	defect-witness	?	fails on assert_seam_parity.assertion.2 (trace typeoid) — lookup seam model load-bearing
