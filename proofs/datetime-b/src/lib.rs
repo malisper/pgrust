@@ -1542,6 +1542,14 @@ extern "C" {
     pub fn pg_adr_time_send(time: i64, out: *mut u8) -> i32;
     pub fn pg_adr_timetz_send(t_time: i64, t_zone: i32, out: *mut u8) -> i32;
     pub fn pg_adr_interval_send(t: i64, d: i32, m: i32, out: *mut u8) -> i32;
+
+    // wave-2: 2071 date_pl_interval / 2072 date_mi_interval
+    pub fn pg_adr_date_pl_interval(
+        date: i32, it: i64, id: i32, im: i32, out: *mut i64, err: *mut c_int,
+    ) -> c_int;
+    pub fn pg_adr_date_mi_interval(
+        date: i32, it: i64, id: i32, im: i32, out: *mut i64, err: *mut c_int,
+    ) -> c_int;
 }
 
 #[cfg(kani)]
@@ -2878,5 +2886,46 @@ mod rem {
             i += 1;
         }
         core::mem::forget(ctx);
+    }
+
+    // ---------- wave-2: 2071 date_pl_interval / 2072 date_mi_interval ----
+    // Composition rows: date2timestamp (upper-julian overflow arm
+    // in-theorem) + timestamp_pl/mi_interval. Planes: m0d0 (month==day==0
+    // LITERAL, time fully symbolic — the julian tm-walk arms are
+    // trap-fenced 99 in the C and unreachable on this plane) + the two
+    // infinite-span literal sentinels (infinity-minus-infinity error arm +
+    // passthrough). Dates contract-fenced per the lane-D module doc.
+
+    macro_rules! eq_date_iv {
+        ($($h:ident: $fc:path, $cfn:ident, $it:expr, $id:expr, $im:expr;)*) => {$(
+            #[kani::proof]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            fn $h() {
+                let date: i32 = kani::any();
+                kani::assume(date == i32::MIN || date >= MIN_DATE);
+                let it: i64 = $it;
+                let mut c_out: i64 = 0;
+                let mut c_err: c_int = 0;
+                let trap = unsafe {
+                    $cfn(date, it, $id, $im, &mut c_out, &mut c_err)
+                };
+                assert!(trap != 99, "julian plane violation");
+                let img = iv_img(it, $id, $im);
+                let r = proof_support::fcinfo::call($fc, [
+                    Datum::from_i32(date),
+                    Datum::from_usize(img.as_ptr() as usize),
+                ]);
+                check_ts_result!(r, c_err, c_out);
+            }
+        )*};
+    }
+
+    eq_date_iv! {
+        eq_date_pl_interval_m0d0:    adt_date::builtins::fc_date_pl_interval, pg_adr_date_pl_interval, kani::any(), 0, 0;
+        eq_date_mi_interval_m0d0:    adt_date::builtins::fc_date_mi_interval, pg_adr_date_mi_interval, kani::any(), 0, 0;
+        eq_date_pl_interval_nobegin: adt_date::builtins::fc_date_pl_interval, pg_adr_date_pl_interval, i64::MIN, i32::MIN, i32::MIN;
+        eq_date_mi_interval_nobegin: adt_date::builtins::fc_date_mi_interval, pg_adr_date_mi_interval, i64::MIN, i32::MIN, i32::MIN;
+        eq_date_pl_interval_noend:   adt_date::builtins::fc_date_pl_interval, pg_adr_date_pl_interval, i64::MAX, i32::MAX, i32::MAX;
+        eq_date_mi_interval_noend:   adt_date::builtins::fc_date_mi_interval, pg_adr_date_mi_interval, i64::MAX, i32::MAX, i32::MAX;
     }
 }

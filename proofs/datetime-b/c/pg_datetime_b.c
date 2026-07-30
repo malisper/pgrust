@@ -2821,3 +2821,49 @@ pg_adr_interval_send(int64 t, int32 d, int32 m, uint8 *out /* [20] */ )
 	pg_adr_set_varsize_4b(out, 20);
 	return 20;
 }
+
+/* ---------- date.c: date_pl_interval (2071) / date_mi_interval (2072)
+ * (wave-2; composition of date2timestamp + timestamp_pl/mi_interval above;
+ * julian month/day tm-walk arms -> OUT-OF-PLANE TRAP 99 propagates) ------ */
+
+int
+pg_adr_date_pl_interval(int32 dateVal, int64 it, int32 id, int32 im,
+						int64 *out, int *err)
+{
+	Interval	span_ = {it, id, im};
+	Interval   *span = &span_;
+	Timestamp	dateStamp;
+	int			rc;
+
+	dateStamp = pg_adr_date2timestamp_opt_overflow(dateVal, NULL, err);
+	if (*err)					/* shim: longjmp propagation */
+		return 0;
+
+	rc = pg_adr_timestamp_pl_interval(dateStamp, span, out);
+	if (rc == 99)
+		return 99;				/* out-of-plane trap propagates loudly */
+	if (rc)
+		*err = rc;
+	return 0;
+}
+
+int
+pg_adr_date_mi_interval(int32 dateVal, int64 it, int32 id, int32 im,
+						int64 *out, int *err)
+{
+	Interval	span_ = {it, id, im};
+	Interval   *span = &span_;
+	Timestamp	dateStamp;
+	int			rc;
+
+	dateStamp = pg_adr_date2timestamp_opt_overflow(dateVal, NULL, err);
+	if (*err)					/* shim: longjmp propagation */
+		return 0;
+
+	rc = pg_adr_timestamp_mi_interval(dateStamp, span, out);
+	if (rc == 99)
+		return 99;				/* out-of-plane trap propagates loudly */
+	if (rc)
+		*err = rc;
+	return 0;
+}
