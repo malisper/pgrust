@@ -632,7 +632,8 @@ path_cmp! {
     fc_path_n_ge => >=;
 }
 
-fn fc_path_inter(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_inter(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let a = unsafe { arg_path(fcinfo, 0) }?;
     // SAFETY: module contract.
@@ -675,7 +676,8 @@ fn fc_path_open(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
     Ok(varlena_result(v))
 }
 
-fn fc_path_area(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_area(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_path(fcinfo, 0) }?;
     match crate::path::path_area(&p)? {
@@ -690,7 +692,8 @@ fn fc_path_length(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     Ok(Datum::from_f64(crate::path::path_length(&p)?))
 }
 
-fn fc_path_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_path_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let a = unsafe { arg_path(fcinfo, 0) }?;
     // SAFETY: module contract.
