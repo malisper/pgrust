@@ -1886,8 +1886,8 @@ oid	name	source_file	status	class	notes
 3235	pg_lsn_gt	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64xu64)	fast	<0.1s; proofs/pg_lsn
 3236	pg_lsn_ne	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64xu64)	fast	<0.1s; proofs/pg_lsn
 3237	pg_lsn_mi	crates/backend/utils/adt/pg_lsn/src/builtins.rs	untriaged		
-3238	pg_lsn_recv	crates/backend/utils/adt/pg_lsn/src/builtins.rs	untriaged		
-3239	pg_lsn_send	crates/backend/utils/adt/pg_lsn/src/builtins.rs	untriaged		
+3238	pg_lsn_recv	crates/backend/utils/adt/pg_lsn/src/builtins.rs	wall(symex/unwind: mcx AcctWeak-retain + StringInfo::enlarge_slow truncate at unwind(16); 6.9GB RSS kill at 111s; FAILED verdict = unwind artifact, not divergence)	wall	wave-5 2026-07-30; same blocked:stringinfo-symex class as uuid_recv — needs slice-core refactor; proofs/pg_lsn
+3239	pg_lsn_send	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64, wrapper-level, modulo static-buffer allocator model)	slow	140.4s kissat, unwinding assertions pass; byte-skew control fails as designed (102s); proofs/pg_lsn wave5
 3251	pg_lsn_cmp	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64xu64)	fast	0.04s; proofs/pg_lsn
 3252	pg_lsn_hash	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64 lsn (rides as i64 datum), wrapper-level)	fast	3.6s; proofs/hash-rows wave5
 3255	bttextsortsupport	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(port gap: unported)	-	builtins.rs:561 panics "abbreviated-key SortSupport unported"

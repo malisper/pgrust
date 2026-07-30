@@ -1869,3 +1869,6 @@ uuid	wave5::cover_uuid_recv_both_arms	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c -
 uuid	wave5::eq_uuid_send	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	info	release-gate	wall	CNF wall: symex 56757 VCCs completes; >300s kissat; >6GB default
 uuid	wave5::eq_generate_uuidv7	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --solver kissat --exact	green	per-commit	2.2	wave-5 run 2026-07-30 idle
 uuid	wave5::control_generate_uuidv7_rng_skew	-Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --exact	must-fail	control	0.9	fails on rng skew as designed
+pg_lsn	wave5::eq_pg_lsn_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	info	release-gate	wall	wall: unwind-16 truncation (AcctWeak retain, enlarge_slow) + 6.9GB RSS kill; FAILED = artifact
+pg_lsn	wave5::eq_pg_lsn_send	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	release-gate	140.4	wave-5 run 2026-07-30 idle; unwinding assertions pass
+pg_lsn	wave5::control_pg_lsn_send_skew	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --exact	must-fail	control	102.4	fails on img byte skew as designed
