@@ -42,6 +42,11 @@ bool	eq_int4_bool	-Z c-ffi --c-lib c/pg_bool.c --solver kissat	green	per-commit	
 bool	eq_bool_int4	-Z c-ffi --c-lib c/pg_bool.c --solver kissat	green	per-commit	0.02	added to run-all.sh 2026-07-28
 bool	control_negative_boollt_vs_c_boolle	-Z c-ffi --c-lib c/pg_bool.c	must-fail	defect-witness	?	DEFAULT solver (run-all.sh reconciled 2026-07-28)
 bool-parse	parse_bool_equiv	-Z c-ffi --c-lib csrc/bool_shim.c	green	per-commit	7.7	recipe INFERRED; run.log 7.67s; unwind(12) len<=8
+brin-bloom	proofs::eq_summary_in	-Z c-ffi -Z stubbing --c-lib c/pg_brin_bloom.c --exact	green	per-commit	0.46	ledger 4596 error-class-only 0A000; DEFAULT solver; w2-brin 2026-07-30
+brin-bloom	proofs::eq_summary_recv	-Z c-ffi -Z stubbing --c-lib c/pg_brin_bloom.c --exact	green	per-commit	1.0	ledger 4598 error-class-only 0A000; DEFAULT solver
+brin-bloom	proofs::eq_summary_send_l0	-Z c-ffi -Z stubbing --c-lib c/pg_brin_bloom.c --exact	green	calibration	102.4	ledger 4599 byteasend-delegation identity cell len 0; DEFAULT solver; mcx-stubs
+brin-bloom	proofs::eq_summary_send_l8	-Z c-ffi -Z stubbing --c-lib c/pg_brin_bloom.c --exact	green	calibration	113.9	ledger 4599 identity cell len 8, symbolic content
+brin-bloom	proofs::control_summary_send_lastbyte	-Z c-ffi -Z stubbing --c-lib c/pg_brin_bloom.c --exact	must-fail	defect-witness	150.9	bloom-family rig witness; fails on exactly out[i]==cimg[i] (verified 2026-07-30); DEFAULT solver
 brin-minmax	proofs::eq_opcinfo	-Z c-ffi -Z stubbing --c-lib c/pg_brin_minmax.c --exact	green	unmeasured	?	doc+run-all.sh reconciled: default solver everywhere (2026-07-28)
 brin-minmax	proofs::eq_int4_add_value	-Z c-ffi -Z stubbing --c-lib c/pg_brin_minmax.c --exact	green	unmeasured	?	seam_stubs!; unwind(20)
 brin-minmax	proofs::eq_date_add_value	-Z c-ffi -Z stubbing --c-lib c/pg_brin_minmax.c --exact	green	unmeasured	?	
@@ -81,6 +86,31 @@ brin-minmax	proofs::probe_const_none_in_vec	-Z c-ffi -Z stubbing --c-lib c/pg_br
 brin-minmax	proofs::probe_const_none_in_vec_push	-Z c-ffi -Z stubbing --c-lib c/pg_brin_minmax.c --exact	missing	unmeasured	?	probe; name repaired: no such harness in cargo kani list (pattern-name superseded or not landed)
 brin-minmax	proofs::probe_const_none_local_opaque	-Z c-ffi -Z stubbing --c-lib c/pg_brin_minmax.c --exact	missing	unmeasured	?	probe; name repaired: no such harness in cargo kani list (pattern-name superseded or not landed)
 brin-minmax	proofs::cal_int4_add_value_engaged	-Z c-ffi -Z stubbing --c-lib c/pg_brin_minmax.c --exact	missing	unmeasured	?	calibration harness; name repaired: no such harness in cargo kani list (pattern-name superseded or not landed)
+brin-minmax	dist_proofs::eq_dist_int2	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	0.83	ledger 4621 full-i16; w2-brin 2026-07-30
+brin-minmax	dist_proofs::eq_dist_int4	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	1.79	ledger 4622 full-i32
+brin-minmax	dist_proofs::eq_dist_int8	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	3.88	ledger 4623 full-i64 (per-side f64 widen)
+brin-minmax	dist_proofs::eq_dist_date	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	2.11	ledger 4629 full-i32
+brin-minmax	dist_proofs::eq_dist_timestamp	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	3.76	ledger 4637 full-i64
+brin-minmax	dist_proofs::eq_dist_pg_lsn	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	0.41	ledger 4633 full-u64 wrapping_sub
+brin-minmax	dist_proofs::eq_dist_float4	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	2.79	ledger 4624 NaN lattice + a1<=a2 plane
+brin-minmax	dist_proofs::eq_dist_float8	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	release-gate	12.2	ledger 4625 NaN lattice + a1<=a2 plane
+brin-minmax	dist_proofs::eq_dist_tid	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	7.84	ledger 4627 u32-wrap claim + MaxHeapTuplesPerPage wiring assert
+brin-minmax	dist_proofs::eq_dist_time	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	0.38	ledger 4630 contract [0,USECS_PER_DAY]; wrap plane = native_dist_wrap (CI-decode 2026-07-30)
+brin-minmax	dist_proofs::eq_dist_timetz	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	3.37	ledger 4632 contract times x |zone|<=86400; zone-wrap plane = staged divergence candidate (probe below)
+brin-minmax	dist_proofs::probe_dist_timetz_zone_wrap	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --exact	must-fail	defect-witness	0.63	EXPECTED-FAIL divergence witness (C int32-subtracts zones before widening); DEFAULT solver; a PASS = plane closed, re-examine (CI-decode 2026-07-30)
+brin-minmax	dist_proofs::eq_dist_macaddr	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	calibration	111.5	ledger 4634 full 6-byte lex-fenced pairs; kissat (w2-brin 2026-07-30, load~11)
+brin-minmax	dist_proofs::eq_dist_macaddr8	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	wall-recorded	calibration	?	wall(timeout-450s BOTH solvers, load 13-27) w2-brin 2026-07-30; live for CI cluster retry tier; native_dist_chains 4.0M 0 diffs
+brin-minmax	dist_proofs::eq_dist_uuid	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	wall-recorded	calibration	?	wall(timeout-450s BOTH solvers, load 13-47) w2-brin 2026-07-30; live for CI cluster retry tier; native_dist_chains 4.0M 0 diffs
+brin-minmax	dist_proofs::eq_dist_inet_mismatch	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	per-commit	1.02	ledger 4636 family-mismatch constant-1.0 arm
+brin-minmax	dist_proofs::eq_dist_inet_v4	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	green	calibration	39.4	ledger 4636 full 4-byte + bits, masked-prefix fence
+brin-minmax	dist_proofs::eq_dist_inet_v6	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --solver kissat --exact	wall-recorded	calibration	?	wall(timeout-450s BOTH solvers) w2-brin 2026-07-30; live for CI cluster retry tier; native_dist_chains 2.0M 0 diffs
+brin-minmax	dist_proofs::eq_summary_in	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --exact	green	per-commit	0.49	ledger 4638 error-class-only 0A000; DEFAULT solver
+brin-minmax	dist_proofs::eq_summary_recv	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --exact	green	per-commit	1.82	ledger 4640 error-class-only 0A000; DEFAULT solver
+brin-minmax	dist_proofs::control_dist_int4_swapped	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_dist.c --no-overflow-checks --exact	must-fail	defect-witness	0.22	distance-lane rig witness; fails on exactly the to_bits parity assert (verified 2026-07-30); DEFAULT solver
+brin-minmax	send_proofs::eq_summary_send_l0	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_send.c --exact	green	calibration	126.5	ledger 4641 byteasend-delegation identity cell len 0; DEFAULT solver; mcx-stubs; w2-brin 2026-07-30
+brin-minmax	send_proofs::eq_summary_send_l8	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_send.c --exact	green	calibration	134.9	ledger 4641 identity cell len 8, symbolic content
+brin-minmax	send_proofs::control_summary_send_lastbyte	-Z c-ffi -Z stubbing --c-lib c/pg_brin_multi_send.c --exact	must-fail	defect-witness	96.3	send-lane rig witness; fails on exactly out[i]==cimg[i] (verified 2026-07-30); DEFAULT solver
+brin-minmax	native_dist_chains	cargo run --release --bin native_dist_chains	green	unmeasured	?	native differential: macaddr8/uuid/macaddr/inet v4+v6, 14M checks 0 diffs (1.5s); backs the wall-recorded rows above; tested(differential) grade
 bytea-cmp	eq_byteaeq	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	ledger 0.2-2.4s; unwind(10)
 bytea-cmp	eq_byteane	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	0.2-2.4s
 bytea-cmp	eq_bytealt	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	0.2-2.4s
