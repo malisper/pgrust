@@ -101,41 +101,55 @@ impl<'mcx> PredIter<'mcx> {
     }
 }
 
-fn predicate_classify<'mcx>(node: Node<'mcx>) -> (PredClass, PredIter<'mcx>) {
+fn predicate_classify<'mcx>(node: Node<'mcx>) -> PgResult<(PredClass, PredIter<'mcx>)> {
     if let Some(list) = node.as_list() {
-        return (PredClass::And, PredIter::List(list.as_slice()));
+        return Ok((PredClass::And, PredIter::List(list.as_slice())));
     }
     if clauses::is_andclause(node) {
         let b = node.as_bool_expr().expect("BoolExpr");
-        return (PredClass::And, PredIter::List(b.args.as_slice()));
+        return Ok((PredClass::And, PredIter::List(b.args.as_slice())));
     }
     if clauses::is_orclause(node) {
         let b = node.as_bool_expr().expect("BoolExpr");
-        return (PredClass::Or, PredIter::List(b.args.as_slice()));
+        return Ok((PredClass::Or, PredIter::List(b.args.as_slice())));
     }
     if let Some(saop) = node.as_scalar_array_op_expr() {
         let class = if saop.useOr { PredClass::Or } else { PredClass::And };
         if let Some(arraynode) = saop.args.as_slice().get(1).copied() {
             if let Some(c) = arraynode.as_const() {
                 if !c.constisnull {
-                    let nelems = const_array_nelems(c);
+                    let nelems = const_array_nelems(c)?;
                     if nelems <= MAX_SAOP_ARRAY_SIZE {
-                        return (class, PredIter::ArrayConst(saop));
+                        return Ok((class, PredIter::ArrayConst(saop)));
                     }
                 }
             } else if let Some(a) = arraynode.as_array_expr() {
                 if !a.multidims && a.elements.len() as i32 <= MAX_SAOP_ARRAY_SIZE {
-                    return (class, PredIter::ArrayExpr(saop));
+                    return Ok((class, PredIter::ArrayExpr(saop)));
                 }
             }
         }
     }
-    (PredClass::Atom, PredIter::Atom)
+    Ok((PredClass::Atom, PredIter::Atom))
 }
 
 // Header-relative dims read: works for 1B and 4B array images (bound-param
 // array consts can be short-form).
-fn const_array_nelems(c: &Const) -> i32 {
+//
+// C is predtest.c's `ArrayGetNItems(ARR_NDIM(arrayval), ARR_DIMS(arrayval))`
+// -- the HARD entry point (escontext == NULL), so a corrupt Const image whose
+// dims imply a negative count, an int32 product overflow or a size above
+// MaxArraySize makes C ereport(ERROR, 54000) right here, inside planning. That
+// is a catchable statement error, not a crash, so the Err propagates instead
+// of being unwrapped: `.expect()` turned C's ERROR into a backend panic, which
+// under the panic-fatality doctrine is a crash-and-restart. Same defect class
+// as the read_dims_lbounds corruption plane -- and, like it, unreachable from
+// any Const a running pgrust can build (array_in / array_recv validate).
+//
+// The ndim > MAXDIM cell has no C answer to match (C hands ArrayGetNItems a
+// bare `const int *` and reads past the dims area); array_get_n_items_safe
+// raises the dimension-count error there by design.
+fn const_array_nelems(c: &Const) -> PgResult<i32> {
     let body = crate::selfuncs::varlena_datum_payload(c.constvalue);
     let rd = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
     let ndim = rd(0);
@@ -144,7 +158,7 @@ fn const_array_nelems(c: &Const) -> i32 {
     for (i, d) in dims[..n].iter_mut().enumerate() {
         *d = rd(12 + 4 * i);
     }
-    arrayutils::array_get_n_items(ndim, &dims[..n]).expect("valid stored array")
+    arrayutils::array_get_n_items(ndim, &dims[..n])
 }
 
 fn arrayconst_components<'mcx>(
@@ -218,8 +232,8 @@ fn predicate_implied_by_recurse<'mcx>(
     predicate: Node<'mcx>,
     weak: bool,
 ) -> PgResult<bool> {
-    let (pclass, pred_info) = predicate_classify(predicate);
-    let (cclass, clause_info) = predicate_classify(clause);
+    let (pclass, pred_info) = predicate_classify(predicate)?;
+    let (cclass, clause_info) = predicate_classify(clause)?;
     match (cclass, pclass) {
         (PredClass::And, PredClass::And) => {
             for &pitem in pred_info.components(mcx)?.as_slice() {
@@ -304,8 +318,8 @@ fn predicate_refuted_by_recurse<'mcx>(
     predicate: Node<'mcx>,
     weak: bool,
 ) -> PgResult<bool> {
-    let (pclass, pred_info) = predicate_classify(predicate);
-    let (cclass, clause_info) = predicate_classify(clause);
+    let (pclass, pred_info) = predicate_classify(predicate)?;
+    let (cclass, clause_info) = predicate_classify(clause)?;
     match cclass {
         PredClass::And => match pclass {
             PredClass::And => {
@@ -638,7 +652,7 @@ fn clause_is_strict_for<'mcx>(
                 if c.constisnull {
                     return Ok(true);
                 }
-                nelems = const_array_nelems(c);
+                nelems = const_array_nelems(c)?;
             } else if let Some(a) = arraynode.as_array_expr() {
                 if !a.multidims {
                     nelems = a.elements.len() as i32;
@@ -1150,5 +1164,137 @@ mod tests {
         .unwrap();
         assert!(predicate_refuted_by(mcx, &[not_x], &[x], false).unwrap());
         assert!(predicate_refuted_by(mcx, &[x], &[not_x], false).unwrap());
+    }
+
+    // Corrupt array Const in a ScalarArrayOpExpr: predicate_classify's
+    // ArrayGetNItems call is the first thing predicate_implied_by does with
+    // the node, and it is C's HARD entry point (predtest.c:879 passes no
+    // escontext), so C ereports 54000 "array size exceeds the maximum
+    // allowed" / "number of array dimensions ..." from inside the planner.
+    // pgrust must return that as an Err -- it used to `.expect()` it into a
+    // backend panic (before the array-header fix, the same images panicked
+    // one frame deeper on a dims[i] slice index).
+    //
+    // Images below are built by hand precisely because array_in/array_recv
+    // cannot produce them: this plane is corrupt-page / crafted-binary only.
+    // A hand-built flat int4[] image: `ndim` goes into the header verbatim
+    // while only `dims.len()` dim/lbound pairs are materialized, so the header
+    // can claim more dimensions than the body carries (a corrupt page, or a
+    // crafted binary-format value -- array_in/array_recv cannot produce this).
+    fn corrupt_array_const<'mcx>(mcx: Mcx<'mcx>, ndim: i32, dims: &[i32]) -> Const {
+        let total = 4 + 16 + 8 * dims.len();
+        let mut img = mcx::vec_with_capacity_in(mcx, total).unwrap();
+        mcx::vec_append_bytes(&mut img, &datum::varlena::set_varsize_4b(total)).unwrap();
+        mcx::vec_append_bytes(&mut img, &ndim.to_ne_bytes()).unwrap();
+        mcx::vec_append_bytes(&mut img, &0i32.to_ne_bytes()).unwrap(); // dataoffset
+        mcx::vec_append_bytes(&mut img, &23u32.to_ne_bytes()).unwrap(); // int4 elemtype
+        for d in dims {
+            mcx::vec_append_bytes(&mut img, &d.to_ne_bytes()).unwrap();
+        }
+        for _ in dims {
+            mcx::vec_append_bytes(&mut img, &1i32.to_ne_bytes()).unwrap(); // lbounds
+        }
+        let ptr = img.as_slice().as_ptr() as usize;
+        core::mem::forget(img); // bump-allocated; lives as long as the context
+        Const {
+            consttype: 1007, // int4[]
+            consttypmod: -1,
+            constcollid: 0,
+            constlen: -1,
+            constvalue: datum::Datum::from_usize(ptr),
+            constisnull: false,
+            constbyval: false,
+            location: -1,
+        }
+    }
+
+    // Every cell of the corruption plane, taken at const_array_nelems (C's
+    // predtest.c:879 `ArrayGetNItems(ARR_NDIM(arrayval), ARR_DIMS(arrayval))`,
+    // hard entry point -- see the function's comment). Established C behavior:
+    // ndim <= 0 -> 0; negative dim / int32 product overflow / > MaxArraySize ->
+    // ereport(ERROR, 54000); ndim > MAXDIM -> reads past the dims area, no
+    // answer to match.
+    #[test]
+    fn const_array_nelems_matches_c_on_the_corruption_plane() {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let size_msg = std::format!(
+            "array size exceeds the maximum allowed ({})",
+            arrayutils::MAX_ARRAY_SIZE
+        );
+
+        // Valid plane, unchanged: nelems is the dims product.
+        assert_eq!(const_array_nelems(&corrupt_array_const(mcx, 1, &[3])).unwrap(), 3);
+        assert_eq!(
+            const_array_nelems(&corrupt_array_const(mcx, 2, &[3, 4])).unwrap(),
+            12
+        );
+        // C's `ndim <= 0 -> return 0` arm: a VALUE, not an error. (Must not
+        // over-tighten: 0 elements still classifies as an array Const.)
+        for ndim in [0, -1, i32::MIN] {
+            assert_eq!(
+                const_array_nelems(&corrupt_array_const(mcx, ndim, &[])).unwrap(),
+                0,
+                "ndim={ndim}"
+            );
+        }
+        // Negative dimension (UB-LB overflowed) -> C's first ereturn.
+        let e = const_array_nelems(&corrupt_array_const(mcx, 1, &[-1])).unwrap_err();
+        assert_eq!(e.message(), size_msg);
+        assert_eq!(e.sqlstate, types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        // int32 product overflow -> C's second ereturn.
+        let e = const_array_nelems(&corrupt_array_const(mcx, 2, &[100_000, 100_000])).unwrap_err();
+        assert_eq!(e.message(), size_msg);
+        // Over MaxArraySize (but no int32 overflow) -> C's third ereturn.
+        let e = const_array_nelems(&corrupt_array_const(mcx, 1, &[200_000_000])).unwrap_err();
+        assert_eq!(e.message(), size_msg);
+        // ndim > MAXDIM: no C answer; pgrust raises the dimension-count error
+        // rather than reading past the dims area, and above all does not panic.
+        for ndim in [7, 1000, i32::MAX] {
+            let e = const_array_nelems(&corrupt_array_const(mcx, ndim, &[1; 6])).unwrap_err();
+            assert_eq!(
+                e.message(),
+                std::format!(
+                    "number of array dimensions ({ndim}) exceeds the maximum allowed ({})",
+                    arrayutils::MAXDIM
+                )
+            );
+            assert_eq!(e.sqlstate, types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        }
+    }
+
+    // End-to-end: the error must travel out of predicate_implied_by as an Err.
+    // It used to be `.expect("valid stored array")` -- a backend panic, i.e. a
+    // crash-and-restart under the panic-fatality doctrine, where C raises a
+    // catchable statement error from inside the planner.
+    #[test]
+    fn predicate_implied_by_propagates_corrupt_array_const_error() {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let clause = null_test(mcx, var(mcx, 1), true);
+        let arrayconst = Node::mk(mcx, corrupt_array_const(mcx, 1, &[-1])).unwrap();
+        let pred = Node::mk(
+            mcx,
+            types_nodes::primnodes::ScalarArrayOpExpr {
+                opno: 96, // int4eq
+                opfuncid: 65,
+                hashfuncid: 0,
+                negfuncid: 0,
+                useOr: true,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, var(mcx, 1), arrayconst).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let e = predicate_implied_by(mcx, &[pred], &[clause], false)
+            .expect_err("corrupt array Const must be an error, not a panic");
+        assert_eq!(e.sqlstate, types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        // Same through the refutation entry point.
+        let e = predicate_refuted_by(mcx, &[pred], &[clause], false)
+            .expect_err("corrupt array Const must be an error, not a panic");
+        assert_eq!(e.sqlstate, types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
     }
 }
