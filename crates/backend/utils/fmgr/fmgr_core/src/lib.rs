@@ -32,6 +32,24 @@ pub use canonical::{CANONICAL, CANONICAL_LAST_BUILTIN_OID};
 
 pub fn init_seams() {
     fmgr_seams::fmgr_info::set(fmgr_info);
+    fmgr_seams::fmgr_info_not_ported_name::set(fmgr_info_not_ported_name);
+}
+
+/// pgrust-only (no C analogue): `Some(builtin name)` iff `flinfo`'s resolved
+/// entry point is the not-ported stub — i.e. invoking it can only raise the
+/// clean feature-not-supported error. The stub's call-time late-table
+/// dispatch is re-checked here so the answer tracks what invocation would
+/// actually do. Lets eager resolvers (index-AM support-proc loading) reject
+/// an unported dependency at resolution time instead of deep inside an
+/// operation (e.g. a GiST page split long after CREATE INDEX succeeded).
+pub fn fmgr_info_not_ported_name(flinfo: &FmgrInfo) -> Option<&'static str> {
+    if flinfo.fn_addr as usize == builtin_not_ported as usize
+        && late_builtin(flinfo.fn_oid).is_none()
+    {
+        Some(fmgr_isbuiltin(flinfo.fn_oid).map_or("?", |b| b.name))
+    } else {
+        None
+    }
 }
 
 /// C: `InvalidOidBuiltinMapping` (fmgrtab.h).
