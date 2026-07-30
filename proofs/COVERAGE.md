@@ -51,6 +51,46 @@ Conversely, an uncovered line is not an unverified line **claim-wise**
 if a sibling branch is dark) — but the uncovered list is the actionable
 map of where no instrument currently reaches.
 
+## Headline numbers (capture of 2026-07-30, head cf2caf1bec)
+
+Scope SLOC 21,986 across seven adt crates. Percentages are of each
+crate's SLOC; **read the caveat above before quoting any of them.**
+
+| crate   | SLOC  | kani          | fuzz         | regress        | any            |
+|---------|-------|---------------|--------------|----------------|----------------|
+| float   | 2,215 | 197 (8.9%)    | 361 (16.3%)  | 1,217 (54.9%)  | 1,401 (63.3%)  |
+| geo     | 2,819 | 192 (6.8%)    | 133 (4.7%)   | 1,959 (69.5%)  | 1,968 (69.8%)  |
+| jsonb   | 5,875 | 118 (2.0%)    | 0            | 4,458 (75.9%)  | 4,463 (76.0%)  |
+| network | 1,518 | 136 (9.0%)    | 0            | 1,037 (68.3%)  | 1,038 (68.4%)  |
+| numeric | 5,713 | 318 (5.6%)    | 0            | 4,115 (72.0%)  | 4,140 (72.5%)  |
+| varbit  | 866   | 182 (21.0%)   | 0            | 633 (73.1%)    | 656 (75.8%)    |
+| varlena | 2,980 | 178 (6.0%)    | 0            | 2,179 (73.1%)  | 2,190 (73.5%)  |
+| **all** | 21,986| 1,321 (6.0%)  | 494 (2.2%)   | 15,598 (71.0%) | 15,856 (72.1%) |
+
+The Kani column measures the **per-commit tier only** (165 harnesses;
+plus jsonb's 8 release-gate cmp cells) — the calibration and
+release-gate tiers that carry many of the ledger's `proved` rows are not
+in this capture, so the Kani line-coverage of what the full suite proves
+is HIGHER than this. Even allowing for that, the single-digit Kani
+percentages against 1,205 proved ledger rows are the quantified version
+of the fenced-domain point: the proofs are theorems over narrow,
+explicitly-fenced slices, not line-sweeps of the crates.
+
+Largest uncovered regions per crate: `python3
+proofs/coverage/uncovered-report.py proofs/coverage`. Note the top hits
+in most crates are the `const *_BUILTINS: &[FmgrBuiltin]` registration
+tables and const declarations — real source lines with no runtime
+counters (const-eval'd data), inherently dark to all three instruments.
+The actionable logic gaps as of this capture include:
+- numeric: `fixed.rs` `mul_var_short_fixed` + neighbors (the fixed-size
+  fast path, 364-508 band), `io.rs:148-176`.
+- network: `pton.rs:71-102` (an inet_net_pton arm), `lib.rs:277-291`.
+- jsonb: `gin.rs` heads (4-35, 661-687), `populate.rs:5-37`,
+  `tojsonb.rs:5-36`.
+- float: `builtins.rs:159-250` macro-generated cast/wrapper shims.
+- geo: `builtins.rs:317-543` bands of fmgr wrapper glue for predicates
+  the regress corpus never calls.
+
 ## Scope
 
 Per `proofs/coverage/coverage-scope.txt`: the adt crates carrying the
@@ -208,7 +248,10 @@ the three arrays; lines not in `sloc` are non-code (render neutral).
    which defeats much of the formula slicing win on string-heavy
    harnesses: e.g. `text-slice::proofs::eq_bytea_substr` proves in
    seconds in the plain per-commit tier but did not solve in 560s under
-   `--coverage`.
+   `--coverage`. 14 of 165 attempted harnesses walled this way (9 of
+   text-slice's 14; jsonb's `eq_cmp_obj_obj_1_2` additionally blew the
+   6 GiB RSS watchdog at 226s vs a 22s baseline). Full run ledger:
+   `proofs/coverage/coverage-runs.log`.
    Harnesses that walled under coverage are listed in
    `coverage-runs.log`; their functions show as UNDER-covered relative
    to what the plain suite actually proves. No verdict changed on any
