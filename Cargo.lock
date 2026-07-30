@@ -15239,6 +15239,7 @@ dependencies = [
  "guc",
  "heapam",
  "init_small",
+ "inval",
  "lsyscache",
  "mcx",
  "miscinit",
