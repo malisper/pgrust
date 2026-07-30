@@ -2226,7 +2226,7 @@ oid	name	source_file	status	class	notes
 3789	gin_clean_pending_list	crates/backend/access/gin/gin_funcs/src/lib.rs	excluded(state/engine)	-	gin_funcs lib.rs:50 buffer/WAL cleanup
 3790	gtsvector_consistent_oldsig	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3793	gtsquery_consistent_oldsig	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
-3795	inet_spg_config	crates/backend/utils/adt/network_spgist/src/lib.rs	candidate	fast	network_spgist/src/lib.rs:48; literal spgConfigOut writes. Host new proofs/spgist-inet
+3795	inet_spg_config	crates/backend/utils/adt/network_spgist/src/lib.rs	proved(fmgr-level; all fields incl untouched-zero; modulo static-buffer allocator model)	fast	proofs/spgist-inet eq_inet_spg_config kissat 64.4s (load~12); harness fix 2026-07-30: family-wide unwind(12) + env-zero/OnceLock stubs (AcctWeak retain symex hang)
 3796	inet_spg_choose	crates/backend/utils/adt/network_spgist/src/lib.rs	candidate	ladder	lib.rs:73 + inet_spg_node_number:60 — pure inet bit logic over fixed frames, no typcache; arm parity theorem
 3797	inet_spg_picksplit	crates/backend/utils/adt/network_spgist/src/lib.rs	blocked(refactor: symbolic nTuples + mcx node arrays)	ladder	lib.rs:135; per-n split (n=2,3) + mcx-stubs makes it reachable
 3798	inet_spg_inner_consistent	crates/backend/utils/adt/network_spgist/src/lib.rs	candidate	ladder	lib.rs:199 -> inet_spg_consistent_bitmap:280 — u32 bitmap scalar verdict; cap nkeys<=2
