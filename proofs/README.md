@@ -196,6 +196,14 @@ stdout, machine-readable rows to `suite-results.tsv`. Exit is nonzero if
 any green-expected harness fails/times out, or if any must-fail control
 verifies SUCCESSFUL (a vacuous gate — the worst outcome).
 
+`run-suite.sh` also **hard-errors** (`BAD-MANIFEST-TIER`, nonzero exit) on a
+`tier` value outside the vocabulary above, instead of dropping the row. An
+unrecognized tier is matched by no arm of `row_selected()`, so the row runs
+in *no* tier: that is how eight must-fail negative controls (authored as
+`tier=control`) sat silently disabled while every gate reported green. The
+must-fail controls belong to `defect-witness`, the tier that rides along
+with every gate — never to a tier of their own.
+
 ## Licensing
 
 The C sources under `proofs/*/c*` are verbatim (or thinly shimmed and
