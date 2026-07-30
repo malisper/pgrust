@@ -1345,6 +1345,168 @@ mod proofs {
         }
     }
 
+    extern "C" {
+        fn pg_class_aclmask_probe(
+            table_oid: Oid,
+            roleid: Oid,
+            mask: u64,
+            how: c_int,
+            out: *mut u64,
+            err: *mut c_int,
+        ) -> c_int;
+    }
+
+    extern "C" {
+        fn pgq_get_cat_found() -> c_int;
+        fn pgq_get_temp_toast() -> c_int;
+        fn pgq_is_system_class(relid: Oid, relnamespace: Oid) -> c_int;
+        fn pgq_c_superuser(roleid: Oid) -> c_int;
+        fn pgq_get_relnamespace() -> c_int;
+        fn pgq_get_relkind() -> c_int;
+        fn pgq_get_acl_isnull() -> c_int;
+    }
+
+    acl_harness! {
+        /// Rig diagnostic (expected GREEN): Rust-side writes to the extern
+        /// seam globals must be visible to C code across the goto-link
+        /// boundary, and C's reduced IsSystemClass must see the raised
+        /// temp-toast flag.  A failure here is a RIG defect that would
+        /// invalidate every harness in the family.
+        diag_seam_visibility, 5, {
+            unsafe {
+                pgq_cat_found = 1;
+                pgq_temp_toast = 1;
+                assert!(pgq_get_cat_found() == 1);
+                assert!(pgq_get_temp_toast() == 1);
+                // relid 50000 >= FirstUnpinned, ns 16384 != pg_toast:
+                // system-class ONLY via the temp-toast arm
+                assert!(pgq_is_system_class(50000, 16384) == 1);
+                pgq_temp_toast = 0;
+                assert!(pgq_is_system_class(50000, 16384) == 0);
+            }
+        }
+    }
+
+    acl_harness! {
+        /// Rig diagnostic (expected GREEN): C side of the reduced probe in
+        /// isolation, fully concrete.  With the temp-toast flag raised the
+        /// C core must strip SYSTEM_WRITE and return mask 0 with no error.
+        diag_c_probe_strip, 20, {
+            arm_catalog();
+            arm_role_seams(100);
+            unsafe {
+                pgq_temp_toast = 1;
+                pgq_cat_found = 1;
+                pgq_cat_relkind = b'r' as c_int;
+                pgq_cat_relnamespace = 16384;
+                pgq_cat_owner = 100;
+                pgq_cat_acl_isnull = 0;
+                pgq_cat_nacl = 1;
+                pgq_set_cat_acl(0, 100, 100, 1);
+                for i in 0..8 {
+                    pgq_memb_ans[i] = 0;
+                }
+                pgq_memb_default = 0;
+                for i in 0..2 {
+                    pgq_super_ans[i] = 0;
+                }
+                pgq_super_default = 0;
+                let mut cout: u64 = 0;
+                let mut cerr: c_int = 0;
+                pg_class_aclmask_probe(50000, 100, 1, 1, &mut cout, &mut cerr);
+                assert!(cerr == 0);
+                assert!(cout == 0); // SYSTEM_WRITE stripped
+                // control: flag lowered -> INSERT granted via stored ACL
+                pgq_temp_toast = 0;
+                let mut cout2: u64 = 0;
+                let mut cerr2: c_int = 0;
+                pg_class_aclmask_probe(50000, 100, 1, 1, &mut cout2, &mut cerr2);
+                assert!(cerr2 == 0);
+                assert!(cout2 == 1);
+            }
+        }
+    }
+
+    acl_harness! {
+        /// REDUCED KNOWN-DIVERGENCE WITNESS (expected FAIL — divergence
+        /// candidate #A1, adjudication package proofs/aclcheck/
+        /// ADJUDICATION-TEMPTOAST-SYSCLASS.md): same claim as
+        /// probe_system_class_temp_toast but at the pg_class_aclmask level
+        /// (bypasses the priv-string parse whose std::str machinery walls
+        /// symex at 450s on the full-pipeline probe).  All inputs CONCRETE:
+        /// owner=roleid=100 (direct grantee match; membership oracle not
+        /// load-bearing), non-superuser, relkind 'r', relnamespace 16384
+        /// (not pg_toast), stored ACL {grantee 100, INSERT}, C temp-toast
+        /// session flag RAISED.  C strips SYSTEM_WRITE (IsSystemClass sees
+        /// isTempToastNamespace) -> 0; Rust aclchk inline IsSystemClass has
+        /// no temp-toast arm -> ACL_INSERT.  Ground truth: docker
+        /// postgres:18.4 f/f/f/f vs shipped pgrust v0.2 t/t/t/t (owning
+        /// session, temp toast rel) — see the adjudication package.
+        probe_system_class_temp_toast_core, 20, {
+            // Pure Rust-side path — NO arm_* machinery and NO C calls (the
+            // C oracle is pinned separately by diag_c_probe_strip; keeping
+            // the C formula out avoids the mixed-harness anomaly).
+            unsafe {
+                R_CAT_FOUND = true;
+                R_CAT_RELKIND = b'r';
+                R_CAT_RELNS = 16384; // NOT pg_toast; oid >= FirstUnpinned
+                R_CAT_OWNER = 100;
+                R_CAT_ACL_ISNULL = false;
+                R_CAT_NACL = 1;
+                let it = AclItem { ai_grantee: 100, ai_grantor: 100, ai_privs: 1 }; // INSERT
+                R_CAT_ACL[0] = it;
+                // full aclitem[] varlena image for the Rust decoder
+                let size: u32 = (4 + 20 + 16) as u32;
+                ACL_IMG[0..4].copy_from_slice(&(size << 2).to_le_bytes());
+                ACL_IMG[4..8].copy_from_slice(&1i32.to_le_bytes()); // ndim
+                ACL_IMG[8..12].copy_from_slice(&0i32.to_le_bytes()); // dataoffset
+                ACL_IMG[12..16].copy_from_slice(&adt_acl::ACLITEMOID.to_le_bytes());
+                ACL_IMG[16..20].copy_from_slice(&1i32.to_le_bytes()); // dims
+                ACL_IMG[20..24].copy_from_slice(&1i32.to_le_bytes()); // lbound
+                ACL_IMG[24..28].copy_from_slice(&100u32.to_le_bytes());
+                ACL_IMG[28..32].copy_from_slice(&100u32.to_le_bytes());
+                ACL_IMG[32..40].copy_from_slice(&1u64.to_le_bytes());
+                // role seams: nobody is a superuser / member of anything
+                R_MEMB_ROLE = [0; 8];
+                R_MEMB_ANS = [false; 8];
+                R_MEMB_DEFAULT = false;
+                R_SUPER_ROLE = [0; 2];
+                R_SUPER_ANS = [false; 2];
+                R_SUPER_DEFAULT = false;
+            }
+
+            // C-side oracle: diag_c_probe_strip PROVES (green) that the C
+            // core under this exact concrete state returns mask 0 (strip
+            // fires via the temp-toast arm of IsSystemClass).  Comparing
+            // against that proven constant directly keeps the C formula out
+            // of this harness: with both calls in one harness CBMC 5.95
+            // returned NONDETERMINISTIC C-side results across identical
+            // runs (cerr!=0 one run, cout!=0 the next) despite a green
+            // 7-assert pre-call state audit — see the adjudication package.
+            let r = aclchk::pg_class_aclmask(
+                50000,
+                100,
+                adt_acl::ACL_INSERT,
+                adt_acl::AclMaskHow::AclmaskAny,
+            );
+            match r {
+                Ok(m) => {
+                    kani::cover!(true, "ok arm reachable");
+                    // EXPECTED FAILING PROPERTY: Rust has no temp-toast arm,
+                    // so m = ACL_INSERT (1) where C's proven result is 0.
+                    assert!(m == 0);
+                }
+                Err(e) => {
+                    // Err-arm reads are unreliable (known Kani defect:
+                    // Err(Box<PgError>) payload reads corrupt); reachability
+                    // witnessed, not asserted on.
+                    core::mem::forget(e);
+                    kani::cover!(true, "err arm reachable");
+                }
+            }
+        }
+    }
+
     // =====================================================================
     // aclinsert / aclremove (oids 1035/1036) — pure error stubs
     // =====================================================================
