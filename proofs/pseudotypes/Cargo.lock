@@ -996,9 +996,11 @@ version = "0.1.0"
 dependencies = [
  "adt_pseudotypes",
  "datum",
+ "mbutils",
  "mbutils_seams",
  "mcx",
  "proof_support",
+ "stringinfo",
  "types_error",
  "varlena",
 ]
