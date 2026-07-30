@@ -1269,6 +1269,7 @@ dependencies = [
  "datum",
  "mcx",
  "proof_support",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",

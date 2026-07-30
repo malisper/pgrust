@@ -2644,3 +2644,439 @@ pg_poly_box(double hx, double hy, double lx, double ly, double *out4)
 	out4[3] = box->low.y;
 	return 0;
 }
+
+/* =====================================================================
+ * EXTENSION 4 (2026-07-30, geo-wire slice: the send/recv binary I/O
+ * family).
+ *
+ * Provenance:
+ *   - src/backend/utils/adt/geo_ops.c @ postgres/postgres REL_18_STABLE
+ *     (fetched 2026-07-30): point_recv, point_send, box_recv, box_send,
+ *     lseg_recv, lseg_send, line_recv, line_send, circle_recv,
+ *     circle_send, path_send, poly_send — bodies verbatim, pg_ prefix +
+ *     _w suffix on the wrappers.
+ *   - pq_getmsgint64/pq_getmsgfloat8/pq_sendfloat8/pq_sendbyte/
+ *     pq_sendint32 semantics from src/backend/libpq/pqformat.c @ same
+ *     ref: big-endian wire order, float8 <-> uint64 bit pun.
+ *
+ * Shims (plumbing only, never logic):
+ *   - StringInfo -> PQ_BUF: a caller-provided fixed frame (recv: exact
+ *     wire frame, cursor walk; send: 64-byte out image + running length).
+ *     The pq_* helpers below are reimplemented over PQ_BUF with the wire
+ *     semantics above (byte order and pun ARE part of the theorem; the
+ *     StringInfo growth machinery is not). Recv harnesses feed EXACT
+ *     frames, so the insufficient-data ereport path is out of proof
+ *     (fenced; the Rust arm's error path is likewise unreachable there).
+ *   - pq_begintypsend's 4-byte length placeholder + pq_endtypsend's
+ *     SET_VARSIZE -> pg_pq_begintypsend/pg_pq_endtypsend over PQ_BUF
+ *     (little-endian 4B header word = total << 2, as SET_VARSIZE_4B).
+ *   - palloc'd result structs -> caller out-params (values untouched).
+ *   - ereport(ERROR, 22P03 ...) in line_recv/circle_recv ->
+ *     pg_geo_errflag = 5 + immediate return (new flag value, mapped to
+ *     ERRCODE_INVALID_BINARY_REPRESENTATION by the harnesses).
+ */
+
+#include <string.h>
+
+typedef struct
+{
+	const unsigned char *in;	/* recv frame */
+	int			cursor;
+	unsigned char out[64];		/* send image (varlena header + payload) */
+	int			olen;
+} PQ_BUF;
+
+static uint64
+pg_pq_getmsguint64(PQ_BUF *buf)
+{
+	/* unrolled (loop-free: the tight harness unwind bound belongs to the
+	 * mcx registry, not this plumbing) */
+	const unsigned char *p = buf->in + buf->cursor;
+	uint64		v = ((uint64) p[0] << 56) | ((uint64) p[1] << 48) |
+		((uint64) p[2] << 40) | ((uint64) p[3] << 32) |
+		((uint64) p[4] << 24) | ((uint64) p[5] << 16) |
+		((uint64) p[6] << 8) | (uint64) p[7];
+
+	buf->cursor += 8;
+	return v;
+}
+
+static double
+pg_pq_getmsgfloat8(PQ_BUF *buf)
+{
+	union
+	{
+		double		f;
+		uint64		i;
+	}			swap;
+
+	swap.i = pg_pq_getmsguint64(buf);
+	return swap.f;
+}
+
+static int
+pg_pq_getmsgbyte(PQ_BUF *buf)
+{
+	return (int) buf->in[buf->cursor++];
+}
+
+static int32
+pg_pq_getmsgint32(PQ_BUF *buf)
+{
+	const unsigned char *p = buf->in + buf->cursor;
+	uint32		v = ((uint32) p[0] << 24) | ((uint32) p[1] << 16) |
+		((uint32) p[2] << 8) | (uint32) p[3];
+
+	buf->cursor += 4;
+	return (int32) v;
+}
+
+static void
+pg_pq_begintypsend(PQ_BUF *buf)
+{
+	/* four-byte length placeholder (pq_begintypsend) */
+	buf->out[0] = buf->out[1] = buf->out[2] = buf->out[3] = 0;
+	buf->olen = 4;
+}
+
+static void
+pg_pq_sendbyte(PQ_BUF *buf, unsigned char b)
+{
+	buf->out[buf->olen++] = b;
+}
+
+static void
+pg_pq_sendint32(PQ_BUF *buf, uint32 v)
+{
+	buf->out[buf->olen++] = (unsigned char) (v >> 24);
+	buf->out[buf->olen++] = (unsigned char) (v >> 16);
+	buf->out[buf->olen++] = (unsigned char) (v >> 8);
+	buf->out[buf->olen++] = (unsigned char) v;
+}
+
+static void
+pg_pq_sendfloat8(PQ_BUF *buf, double f)
+{
+	union
+	{
+		double		f;
+		uint64		i;
+	}			swap;
+
+	swap.f = f;
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 56);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 48);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 40);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 32);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 24);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 16);
+	buf->out[buf->olen++] = (unsigned char) (swap.i >> 8);
+	buf->out[buf->olen++] = (unsigned char) swap.i;
+}
+
+static void
+pg_pq_endtypsend(PQ_BUF *buf)
+{
+	/* SET_VARSIZE(result, buf->len): 4B LE header word = total << 2 */
+	uint32		hdr = ((uint32) buf->olen) << 2;
+
+	buf->out[0] = (unsigned char) hdr;
+	buf->out[1] = (unsigned char) (hdr >> 8);
+	buf->out[2] = (unsigned char) (hdr >> 16);
+	buf->out[3] = (unsigned char) (hdr >> 24);
+}
+
+/* ---- recv wrappers: geo_ops.c bodies verbatim ---- */
+
+int
+pg_point_recv_w(const unsigned char *in, double *ox, double *oy)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	Point		point_;
+	Point	   *point = &point_;
+
+	pg_geo_errflag = 0;
+	point->x = pg_pq_getmsgfloat8(buf);
+	point->y = pg_pq_getmsgfloat8(buf);
+	*ox = point->x;
+	*oy = point->y;
+	return pg_geo_errflag;
+}
+
+int
+pg_box_recv_w(const unsigned char *in, double *out4)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	BOX			box_;
+	BOX		   *box = &box_;
+	float8		x,
+				y;
+
+	pg_geo_errflag = 0;
+
+	box->high.x = pg_pq_getmsgfloat8(buf);
+	box->high.y = pg_pq_getmsgfloat8(buf);
+	box->low.x = pg_pq_getmsgfloat8(buf);
+	box->low.y = pg_pq_getmsgfloat8(buf);
+
+	/* reorder corners if necessary... */
+	if (float8_lt(box->high.x, box->low.x))
+	{
+		x = box->high.x;
+		box->high.x = box->low.x;
+		box->low.x = x;
+	}
+	if (float8_lt(box->high.y, box->low.y))
+	{
+		y = box->high.y;
+		box->high.y = box->low.y;
+		box->low.y = y;
+	}
+
+	out4[0] = box->high.x;
+	out4[1] = box->high.y;
+	out4[2] = box->low.x;
+	out4[3] = box->low.y;
+	return pg_geo_errflag;
+}
+
+int
+pg_lseg_recv_w(const unsigned char *in, double *out4)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	LSEG		lseg_;
+	LSEG	   *lseg = &lseg_;
+
+	pg_geo_errflag = 0;
+
+	lseg->p[0].x = pg_pq_getmsgfloat8(buf);
+	lseg->p[0].y = pg_pq_getmsgfloat8(buf);
+	lseg->p[1].x = pg_pq_getmsgfloat8(buf);
+	lseg->p[1].y = pg_pq_getmsgfloat8(buf);
+
+	out4[0] = lseg->p[0].x;
+	out4[1] = lseg->p[0].y;
+	out4[2] = lseg->p[1].x;
+	out4[3] = lseg->p[1].y;
+	return pg_geo_errflag;
+}
+
+int
+pg_line_recv_w(const unsigned char *in, double *out3)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	LINE		line_;
+	LINE	   *line = &line_;
+
+	pg_geo_errflag = 0;
+
+	line->A = pg_pq_getmsgfloat8(buf);
+	line->B = pg_pq_getmsgfloat8(buf);
+	line->C = pg_pq_getmsgfloat8(buf);
+
+	if (FPzero(line->A) && FPzero(line->B))
+	{
+		pg_geo_errflag = 5;		/* ereport 22P03 */
+		return pg_geo_errflag;
+	}
+
+	out3[0] = line->A;
+	out3[1] = line->B;
+	out3[2] = line->C;
+	return pg_geo_errflag;
+}
+
+int
+pg_circle_recv_w(const unsigned char *in, double *out3)
+{
+	PQ_BUF		buf_ = {in, 0, {0}, 0};
+	PQ_BUF	   *buf = &buf_;
+	CIRCLE		circle_;
+	CIRCLE	   *circle = &circle_;
+
+	pg_geo_errflag = 0;
+
+	circle->center.x = pg_pq_getmsgfloat8(buf);
+	circle->center.y = pg_pq_getmsgfloat8(buf);
+	circle->radius = pg_pq_getmsgfloat8(buf);
+
+	/* We have to accept NaN. */
+	if (circle->radius < 0.0)
+	{
+		pg_geo_errflag = 5;		/* ereport 22P03 */
+		return pg_geo_errflag;
+	}
+
+	out3[0] = circle->center.x;
+	out3[1] = circle->center.y;
+	out3[2] = circle->radius;
+	return pg_geo_errflag;
+}
+
+/* ---- send wrappers: geo_ops.c bodies verbatim ---- */
+
+int
+pg_point_send_w(double x, double y, unsigned char *out, int *olen)
+{
+	Point		pt_ = {x, y};
+	Point	   *pt = &pt_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, pt->x);
+	pg_pq_sendfloat8(buf, pt->y);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_box_send_w(double hx, double hy, double lx, double ly,
+			  unsigned char *out, int *olen)
+{
+	BOX			box_ = {{hx, hy}, {lx, ly}};
+	BOX		   *box = &box_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, box->high.x);
+	pg_pq_sendfloat8(buf, box->high.y);
+	pg_pq_sendfloat8(buf, box->low.x);
+	pg_pq_sendfloat8(buf, box->low.y);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_lseg_send_w(double x1, double y1, double x2, double y2,
+			   unsigned char *out, int *olen)
+{
+	LSEG		ls_ = {{{x1, y1}, {x2, y2}}};
+	LSEG	   *ls = &ls_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, ls->p[0].x);
+	pg_pq_sendfloat8(buf, ls->p[0].y);
+	pg_pq_sendfloat8(buf, ls->p[1].x);
+	pg_pq_sendfloat8(buf, ls->p[1].y);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_line_send_w(double A, double B, double C, unsigned char *out, int *olen)
+{
+	LINE		line_ = {A, B, C};
+	LINE	   *line = &line_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, line->A);
+	pg_pq_sendfloat8(buf, line->B);
+	pg_pq_sendfloat8(buf, line->C);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_circle_send_w(double cx, double cy, double r, unsigned char *out, int *olen)
+{
+	CIRCLE		circle_ = {{cx, cy}, r};
+	CIRCLE	   *circle = &circle_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int			k;
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendfloat8(buf, circle->center.x);
+	pg_pq_sendfloat8(buf, circle->center.y);
+	pg_pq_sendfloat8(buf, circle->radius);
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_path_send_w(int closed, int npts, const double *xy,
+			   unsigned char *out, int *olen)
+{
+	PATH_S		path_ = {npts, closed};
+	PATH_S	   *path = &path_;
+	Point		p[POLY_CAP];
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int32		i;
+	int			k;
+
+	for (k = 0; k < npts && k < POLY_CAP; k++)
+	{
+		p[k].x = xy[2 * k];
+		p[k].y = xy[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendbyte(buf, path->closed ? 1 : 0);
+	pg_pq_sendint32(buf, (uint32) path->npts);
+	for (i = 0; i < path->npts; i++)
+	{
+		pg_pq_sendfloat8(buf, p[i].x);
+		pg_pq_sendfloat8(buf, p[i].y);
+	}
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
+
+int
+pg_poly_send_w(int npts, const double *xy, unsigned char *out, int *olen)
+{
+	POLY_S		poly_;
+	POLY_S	   *poly = &poly_;
+	PQ_BUF		buf_;
+	PQ_BUF	   *buf = &buf_;
+	int32		i;
+	int			k;
+
+	pg_poly_stage(&poly_, npts, 0.0, 0.0, 0.0, 0.0, xy);
+
+	pg_geo_errflag = 0;
+	pg_pq_begintypsend(buf);
+	pg_pq_sendint32(buf, (uint32) poly->npts);
+	for (i = 0; i < poly->npts; i++)
+	{
+		pg_pq_sendfloat8(buf, poly->p[i].x);
+		pg_pq_sendfloat8(buf, poly->p[i].y);
+	}
+	pg_pq_endtypsend(buf);
+	memcpy(out, buf->out, 64);	/* constant-size: loop-free */
+	*olen = buf->olen;
+	return pg_geo_errflag;
+}
