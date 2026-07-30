@@ -2306,10 +2306,10 @@ datetime-b	rem::eq_tstypmodout_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c
 datetime-b	rem::eq_tstypmodout_d3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	16.5	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
 datetime-b	rem::eq_tstztypmodout_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.6	oid 2908; w2-timestamp 2026-07-30 (times under load 32-75)
 datetime-b	rem::spot_ts_typmodout	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.8	oid 2906+2908; w2-timestamp 2026-07-30 (times under load 32-75)
-datetime-b	rem::eq_f8tstz_nonfinite 0.8 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
-datetime-b	rem::eq_f8tstz_range_reject 0.9 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
-datetime-b	rem::spot_f8tstz_value 0.7 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
-datetime-b	rem::eq_f8tstz_value_screen unk unmeasured calibration	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::eq_f8tstz_nonfinite	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.8	oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::eq_f8tstz_range_reject	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.9	oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::spot_f8tstz_value	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.7	oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::eq_f8tstz_value_screen	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	unmeasured	calibration	unk	oid 1158; w2-timestamp 2026-07-30
 # ---- DARK-HARNESS SWEEP 2026-07-30: harnesses that existed in proofs/*/ with no SUITE row (proofs/dark-harness-sweep). expected=unmeasured = never solved under the manifest; runqueue triage/local lane verdicts quoted in notes are NOT CI-witnessed. jsonb-probe dark harnesses intentionally omitted (overlap with the flags-repair lane).
 aclcheck	proofs::control_catalog_owner_skew	-Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; runqueue triage: must-fail; expect: VERIFICATION FAILED (catalog seam load-bearing)
 aclcheck	proofs::control_priv_map_mismatch	-Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; runqueue triage: must-fail; expect: VERIFICATION FAILED (plain-logic control)
