@@ -63,8 +63,17 @@ pub const MAXDIM: usize = 6;
 pub const CAP: usize = 16 + 4 * MAXDIM + 4 * MAXDIM;
 
 /// Build a flat 4B-header array image: literal varlena size (CAP), symbolic
-/// ndim, dataoffset 0 (no null bitmap), literal elemtype 23, dims/lbs from
-/// the caller (unused lanes are the caller's literal zeros).
+/// ndim, dataoffset 0 (no null bitmap), literal elemtype 23, then the
+/// PACKED on-disk layout — dims[0..ndim] immediately after the header and
+/// lbs[0..ndim] immediately after the dims (ARR_LBOUND = base + 16 + 4*ndim,
+/// ndim-dependent!). Unused trailing bytes stay literal zero.
+///
+/// HISTORY: v1 wrote lbs at the FIXED offset 16+4*MAXDIM; both sides read
+/// 16+4*ndim so parity still held over consistent bytes, but for ndim < 6
+/// the lbounds actually read were literal zeros — the fences bound values
+/// nothing read (eq_array_upper's "fence-excluded" overflow was exactly
+/// dims[0]=i32::MIN with read-lb 0), and the proven lbs plane was narrower
+/// than the ledger would claim. Packed layout restores the intended plane.
 pub fn mk_image(ndim: i32, dims: &[i32; MAXDIM], lbs: &[i32; MAXDIM]) -> [u8; CAP] {
     let mut img = [0u8; CAP];
     img[0..4].copy_from_slice(&datum::varlena::set_varsize_4b(CAP));
@@ -72,11 +81,14 @@ pub fn mk_image(ndim: i32, dims: &[i32; MAXDIM], lbs: &[i32; MAXDIM]) -> [u8; CA
     // dataoffset = 0 (no nulls); elemtype = 23 (int4, literal; never read
     // by the functions under proof)
     img[12..16].copy_from_slice(&23u32.to_ne_bytes());
-    for i in 0..MAXDIM {
-        let d = 16 + 4 * i;
-        img[d..d + 4].copy_from_slice(&dims[i].to_ne_bytes());
-        let l = 16 + 4 * MAXDIM + 4 * i;
-        img[l..l + 4].copy_from_slice(&lbs[i].to_ne_bytes());
+    if ndim > 0 && ndim <= MAXDIM as i32 {
+        let n = ndim as usize;
+        for i in 0..n {
+            let d = 16 + 4 * i;
+            img[d..d + 4].copy_from_slice(&dims[i].to_ne_bytes());
+            let l = 16 + 4 * n + 4 * i;
+            img[l..l + 4].copy_from_slice(&lbs[i].to_ne_bytes());
+        }
     }
     img
 }
@@ -384,3 +396,4 @@ mod proofs {
         }
     }
 }
+
