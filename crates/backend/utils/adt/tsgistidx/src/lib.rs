@@ -790,6 +790,122 @@ fn fc_gtsquery_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_bool(retval))
 }
 
+// tsquery_gist.c hemdist over TSQuerySign (TSQS_SIGLEN = 64 bits).
+#[inline]
+fn tsqs_hemdist(a: u64, b: u64) -> i32 {
+    (a ^ b).count_ones() as i32
+}
+
+fn fc_gtsquery_union(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entryvec = unsafe { &*(fcinfo.arg(0).as_usize() as *const GistEntryVector) };
+    let mut sign: u64 = 0;
+    for e in &entryvec.vector[..entryvec.n as usize] {
+        sign |= e.key.as_u64();
+    }
+    let size_out = fcinfo.arg(1).as_usize() as *mut i32;
+    // SAFETY: size out-param live in the caller frame; sizeof(TSQuerySign).
+    unsafe { *size_out = 8 };
+    Ok(Datum::from_u64(sign))
+}
+
+fn fc_gtsquery_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = fcinfo.arg(0).as_u64();
+    let b = fcinfo.arg(1).as_u64();
+    let result = fcinfo.arg(2).as_usize() as *mut bool;
+    // SAFETY: result out-param live in the caller frame.
+    unsafe { *result = a == b };
+    Ok(fcinfo.arg(2))
+}
+
+fn fc_gtsquery_penalty(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let origval = unsafe { entry_arg(fcinfo, 0) }.key.as_u64();
+    let newval = unsafe { entry_arg(fcinfo, 1) }.key.as_u64();
+    let penalty = fcinfo.arg(2).as_usize() as *mut f32;
+    // SAFETY: penalty out-param live in the caller frame.
+    unsafe { *penalty = tsqs_hemdist(origval, newval) as f32 };
+    Ok(fcinfo.arg(2))
+}
+
+fn fc_gtsquery_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entryvec = unsafe { &*(fcinfo.arg(0).as_usize() as *const GistEntryVector) };
+    let v = unsafe { &mut *(fcinfo.arg(1).as_usize() as *mut GistSplitVec) };
+    // SAFETY: the armed result mcx outlives this call.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let key_at = |pos: usize| entryvec.vector[pos].key.as_u64();
+
+    let mut maxoff = (entryvec.n - 2) as usize;
+    let mut seed_1 = 0usize;
+    let mut seed_2 = 0usize;
+    let mut waste = -1i32;
+    for k in 1..maxoff {
+        for j in k + 1..=maxoff {
+            let size_waste = tsqs_hemdist(key_at(j), key_at(k));
+            if size_waste > waste {
+                waste = size_waste;
+                seed_1 = k;
+                seed_2 = j;
+            }
+        }
+    }
+
+    v.spl_left = Vec::with_capacity(maxoff + 1);
+    v.spl_right = Vec::with_capacity(maxoff + 1);
+
+    if seed_1 == 0 || seed_2 == 0 {
+        seed_1 = 1;
+        seed_2 = 2;
+    }
+
+    let mut datum_l = key_at(seed_1);
+    let mut datum_r = key_at(seed_2);
+
+    maxoff += 1;
+
+    #[derive(Clone, Copy)]
+    struct SplitCost {
+        pos: u16,
+        cost: i32,
+    }
+    let mut costvector: PgVec<'_, SplitCost> = mcx::vec_with_capacity_in(mcx, maxoff)?;
+    for j in 1..=maxoff {
+        let size_alpha = tsqs_hemdist(key_at(seed_1), key_at(j));
+        let size_beta = tsqs_hemdist(key_at(seed_2), key_at(j));
+        costvector.push(SplitCost { pos: j as u16, cost: (size_alpha - size_beta).abs() });
+    }
+    costvector.sort_unstable_by_key(|s| s.cost);
+
+    for k in 0..maxoff {
+        let j = costvector[k].pos as usize;
+        if j == seed_1 {
+            v.spl_left.push(j as u16);
+            continue;
+        } else if j == seed_2 {
+            v.spl_right.push(j as u16);
+            continue;
+        }
+        let size_alpha = tsqs_hemdist(datum_l, key_at(j));
+        let size_beta = tsqs_hemdist(datum_r, key_at(j));
+
+        if (size_alpha as f64)
+            < size_beta as f64 + wish_f(v.spl_left.len() as i32, v.spl_right.len() as i32, 0.05)
+        {
+            datum_l |= key_at(j);
+            v.spl_left.push(j as u16);
+        } else {
+            datum_r |= key_at(j);
+            v.spl_right.push(j as u16);
+        }
+    }
+
+    v.spl_ldatum = Datum::from_u64(datum_l);
+    v.spl_rdatum = Datum::from_u64(datum_r);
+
+    Ok(fcinfo.arg(1))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -806,6 +922,10 @@ pub const TSGISTIDX_BUILTINS: &[FmgrBuiltin] = &[
     b(3653, "gtsvector_penalty", 3, fc_gtsvector_penalty),
     b(3654, "gtsvector_consistent", 5, fc_gtsvector_consistent),
     b(3695, "gtsquery_compress", 1, fc_gtsquery_compress),
+    b(3697, "gtsquery_picksplit", 2, fc_gtsquery_picksplit),
+    b(3698, "gtsquery_union", 2, fc_gtsquery_union),
+    b(3699, "gtsquery_same", 3, fc_gtsquery_same),
+    b(3700, "gtsquery_penalty", 3, fc_gtsquery_penalty),
     b(3701, "gtsquery_consistent", 5, fc_gtsquery_consistent),
     b(3790, "gtsvector_consistent_oldsig", 5, fc_gtsvector_consistent),
     b(3793, "gtsquery_consistent_oldsig", 5, fc_gtsquery_consistent),
