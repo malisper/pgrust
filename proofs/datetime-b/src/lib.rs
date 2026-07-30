@@ -2884,4 +2884,121 @@ mod rem {
         }
         core::mem::forget(ctx);
     }
+
+    // ==== w2-timestamp lane (2026-07-30): rows 2905-2908 ================
+    // 2905/2907 core anytimestamp_typmod_check; 2906/2908 core
+    // typmod_paren_suffix_out + " with(out) time zone" (same recipe as the
+    // 2909-2912 lane-D rows above; C side vendored from timestamp.c).
+
+    extern "C" {
+        fn pg_ts_anytimestamp_typmod_check(
+            istz: c_int,
+            typmod: i32,
+            out: *mut i32,
+            err: *mut c_int,
+        ) -> i32;
+        fn pg_ts_anytimestamp_typmodout(istz: c_int, typmod: i32, res: *mut u8) -> c_int;
+    }
+
+    macro_rules! ts_typmod_check {
+        ($($h:ident: $istz:literal / $core_istz:expr;)*) => {$(
+            /// core-level (array decode is fcinfo plumbing, out of these
+            /// rows); full i32 typmod incl the 22023 arm and the >6 clamp
+            /// arm (WARNING out of proof both sides).
+            #[kani::proof]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            #[kani::stub(elog::message_level_is_interesting, model_level_interesting)]
+            #[kani::stub(elog::ThrowErrorData, model_throw_error_data)]
+            fn $h() {
+                let typmod: i32 = kani::any();
+                let mut c_out: i32 = 0;
+                let mut c_err: c_int = 0;
+                unsafe { pg_ts_anytimestamp_typmod_check($istz, typmod, &mut c_out, &mut c_err) };
+                match adt_timestamp::anytimestamp_typmod_check($core_istz, typmod) {
+                    Ok(v) => {
+                        kani::cover!(true, "Ok arm reachable");
+                        assert!(c_err == 0);
+                        assert!(v == c_out);
+                    }
+                    Err(e) => {
+                        kani::cover!(true, "Err arm reachable");
+                        assert!(c_err == 2);
+                        assert!(e.sqlstate == ERRCODE_INVALID_PARAMETER_VALUE);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+            }
+        )*};
+    }
+
+    ts_typmod_check! {
+        eq_tstypmodin_check: 0 / false;
+        eq_tstztypmodin_check: 1 / true;
+    }
+
+    fn check_ts_typmodout(istz: bool, typmod: i32) {
+        // 40 bytes: max image is "(2147483647)" + " without time zone" + NUL
+        let mut c_buf = [0u8; 40];
+        let c_len =
+            unsafe { pg_ts_anytimestamp_typmodout(istz as c_int, typmod, c_buf.as_mut_ptr()) };
+        let mut r_buf = [0u8; 40];
+        let suffix: &[u8] = if istz { b" with time zone" } else { b" without time zone" };
+        let len = adt_timestamp::builtins::typmod_paren_suffix_out(typmod, suffix, &mut r_buf);
+        assert!(len as c_int == c_len);
+        let mut i = 0;
+        while i < 40 {
+            // i == len: C NUL vs Rust zero-init — both 0.
+            assert!(r_buf[i] == c_buf[i] || i > len);
+            i += 1;
+        }
+    }
+
+    /// typmod < 0 plane (no digit loop; suffix copy only).
+    #[kani::proof]
+    #[kani::unwind(42)]
+    fn eq_tstypmodout_neg() {
+        let typmod: i32 = kani::any::<i32>() | i32::MIN;
+        check_ts_typmodout(false, typmod);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(42)]
+    fn eq_tstztypmodout_neg() {
+        let typmod: i32 = kani::any::<i32>() | i32::MIN;
+        check_ts_typmodout(true, typmod);
+    }
+
+    /// digit-emission bands (intout sloped law; catalog domain is 0..=6,
+    /// carried entirely by d1).
+    macro_rules! ts_typmodout_band {
+        ($($h:ident: $istz:literal, $lo:literal ..= $hi:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(42)]
+            fn $h() {
+                let typmod: i32 = kani::any();
+                kani::assume(($lo..=$hi).contains(&typmod));
+                check_ts_typmodout($istz, typmod);
+            }
+        )*};
+    }
+
+    ts_typmodout_band! {
+        eq_tstypmodout_d1: false, 0 ..= 9;
+        eq_tstypmodout_d2: false, 10 ..= 99;
+        eq_tstypmodout_d3: false, 100 ..= 999;
+        eq_tstztypmodout_d1: true, 0 ..= 9;
+    }
+
+    /// wide-magnitude spots (one symbolic index), both suffixes.
+    #[kani::proof]
+    #[kani::unwind(42)]
+    fn spot_ts_typmodout() {
+        const T: &[i32] = &[1000, 65535, 1_000_000, i32::MAX, 6, 0];
+        let idx: usize = kani::any();
+        kani::assume(idx < T.len());
+        check_ts_typmodout(false, T[idx]);
+        check_ts_typmodout(true, T[idx]);
+    }
 }

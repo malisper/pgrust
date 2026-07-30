@@ -2821,3 +2821,55 @@ pg_adr_interval_send(int64 t, int32 d, int32 m, uint8 *out /* [20] */ )
 	pg_adr_set_varsize_4b(out, 20);
 	return 20;
 }
+
+/* ================= w2-timestamp lane (2026-07-30): rows 2905-2908 =========
+ * timestamp.c: anytimestamp_typmod_check + anytimestamp_typmodout, fetched
+ * https://raw.githubusercontent.com/postgres/postgres/REL_18_STABLE/
+ * src/backend/utils/adt/timestamp.c 2026-07-30, bodies verbatim. Shims
+ * (family conventions, see pg_adr_anytime_* section):
+ *   - ereport(ERROR, 22023) -> *err = 2 + return;
+ *   - ereport(WARNING, precision reduced) DROPPED (message emission out of
+ *     proof BOTH sides; Rust stubs elog::message_level_is_interesting);
+ *   - istz feeds message text only in the check;
+ *   - psprintf("(%d)%s")/pstrdup(tz) -> caller 64-byte buffer via the same
+ *     pg_adr_emit_paren_int_str emitter (date.c anytime_typmodout and
+ *     timestamp.c anytimestamp_typmodout bodies are textually identical
+ *     modulo the function name; tz strings identical).
+ */
+int32
+pg_ts_anytimestamp_typmod_check(int istz, int32 typmod, int32 *out, int *err)
+{
+	(void) istz;				/* only feeds message text */
+
+	if (typmod < 0)
+	{
+		*err = 2;				/* 22023 precision must not be negative */
+		return 0;
+	}
+	if (typmod > MAX_TIMESTAMP_PRECISION)
+	{
+		/* ereport(WARNING, "TIMESTAMP(%d)%s precision reduced to maximum
+		 * allowed, %d") DROPPED — out of proof both sides */
+		typmod = MAX_TIMESTAMP_PRECISION;
+	}
+
+	*out = typmod;
+	return 0;
+}
+
+int
+pg_ts_anytimestamp_typmodout(int istz, int32 typmod, char *res /* [64] */ )
+{
+	const char *tz = istz ? " with time zone" : " without time zone";
+	int			i;
+	int			len = 0;
+
+	if (typmod >= 0)
+		return pg_adr_emit_paren_int_str(res, typmod, tz);
+
+	/* pstrdup(tz) */
+	for (i = 0; tz[i] != '\0'; i++)
+		res[len++] = tz[i];
+	res[len] = '\0';
+	return len;
+}
