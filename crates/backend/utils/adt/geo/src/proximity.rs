@@ -1,4 +1,4 @@
-use ::adt_float::{float8_lt, float8_max, float8_mi, float8_min};
+use ::adt_float::{float8_lt, float8_max, float8_mi, float8_min, float8_pl};
 use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
 use ::types_error::PgResult;
 
@@ -387,7 +387,7 @@ pub fn on_ppath(pt: &Point, path: &PathRef<'_>) -> PgResult<bool> {
         let mut a = point_dt(pt, &path.pt(0))?;
         for i in 0..n {
             let b = point_dt(pt, &path.pt(i + 1))?;
-            if FPeq(a + b, point_dt(&path.pt(i), &path.pt(i + 1))?) {
+            if FPeq(float8_pl(a, b)?, point_dt(&path.pt(i), &path.pt(i + 1))?) {
                 return Ok(true);
             }
             a = b;
