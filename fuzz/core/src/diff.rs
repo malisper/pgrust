@@ -240,30 +240,6 @@ pub fn geo_diff(data: &[u8]) {
         let cres = unsafe { pg_diff_on_ppath(px, py, closed, npts as i32, xys.as_ptr()) };
         let cerr = c_errcode();
 
-        // KNOWN DIVERGENCE CANDIDATE (2026-07-30, this lane): open-path
-        // on_ppath sums the two running distances with a plain `a + b` in
-        // shipped Rust where C uses float8_pl — when a+b overflows to inf,
-        // C (and real PostgreSQL 18, confirmed via docker) raises 22003
-        // while Rust returns false. Witness: tests::on_ppath_overflow_
-        // divergence_witness. Carved here (open-path C-err-2-vs-Rust-Ok
-        // only) so fuzzing can keep hunting OTHER divergences; remove the
-        // carve when the shipped code is fixed.
-        if closed == 0 && cres == -1 && cerr == C_ERR_OUT_OF_RANGE {
-            if let Ok(_) = adt_geo::proximity::on_ppath(
-                &types_core::geo::Point { x: px, y: py },
-                &adt_geo::PathRef::from_payload(&{
-                    let mut p = Vec::new();
-                    p.extend_from_slice(&(npts as i32).to_ne_bytes());
-                    p.extend_from_slice(&closed.to_ne_bytes());
-                    p.extend_from_slice(&[0u8; 4]);
-                    p.extend_from_slice(&path_bytes[..npts * 16]);
-                    p
-                }),
-            ) {
-                return;
-            }
-        }
-
         // Rust side: build the PATH varlena payload PathRef expects.
         let mut payload = Vec::with_capacity(PATH_HEADER_PAYLOAD + npts * 16);
         payload.extend_from_slice(&(npts as i32).to_ne_bytes());
@@ -398,9 +374,9 @@ mod tests {
     /// FPeq(float8_pl(a, b), ...) => real PostgreSQL 18 raises 22003
     /// ("value out of range: overflow"); shipped Rust computes the plain
     /// unchecked `a + b` (inf) and returns Ok(false).
-    /// This test pins the CURRENT divergent Rust behavior; when the fix
-    /// lands (float8_pl-equivalent checked add in proximity::on_ppath),
-    /// flip the assertion to Err(22003) and drop the geo_diff carve.
+    /// FIXED (fix/on-ppath-float8-pl): proximity::on_ppath now uses the
+    /// checked float8_pl, so Rust raises 22003 exactly like C/PG18; the
+    /// geo_diff carve for this divergence has been removed.
     #[test]
     fn on_ppath_overflow_divergence_witness() {
         let pt = types_core::geo::Point { x: 0.0, y: 1e308 };
@@ -413,8 +389,10 @@ mod tests {
             payload.extend_from_slice(&y.to_le_bytes());
         }
         let path = adt_geo::PathRef::from_payload(&payload);
-        // Current shipped behavior (divergent from C/PG18):
-        assert_eq!(adt_geo::proximity::on_ppath(&pt, &path).unwrap(), false);
+        // Fixed behavior: 22003 overflow error, matching C/PG18.
+        let err = adt_geo::proximity::on_ppath(&pt, &path).unwrap_err();
+        assert_eq!(rust_err_class(&err), C_ERR_OUT_OF_RANGE);
+        assert_eq!(err.message, "value out of range: overflow");
         // C oracle behavior (matches real PG18): 22003 error.
         let mut xys = [0.0f64, 0.0, 1.0, 0.0];
         let cres = unsafe { pg_diff_on_ppath(0.0, 1e308, 0, 2, xys.as_mut_ptr()) };
