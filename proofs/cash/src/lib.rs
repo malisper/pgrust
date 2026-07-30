@@ -182,6 +182,10 @@ mod proofs {
     // ---------- locale seam scaffolding ----------
 
     static mut PROOF_LCONV: pg_locale::PgLconv = pg_locale::PgLconv {
+        // LC_NUMERIC pair (to_char's D/G) — not read by any cash path;
+        // present only because the shipped PgLconv grew these fields.
+        decimal_point: "",
+        thousands_sep: "",
         mon_decimal_point: "",
         mon_thousands_sep: "",
         mon_grouping: "",

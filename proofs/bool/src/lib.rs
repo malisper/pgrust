@@ -42,7 +42,7 @@ mod ffi {
 #[cfg(kani)]
 mod harnesses {
     use crate::ffi;
-    use core::ffi::c_int;
+    use core::ffi::{c_char, c_int};
 
     /// Postgres bool.c whitespace set as trimmed by boolin (isspace, C locale).
     fn is_c_space(b: u8) -> bool {
