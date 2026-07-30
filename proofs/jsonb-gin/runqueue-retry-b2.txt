@@ -1,0 +1,47 @@
+# proofs/jsonb-gin RETRY runqueue — batchB (fleet 994f9977/1785310905) follow-up
+# 2026-07-29 runner-harvester lane 2.
+# Canonical 4-col pipe rows: <harness> | <expected> | <tier> | <command>
+#
+# Contents:
+#  1. The 25 batchB info-timeout rows at 3-4x their original timeouts
+#     (jsp consistent/triconsistent cells 75s -> 300s; gin_extract_jsonb
+#     per-n cells 240s -> 720s). Marked info: a second NO-VERDICT at the
+#     raised timeout is a wall verdict, not a gate failure.
+#  2. The two 240s NO-VERDICT must-fail CONTROLS at 480s (task bar: an
+#     unadjudicated control is gate-blindness — these two rows DO gate:
+#     pass condition is VERIFICATION FAILED with a decodable counterexample).
+#     DEFAULT solver per prove-target law (kissat never terminates on
+#     failing harnesses).
+
+# ---- jsp cells (batchB 75s info-timeouts, kissat, 4x) ----
+proofs::eq_jsp_bin_entry | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_entry --exact
+proofs::eq_jsp_bin_and2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_and2 --exact
+proofs::eq_jsp_bin_or2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_or2 --exact
+proofs::eq_jsp_bin_and3 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_and3 --exact
+proofs::eq_jsp_bin_and_or | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_and_or --exact
+proofs::eq_jsp_bin_or_and | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_or_and --exact
+proofs::eq_jsp_tri_entry | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_entry --exact
+proofs::eq_jsp_tri_and2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_and2 --exact
+proofs::eq_jsp_tri_or2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_or2 --exact
+proofs::eq_jsp_tri_and3 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_and3 --exact
+proofs::eq_jsp_tri_and_or | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_and_or --exact
+proofs::eq_jsp_tri_or_and | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_or_and --exact
+proofs::eq_jsp_bin_pred_and2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_bin_pred_and2 --exact
+proofs::eq_jsp_tri_pred_or2 | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_tri_pred_or2 --exact
+proofs::eq_jsp_path_bin_and_or | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_path_bin_and_or --exact
+proofs::eq_jsp_path_tri_or_and | info | wall-retry | timeout 300 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_jsp_path_tri_or_and --exact
+
+# ---- gin_extract_jsonb per-n cells (batchB 240s info-timeouts, 3x) ----
+proofs::eq_extract_jsonb_arr_n0 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n0 --exact
+proofs::eq_extract_jsonb_arr_n1 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n1 --exact
+proofs::eq_extract_jsonb_arr_n2 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n2 --exact
+proofs::eq_extract_jsonb_arr_n3 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_arr_n3 --exact
+proofs::eq_extract_jsonb_obj_n1 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_obj_n1 --exact
+proofs::eq_extract_jsonb_path_arr_n1 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_arr_n1 --exact
+proofs::eq_extract_jsonb_path_arr_n2 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_arr_n2 --exact
+proofs::eq_extract_jsonb_path_arr_n3 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_arr_n3 --exact
+proofs::eq_extract_jsonb_path_str_n1 | info | wall-retry | timeout 720 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --solver kissat --harness proofs::eq_extract_jsonb_path_str_n1 --exact
+
+# ---- CONTROL ADJUDICATION at 480s (batchB 240s NO-VERDICT; these GATE) ----
+proofs::control_jsp_wrong_entry | must-fail | control | timeout 480 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::control_jsp_wrong_entry --exact
+proofs::control_extract_hash_seam_skew | must-fail | control | timeout 480 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_jsonb_gin.c --harness proofs::control_extract_hash_seam_skew --exact

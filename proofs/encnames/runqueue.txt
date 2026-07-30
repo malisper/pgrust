@@ -1,0 +1,25 @@
+# proofs/encnames runqueue — PG_char_to_encoding oid 1264 / PG_encoding_to_char
+# oid 1597 (compile-only pre-build 2026-07-28; NOT yet run — solver slots saturated).
+# kissat for expected-green; DEFAULT solver for the expected-FAIL rows (kissat
+# never terminates on failing harnesses).
+# Codegen note: crate-level kani warning lists caller_location(1) + foreign
+# function(1) in the adt_misc dependency graph — believed unreachable from
+# these harnesses; if witness_wrapper_non_utf8_plane trips an unsupported-
+# construct failure instead of the divergence assert, that is toolchain
+# friction, not the witness.
+# Run from proofs/encnames/.
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+proofs::eq_encoding_to_char_frame | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_encnames.c --solver kissat --harness proofs::eq_encoding_to_char_frame --exact   # expect: PROVED — oid 1597 full-i32, 64B NameData frame (shipped namestrcpy in-theorem) | RAN 2026-07-29: proved 2.07s kissat (ledger 1597)
+proofs::eq_char_to_encoding_core_ascii | info | release-gate | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_encnames.c --solver kissat --harness proofs::eq_char_to_encoding_core_ascii --exact   # expect: PROVED — oid 1264 core, sym len<=16 NUL-free ASCII | RAN 2026-07-29: wall(model: CBMC pointer-arith binary-search strcmp — unwind-insensitive; TRIAGE RVR) ; coverage of record = spots + native differential 416k names 0 diffs (ledger 1264)
+proofs::eq_char_to_encoding_core_utf8 | info | release-gate | timeout 60 cargo kani -Z c-ffi --c-lib c/pg_encnames.c --solver kissat --harness proofs::eq_char_to_encoding_core_utf8 --exact   # expect: PROVED (slower tier: std UTF-8 validator in-formula; if >60s record the ASCII tier + spots and note ladder exhaustion — do NOT drop the row to wall without trying the DEFAULT solver, mixed-arm inversion trap) | RAN 2026-07-29: wall(model: CBMC pointer-arith binary-search strcmp — unwind-insensitive; TRIAGE RVR) ; coverage of record = spots + native differential 416k names 0 diffs (ledger 1264)
+proofs::spot_char_to_encoding_len63 | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_encnames.c --solver kissat --harness proofs::spot_char_to_encoding_len63 --exact   # expect: PROVED — NAMEDATALEN boundary spot (walks clean+search at len 63)
+proofs::spot_char_to_encoding_len64 | green | per-commit | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_encnames.c --solver kissat --harness proofs::spot_char_to_encoding_len64 --exact   # expect: PROVED — NAMEDATALEN boundary spot (both sides short-circuit -1)
+proofs::witness_wrapper_non_utf8_plane | green | per-commit | timeout 60 cargo kani -Z c-ffi --c-lib c/pg_encnames.c -Z concrete-playback --concrete-playback=print --harness proofs::witness_wrapper_non_utf8_plane --exact   # expect: VERIFICATION FAILED — SCREENED DIVERGENCE WITNESS (wrapper from_utf8 wholesale-reject vs C byte-wise clean). MANDATORY before recording: ground-truth on real glibc PG (Name with a high byte, server locale in play — vendored C models C-locale isalnum); then adjudicate divergence(bug in wrapper) vs divergence(ratified) per triage. A PASS is itself a finding — investigate vacuity. | DIVERGENCE #10 FIXED bd9442e253 — witness now GREEN 15.9s (ledger 1264); original expected-FAIL wording below is pre-fix (module doc stale too)
+proofs::control_encoding_to_char_frame_shifted | must-fail | control | timeout 30 cargo kani -Z c-ffi --c-lib c/pg_encnames.c --harness proofs::control_encoding_to_char_frame_shifted --exact   # expect: VERIFICATION FAILED (negative control, DEFAULT solver; decode before recording)

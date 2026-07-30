@@ -1,0 +1,11 @@
+[package]
+name = "proof-records"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_rowtypes = { path = "../../crates/backend/utils/adt/rowtypes" }
+datum = { path = "../../crates/_support/types/datum" }
+types_core = { path = "../../crates/_support/types/types_core" }

@@ -1,0 +1,10 @@
+[package]
+name = "poc-bitutils"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED port, not a copy.
+pg_bitutils = { path = "../../crates/port/pg_bitutils" }
+
+[workspace]

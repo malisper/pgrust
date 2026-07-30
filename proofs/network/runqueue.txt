@@ -1,0 +1,125 @@
+# proofs/network runqueue — WAVE 11 net-arith + net-ntop extension
+# (compile-only pre-build 2026-07-28; NOT yet run — pre-build lane, zero solves.
+#  Compile gate passed: cargo kani --only-codegen -Z c-ffi -Z stubbing, plus
+#  goto-cc -c of both new C files.)
+#
+# The pre-existing bitncmp/bitncommon + net-ops harnesses (comparators,
+# broadcast/network/netmask/hostmask/inetnot/inetand/inetor, masklen/family,
+# inet_same_family, inet_merge, smaller/larger + controls) are already
+# recorded in the ledger and are not re-queued here. NOTE: those existing
+# harnesses were gated with kissat for expected-green runs (module doc);
+# solver choice below is per-harness and explicit.
+#
+# Solver policy for the NEW harnesses:
+#  - mixed-arm value+verdict+sqlstate harnesses (all eq_inetpl/inetmi/
+#    set_masklen/to_cidr rows): DEFAULT solver FIRST — kissat inverted on
+#    every mixed-arm family measured (mbconv law; "solver choice inverts on
+#    mixed-arm harnesses"). If >10s, try kissat before recording.
+#  - pure-green single-claim harnesses (hash rows, ntop spots, covers):
+#    kissat (family precedent for expected-green).
+#  - negative controls + anything that might FAIL: DEFAULT solver always
+#    (external kissat never terminates on failing harnesses).
+# Per MBCONV law #4: under multi-lane contention judge on kani-reported
+# Verification Time, not wall clock; the 75s timeout below is the
+# contention-safe cap (7s solves have been inflated to >30s wall under load).
+# Per MBCONV law #1: pass ONLY the C file each harness needs (whole-family
+# --c-lib linking adds a fixed CBMC read cost that fakes solver walls).
+# Run from proofs/network/. ONE invocation at a time (RSS discipline).
+#
+# ---------- net-arith section (csrc/net_arith.c) ----------
+# inetpl oid 2630 — core-level, both arms (Ok struct eq; Err 22003 parity);
+# full-i64 addend; v6 Err arm unreachable by construction (module doc).
+# NORMALIZED 2026-07-29 (maintenance lane): canonical 4-col pipe rows
+#   <harness> | <expected> | <tier> | <command>
+# expected legend: green = expect success; must-fail = negative control /
+#   expected-fail witness (pass condition is VERIFICATION FAILED with a
+#   decodable counterexample); info = probe / ladder / wall-risk row (verdict
+#   recorded, not gated). Harness names fully qualified (module::name) so
+#   --exact matches (TRIAGE RVR lesson: bare names never match nested modules).
+
+arith_proofs::eq_inetpl_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inetpl_v4 --exact   # expect: PROVED (fast; 4-byte carry loop, /0x100 pow2)
+arith_proofs::eq_inetpl_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inetpl_v6 --exact   # expect: PROVED (fast/ladder; 16-byte carry loop)
+# inetmi_int8 oid 2632 — same theorem through the negation plane; addend
+# full-i64 INCLUDING i64::MIN (C -addend under -fwrapv == CBMC wrap ==
+# shipped wrapping_neg; in-theorem, not fenced).
+arith_proofs::eq_inetmi_int8_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inetmi_int8_v4 --exact   # expect: PROVED (fast)
+arith_proofs::eq_inetmi_int8_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inetmi_int8_v6 --exact   # expect: PROVED (fast/ladder)
+# inetmi oid 2633 — i64 result + both error arms (22023 mismatch / 22003
+# overflow); v4 overflow-free, v6 owns the overflow plane, xf the mismatch.
+arith_proofs::eq_inetmi_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inetmi_v4 --exact   # expect: PROVED (fast)
+arith_proofs::eq_inetmi_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inetmi_v6 --exact   # expect: PROVED (fast/ladder; 16-byte borrow loop + overflow checks)
+arith_proofs::eq_inetmi_xf | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inetmi_xf --exact   # expect: PROVED (fast; loops unreached)
+# arm + split coverage witnesses (MANDATORY companions; kissat OK — the
+# UNSAT direction is what costs, covers are SAT-cheap).
+arith_proofs::cover_arith_family_cases | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::cover_arith_family_cases --exact   # expect: PROVED + covers SATISFIED
+arith_proofs::cover_inetpl_arms | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::cover_inetpl_arms --exact   # expect: PROVED + both covers SATISFIED (Ok, v4 out-of-range)
+arith_proofs::cover_inetmi_arms | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::cover_inetmi_arms --exact   # expect: PROVED + 3 covers SATISFIED (Ok, mismatch, v6 overflow)
+# inet_to_cidr oid 1715 — value path over the full fenced domain; both
+# sides' invalid-bit-length arms asserted UNREACHABLE (cerr != -3), not fenced.
+arith_proofs::eq_inet_to_cidr | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inet_to_cidr --exact   # expect: PROVED (fast; masked-copy loop <= 16)
+# inet_set_masklen 605 / cidr_set_masklen 635 — TOTAL harnesses: fenced
+# inet x FULL-i32 bits, Ok struct eq (incl. -1 alias + partial-byte mask +
+# zeroed tail) / Err 22023 parity.
+arith_proofs::eq_inet_set_masklen | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_inet_set_masklen --exact   # expect: PROVED (fast)
+arith_proofs::eq_cidr_set_masklen | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::eq_cidr_set_masklen --exact   # expect: PROVED (fast; symbolic-length memcpy <= 16, merge-row precedent)
+arith_proofs::cover_set_masklen_arms | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::cover_set_masklen_arms --exact   # expect: PROVED + 3 covers SATISFIED (valid, -1 alias, invalid)
+# hashinet 422 / hashinetextended 779 — COMPOSED: shipped hash over the
+# C-assembled VARDATA_ANY byte view; ledger wording must carry
+# "composed with proved hash_bytes ≡ hash_any (proofs/hash)".
+arith_proofs::eq_hashinet_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::eq_hashinet_v4 --exact   # expect: PROVED (fast; 6-byte fixed-len hash)
+arith_proofs::eq_hashinet_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::eq_hashinet_v6 --exact   # expect: PROVED (fast/ladder; 18-byte fixed-len hash)
+arith_proofs::eq_hashinetextended_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::eq_hashinetextended_v4 --exact   # expect: PROVED (fast; symbolic seed)
+arith_proofs::eq_hashinetextended_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --solver kissat --harness arith_proofs::eq_hashinetextended_v6 --exact   # expect: PROVED (fast/ladder)
+# negative controls for this section — DEFAULT solver, MUST FAIL with a
+# decodable counterexample (decode with -Z concrete-playback
+# --concrete-playback=print before recording anything else).
+arith_proofs::control_inetpl_vs_c_inetmi_int8 | must-fail | control | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::control_inetpl_vs_c_inetmi_int8 --exact   # expect: VERIFICATION FAILED (sign flip; any addend != 0)
+arith_proofs::control_hashinet_view_skew | must-fail | control | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_arith.c --harness arith_proofs::control_hashinet_view_skew --exact   # expect: VERIFICATION FAILED (view one byte short)
+#
+# ---------- net-ntop spot section (csrc/net_ntop.c) ----------
+# Derived-length text rows: inet_out 911 / cidr_out 1427 / network_host 699 /
+# network_show 730 / inet_abbrev 598 / cidr_abbrev 599. CONCRETE SPOTS ONLY —
+# the symbolic-input image claims are the known wall class (result-image /
+# derived-length-copy laws, proofs/TRIAGE.md); ledger rows should read
+# proved(spots: <grid>; symbolic remainder wall(CNF width-bound)) — do NOT
+# ladder against the remainder.
+ntop_spot_proofs::spot_inet_out_v4_full | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_inet_out_v4_full --exact   # expect: PROVED ("192.0.2.1")
+ntop_spot_proofs::spot_inet_out_v4_mask | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_inet_out_v4_mask --exact   # expect: PROVED ("192.0.2.0/24")
+ntop_spot_proofs::spot_cidr_out_v4_mask | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_out_v4_mask --exact   # expect: PROVED ("10.0.0.0/8")
+ntop_spot_proofs::spot_cidr_out_v4_full | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_out_v4_full --exact   # expect: PROVED ("10.1.2.3/32" appended arm)
+ntop_spot_proofs::spot_inet_out_v6_compress | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_inet_out_v6_compress --exact   # expect: PROVED ("2001:db8::1")
+ntop_spot_proofs::spot_cidr_out_v6_mask | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_out_v6_mask --exact   # expect: PROVED ("2001:db8::/64")
+ntop_spot_proofs::spot_inet_out_v6_v4mapped | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_inet_out_v6_v4mapped --exact   # expect: PROVED ("::ffff:192.0.2.128")
+ntop_spot_proofs::spot_network_host_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_network_host_v4 --exact   # expect: PROVED ("192.0.2.5" — /24 suppressed)
+ntop_spot_proofs::spot_network_show_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_network_show_v4 --exact   # expect: PROVED ("192.0.2.5/24")
+ntop_spot_proofs::spot_network_host_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_network_host_v6 --exact   # expect: PROVED ("2001:db8::5")
+ntop_spot_proofs::spot_network_show_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_network_show_v6 --exact   # expect: PROVED ("2001:db8::5/64")
+ntop_spot_proofs::spot_inet_abbrev_v4 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_inet_abbrev_v4 --exact   # expect: PROVED ("10.1.0.0/16" — v4 net_ntop keeps all octets)
+ntop_spot_proofs::spot_inet_abbrev_v6 | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_inet_abbrev_v6 --exact   # expect: PROVED ("2001::1/60")
+ntop_spot_proofs::spot_cidr_abbrev_v4_partial | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_abbrev_v4_partial --exact   # expect: PROVED ("10.128/9" — partial-octet mask)
+ntop_spot_proofs::spot_cidr_abbrev_v4_zero | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_abbrev_v4_zero --exact   # expect: PROVED ("0/0")
+ntop_spot_proofs::spot_cidr_abbrev_v6_zero | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_abbrev_v6_zero --exact   # expect: PROVED ("::/0")
+ntop_spot_proofs::spot_cidr_abbrev_v6_words | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_abbrev_v6_words --exact   # expect: PROVED ("2001:db8/32")
+ntop_spot_proofs::spot_cidr_abbrev_v6_v4mapped | green | per-commit | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --solver kissat --harness ntop_spot_proofs::spot_cidr_abbrev_v6_v4mapped --exact   # expect: PROVED ("::ffff:192.0.2/120" — drop-last-octet quirk)
+# negative control for this section — DEFAULT solver, MUST FAIL.
+ntop_spot_proofs::control_ntop_host_vs_show | must-fail | control | timeout 75 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/net_ntop.c --harness ntop_spot_proofs::control_ntop_host_vs_show --exact   # expect: VERIFICATION FAILED (host vs show /24)
+#
+# ---------- rows deliberately NOT queued ----------
+# - network/netmask/hostmask/broadcast/family/masklen, inet_same_family,
+#   inet_merge, inetand/or/not, all comparators: already harnessed +
+#   recorded by the prior net-ops lane (this crate).
+# - inet_in 910 / cidr_in 4104 (pton parse cascade): heaviest-circuit
+#   multi-format sscanf-cascade class (macaddr lesson: ~2.4x per symbolic
+#   byte) — needs its own per-length ladder lane; not chartered here.
+# - inet_recv 2496 / cidr_recv 2498: recv rows are the pointer-datum
+#   round-trip wall class (int-arith law) until a slice-core/C-shim-read
+#   refactor; send 2497/2499 composes StringInfo construction (mcx-stubs +
+#   fmt-stub + unwind recipe) — deferred with the recv pair so the class
+#   lands as one rig.
+# - inet_client_addr/port, inet_server_addr/port: excluded(state) — session
+#   state, per NEXT-200.
+# - network_sortsupport 5033 (abbrev keys) / network_subset_support 1173:
+#   sortsupport-by-design / planner classes, excluded per NEXT-200.
+# - convert_network_to_scalar: float-arm selectivity support, excluded
+#   class (TRIAGE); network_scan_first/last are planner-internal
+#   compositions of already-harnessed cores (no pg_proc oid).

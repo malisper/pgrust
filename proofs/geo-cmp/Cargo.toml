@@ -1,0 +1,18 @@
+[package]
+name = "proof_geo_cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+# mcx is a direct dep so #[kani::stub(mcx::Mcx::allocate, ..)] resolves
+# (ext2 by-ref-result harnesses); tiny-proof-heap keeps the bit-blasted
+# stub heap small (all allocations here are 16-32B images).
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

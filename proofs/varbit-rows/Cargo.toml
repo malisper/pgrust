@@ -1,0 +1,18 @@
+[package]
+name = "proof-varbit-rows"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_varbit = { path = "../../crates/backend/utils/adt/varbit" }
+types_error = { path = "../../crates/_support/types/types_error" }
+# wave-10 rows: mcx-bound image cores under the proof_support mcx-stubs
+# recipe (tiny-proof-heap: all images here are <= 32 bytes; StringInfo's
+# 1024-byte default buffer in the recv/send harnesses fits the 2 KiB cap).
+mcx = { path = "../../crates/_support/mcx" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

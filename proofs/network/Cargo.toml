@@ -1,0 +1,18 @@
+[package]
+name = "t4_net"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adt_network = { path = "../../crates/backend/utils/adt/network" }
+# net-ops extension: wrapper-level harnesses through real LocalFcinfo frames
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_error = { path = "../../crates/_support/types/types_error" }
+datum = { path = "../../crates/_support/types/datum" }
+# inetand/inetor: canonical format-machinery stub (stub_format)
+proof_support = { path = "../support" }
+# hashinet/hashinetextended composed rows: shipped hash over the C-assembled
+# byte view (hash_bytes ≡ hash_any proved in proofs/hash)
+hashfn = { path = "../../crates/common/hashfn" }
+
+[workspace]

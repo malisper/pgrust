@@ -1,0 +1,11 @@
+[package]
+name = "proof_float_cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_float = { path = "../../crates/backend/utils/adt/float" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }

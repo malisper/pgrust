@@ -1,0 +1,15 @@
+[package]
+name = "proof_text_cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+adt_varchar = { path = "../../crates/backend/utils/adt/varchar" }
+name = { path = "../../crates/backend/utils/adt/name" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }

@@ -1,0 +1,28 @@
+[package]
+name = "proof_datetime_cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
+adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+# dt-minmax extension: tz-seam model for the date<->timestamptz cross-type rows
+adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }
+localtime = { path = "../../crates/backend/timezone/localtime" }
+pgtz = { path = "../../crates/backend/timezone/pgtz" }
+# wave-6 arithmetic extension: fallible wrappers (PgError stub) + by-ref
+# interval/timetz results (mcx stub set, tiny heap)
+types_error = { path = "../../crates/_support/types/types_error" }
+# wave-7: 1B-header text image for the zone-name argument
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+
+# native differential tier for the /USECS_PER_DAY divider walls (json-escape
+# precedent): build.rs links the vendored C for non-kani builds only.
+[build-dependencies]
+cc = "1"

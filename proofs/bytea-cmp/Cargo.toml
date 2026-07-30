@@ -1,0 +1,15 @@
+[package]
+name = "proof-bytea-cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+# get/set byte/bit wave (oids 721-724, 2026-07-28): err-parity + result-image
+# harnesses need the error type, the allocator seam, and the mcx-stub recipe
+# (tiny-proof-heap: the largest allocation is a 12-byte varlena image).
+types_error = { path = "../../crates/_support/types/types_error" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

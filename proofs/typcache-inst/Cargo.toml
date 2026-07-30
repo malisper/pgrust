@@ -1,0 +1,22 @@
+[package]
+name = "proof-typcache-inst"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }
+adt_rangetypes = { path = "../../crates/backend/utils/adt/rangetypes" }
+nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
+adt_uuid = { path = "../../crates/backend/utils/adt/uuid" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_core = { path = "../../crates/_support/types/types_core" }
+datum = { path = "../../crates/_support/types/datum" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }

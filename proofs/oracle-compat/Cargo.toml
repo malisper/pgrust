@@ -1,0 +1,20 @@
+[package]
+name = "proof_oracle_compat"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+adt_oracle_compat = { path = "../../crates/backend/utils/adt/oracle_compat" }
+adt_varchar = { path = "../../crates/backend/utils/adt/varchar" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
+wchar = { path = "../../crates/common/wchar" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }

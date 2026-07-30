@@ -1,0 +1,10 @@
+[package]
+name = "proof_interval_cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
+proof_support = { path = "../support" }

@@ -10,6 +10,12 @@ error message text, which are intentionally kept identical to
 PostgreSQL so the two systems can be compared byte-for-byte in
 testing).
 
+In addition, the equivalence-proof tree under proofs/ contains verbatim
+copies of PostgreSQL C source files (vendored as the reference side of
+machine-checked C-vs-Rust equivalence proofs). Those files are
+PostgreSQL source code, retain their upstream headers, and are
+distributed under the PostgreSQL License reproduced below.
+
 PostgreSQL is developed by the PostgreSQL Global Development Group and
 is distributed under the PostgreSQL License. In accordance with that
 license, its copyright and permission notice is reproduced in full
