@@ -97,11 +97,16 @@ proofs::control_membership_skew | must-fail | control | timeout 600 cargo kani -
 proofs::control_catalog_owner_skew | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_catalog_owner_skew --exact   # expect: VERIFICATION FAILED (catalog seam load-bearing)
 proofs::control_priv_map_mismatch | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_priv_map_mismatch --exact   # expect: VERIFICATION FAILED (plain-logic control)
 
-# ---- known-divergence probe (DEFAULT solver; expected FAIL — this is a
-# DIVERGENCE CANDIDATE, not a rig defect: Rust IsSystemClass lacks C's
-# isTempToastNamespace arm; adjudicate + ground-truth vs docker postgres:18
-# before recording anything) ----
-proofs::probe_system_class_temp_toast | info | probe | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::probe_system_class_temp_toast --exact   # DIVERGENCE CANDIDATE probe, expected FAILED; adjudicate + ground-truth vs docker postgres:18 before recording (header)
+# ---- known-divergence probe — RESOLVED 2026-07-30 (aclcheck lane): the
+# full-pipeline probe walls (symex, 450s: convert_any_priv_string std::str
+# machinery); superseded by the witness pair below. Divergence CONFIRMED on
+# real binaries (docker postgres:18.4 f/f/f/f vs pgrust v0.2 t/t/t/t,
+# owning-session temp-toast write privileges). Adjudication package:
+# ADJUDICATION-TEMPTOAST-SYSCLASS.md (options only, awaiting ruling). ----
+proofs::probe_system_class_temp_toast | info | probe | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::probe_system_class_temp_toast --exact   # WALL(symex timeout-450s) — superseded by probe_system_class_temp_toast_core
+proofs::diag_seam_visibility | green | per-commit | timeout 60 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::diag_seam_visibility --exact   # rig gate: seam writes cross goto-link (0.03s)
+proofs::diag_c_probe_strip | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::diag_c_probe_strip --exact   # C oracle pin: temp-toast strip fires -> mask 0 (8.9s)
+proofs::probe_system_class_temp_toast_core | must-fail | probe | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::probe_system_class_temp_toast_core --exact   # divergence witness: Rust m=ACL_INSERT vs C 0 (3s); Ok-cover SATISFIED / Err UNREACHABLE
 
 # Additional pre-screened divergence candidate for the run lane (no harness
 # yet, cheap to add): C-locale isspace trims \v (0x0B) in
