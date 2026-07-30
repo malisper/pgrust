@@ -2160,3 +2160,11 @@ datetime-b	rem::eq_date_pl_interval_nobegin	-Z c-ffi -Z stubbing --c-lib c/pg_da
 datetime-b	rem::eq_date_mi_interval_nobegin	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c	green	per-commit	1.7	measured 2026-07-30
 datetime-b	rem::eq_date_pl_interval_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c	green	per-commit	1.8	measured 2026-07-30
 datetime-b	rem::eq_date_mi_interval_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c	green	per-commit	1.9	measured 2026-07-30
+adt-misc	proofs::eq_pg_num_nulls_n4	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	1.0	default solver; measured 2026-07-30
+adt-misc	proofs::eq_pg_num_nulls_n1	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	0.8	default solver; measured 2026-07-30
+adt-misc	proofs::eq_pg_num_nulls_n0	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	0.8	default solver; measured 2026-07-30
+adt-misc	proofs::eq_pg_num_nonnulls_n4	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	0.9	default solver; measured 2026-07-30
+adt-misc	proofs::eq_pg_num_nonnulls_n1	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	1.0	default solver; measured 2026-07-30
+adt-misc	proofs::eq_pg_num_nonnulls_n0	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	0.7	default solver; measured 2026-07-30
+adt-misc	proofs::eq_any_value_transfn	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	green	per-commit	0.04	default solver; measured 2026-07-30
+adt-misc	proofs::control_num_nulls_vs_c_nonnulls	-Z c-ffi -Z stubbing (c-lib via Cargo metadata)	must-fail	defect-witness	?	fails on drive_counts::<4>.assertion.6 (value parity) — rig non-vacuous
