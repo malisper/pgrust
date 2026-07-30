@@ -77,7 +77,15 @@ bench = false
 
 # libm math family (2026-07-30 lane): the 38 blocked(libm)/blocked(seam:
 # libm-oracle) ledger rows. Both sides call the REAL platform libm — the
-# thing a Kani seam would have defined away.
+# thing a Kani seam would have defined away. First campaign (macOS host
+# oracle): float_math 34.7M coverage-guided + 280M sampler cases (10M per
+# unary fn via core/examples/float_math_sample.rs), float_math2 33.8M
+# coverage-guided + 30M sampler. One divergence candidate found and
+# adjudicated as an ORACLE COMPILER ARTIFACT (clang -ffp-contract=on fmsub
+# fusion in the degree-trig scaling expressions; real PG 18.4 aarch64
+# docker returns a third value again — glibc acos ulp drift), carved by
+# pinning -ffp-contract=off in core/build.rs; see diff.rs
+# tests::dasind_fp_contraction_witness. Zero wrapper-logic divergences.
 [[bin]]
 name = "float_math_diff"
 path = "fuzz_targets/float_math_diff.rs"
