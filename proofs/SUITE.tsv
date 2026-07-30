@@ -88,8 +88,8 @@ bytea-cmp	eq_byteale	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per
 bytea-cmp	eq_byteagt	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	0.2-2.4s
 bytea-cmp	eq_byteage	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	0.2-2.4s
 bytea-cmp	eq_byteacmp	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	exact int32 value incl memcmp magnitude
-bytea-cmp	eq_bytea_larger	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	minmax_harness!
-bytea-cmp	eq_bytea_smaller	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.4	minmax_harness!
+bytea-cmp	eq_bytea_larger	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	2.9	RAN 2026-07-30 lane pick-a: proved 2.9s (ledger 6393)
+bytea-cmp	eq_bytea_smaller	-Z c-ffi --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	3.2	RAN 2026-07-30 lane pick-a: proved 3.2s (ledger 6394)
 bytea-cmp	control_byteacmp_short_c_len	-Z c-ffi --c-lib c/pg_bytea_cmp.c	must-fail	defect-witness	?	DEFAULT solver mandatory
 bytea-varbit	eq_esc_enc_len	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_varbit.c --solver kissat	green	per-commit	1	sub-second class
 bytea-varbit	eq_esc_encode	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_varbit.c	green	release-gate	29	DEFAULT solver (29s default / 44s kissat); unwind(35)
@@ -1816,6 +1816,17 @@ bytea-cmp	proofs::eq_bytea_get_bit	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c
 bytea-cmp	proofs::eq_bytea_set_byte	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	wall-recorded	calibration	104.9	ledger 722: proved(len=4 spot, full-i32 n, truncation+2202E planes) + wall(CNF width-bound at symbolic len<=8, both solvers); DEFAULT solver; grow/dealloc mcx stubs load-bearing (TRIAGE RVR)
 bytea-cmp	proofs::eq_bytea_set_bit	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	wall-recorded	calibration	?	ledger 724: wall(CNF width-bound at symbolic len<=8, both solvers; same circuit as 722 — per-length split expected identical)
 bytea-cmp	proofs::control_get_byte_short_c_len	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	must-fail	defect-witness	?	DEFAULT solver mandatory; negative control (get/set wave)
+bytea-cmp	eq_bytea_int2	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.3	oid 6370; len<=9; value+verdict+sqlstate 22003
+bytea-cmp	eq_bytea_int4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.3	oid 6371
+bytea-cmp	eq_bytea_int8	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.4	oid 6372; Err arm in-domain at len 9
+bytea-cmp	eq_bytea_bit_count	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	0.8	oid 6163; len<=7 table path; NEON arm blocked:simd
+bytea-cmp	eq_to_hex32	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.0	oid 2089; full-frame image + start idx
+bytea-cmp	eq_to_hex64	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.5	oid 2090
+bytea-cmp	eq_to_oct32	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.5	oid 6332
+bytea-cmp	eq_to_oct64	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.2	oid 6333
+bytea-cmp	eq_to_bin32	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.8	oid 6330
+bytea-cmp	eq_to_bin64	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.7	oid 6331
+bytea-cmp	control_to_base_skewed_value	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c	must-fail	defect-witness	0.5	DEFAULT solver; fails on start/frame assert (verified check name); C sees value+1
 datetime-cmp	wave7_proofs::eq_timestamp_finite	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	0.16	
 datetime-cmp	wave7_proofs::eq_timestamp_hash	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.6	
 datetime-cmp	wave7_proofs::eq_timestamp_hash_extended	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.6	
