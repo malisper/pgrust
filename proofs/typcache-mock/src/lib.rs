@@ -287,6 +287,8 @@ pub fn install() {
         fmgr_core::init_seams();
         typcache::init_seams();
         detoast::init_seams();
+        // In-process tests are always in normal (non-bootstrap) processing.
+        miscinit_seams::is_bootstrap_processing_mode::set(|| false);
 
         s::lookup_pg_type_typcache_shape::set(typcache_shape);
         s::lookup_pg_type_shape::set(|typid| {
@@ -327,6 +329,23 @@ pub fn install() {
                 typtype: t.typtype as i8,
                 typnotnull: false,
                 typbasetype: InvalidOid,
+            }))
+        });
+        s::pg_type_io_shape::set(|typid| {
+            Ok(typ(typid).map(|t| syscache_seams::PgTypeIoShape {
+                oid: t.oid,
+                typinput: t.typinput,
+                typoutput: t.typoutput,
+                typreceive: t.typreceive,
+                typsend: t.typsend,
+                typmodin: t.typmodin,
+                typmodout: t.typmodout,
+                typelem: t.typelem,
+                typlen: t.typlen,
+                typbyval: t.typbyval,
+                typalign: t.typalign as i8,
+                typdelim: t.typdelim as i8,
+                typisdefined: t.typisdefined,
             }))
         });
         // Deterministic stand-in; routes inval only (see module docs).

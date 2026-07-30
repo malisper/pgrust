@@ -129,6 +129,12 @@ pub struct GenPgType {
     pub typelem: Oid,
     pub typarray: Oid,
     pub typcollation: Oid,
+    pub typinput: Oid,
+    pub typoutput: Oid,
+    pub typreceive: Oid,
+    pub typsend: Oid,
+    pub typmodin: Oid,
+    pub typmodout: Oid,
 }
 EOS
 $out .= "pub const PG_TYPE: &[GenPgType] = &[\n";
@@ -142,13 +148,16 @@ for my $t (sort { $a->{oid} <=> $b->{oid} } @$types) {
     $align = 'd' if $align eq 'ALIGNOF_POINTER';    # 64-bit pointers
     local $t->{typalign} = $align;
     $out .= sprintf
-      "    GenPgType { oid: %d, typname: \"%s\", typlen: %d, typbyval: %s, typalign: %s, typstorage: %s, typtype: %s, typcategory: %s, typispreferred: %s, typisdefined: %s, typdelim: %s, typrelid: %d, typsubscript: %d, typelem: %d, typarray: %d, typcollation: %d },\n",
+      "    GenPgType { oid: %d, typname: \"%s\", typlen: %d, typbyval: %s, typalign: %s, typstorage: %s, typtype: %s, typcategory: %s, typispreferred: %s, typisdefined: %s, typdelim: %s, typrelid: %d, typsubscript: %d, typelem: %d, typarray: %d, typcollation: %d, typinput: %d, typoutput: %d, typreceive: %d, typsend: %d, typmodin: %d, typmodout: %d },\n",
       $t->{oid}, $t->{typname}, $len, b($byval), ch($t->{typalign}),
       ch($t->{typstorage}), ch($t->{typtype}), ch($t->{typcategory}),
       b($t->{typispreferred}), b($t->{typisdefined}), ch($t->{typdelim}),
       res_simple(\%classoid, $t->{typrelid}, 'class'),
       res_proc($t->{typsubscript}), res_type($t->{typelem}),
-      res_type($t->{typarray}), res_simple(\%colloid, $t->{typcollation}, 'coll');
+      res_type($t->{typarray}), res_simple(\%colloid, $t->{typcollation}, 'coll'),
+      res_proc($t->{typinput}), res_proc($t->{typoutput}),
+      res_proc($t->{typreceive}), res_proc($t->{typsend}),
+      res_proc($t->{typmodin}), res_proc($t->{typmodout});
 }
 $out .= "];\n\n";
 

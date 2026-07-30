@@ -4898,6 +4898,7 @@ dependencies = [
  "indexcmds_seams",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "seam_core",
  "syscache_seams",
  "typcache",

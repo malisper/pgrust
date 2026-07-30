@@ -66,7 +66,8 @@ for d in rows("PG_TYPE", struct=True):
          "t" if d["typispreferred"] == "true" else "f",
          "t" if d["typisdefined"] == "true" else "f",
          as_char(d["typdelim"]), d["typrelid"], d["typsubscript"], d["typelem"],
-         d["typarray"], d["typcollation"]]
+         d["typarray"], d["typcollation"], d["typinput"], d["typoutput"],
+         d["typreceive"], d["typsend"], d["typmodin"], d["typmodout"]]
     if g != r:
         report("pg_type", oid, g, r)
 

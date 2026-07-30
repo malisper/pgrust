@@ -19,6 +19,7 @@ indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }
 fmgr_core = { path = "../../crates/backend/utils/fmgr/fmgr_core" }
 typcache = { path = "../../crates/backend/utils/cache/typcache" }
 detoast = { path = "../../crates/backend/access/common/detoast" }
+miscinit_seams = { path = "../../crates/backend/utils/init/miscinit_seams" }
 
 [dev-dependencies]
 mcx = { path = "../../crates/_support/mcx" }

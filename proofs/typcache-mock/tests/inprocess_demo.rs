@@ -390,3 +390,49 @@ fn inprocess_throughput_smoke() {
         n as f64 / dt.as_secs_f64()
     );
 }
+
+/// array_in (750) / array_out (751), both `excluded(typcache)`: the io lane
+/// rides the pg_type_io_shape projection (element in/out fns resolved through
+/// fmgr). Round-trips in-process; text form diffed against the server.
+#[test]
+fn array_io_inprocess_differential() {
+    typcache_mock::install();
+    let ctx = mcx::MemoryContext::new("io");
+    let mcx = ctx.mcx();
+    let mut out_flinfo = FmgrInfo::new(arrayfuncs::builtins::fc_array_out, 751, 1, true, false);
+    let mut in_flinfo = FmgrInfo::new(arrayfuncs::builtins::fc_array_in, 750, 3, true, false);
+
+    let mut rng = Rng(0x1057_10f0);
+    let mut checked_oracle = 0;
+    for case in 0..200u32 {
+        let elems = rand_elems(&mut rng, 6);
+        let arr = int4_array(mcx, &elems);
+
+        // array_out
+        let mut fo = LocalFcinfo::<2>::fresh(0);
+        unsafe { fo.set_result_mcx(mcx) };
+        fo.set_arg(0, datum_of(&arr));
+        let d = arrayfuncs::builtins::fc_array_out(Some(&mut out_flinfo), &mut fo).unwrap();
+        let cstr = unsafe { std::ffi::CStr::from_ptr(d.as_usize() as *const std::ffi::c_char) };
+        let text = cstr.to_str().unwrap().to_string();
+        assert_eq!(text, pg_literal(&elems), "array_out case {case}");
+
+        // array_in round-trip
+        let lit = std::ffi::CString::new(text.clone()).unwrap();
+        let mut fi = LocalFcinfo::<3>::fresh(0);
+        unsafe { fi.set_result_mcx(mcx) };
+        fi.set_arg(0, Datum::from_usize(lit.as_ptr() as usize));
+        fi.set_arg(1, Datum::from_oid(INT4OID));
+        fi.set_arg(2, Datum::from_i32(-1));
+        let back = arrayfuncs::builtins::fc_array_in(Some(&mut in_flinfo), &mut fi).unwrap();
+        assert_eq!(decode_int4_array(mcx, back), elems, "array_in case {case}");
+
+        if case % 25 == 0 {
+            if let Some(srv) = oracle(&format!("select '{}'::int4[]::text", pg_literal(&elems))) {
+                assert_eq!(text, srv, "case {case} vs oracle");
+                checked_oracle += 1;
+            }
+        }
+    }
+    eprintln!("array_out/array_in: 200 in-process round-trips, {checked_oracle} oracle-diffed");
+}
