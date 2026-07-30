@@ -6773,6 +6773,7 @@ dependencies = [
  "pg_prng",
  "predicate_seams",
  "procarray_seams",
+ "syscache_seams",
  "tidbitmap",
  "transam_xlog",
  "transam_xlog_seams",

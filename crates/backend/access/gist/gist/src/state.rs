@@ -29,6 +29,60 @@ fn resolve_optional(proc: Oid) -> PgResult<FmgrInfo> {
     }
 }
 
+/// pgrust-only guard (no C analogue: every catalog proc has a body there).
+/// A mandatory support proc whose registered entry point is fmgr's
+/// not-ported stub would otherwise surface arbitrarily late: with one tuple
+/// GiST never calls union/penalty/picksplit, so CREATE INDEX succeeds and
+/// every INSERT after the first page split fails instead. initGISTstate runs
+/// for both index build and insert descent, so rejecting here makes CREATE
+/// INDEX fail immediately and makes the first INSERT into a pre-existing
+/// such index fail clearly.
+#[cold]
+#[inline(never)]
+fn not_ported_support_proc(
+    procnum: u16,
+    proc_oid: Oid,
+    proc_name: &str,
+    attno_0based: usize,
+    index: &Relation<'_>,
+) -> Box<::types_error::PgError> {
+    let opclass = opclass_name(index, attno_0based);
+    Box::new(
+        ::types_error::PgError::error(format!(
+            "operator class \"{opclass}\" of access method gist cannot be used: \
+             required support function {procnum} ({proc_name}, OID {proc_oid}) \
+             is not yet implemented"
+        ))
+        .with_detail(format!(
+            "GiST support function {procnum} is required to build or modify \
+             attribute {} of index \"{}\".",
+            attno_0based + 1,
+            index.name(),
+        ))
+        .with_hint(
+            "Drop the index or use a different index access method for this column.",
+        )
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+// Best-effort opclass name for the error above (cold path). Uninstalled
+// seams = unit-test / bootstrap paths, where no such error can be user-facing.
+fn opclass_name(index: &Relation<'_>, attno_0based: usize) -> String {
+    if syscache_seams::pg_index_indclass_element::is_installed()
+        && syscache_seams::pg_opclass_opcname::is_installed()
+    {
+        if let Ok(Some(opclass)) =
+            syscache_seams::pg_index_indclass_element::call(index.rd_id, attno_0based as i32)
+        {
+            if let Ok(Some(name)) = syscache_seams::pg_opclass_opcname::call(opclass) {
+                return String::from_utf8_lossy(name.name_str()).into_owned();
+            }
+        }
+    }
+    "?".into()
+}
+
 #[cold]
 #[inline(never)]
 fn missing_support_proc(procnum: u16, attno: usize, rel: &Relation<'_>) -> ! {
@@ -108,7 +162,17 @@ pub fn initGISTstate<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<G
             if oid == InvalidOid {
                 missing_support_proc(procnum, i, index);
             }
-            resolve(oid)
+            let finfo = resolve(oid)?;
+            // Mandatory procs must be callable; see not_ported_support_proc.
+            // No-op for fully-ported opclasses (predicate returns None), and
+            // gated on is_installed for test mocks that install only the
+            // fmgr_info seam.
+            if fmgr_seams::fmgr_info_not_ported_name::is_installed() {
+                if let Some(name) = fmgr_seams::fmgr_info_not_ported_name::call(&finfo) {
+                    return Err(not_ported_support_proc(procnum, oid, name, i, index));
+                }
+            }
+            Ok(finfo)
         };
         st.consistentFn.push(mandatory(GIST_CONSISTENT_PROC)?);
         st.unionFn.push(mandatory(GIST_UNION_PROC)?);
