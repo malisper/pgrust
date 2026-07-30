@@ -2251,3 +2251,31 @@ network-gist	spec_compress_nonleaf_identity	-Z c-ffi -Z stubbing --c-lib c/pg_ne
 network-gist	spec_compress_null_leafkey	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c	green	calibration	331	spec: NULL leaf key arm
 network-gist	eq_fetch_v4	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	316	mcx-stubs wrapper cell
 network-gist	eq_fetch_v6	-Z c-ffi -Z stubbing --c-lib c/pg_network_gist.c --c-lib c/pg_net_bits.c --solver kissat	green	calibration	441	mcx-stubs wrapper cell
+spgist-inet	proofs::eq_inet_spg_config	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	release-gate	64	PROVED 2026-07-30 local load~12; row 3795
+spgist-inet	proofs::eq_inet_spg_choose_nopfx	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	release-gate	97	PROVED 2026-07-30 load~21; row 3796 partial (no-prefix arm)
+spgist-inet	proofs::eq_inet_spg_choose_famsplit	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	unmeasured	?	FLEET-BOUND: local wall(timeout-450s, load 18-24, died in SSA-convert phase)
+spgist-inet	proofs::eq_inet_spg_choose_af4	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	unmeasured	?	FLEET-BOUND: not attempted locally (ladder tier)
+spgist-inet	proofs::eq_inet_spg_inner_nopfx	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	unmeasured	?	FLEET-BOUND: local wall(timeout-240s, load 15-27, symex done — SAT-phase; 8256 VCC)
+spgist-inet	proofs::eq_inet_spg_inner_af4_nkeys1	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	unmeasured	?	FLEET-BOUND: not attempted locally (ladder tier)
+spgist-inet	proofs::eq_inet_spg_inner_allsame	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	release-gate	77	PROVED 2026-07-30 load~17; row 3798 partial (allTheSame arm)
+spgist-inet	proofs::eq_inet_spg_leaf_af4_nkeys2	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	unmeasured	?	FLEET-BOUND: not attempted locally (ladder tier)
+spgist-inet	proofs::eq_inet_spg_leaf_mixed_family	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c --solver kissat	green	release-gate	119	PROVED 2026-07-30 load~25; row 3799 partial (cross-family arm)
+spgist-inet	proofs::cover_spgist_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c	covers	unmeasured	?	FLEET-BOUND: not run locally; DEFAULT solver
+spgist-inet	proofs::control_spgist_leaf_strategy_skew	-Z c-ffi -Z stubbing --c-lib c/pg_network_spgist.c	must-fail	unmeasured	?	FLEET-BOUND: not run locally; DEFAULT solver; verify failing CHECK NAME
+spgist-geo	proofs::eq_spg_quad_config_h	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	release-gate	101	PROVED 2026-07-30 load~21; row 4018
+spgist-geo	proofs::eq_spg_kd_config_h	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	release-gate	125	PROVED 2026-07-30 load~22; row 4023
+spgist-geo	proofs::eq_spg_box_config_h	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	release-gate	111	PROVED 2026-07-30 load~20; row 5012
+spgist-geo	proofs::eq_spg_bbox_config_h	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	release-gate	114	PROVED 2026-07-30 load~19; row 5010
+spgist-geo	proofs::eq_spg_text_config_core	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	per-commit	1	PROVED 2026-07-30 0.05s; row 4027 core-level (fmgr shell = Kani ICE via fc_spghandler)
+spgist-geo	proofs::eq_spg_kd_choose	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	release-gate	141	PROVED 2026-07-30 load~15; row 4024
+spgist-geo	proofs::eq_spg_quad_choose	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 4019
+spgist-geo	proofs::eq_quad_getquadrant_err_plane	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: local wall(timeout-180s, load=26); row 4019 panic-parity + plane cover
+spgist-geo	proofs::eq_spg_quad_leaf	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 4022
+spgist-geo	proofs::eq_spg_quad_inner	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 4021
+spgist-geo	proofs::eq_spg_kd_inner	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 4026
+spgist-geo	proofs::eq_spg_box_quad_choose	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 5013
+spgist-geo	proofs::eq_spg_box_quad_leaf	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 5016
+spgist-geo	proofs::eq_spg_box_quad_inner	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 5015 (16-quadrant ladder tier)
+spgist-geo	proofs::eq_spg_poly_quad_compress	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat	green	unmeasured	?	FLEET-BOUND: authored+codegen-gated, not solved locally; row 5011
+spgist-geo	proofs::cover_spgist_geo_regimes	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c	covers	unmeasured	?	FLEET-BOUND: DEFAULT solver; covers must be SATISFIED
+spgist-geo	proofs::control_spgist_geo_strategy_skew	-Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c	must-fail	unmeasured	?	FLEET-BOUND: DEFAULT solver; MUST FAIL w/ decodable cex; verify failing CHECK NAME

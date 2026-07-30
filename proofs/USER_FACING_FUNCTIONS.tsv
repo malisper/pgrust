@@ -2226,11 +2226,11 @@ oid	name	source_file	status	class	notes
 3789	gin_clean_pending_list	crates/backend/access/gin/gin_funcs/src/lib.rs	excluded(state/engine)	-	gin_funcs lib.rs:50 buffer/WAL cleanup
 3790	gtsvector_consistent_oldsig	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3793	gtsquery_consistent_oldsig	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
-3795	inet_spg_config	crates/backend/utils/adt/network_spgist/src/lib.rs	candidate	fast	network_spgist/src/lib.rs:48; literal spgConfigOut writes. Host new proofs/spgist-inet
-3796	inet_spg_choose	crates/backend/utils/adt/network_spgist/src/lib.rs	candidate	ladder	lib.rs:73 + inet_spg_node_number:60 — pure inet bit logic over fixed frames, no typcache; arm parity theorem
+3795	inet_spg_config	crates/backend/utils/adt/network_spgist/src/lib.rs	proved(fmgr-level; all fields incl untouched-zero; modulo static-buffer allocator model)	fast	proofs/spgist-inet eq_inet_spg_config kissat 64.4s (load~12); harness fix 2026-07-30: family-wide unwind(12) + env-zero/OnceLock stubs (AcctWeak retain symex hang)
+3796	inet_spg_choose	crates/backend/utils/adt/network_spgist/src/lib.rs	partial(no-prefix arm proved; famsplit+af4 CI-bound)	ladder	eq_inet_spg_choose_nopfx PROVED kissat 96.8s (load~21); famsplit wall(timeout-450s, load 18-24, SSA-convert phase); af4 not attempted locally
 3797	inet_spg_picksplit	crates/backend/utils/adt/network_spgist/src/lib.rs	blocked(refactor: symbolic nTuples + mcx node arrays)	ladder	lib.rs:135; per-n split (n=2,3) + mcx-stubs makes it reachable
-3798	inet_spg_inner_consistent	crates/backend/utils/adt/network_spgist/src/lib.rs	candidate	ladder	lib.rs:199 -> inet_spg_consistent_bitmap:280 — u32 bitmap scalar verdict; cap nkeys<=2
-3799	inet_spg_leaf_consistent	crates/backend/utils/adt/network_spgist/src/lib.rs	candidate	fast	lib.rs:262 — bool verdict, no alloc, fixed-size inet; best spgist row
+3798	inet_spg_inner_consistent	crates/backend/utils/adt/network_spgist/src/lib.rs	partial(allTheSame arm proved; nopfx+af4 CI-bound)	ladder	eq_inet_spg_inner_allsame PROVED kissat 76.8s (load~17); nopfx wall(timeout-240s, load 15-27, SAT-phase after 8256 VCC); af4_nkeys1 not attempted locally
+3799	inet_spg_leaf_consistent	crates/backend/utils/adt/network_spgist/src/lib.rs	partial(cross-family arm proved; af4_nkeys2 CI-bound)	fast	eq_inet_spg_leaf_mixed_family PROVED kissat 119.0s (load~25); af4_nkeys2 not attempted locally
 3800	pg_current_logfile	crates/backend/utils/adt/adt_misc/src/builtins.rs	excluded(state)	-	server WAL/catalog/session state
 3801	pg_current_logfile_1arg	crates/backend/utils/adt/adt_misc/src/builtins.rs	excluded(state)	-	server WAL/catalog/session state
 3803	jsonb_send	crates/backend/utils/adt/jsonb/src/builtins.rs	excluded(wall: CNF width / image)	-	io.rs:390 version byte + jsonb_to_cstring_into RENDER (not a delegate); escape_json width wall
@@ -2374,16 +2374,16 @@ oid	name	source_file	status	class	notes
 4010	jsonb_path_exists_opr	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
 4011	jsonb_path_match_opr	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
 4014	brin_desummarize_range	crates/backend/access/brin/brin_funcs/src/lib.rs	excluded(state/engine)	-	revmap mutation
-4018	spg_quad_config	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	fast	spgist_quadtree/src/lib.rs:139 constant stores; free proof
-4019	spg_quad_choose	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	fast	getQuadrant :93 (proved FP compares) + fc :153; impossible-case panic arm = unreachability claim
+4018	spg_quad_config	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	proved(fmgr-level; all fields incl untouched-zero; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_quad_config_h kissat 100.9s (load~21)
+4019	spg_quad_choose	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	authored(CI-bound)	fast	proofs/spgist-geo eq_spg_quad_choose + eq_quad_getquadrant_err_plane codegen-gated; err-plane wall(timeout-180s, load=26) local; impossible-quadrant plane = panic-parity theorem + cover
 4020	spg_quad_picksplit	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	blocked(wall+mcx: centroid /= n symbolic divide + PgVec)	-	:177
-4021	spg_quad_inner_consistent	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	ladder	:217 which-bitmask lattice 6 strategies + ContainedBy 4-corner fold; mcx-stubs for PgVec outs; fence norderbys=0, nkeys<=2
-4022	spg_quad_leaf_consistent	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	candidate	fast	:344 point predicates over nkeys<=2, no alloc when norderbys=0
-4023	spg_kd_config	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	candidate	fast	spgist_kdtree/src/lib.rs:54 constant stores
-4024	spg_kd_choose	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	candidate	fast	getSide :43 + level%2 axis pick :68
+4021	spg_quad_inner_consistent	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	authored(CI-bound)	ladder	proofs/spgist-geo eq_spg_quad_inner codegen-gated; nkeys<=1 pt-strategies incl RTSame quadrant + ContainedBy 4-corner fold; norderbys=0 fence, allTheSame arm in
+4022	spg_quad_leaf_consistent	crates/backend/access/spgist/spgist_quadtree/src/lib.rs	authored(CI-bound)	fast	proofs/spgist-geo eq_spg_quad_leaf codegen-gated; nkeys<=1, verdict+recheck+leafValue; norderbys=0 fence
+4023	spg_kd_config	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	proved(fmgr-level; all fields incl untouched-zero; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_kd_config_h kissat 124.7s (load~22)
+4024	spg_kd_choose	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	proved(fmgr-level; full-symbolic point+coord incl NaN/+-0; fences: allTheSame=false (C elog/Rust panic plane), hasPrefix, nNodes=2, level>=0; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_kd_choose kissat 141.4s (load~15)
 4025	spg_kd_picksplit	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	excluded(blocked: sort — stable sort_by vs C unstable qsort, declared tie-order difference)	-	:91 + PgVec
-4026	spg_kd_inner_consistent	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	candidate	ladder	:151 FP lattice + by_x axis + hi/lo arm; mcx-stubs, fence norderbys=0
-4027	spg_text_config	crates/backend/access/spgist/spgist_text/src/lib.rs	candidate	fast	spgist_text/src/lib.rs:115 constant stores
+4026	spg_kd_inner_consistent	crates/backend/access/spgist/spgist_kdtree/src/lib.rs	authored(CI-bound)	ladder	proofs/spgist-geo eq_spg_kd_inner codegen-gated; nkeys<=1, FP lattice + axis split; norderbys=0, allTheSame=false fences
+4027	spg_text_config	crates/backend/access/spgist/spgist_text/src/lib.rs	proved(core-level spg_text_config; all fields incl untouched-zero)	fast	proofs/spgist-geo eq_spg_text_config_core kissat 0.05s; fmgr shell excluded: SPGIST_TEXT_BUILTINS reaches fc_spghandler -> ipc_seams::proc_exit = Kani 0.67 codegen ICE
 4028	spg_text_choose	crates/backend/access/spgist/spgist_text/src/lib.rs	blocked(refactor: decision core — emits level-derived text images)	-	:130; SPLIT OUT common_prefix :87 + search_char :98 (int16 bsearch) as standalone candidate-fast kernels
 4029	spg_text_picksplit	crates/backend/access/spgist/spgist_text/src/lib.rs	blocked(alloc/sort)	-	:240
 4030	spg_text_inner_consistent	crates/backend/access/spgist/spgist_text/src/lib.rs	blocked(seam+image: pg_newlocale_from_collation + form_text_4b derived lengths)	-	:325; cmp/strategy lattice only provable projection
@@ -2682,13 +2682,13 @@ oid	name	source_file	status	class	notes
 5006	phraseto_tsquery_byid	crates/backend/tsearch/to_tsany/src/builtins.rs	excluded(engine)	-	tsearch parser+config engine
 5007	websearch_to_tsquery_byid	crates/backend/tsearch/to_tsany/src/builtins.rs	excluded(engine)	-	tsearch parser+config engine
 5009	websearch_to_tsquery	crates/backend/tsearch/to_tsany/src/builtins.rs	excluded(engine)	-	tsearch parser+config engine
-5010	spg_bbox_quad_config	crates/backend/access/spgist/spgist_box/src/lib.rs	candidate	fast	spgist_box/src/lib.rs:546 constant stores incl leafType split vs 5012
-5011	spg_poly_quad_compress	crates/backend/access/spgist/spgist_box/src/lib.rs	candidate	ladder	:557 boundbox slice + form_box_datum :111 fixed 4xf64 PgVec; mcx-stubs
-5012	spg_box_quad_config	crates/backend/access/spgist/spgist_box/src/lib.rs	candidate	fast	:257 constant stores
-5013	spg_box_quad_choose	crates/backend/access/spgist/spgist_box/src/lib.rs	candidate	fast	getQuadrant :122 four raw f64 > compares + allTheSame arm :267
+5010	spg_bbox_quad_config	crates/backend/access/spgist/spgist_box/src/lib.rs	proved(fmgr-level; all fields incl leafType split vs 5012; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_bbox_config_h kissat 113.8s (load~19)
+5011	spg_poly_quad_compress	crates/backend/access/spgist/spgist_box/src/lib.rs	authored(CI-bound)	ladder	proofs/spgist-geo eq_spg_poly_quad_compress codegen-gated; npts=1 polygon image, 4xf64 boundbox image parity
+5012	spg_box_quad_config	crates/backend/access/spgist/spgist_box/src/lib.rs	proved(fmgr-level; all fields incl untouched-zero; modulo static-buffer allocator model)	fast	proofs/spgist-geo eq_spg_box_config_h kissat 110.8s (load~20)
+5013	spg_box_quad_choose	crates/backend/access/spgist/spgist_box/src/lib.rs	authored(CI-bound)	fast	proofs/spgist-geo eq_spg_box_quad_choose codegen-gated; 4 raw f64 > compares incl NaN plane + allTheSame zero-nodeN arm
 5014	spg_box_quad_picksplit	crates/backend/access/spgist/spgist_box/src/lib.rs	blocked(alloc/sort: PgVec arrays + total_cmp sort — declared NaN/-0.0 median difference vs C)	-	:284
-5015	spg_box_quad_inner_consistent	crates/backend/access/spgist/spgist_box/src/lib.rs	candidate	ladder	:376 nextRectBox :155 + 4D FPge/FPle predicates :181-253; 16-quadrant loop unwind 16 exact; mcx-stubs; fence norderbys=0 nkeys=1
-5016	spg_box_quad_leaf_consistent	crates/backend/access/spgist/spgist_box/src/lib.rs	candidate	fast	:483 box predicates (PROVED in geo-cmp) nkeys<=2 BOXOID; polygon arm + recheck flip = ladder follow-up
+5015	spg_box_quad_inner_consistent	crates/backend/access/spgist/spgist_box/src/lib.rs	authored(CI-bound)	ladder	proofs/spgist-geo eq_spg_box_quad_inner codegen-gated; 16-quadrant nextRectBox loop, nkeys<=1 box strategies, root traversal; ladder tier
+5016	spg_box_quad_leaf_consistent	crates/backend/access/spgist/spgist_box/src/lib.rs	authored(CI-bound)	fast	proofs/spgist-geo eq_spg_box_quad_leaf codegen-gated; BOXOID keys nkeys<=1, all 12 strategies, returnData gate; polygon-key arm = follow-up
 5018	pg_mcv_list_in	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads
 5019	pg_mcv_list_out	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads
 5020	pg_mcv_list_recv	crates/backend/statistics/statistics/src/builtins.rs	excluded(state)	-	stats catalog reads

@@ -216,6 +216,9 @@ mod proofs {
     macro_rules! sg_proof {
         ($(#[$attr:meta])* fn $name:ident() $body:block) => {
             #[kani::proof]
+            // Family-wide unwind bound: mcx AcctWeak-registry retain loops
+            // (empty-vec, infeasible-deep) hang symex without a bound.
+            #[kani::unwind(12)]
             $(#[$attr])*
             #[kani::stub(mcx::Mcx::allocate, proof_support::mcx_stubs::stub_mcx_allocate)]
             #[kani::stub(mcx::Mcx::grow, proof_support::mcx_stubs::stub_mcx_grow)]
@@ -225,7 +228,11 @@ mod proofs {
             #[kani::stub(mcx::local_pool_on, stub_local_pool_on)]
             #[kani::stub(types_error::PgError::error, proof_support::stub_pg_error_error)]
             #[kani::stub(alloc::fmt::format, proof_support::stub_format)]
-            #[kani::stub(std::env::var, proof_support::stub_env_var)]
+            // env=0 + OnceLock-recompute: without these, MemoryContext
+            // construction reaches the AcctWeak registry retain loop
+            // (unbounded symex hang — measured 2026-07-30, iteration 469+).
+            #[kani::stub(std::env::var, proof_support::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, proof_support::stub_once_lock_get_or_init)]
             fn $name() $body
         };
     }
@@ -490,7 +497,6 @@ mod proofs {
         /// row 3796 prefixed tuple, both AF_INET: the full split-vs-match
         /// decision (bitncmp + bitncommon + cidr_set_masklen + node_number
         /// in-theorem, fresh-prefix image parity). Expected ladder tier.
-        #[kani::unwind(12)]
         fn eq_inet_spg_choose_af4() {
             let val = sym_inet4();
             let prefix = sym_inet4();
@@ -601,7 +607,6 @@ mod proofs {
     sg_proof! {
         /// row 3798 4-node prefixed tuple, AF_INET plane, nkeys<=1: the full
         /// consistent_bitmap checks 0-5 in-theorem. Expected ladder tier.
-        #[kani::unwind(12)]
         fn eq_inet_spg_inner_af4_nkeys1() {
             let nkeys: i32 = kani::any();
             kani::assume((0..=1).contains(&nkeys));
@@ -685,7 +690,6 @@ mod proofs {
         /// row 3799 AF_INET plane, nkeys<=2 fully symbolic strategies: bool
         /// verdict + recheck + leafValue passthrough (checks 0-6 incl the
         /// whole-address bitncmp in-theorem). Expected ladder tier.
-        #[kani::unwind(12)]
         fn eq_inet_spg_leaf_af4_nkeys2() {
             let nkeys: i32 = kani::any();
             kani::assume((0..=2).contains(&nkeys));
@@ -734,7 +738,6 @@ mod proofs {
         /// Regime coverage (vacuity insurance): leaf verdict both ways and
         /// the sub/super strategy arms reachable on the AF4 plane. DEFAULT
         /// solver.
-        #[kani::unwind(12)]
         fn cover_spgist_regimes() {
             let leaf = sym_inet4();
             let a0 = sym_inet4();
@@ -766,7 +769,6 @@ mod proofs {
         /// MUST FAIL (rig non-vacuity control): C sees a SKEWED strategy
         /// (RTLess where Rust sees RTLessEqual) — any exact-equal leaf/arg
         /// pair is a counterexample. DEFAULT solver.
-        #[kani::unwind(12)]
         fn control_spgist_leaf_strategy_skew() {
             let leaf = sym_inet4();
             let a0 = sym_inet4();

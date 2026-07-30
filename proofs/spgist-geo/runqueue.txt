@@ -1,0 +1,35 @@
+# proofs/spgist-geo runqueue — SP-GiST point/box opclasses + text config
+# (rows 4018 4019 4021 4022 / 4023 4024 4026 / 5010 5011 5012 5013 5015
+# 5016 / 4027). Picksplit rows are NOT harnessed (4020 4025 5014 out of
+# this lane's oid set; symbolic nTuples + sorts anyway).
+#
+# Run from proofs/spgist-geo/, ONE at a time. kissat for expected-green,
+# DEFAULT for covers/controls. All harnesses carry the family unwind(18)
+# + full mcx stub set inside the sg_proof! macro (AcctWeak-retain symex
+# hang without it — measured in spgist-inet 2026-07-30).
+#
+# Under load ~20, fmgr-frame harnesses cost ~100-150s wall each
+# (CBMC-reported Verification Time; per-commit budget re-anchored to that
+# overhead, not the 10s scalar-class bar).
+#
+# harness | rows | command
+# eq_spg_quad_config_h      4018 | timeout 180 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_spgist_geo.c --solver kissat --harness proofs::eq_spg_quad_config_h --exact
+# eq_spg_kd_config_h        4023 | (same shape)
+# eq_spg_box_config_h       5012 | (same shape)
+# eq_spg_bbox_config_h      5010 | (same shape)
+# eq_spg_text_config_core   4027 | (same shape; core-level, see lib.rs — fmgr shell is a Kani ICE via fc_spghandler)
+# eq_spg_quad_choose        4019 | timeout 300
+# eq_quad_getquadrant_err_plane 4019 | timeout 300 (panic-parity + cover of the impossible-quadrant plane)
+# eq_spg_quad_leaf          4022 | timeout 300
+# eq_spg_quad_inner         4021 | timeout 450
+# eq_spg_kd_choose          4024 | timeout 300
+# eq_spg_kd_inner           4026 | timeout 450
+# eq_spg_box_quad_choose    5013 | timeout 300
+# eq_spg_box_quad_leaf      5016 | timeout 450
+# eq_spg_box_quad_inner     5015 | timeout 450 (16-quadrant loop; ladder tier)
+# eq_spg_poly_quad_compress 5011 | timeout 300
+# cover_spgist_geo_regimes  ctl  | timeout 450, DEFAULT solver (covers must be SATISFIED)
+# control_spgist_geo_strategy_skew ctl | timeout 450, DEFAULT solver, MUST FAIL w/ decodable cex
+#
+# NOTE five-configs-in-one-harness was a measured symex wall (>450s);
+# per-config harnesses are the recorded shape.
