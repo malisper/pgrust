@@ -1849,3 +1849,14 @@ datetime-cmp	wave7_proofs::eq_tstz_mi_interval_nobegin	-Z c-ffi -Z stubbing --c-
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_nobegin	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.0	plane; DEFAULT solver
 datetime-cmp	wave7_proofs::eq_tstz_mi_interval_at_zone_noend	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --exact	green	per-commit	2.3	plane; DEFAULT solver
+hash-rows	wave5::eq_hashtid	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	2.3	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashtidextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	6.7	wave-5 run 2026-07-30 idle
+hash-rows	wave5::control_hashtid_len_skew	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --exact	must-fail	control	0.5	default solver; fails on C 4-of-6-byte skew as designed
+hash-rows	wave5::eq_hashxid	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	0.7	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashxidextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	3.3	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashcid	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	0.8	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashcidextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	3.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashxid8	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	4.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_hashxid8extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	7.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_pg_lsn_hash	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	3.6	wave-5 run 2026-07-30 idle
+hash-rows	wave5::eq_pg_lsn_hash_extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	4.4	wave-5 run 2026-07-30 idle

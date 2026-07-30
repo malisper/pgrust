@@ -1265,8 +1265,8 @@ oid	name	source_file	status	class	notes
 2221	regtypeout	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
 2230	pg_stat_clear_snapshot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 2232	pg_get_function_identity_arguments	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
-2233	hashtid	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-2234	hashtidextended	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+2233	hashtid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full symbolic 6-byte tid image, wrapper-level)	fast	2.3s; C hashes the 4-byte block fold of all 6 bytes — len-skew control in family; proofs/hash-rows wave5
+2234	hashtidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full symbolic 6-byte tid image + full symbolic seed, wrapper-level)	fast	6.7s; proofs/hash-rows wave5
 2246	fmgr_internal_validator	crates/backend/executor/sql_functions/src/lib.rs	excluded(state: catalog + MemoryContext)	-	sql_functions/src/lib.rs:1177
 2247	fmgr_c_validator	crates/backend/catalog/pg_proc/src/lib.rs	excluded(state)	-	pg_proc catalog state
 2248	fmgr_sql_validator	crates/backend/executor/sql_functions/src/lib.rs	excluded(state: catalog + parser)	-	sql_functions/src/lib.rs:1196
@@ -1889,7 +1889,7 @@ oid	name	source_file	status	class	notes
 3238	pg_lsn_recv	crates/backend/utils/adt/pg_lsn/src/builtins.rs	untriaged		
 3239	pg_lsn_send	crates/backend/utils/adt/pg_lsn/src/builtins.rs	untriaged		
 3251	pg_lsn_cmp	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64xu64)	fast	0.04s; proofs/pg_lsn
-3252	pg_lsn_hash	crates/backend/utils/adt/pg_lsn/src/builtins.rs	untriaged		
+3252	pg_lsn_hash	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64 lsn (rides as i64 datum), wrapper-level)	fast	3.6s; proofs/hash-rows wave5
 3255	bttextsortsupport	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(port gap: unported)	-	builtins.rs:561 panics "abbreviated-key SortSupport unported"
 3259	generate_series	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state: SRF fn_extra + DigitBuf)	-	GenerateSeriesNumeric series.rs:29/50
 3260	generate_series	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state: SRF fn_extra + DigitBuf)	-	same PGFunction, 2-arg form series.rs:41
@@ -1994,7 +1994,7 @@ oid	name	source_file	status	class	notes
 3410	timetz_hash_extended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full (i64,i32) x full seed)	slow	31.2s; proofs/datetime-b lane D
 3411	timestamp_hash_extended	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 x full-u64 seed)	fast	3.6s; proofs/datetime-cmp wave7
 3412	uuid_hash_extended	crates/backend/utils/adt/uuid/src/builtins.rs	untriaged		
-3413	pg_lsn_hash_extended	crates/backend/utils/adt/pg_lsn/src/builtins.rs	untriaged		
+3413	pg_lsn_hash_extended	crates/backend/utils/adt/pg_lsn/src/builtins.rs	proved(full-u64 lsn + full symbolic seed, wrapper-level)	fast	4.4s; proofs/hash-rows wave5
 3414	hashenumextended	crates/backend/utils/adt/adt_enum/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 3415	pg_get_statisticsobjdef	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 3416	jsonb_hash_extended	crates/backend/utils/adt/jsonb/src/builtins.rs	blocked(fixed-frame hash core: mirror ops::compare_containers_fixed)	ladder	ops.rs:425 allocating iterator; provable TODAY: hash_scalar_value_extended ops.rs:384 + hash_numeric_extended ops.rs:338 + container_size==0 shortcut; unblock = 15-line jsonb_hash_fixed<N> over FixedJsonbIterator iter.rs:229
@@ -2954,12 +2954,12 @@ oid	name	source_file	status	class	notes
 6416	hashdateextended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i32 x full seed)	fast	4.2s; proofs/datetime-b lane D
 6417	hashbool	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 6418	hashboolextended	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
-6419	hashxid	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-6420	hashxidextended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hash_uint32_extended scalar/src/builtins.rs:178 (hashfn proved). Host proofs/hash-rows
-6421	hashxid8	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hashxid8 scalar/src/builtins.rs:268 — sign-conditional hi/lo xor fold, full i64; highest-value of batch. Host proofs/hash-rows
-6422	hashxid8extended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	builtins.rs:277 — same fold + seeded mix
-6423	hashcid	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hash_uint32 builtins.rs:173 shared body w/ hashxid; one harness both oids
-6424	hashcidextended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	shared body with 6420
+6419	hashxid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level)	fast	0.7s; shared fc_hash_uint32 body with hashcid; proofs/hash-rows wave5
+6420	hashxidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 + full symbolic seed, wrapper-level)	fast	3.3s; shared fc_hash_uint32_extended body with hashcidextended; proofs/hash-rows wave5
+6421	hashxid8	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-i64 sign-conditional hi/lo fold, wrapper-level)	fast	4.6s; proofs/hash-rows wave5
+6422	hashxid8extended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-i64 sign-conditional hi/lo fold + full symbolic seed, wrapper-level)	fast	7.6s; proofs/hash-rows wave5
+6423	hashcid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level)	fast	0.8s; shared fc_hash_uint32 body with hashxid; proofs/hash-rows wave5
+6424	hashcidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 + full symbolic seed, wrapper-level)	fast	3.6s; shared body with 6420; proofs/hash-rows wave5
 6425	timestamptz_hash	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64; hashint8 fold + hash_uint32 in-theorem)	fast	3.6s; proofs/datetime-cmp wave7
 6426	timestamptz_hash_extended	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 x full-u64 seed)	fast	3.6s; proofs/datetime-cmp wave7
 6427	pg_get_sequence_data	crates/backend/commands/sequence/src/builtins.rs	candidate	seam	pending state-seam probe (sequence state)
