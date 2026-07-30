@@ -557,8 +557,7 @@ mod proofs {
     #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
     #[kani::stub(std::fmt::format, stubs::stub_format)]
     fn control_ovout_value_skew() {
-        let v: u32 = kani::any();
-        kani::assume(v < 10_000);
+        let v: u32 = 42; // concrete: the expected failure must decode fast
         let img = ovec(1, [v, 0, 0, 0]);
         let skew = [v ^ 1, 0, 0, 0];
         let mut cbuf = [0u8; 64];
@@ -644,7 +643,7 @@ mod proofs {
     /// dim-2 banded cell: elements in (-100,100) (the full-i16 dim-2 cell
     /// is a measured memory wall at the 6GB local cap).
     #[kani::proof]
-    #[kani::unwind(9)]
+    #[kani::unwind(12)]
     #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
     #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
     #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
