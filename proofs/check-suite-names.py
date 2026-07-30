@@ -53,17 +53,39 @@ Exit nonzero on any ERROR (unresolvable name, missing-marked name that now
 resolves, kani list failure, missing native bin) or on a census mismatch.
 """
 
+import atexit
 import collections
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 
 PROOFS_DIR = os.path.dirname(os.path.abspath(__file__))
 SUITE_TSV = os.path.join(PROOFS_DIR, "SUITE.tsv")
+
+
+# Manifests currently stripped of [package.metadata.kani.flags] as (path,
+# backup) pairs. Restored by the normal `finally`, and by an atexit/signal
+# handler if the run is interrupted — an abandoned stripped manifest silently
+# changes a family's proof recipe.
+PENDING_RESTORES = set()
+
+
+def restore_pending(*_args):
+    for manifest, backup in list(PENDING_RESTORES):
+        if os.path.exists(backup):
+            shutil.move(backup, manifest)
+            print(f"restored {manifest} (interrupted)", file=sys.stderr)
+    PENDING_RESTORES.clear()
+
+
+atexit.register(restore_pending)
+for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(_sig, lambda s, f: sys.exit(128 + s))
 
 
 LIST_ATTEMPTS = 3
@@ -105,12 +127,24 @@ def kani_list(family, cache_dir=None):
     out_json = os.path.join(crate, "kani-list.json")
     backup = None
 
+    def restore():
+        # The stripped manifest must never outlive this call: a leftover
+        # stripped Cargo.toml silently drops the family's c-lib flags, which
+        # is the same manifest-rot class this checker exists to catch. The
+        # finally block covers exceptions; PENDING_RESTORES covers signals.
+        if backup and os.path.exists(backup):
+            shutil.move(backup, manifest)
+        PENDING_RESTORES.discard(token)
+
+    token = (manifest, manifest + ".check-names.bak")
+
     with open(manifest) as f:
         toml = f.read()
     if "[package.metadata.kani.flags]" in toml:
         # cargo-kani 0.67: metadata flags misroute `list` into verification.
         backup = manifest + ".check-names.bak"
         shutil.copy2(manifest, backup)
+        PENDING_RESTORES.add(token)
         stripped = re.sub(
             r"\[package\.metadata\.kani\.flags\][^\[]*", "", toml
         )
@@ -137,8 +171,7 @@ def kani_list(family, cache_dir=None):
         os.remove(out_json)  # don't leave build artifacts in the crate
         return names
     finally:
-        if backup:
-            shutil.move(backup, manifest)
+        restore()
 
 
 def load_names(path):
