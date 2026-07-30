@@ -166,14 +166,17 @@ mod proofs {
     // (Linux-aarch64). Ground-truthed 2026-07-29 on real Postgres 18.4:
     // hashchar('\200'::"char") = 1361043915 (macOS) vs 1807103465 (docker
     // postgres:18 Linux aarch64) — C Postgres itself is platform-dependent
-    // for high-bit chars. pgrust ships the SIGN-EXTENDING arm
-    // (as_char() as i32). Adjudication owed (which arm to pin on the
-    // Linux-aarch64 deployment platform); until ruled:
+    // for high-bit chars. The v0.2 lineage ships the ZERO-EXTENDING arm
+    // (as_char() as u8 as u32) — matches Linux-aarch64 C PG (deployment
+    // platform), diverges from macOS/x86-64 C PG on the high-bit plane
+    // (the old lineage shipped the sign-extending arm; adjudication
+    // package proofs/char/ADJUDICATION-CHAR-SIGNEDNESS.md predates the
+    // flip). Structure:
     //  (a) eq_* theorems fence to the portable plane (v >= 0), green on
     //      any suite host;
     //  (b) model_* theorems pin pgrust's full-domain behavior to the
-    //      explicit sign-extended model through the same vendored hash
-    //      core (pg_hashint4 == hash_uint32(v)).
+    //      explicit ZERO-extended model through the same vendored hash
+    //      core (pg_hashint4 == hash_uint32(zext v)).
 
     #[kani::proof]
     fn eq_hashchar() {
@@ -198,19 +201,25 @@ mod proofs {
         assert!(r.as_u64() == c);
     }
 
-    /// Pinned model: shipped hashchar == hash_uint32(sign-extend(v)) over
+    /// Pinned model: shipped hashchar == hash_uint32(ZERO-extend(v)) over
     /// the FULL i8 domain, via the vendored hash core (pg_hashint4).
+    /// The v0.2 lineage ships the UNSIGNED arm (`as_char() as u8 as u32`,
+    /// adt_int/builtins.rs fc_hashchar) — it matches C Postgres on
+    /// unsigned-char platforms (Linux-aarch64, the deployment platform)
+    /// and diverges from C Postgres on signed-char platforms
+    /// (macOS / Linux-x86-64) for the 128 high-bit chars. Decode lane
+    /// 2026-07-30: re-pointed from the old lineage's sign-extended pin.
     #[kani::proof]
-    fn model_hashchar_signed_full() {
+    fn model_hashchar_unsigned_full() {
         let v: i8 = kani::any();
         let r = call(adt_int::builtins::fc_hashchar, 0, [Datum::from_char(v)]);
-        let m = unsafe { pg_hashint4(v as i32) };
+        let m = unsafe { pg_hashint4(v as u8 as i32) };
         assert!(r.as_u32() == m);
     }
 
     /// Pinned model, extended variant (same claim through hash_uint32_extended).
     #[kani::proof]
-    fn model_hashcharextended_signed_full() {
+    fn model_hashcharextended_unsigned_full() {
         let v: i8 = kani::any();
         let seed: i64 = kani::any();
         let r = call(
@@ -218,7 +227,7 @@ mod proofs {
             0,
             [Datum::from_char(v), Datum::from_i64(seed)],
         );
-        let m = unsafe { pg_hashint4extended(v as i32, seed) };
+        let m = unsafe { pg_hashint4extended(v as u8 as i32, seed) };
         assert!(r.as_u64() == m);
     }
 

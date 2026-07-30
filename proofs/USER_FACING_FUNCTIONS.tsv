@@ -1,6 +1,6 @@
 oid	name	source_file	status	class	notes
 31	byteaout	crates/backend/utils/adt/varlena/src/builtins.rs	proved(hex path len<=8 end-to-end incl prefix+NUL; escape path WALL)	fast/wall-split	hex = default bytea_output, 23s; escape wall = std Vec push machinery not escape logic (kernels proved separately); proofs/bytea-varbit
-33	charout	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8; roundtrip)	fast	0.47s; proofs/char; C int-truncation comment claim now machine-checked
+33	charout	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8; roundtrip; 8-bit datum-value parity)	fast	0.61s; proofs/char; C int-truncation comment claim machine-checked; CI cluster char-signedness FAILs = harness-shim widening artifact (fixed, CI-decode 2026-07-30)
 34	namein	crates/backend/utils/adt/name/src/builtins.rs	proved(cstr len<=71 incl truncation; modulo identical mbcliplen single-byte model)	fast	1.7s; multibyte clip parity owed to mbutils family; proofs/name-ascii
 35	nameout	crates/backend/utils/adt/name/src/builtins.rs	proved(full [u8;64], contract data[63]==0)	fast	13.2s under load — re-measure idle; proofs/name-ascii
 38	int2in	crates/backend/utils/adt/int/src/builtins.rs	untriaged		
@@ -38,7 +38,7 @@ oid	name	source_file	status	class	notes
 73	chargt	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 74	charge	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 77	chartoi4	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8)	fast	0.02s; proofs/char
-78	i4tochar	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i32 incl truncation)	fast	0.74s; proofs/char
+78	i4tochar	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i32 incl truncation; 8-bit datum-value parity)	fast	0.63s; proofs/char; CI cluster FAIL = shim widening artifact (fixed)
 79	nameregexeq	crates/backend/utils/adt/regexp/src/builtins.rs	excluded(engine)	-	regex engine internals
 84	boolne	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-bool2)	fast	proofs/bool; <1s; kissat
 86	pg_ddl_command_in	crates/backend/utils/adt/pseudotypes/src/builtins.rs	proved(err-parity: verdict+sqlstate+level; all args ignored)	fast	~0.6s default solver; proofs/pseudotypes eq_pg_ddl_command_in; wrapper-level via LocalFcinfo (call1, null Datum); C MAKE_SQLSTATE computed vs shipped with_sqlstate — 0A000 encoding in-theorem; message text/location out of proof; Err-arm cover! + shell_in must-fail control
@@ -306,7 +306,7 @@ oid	name	source_file	status	class	notes
 443	hashfloat4extended	crates/backend/utils/adt/float/src/builtins.rs	proved(full f32/f64 incl ±0/NaN/Inf + seed; cross-type hashfloat4(x)==hashfloat8(x as f64) bonus theorem)	fast	1-5.3s; proofs/hash-rows
 444	hashfloat8extended	crates/backend/utils/adt/float/src/builtins.rs	proved(full f32/f64 incl ±0/NaN/Inf + seed; cross-type hashfloat4(x)==hashfloat8(x as f64) bonus theorem)	fast	1-5.3s; proofs/hash-rows
 445	hashoidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
-446	hashcharextended	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
+446	hashcharextended	crates/backend/utils/adt/int/src/builtins.rs	proved(v>=0 portable plane + full-i8 zero-extend pinned model, full symbolic seed, wrapper-level)	fast	0.2-9.8s; proofs/hash-rows; high-bit plane = KNOWN C-PG char-signedness platform split (v0.2 ships unsigned arm = Linux-aarch64 C PG; diverges vs signed-char C PG hosts); see proofs/char/ADJUDICATION-CHAR-SIGNEDNESS.md; CI-decode 2026-07-30
 447	hashnameextended	crates/backend/utils/adt/name/src/builtins.rs	proved(len<=8 + len-16 spot, NUL-scan in-theorem; 2 interior lengths unresolved-under-load, retry idle)	fast	proofs/hash-rows
 448	hashtextextended	crates/backend/utils/adt/varlena/src/builtins.rs	proved(len<=8 per-length + coverage + mix-boundary spot; C-collation; collid=0 err-arm 42P22 parity)	fast	extended l6-l8 over-budget greens; proofs/hash-rows
 449	hashint2	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
@@ -314,7 +314,7 @@ oid	name	source_file	status	class	notes
 451	hashfloat4	crates/backend/utils/adt/float/src/builtins.rs	proved(full f32/f64 incl ±0/NaN/Inf + seed; cross-type hashfloat4(x)==hashfloat8(x as f64) bonus theorem)	fast	1-5.3s; proofs/hash-rows
 452	hashfloat8	crates/backend/utils/adt/float/src/builtins.rs	proved(full f32/f64 incl ±0/NaN/Inf + seed; cross-type hashfloat4(x)==hashfloat8(x as f64) bonus theorem)	fast	1-5.3s; proofs/hash-rows
 453	hashoid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
-454	hashchar	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
+454	hashchar	crates/backend/utils/adt/int/src/builtins.rs	proved(v>=0 portable plane + full-i8 zero-extend pinned model, wrapper-level)	fast	0.2s; proofs/hash-rows; high-bit plane = KNOWN C-PG char-signedness platform split (v0.2 ships unsigned arm = Linux-aarch64 C PG); see proofs/char/ADJUDICATION-CHAR-SIGNEDNESS.md; CI-decode 2026-07-30
 455	hashname	crates/backend/utils/adt/name/src/builtins.rs	proved(len<=8 + len-16 spot, NUL-scan in-theorem; 2 interior lengths unresolved-under-load, retry idle)	fast	proofs/hash-rows
 456	hashvarlena	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
 457	hashoidvector	crates/backend/utils/adt/scalar/src/builtins.rs	proved(dim<=4 per-length + coverage; valid-oidvector fence)	fast	FIXED 2026-07-28: release-effective check_valid_oidvector gate added; proofs/hash-rows
@@ -509,7 +509,7 @@ oid	name	source_file	status	class	notes
 941	int4mod	crates/backend/utils/adt/int/src/builtins.rs	proved(b in {0,-1,+1} spots full-sym dividend: x/0 22012, INT_MIN/-1 22003, /-1==neg, %-1==0 all in-theorem; symbolic-divisor remainder wall)	fast	0.1-0.2s spots; proofs/int-arith
 942	int28mi	crates/backend/utils/adt/int8/src/builtins.rs	proved(full domain; value+verdict+sqlstate 22003, wrapper-level)	fast	0.4-0.5s; proofs/int-arith
 943	int28mul	crates/backend/utils/adt/int8/src/builtins.rs	proved(FULL symbolic domain incl 64x64; value+verdict+sqlstate)	fast	1-8s kissat+noreach; predecessor wall = drop-glue artifact; proofs/int-arith
-944	text_char	crates/backend/utils/adt/char/src/builtins.rs	proved	fast	0.48s; proofs/char
+944	text_char	crates/backend/utils/adt/char/src/builtins.rs	proved(8-bit datum-value parity)	fast	0.42s; proofs/char; CI cluster FAIL = shim widening artifact (fixed)
 945	int8mod	crates/backend/utils/adt/int8/src/builtins.rs	proved(b in {0,-1,+1} spots full-sym dividend: x/0 22012, INT_MIN/-1 22003, /-1==neg, %-1==0 all in-theorem; symbolic-divisor remainder wall)	fast	0.1-0.2s spots; proofs/int-arith
 946	char_text	crates/backend/utils/adt/char/src/builtins.rs	proved(value core full-i8 incl 0x00->empty arm; cstring_to_text packing tier tested)	fast	wrapper symex wall; proofs/char
 947	int8mod	crates/backend/utils/adt/int8/src/builtins.rs	proved(b in {0,-1,+1} spots full-sym dividend: x/0 22012, INT_MIN/-1 22003, /-1==neg, %-1==0 all in-theorem; symbolic-divisor remainder wall)	fast	0.1-0.2s spots; proofs/int-arith
@@ -675,7 +675,7 @@ oid	name	source_file	status	class	notes
 1242	boolin	crates/backend/utils/adt/bool/src/builtins.rs	proved(len<=8)	fast	7.7s; proofs/bool-parse; trailing-space==NUL comment claim machine-checked; also case-split l0-l6 + union coverage in proofs/bool
 1243	boolout	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-bool; byte+NUL)	fast	proofs/bool; <1s; kissat
 1244	byteain	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	SCALAR CORE byteain pass one varlena/src/bytea.rs:151-170: escape-count + accept/reject (invalid_bytea_input); symbolic len<=8; pass-two image walls; \x arm delegates hex_decode — fence out. Octal-escape acceptance parity
-1245	charin	crates/backend/utils/adt/char/src/builtins.rs	proved(cstr len<=4)	fast	0.42s; proofs/char
+1245	charin	crates/backend/utils/adt/char/src/builtins.rs	proved(cstr len<=4; 8-bit datum-value parity)	fast	0.97s; proofs/char; CI cluster FAIL = shim widening artifact (fixed)
 1246	charlt	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 1250	unique_key_recheck	crates/backend/commands/constraint_cmd/src/lib.rs	excluded(state)	-	constraint catalog state
 1251	int4abs	crates/backend/utils/adt/int/src/builtins.rs	proved(full domain; value+verdict+sqlstate 22003)	fast	0.4-1s; proofs/int-arith
@@ -916,7 +916,7 @@ oid	name	source_file	status	class	notes
 1619	pg_typeof	crates/backend/utils/adt/adt_misc/src/lib.rs	excluded(state)	-	fn_expr arg-type introspection
 1620	ascii	crates/backend/utils/adt/oracle_compat/src/builtins.rs	in-progress		assigned agent:strings-misc 2026-07-28w5
 1621	chr	crates/backend/utils/adt/oracle_compat/src/builtins.rs	in-progress		assigned agent:strings-misc 2026-07-28w5
-1622	repeat	crates/backend/utils/adt/oracle_compat/src/builtins.rs	untriaged		
+1622	repeat	crates/backend/utils/adt/oracle_compat/src/builtins.rs	proved(54000 count-overflow err plane, count>=0x10000000, slen=4 symbolic; ok-arm image out of theorem)	ladder	eq_repeat_err_plane 48s (kissat, loaded box); CI cluster FAIL = concrete_varlena unwind(4) truncation artifact (unwind 6 fix in-tree, re-verified); proofs/oracle-compat; CI-decode 2026-07-30
 1623	similar_escape	crates/backend/utils/adt/regexp/src/builtins.rs	excluded(engine)	-	regex engine internals
 1624	mul_d_interval	crates/backend/utils/adt/adt_date/src/builtins.rs	excluded(wall: alias of interval_mul core)	-	builtins.rs:596 args swapped
 1631	bpcharlike	crates/backend/utils/adt/like/src/builtins.rs	excluded(engine)	-	LIKE matcher engine
@@ -1043,7 +1043,7 @@ oid	name	source_file	status	class	notes
 1813	pg_convert	crates/backend/utils/mb/mbutils/src/builtins.rs	excluded(blocked: conversion-proc dispatch + image)	-	same core; pg_char_to_encoding lookups already covered by encnames family
 1830	float8_avg	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity full + value grid)	fast	CI cluster; proofs/float-agg
 1831	float8_var_samp	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity full + value grid)	fast	CI cluster; proofs/float-agg
-1832	float8_stddev_samp	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity planes) + tested(differential, 0 diffs)	ladder	CBMC sqrt model artifact; proofs/float-agg
+1832	float8_stddev_samp	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity planes + special grid, modulo deterministic sqrt model) + tested(differential, 0 diffs)	ladder	grid_stddev_samp 5.4s green with det-sqrt stub; CI cluster FAIL @994f9977 = dsqrt dual-mode artifact (pre-fix tip); proofs/float-agg; CI-decode 2026-07-30
 1833	numeric_accum	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state)	-	numeric_accum_common builtins.rs:497; INTERNAL state + Mcx
 1834	int2_accum	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state)	-	fc_poly_accum builtins.rs:378 -> do_int128_accum aggregates.rs:760 (sampled macro family); re-openable under state-seam pattern
 1835	int4_accum	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state)	-	as 1834 (sampled)
@@ -1482,7 +1482,7 @@ oid	name	source_file	status	class	notes
 2510	pg_prepared_statement	crates/backend/commands/prepare/src/lib.rs	excluded(state)	-	prepared-stmt session state
 2511	pg_cursor	crates/backend/utils/mmgr/portalmem/src/funcs.rs	excluded(state: portal hash table)	-	portalmem/src/funcs.rs:5 InitMaterializedSRF
 2512	float8_var_pop	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity full + value grid)	fast	CI cluster; proofs/float-agg
-2513	float8_stddev_pop	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity planes) + tested(differential: exact grid 32,616 + 8.0M random full-bit sweeps, 0 diffs)	ladder	sqrt grid FAILED = CBMC sqrt subnormal mis-round artifact (TRIAGE); proofs/float-agg
+2513	float8_stddev_pop	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity planes + special grid, modulo deterministic sqrt model) + tested(differential: exact grid 32,616 + 8.0M random full-bit sweeps, 0 diffs)	ladder	grid_stddev_pop 3.9s green with det-sqrt stub; CI cluster FAIL = dsqrt dual-mode artifact (TRIAGE tool defect 2); proofs/float-agg; CI-decode 2026-07-30
 2514	numeric_var_pop	crates/backend/utils/adt/numeric/src/builtins.rs	excluded(state)	-	numeric_stddev_internal (variance_pop arm)
 2515	booland_statefunc	crates/backend/utils/adt/bool/src/builtins.rs	proved(full bool2)	fast	1s; proofs/misc-ops
 2516	boolor_statefunc	crates/backend/utils/adt/bool/src/builtins.rs	proved(full bool2)	fast	1s; proofs/misc-ops
@@ -1540,8 +1540,8 @@ oid	name	source_file	status	class	notes
 2627	inetnot	crates/backend/utils/adt/network/src/builtins.rs	proved(core; full output struct)	fast	2.7s; proofs/network
 2628	inetand	crates/backend/utils/adt/network/src/builtins.rs	proved(core; full struct + mismatch Err parity)	fast	12.7s; proofs/network
 2629	inetor	crates/backend/utils/adt/network/src/builtins.rs	proved(core; full struct + mismatch Err parity)	fast	14s; proofs/network
-2630	inetpl	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
-2632	inetmi_int8	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
+2630	inetpl	crates/backend/utils/adt/network/src/builtins.rs	proved(v4+v6 family cells; Ok struct eq + 22003 sqlstate/level Err parity)	fast	0.66s v4; proofs/network; CI cluster FAIL @994f9977 = memcmp unwind(9) truncation artifact (unwind 18 fix in-tree, re-verified); CI-decode 2026-07-30
+2632	inetmi_int8	crates/backend/utils/adt/network/src/builtins.rs	proved(v4+v6 family cells; Ok struct eq + 22003 Err parity)	fast	0.79s v4; proofs/network; CI cluster FAIL = memcmp unwind artifact (fixed); CI-decode 2026-07-30
 2633	inetmi	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
 2647	now	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	alias of 1299
 2648	statement_timestamp	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(state)	-	builtins.rs:131
@@ -1613,7 +1613,7 @@ oid	name	source_file	status	class	notes
 2814	float8_regr_intercept	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity planes) + tested(differential, 0 diffs)	ladder	CI cluster timeout = same sqrt/divide class; proofs/float-agg
 2815	float8_covar_pop	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity full + value grid)	fast	CI cluster; proofs/float-agg
 2816	float8_covar_samp	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity full + value grid)	fast	CI cluster; proofs/float-agg
-2817	float8_corr	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity planes) + tested(differential, 0 diffs)	ladder	proofs/float-agg
+2817	float8_corr	crates/backend/utils/adt/float/src/builtins.rs	proved(nullity planes + special grid, modulo deterministic sqrt model) + tested(differential, 0 diffs)	ladder	grid_corr 16.0s green with det-sqrt stub; CI cluster FAIL = dsqrt dual-mode artifact; proofs/float-agg; CI-decode 2026-07-30
 2844	pg_stat_get_db_blk_read_time	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 2845	pg_stat_get_db_blk_write_time	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 2848	pg_switch_wal	crates/backend/utils/adt/adt_misc/src/builtins.rs	excluded(state)	-	server WAL/catalog/session state
@@ -1663,9 +1663,9 @@ oid	name	source_file	status	class	notes
 2911	timetztypmodin	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(core full-i32 incl 22023 + clamp)	fast	1.4s; proofs/datetime-b lane D
 2912	timetztypmodout	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(core planes + bands + spots) + tested(differential)	fast	2-15.5s; proofs/datetime-b lane D
 2913	bpchartypmodin	crates/backend/utils/adt/varchar/src/builtins.rs	untriaged		
-2914	bpchartypmodout	crates/backend/utils/adt/varchar/src/builtins.rs	untriaged		
+2914	bpchartypmodout	crates/backend/utils/adt/varchar/src/builtins.rs	proved(core anychar_typmodout: band typmod in [-16,1e7+3] + wide spots MaxAttrSize/INT32_MAX/INT32_MIN)	ladder	band 28.8s release-gate, spots 1.4s; CI cluster FAILs = pg_ultoa_n unwind truncation artifact (unwind 12/14 fix in-tree, re-verified); proofs/oracle-compat; CI-decode 2026-07-30
 2915	varchartypmodin	crates/backend/utils/adt/varchar/src/builtins.rs	untriaged		
-2916	varchartypmodout	crates/backend/utils/adt/varchar/src/builtins.rs	untriaged		
+2916	varchartypmodout	crates/backend/utils/adt/varchar/src/builtins.rs	proved(core anychar_typmodout: band + wide spots; same core as 2914)	ladder	see 2914; proofs/oracle-compat; CI-decode 2026-07-30
 2917	numerictypmodin	crates/backend/utils/adt/numeric/src/builtins.rs	candidate	fast	numerictypmodin_core ops.rs:19 + make_numeric_typmod ops.rs:59 — pure compares + shift/mask over &[i32] len 0..=3; stub PgError::error; proves typmod codec trio ops.rs:64/69/74 used by 8 other rows. Host proofs/numeric-probe
 2918	numerictypmodout	crates/backend/utils/adt/adt_misc/src/builtins.rs	candidate	fast	pure typmod formatting (adt_misc/builtins.rs:962)
 2919	bittypmodin	crates/backend/utils/adt/varbit/src/lib.rs	proved(anybit_typmodin check+value core, tl/n symbolic n<=2, all 3 err planes + 22023; cstring[] parse tested-tier)	fast	0.67s; proofs/varbit-rows relaunch 2026-07-29 (re-derived)
@@ -2664,9 +2664,9 @@ oid	name	source_file	status	class	notes
 4627	brin_minmax_multi_distance_tid	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	fast	:69 u32 wrapping_mul MaxHeapTuplesPerPage const + wrapping_add + f64 sub; uint32-wrap comment claim
 4628	brin_minmax_multi_distance_uuid	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	ladder	:107 16x (add + /256.0 pow2); 16-deep chain — per-byte-prefix cells or fewer-symbolic-byte grids
 4629	brin_minmax_multi_distance_date	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	fast	:119 i32->f64 sub
-4630	brin_minmax_multi_distance_time	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	fast	:123 (i64 sub) as f64 — C order-of-ops parity claim
+4630	brin_minmax_multi_distance_time	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	proved(contract [0,USECS_PER_DAY] pair; subtract-then-widen order claim) + tested(differential: full-i64 wrap plane 2.0M, 0 diffs)	fast	0.37s; CI cluster FAILs = out-of-contract Kani debug-overflow-check artifact (release wraps as C -fwrapv; native_dist_wrap); proofs/brin-minmax; CI-decode 2026-07-30
 4631	brin_minmax_multi_distance_interval	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	excluded(wall: %/÷ USECS_PER_DAY divider chain)	-	:144 don't negotiate
-4632	brin_minmax_multi_distance_timetz	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	fast	:127 zone*USECS_PER_SEC const mul + i64 sub
+4632	brin_minmax_multi_distance_timetz	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	proved(contract times x |zone|<=86400) + tested(differential 2.0M in-bound, 0 diffs) + divergence-candidate(zone-wrap plane, ratified-unreachable expected)	fast	3.6s; zone-wrap: C int32-subtracts zones before widening, Rust widens first — value-visible only for zone diff outside i32, unreachable from timetz_in-validated zones; witness: probe_dist_timetz_zone_wrap (FAILED 0.63s, right check) + native 4/4 points diverge; CI-decode 2026-07-30
 4633	brin_minmax_multi_distance_pg_lsn	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	fast	:162 u64 wrapping_sub + u64->f64
 4634	brin_minmax_multi_distance_macaddr	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	ladder	:166 6x /256 chain; prove FIRST to calibrate
 4635	brin_minmax_multi_distance_macaddr8	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	candidate	ladder	:178 8x /256

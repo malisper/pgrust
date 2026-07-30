@@ -134,11 +134,11 @@ casts	eq_dtoi8	-Z c-ffi -Z stubbing --c-lib c/pg_casts.c --solver kissat	green	p
 casts	eq_ftoi8	-Z c-ffi -Z stubbing --c-lib c/pg_casts.c --solver kissat	green	per-commit	6.7	3.9-6.7s band
 casts	eq_dtof	-Z c-ffi -Z stubbing --c-lib c/pg_casts.c --solver kissat	green	per-commit	6.7	hand-written; 3 cover! arms
 casts	control_dtoi4_trunc_vs_rint	-Z c-ffi -Z stubbing --c-lib c/pg_casts.c	must-fail	defect-witness	?	DEFAULT solver mandatory; deliberate trunc variant
-char	charout_equiv_and_roundtrip	-Z c-ffi --c-lib csrc/char_shim.c --solver kissat	green	per-commit	0.47	run.log 0.467s; recipe INFERRED (no doc recipe)
-char	charin_equiv	-Z c-ffi --c-lib csrc/char_shim.c --solver kissat	green	per-commit	0.42	run.log 0.420s
+char	proofs::charout_equiv_and_roundtrip	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --solver kissat --exact	green	per-commit	0.61	8-bit datum-value parity claim (shim widening platform-split, CI-adjudicated); re-verified 2026-07-30
+char	proofs::charin_equiv	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --solver kissat --exact	green	per-commit	0.97	8-bit datum-value parity claim; re-verified 2026-07-30
 char	eq_chartoi4	-Z c-ffi --c-lib csrc/char_shim.c --solver kissat	green	per-commit	0.02	ledger
-char	eq_i4tochar	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --solver kissat	green	per-commit	0.74	stubs PgError::error
-char	eq_text_char	-Z c-ffi --c-lib csrc/char_shim.c --solver kissat	green	per-commit	0.48	unwind(10)
+char	proofs::eq_i4tochar	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --solver kissat --exact	green	per-commit	0.63	stubs PgError::error; 8-bit datum-value parity claim; re-verified 2026-07-30
+char	proofs::eq_text_char	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --solver kissat --exact	green	per-commit	0.42	unwind(10); 8-bit datum-value parity claim; re-verified 2026-07-30
 char	eq_char_text_value_core	-Z c-ffi --c-lib csrc/char_shim.c --solver kissat	green	unmeasured	?	value core full-i8 proved; no time recorded
 char	eq_char_text	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --solver kissat	wall-recorded	calibration	?	NOT A STANDING GATE; walls >180s both solvers; mcx stub set
 datetime-cmp	proofs::eq_date_eq	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	0.07	ledger; name repaired
@@ -312,14 +312,16 @@ hash	hash_bytes_symlen16	-Z c-ffi --c-lib pg_hashfn.c	green	calibration	109	symb
 hash	hash_bytes_symlen32	-Z c-ffi --c-lib pg_hashfn.c	green	calibration	262	symbolic len<=32
 hash	hash_bytes_symlen48	-Z c-ffi --c-lib pg_hashfn.c	wall-recorded	calibration	?	WALLS >600s; stretch
 hash	control_expected_divergence	-Z c-ffi --c-lib pg_hashfn.c	must-fail	defect-witness	?	length-mismatch control; DEFAULT solver
-hash-rows	proofs::eq_hashchar	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
+hash-rows	proofs::eq_hashchar	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	0.2	fenced v>=0 portable plane (char-signedness platform split); re-verified 2026-07-30
 hash-rows	proofs::eq_hashint2	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashint4	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashint8	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashoid	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashenum	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashbool	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
-hash-rows	proofs::eq_hashcharextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
+hash-rows	proofs::eq_hashcharextended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	9.8	fenced v>=0 portable plane; re-verified 2026-07-30
+hash-rows	proofs::model_hashchar_unsigned_full	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	0.23	pins v0.2 shipped zero-extend arm over full i8 (CI-decode 2026-07-30; re-pointed from old-lineage signed pin)
+hash-rows	proofs::model_hashcharextended_unsigned_full	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	2.5	pins zero-extend arm, full symbolic seed (CI-decode 2026-07-30)
 hash-rows	proofs::eq_hashint2extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashint4extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
 hash-rows	proofs::eq_hashint8extended	-Z c-ffi -Z stubbing --c-lib c/pg_hash_rows.c --solver kissat --exact	green	per-commit	5.3	0.2-5.3s under ~6-way load
