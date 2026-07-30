@@ -201,6 +201,23 @@ crash-resume segments, which each start a fresh postmaster).
       --fuzz-lcov fuzz-float_in_diff.lcov --fuzz-lcov fuzz-float_out_diff.lcov \
       --fuzz-lcov fuzz-geo_diff.lcov --regress-lcov regress.lcov
 
+(`summary.json.head_sha` records the sha of the tree the instruments
+ran against; the scope crates at that sha are what the per-file line
+numbers refer to.)
+
+### 5. Viewer bundle
+
+    python3 tools/coverage-viewer/generate.py --from-real proofs/coverage
+
+Re-emits `tools/coverage-viewer/site/data/` (meta/summary/per-crate
+detail) from `proofs/coverage/`, cross-checking every per-file and
+total count against `summary.json` (it exits nonzero on any mismatch),
+and snapshots each scope source file at `head_sha` under
+`site/data/src/` so the file view's gutter marks stay aligned with the
+measured line numbers after the working tree drifts. View with
+`python3 -m http.server` from the repo root, then open
+`/tools/coverage-viewer/site/index.html`.
+
 ## summary.json schema (contract for the viewer)
 
 ```
