@@ -260,6 +260,14 @@ pub const TS_STAT_BUILTINS: &[FmgrBuiltin] = &[
         retset: false,
         func: trigger::fc_tsvector_update_trigger_byid,
     },
+    FmgrBuiltin {
+        foid: 3753,
+        name: "tsvector_update_trigger_bycolumn",
+        nargs: 0,
+        strict: false,
+        retset: false,
+        func: trigger::fc_tsvector_update_trigger_bycolumn,
+    },
 ];
 
 pub mod trigger;
