@@ -1986,6 +1986,181 @@ mod proofs {
             Err(e) => core::mem::forget(e),
         }
     }
+
+    // ======================================================================
+    // N4: numeric_min_scale / numeric_trim_scale — DigitBuf-unblock wave
+    // (2026-07-30).  FIRST builtin-level theorems whose Rust side runs
+    // NumericVar::from_view — DigitBuf::realloc_uninit at SYMBOLIC ndigits —
+    // in-theorem.  Enabled by the shipped stub seams
+    // adt_numeric::var::{digit_buf_heap_realloc, digit_buf_put} (pure code
+    // motion of the heap/pool arms out of realloc_uninit and Drop): with the
+    // plane fenced to nd + 1 <= INLINE_DIGITS (36), the heap arm is
+    // unreachable and its stub PANICS (loud trap, never a silent fence);
+    // drop-time pool return is forgotten.  Without the seams,
+    // kani::assume(nd <= cap) leaves the not-taken heap arm structurally in
+    // the formula (assume-never-folds law) and symex drowns in TLS
+    // DIGIT_POOL (_tlv_atexit, Kani-unsupported) + Vec::reserve machinery —
+    // the recorded blocked(numeric DigitBuf) wall.
+    // Ledger wording: "modulo inline-capacity DigitBuf allocator model
+    // (heap arm unreachable under the nd fence, panics if reached) + TLS
+    // word-pool model (pool-miss arm)".
+    // C side: pg_numeric_tail.c pg_numeric_min_scale / pg_numeric_trim_scale
+    // (verbatim get_min_scale; make_result_opt_error already in-theorem).
+    // ======================================================================
+
+    extern "C" {
+        fn pg_numeric_min_scale(weight: c_int, digits: *const i16, ndigits: c_int) -> c_int;
+        fn pg_numeric_trim_scale(
+            sign: c_int, weight: c_int, dscale: c_int, digits: *const i16, ndigits: c_int,
+            out: *mut u8, err: *mut c_int,
+        ) -> c_int;
+    }
+
+    /// Kani stub for `adt_numeric::var::digit_buf_heap_realloc`: the plane
+    /// fences ndigits within INLINE_DIGITS, so realloc_uninit always takes
+    /// the inline arm; reaching the heap arm is a harness defect — panic
+    /// loudly (never a silent fence).
+    fn stub_digit_buf_heap_realloc(_heap: &mut Vec<i16>, _n: usize) {
+        panic!("DigitBuf heap arm reached under the inline nd fence");
+    }
+
+    /// Kani stub for `adt_numeric::var::digit_buf_put`: drop-time pool
+    /// return (buffer recycling out of proof; the vec is capacity-0 here by
+    /// construction — the heap arm never ran).
+    fn stub_digit_buf_put(v: Vec<i16>) {
+        core::mem::forget(v);
+    }
+
+    /// numeric_min_scale, finite plane (C returns SQL NULL on specials — a
+    /// two-line passthrough in both fc wrappers, tested tier).  Unstripped
+    /// domain: the last-nonzero-digit paranoia scan is live on both sides.
+    /// from_view (symbolic-nd realloc_uninit, inline arm) is in-theorem.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn eq_numeric_min_scale_nd4() {
+        let a = sym_num(4, false);
+        kani::assume(a.sel >= 3);
+        let r = adt_numeric::numeric_min_scale(Num::from_payload(&a.buf.0[..a.len]));
+        let c = unsafe { pg_numeric_min_scale(a.weight, a.digits.as_ptr(), a.nd) };
+        assert!(r == c);
+    }
+
+    /// Regime witnesses for min_scale, hoisted (cover = extra SAT call).
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn cover_numeric_min_scale_regimes() {
+        let a = sym_num(4, false);
+        kani::assume(a.sel >= 3);
+        let r = adt_numeric::numeric_min_scale(Num::from_payload(&a.buf.0[..a.len]));
+        kani::cover!(a.nd > 0 && a.digits[(a.nd - 1) as usize] == 0); // trailing-zero scan live
+        kani::cover!(r == 0); // integral / zero regime
+        kani::cover!(r > 0 && r % adt_numeric::DEC_DIGITS != 0); // last-digit /10 loop live
+    }
+
+    /// Negative control (DEFAULT solver, must FAIL): C sees weight+1 on a
+    /// plane where min_scale is provably positive on both sides (weight < 0,
+    /// last digit nonzero), so the 1-digit weight skew shifts the result by
+    /// DEC_DIGITS and cannot be masked by the trailing-zero reduction (< 4).
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn ctl_numeric_min_scale_weight_skew() {
+        let a = sym_num(4, true);
+        kani::assume(a.sel >= 3 && a.nd >= 1 && a.weight < 0);
+        let r = adt_numeric::numeric_min_scale(Num::from_payload(&a.buf.0[..a.len]));
+        let c = unsafe { pg_numeric_min_scale(a.weight + 1, a.digits.as_ptr(), a.nd) };
+        assert!(r == c);
+    }
+
+    /// numeric_trim_scale, full value lattice.  Special arm: C is
+    /// duplicate_numeric — image identity IS the spec (uplus precedent), no
+    /// C call needed.  Finite arm: from_view + get_min_scale + make_result
+    /// vs the verbatim C pipeline, full varlena image byte-compare.  The
+    /// make_result error arm (weight underflows i16 after leading-zero
+    /// strip) is in-theorem as verdict parity (message out of proof;
+    /// PgError::error stubbed — Location::caller is Kani-unsupported).
+    #[kani::proof]
+    #[kani::unwind(24)]
+    #[kani::stub(adt_numeric::var::word_buf_take, stub_word_buf_take)]
+    #[kani::stub(adt_numeric::var::word_buf_put, stub_word_buf_put)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    fn eq_numeric_trim_scale_nd4() {
+        let a = sym_num(4, false);
+        let n = Num::from_payload(&a.buf.0[..a.len]);
+        if a.sel <= 2 {
+            match adt_numeric::numeric_trim_scale(n) {
+                Ok(img) => {
+                    assert!(img.payload() == &a.buf.0[..a.len]);
+                    core::mem::forget(img);
+                }
+                Err(e) => {
+                    core::mem::forget(e);
+                    panic!("trim_scale errored on a special");
+                }
+            }
+            return;
+        }
+        let mut out = [0u8; 32];
+        let mut err: c_int = 0;
+        let clen = unsafe {
+            pg_numeric_trim_scale(
+                a.sign, a.weight, a.dscale, a.digits.as_ptr(), a.nd,
+                out.as_mut_ptr(), &mut err,
+            )
+        };
+        match adt_numeric::numeric_trim_scale(n) {
+            Ok(img) => {
+                assert!(err == 0);
+                assert!(img.as_bytes() == &out[..clen as usize]);
+                core::mem::forget(img);
+            }
+            Err(e) => {
+                assert!(err == 1);
+                core::mem::forget(e);
+            }
+        }
+    }
+
+    /// Regime witnesses for trim_scale, hoisted: both header forms of the
+    /// result, the dscale-actually-trimmed regime, and the make_result
+    /// overflow (error) arm must all be reachable.
+    #[kani::proof]
+    #[kani::unwind(24)]
+    #[kani::stub(adt_numeric::var::word_buf_take, stub_word_buf_take)]
+    #[kani::stub(adt_numeric::var::word_buf_put, stub_word_buf_put)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    fn cover_numeric_trim_scale_regimes() {
+        let a = sym_num(4, false);
+        kani::assume(a.sel >= 3);
+        let n = Num::from_payload(&a.buf.0[..a.len]);
+        match adt_numeric::numeric_trim_scale(n) {
+            Ok(img) => {
+                let short = (u16::from_ne_bytes([img.payload()[0], img.payload()[1]])
+                    & 0x8000)
+                    != 0;
+                kani::cover!(short);
+                kani::cover!(!short);
+                kani::cover!(
+                    adt_numeric::numeric_min_scale(Num::from_payload(&a.buf.0[..a.len]))
+                        < a.dscale
+                ); // trim actually reduced dscale
+                core::mem::forget(img);
+            }
+            Err(e) => {
+                kani::cover!(true); // make_result overflow arm reachable
+                core::mem::forget(e);
+            }
+        }
+    }
 }
 
 /// Native replay of the numeric_smaller/larger tie-plane identity

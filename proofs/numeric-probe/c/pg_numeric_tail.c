@@ -863,3 +863,109 @@ pg_apply_typmod_special(int sign, int32 typmod, int *err)
 								 * hold an infinite value) */
 	return 0;
 }
+
+/* ======================================================================
+ * N4 scale-trim rows (DigitBuf-unblock wave, added 2026-07-30):
+ * get_min_scale / numeric_min_scale / numeric_trim_scale.
+ * Provenance: same numeric.c REL_18_STABLE ref as the header comment;
+ * bodies verbatim, shims per the family conventions (T1 explicit spec
+ * params in place of init_var_from_num's aliasing decode — which copies
+ * nothing in C either; T3 err flag; T4 caller image buffer via
+ * pg_tail_make_result_opt_error above).  numeric_min_scale's special arm
+ * (PG_RETURN_NULL) and numeric_trim_scale's special arm
+ * (duplicate_numeric = image identity) are asserted at harness level.
+ * ====================================================================== */
+
+/*
+ * get_min_scale() - verbatim REL_18 body.
+ */
+static int
+get_min_scale(NumericVar *var)
+{
+	int			min_scale;
+	int			last_digit_pos;
+
+	/*
+	 * Ordinarily, the input value will be "stripped" so that the last
+	 * NumericDigit is nonzero.  But we don't want to get into an infinite
+	 * loop if it isn't, so explicitly find the last nonzero digit.
+	 */
+	last_digit_pos = var->ndigits - 1;
+	while (last_digit_pos >= 0 &&
+		   var->digits[last_digit_pos] == 0)
+		last_digit_pos--;
+
+	if (last_digit_pos >= 0)
+	{
+		/* compute min_scale assuming that last ndigit has no zeroes */
+		min_scale = (last_digit_pos - var->weight) * DEC_DIGITS;
+
+		/*
+		 * We could get a negative result if there are no digits after the
+		 * decimal point.  In this case the min_scale must be zero.
+		 */
+		if (min_scale > 0)
+		{
+			/*
+			 * Reduce min_scale if trailing digit(s) in last NumericDigit are
+			 * zero.
+			 */
+			NumericDigit last_digit = var->digits[last_digit_pos];
+
+			while (last_digit % 10 == 0)
+			{
+				min_scale--;
+				last_digit /= 10;
+			}
+		}
+		else
+			min_scale = 0;
+	}
+	else
+		min_scale = 0;			/* result if input is zero */
+
+	return min_scale;
+}
+
+/*
+ * numeric_min_scale() finite arm - verbatim structure (init_var_from_num ->
+ * SHIM T1 explicit spec params; free_var is palloc plumbing).  get_min_scale
+ * reads only ndigits/weight/digits; sign/dscale set for hygiene.
+ */
+int
+pg_numeric_min_scale(int weight, const NumericDigit *digits, int ndigits)
+{
+	NumericVar	arg;
+
+	arg.ndigits = ndigits;
+	arg.weight = weight;
+	arg.sign = NUMERIC_POS;
+	arg.dscale = 0;
+	arg.buf = NULL;
+	arg.digits = (NumericDigit *) digits;
+	return get_min_scale(&arg);
+}
+
+/*
+ * numeric_trim_scale() finite arm - verbatim structure: init_var_from_num
+ * (SHIM T1), dscale = get_min_scale, make_result (opt_error form, SHIM
+ * T3/T4).  Writes the full packed varlena image to `out`, returns its
+ * length, or -1 with *err = 1.
+ */
+int
+pg_numeric_trim_scale(int sign, int weight, int dscale,
+					  const NumericDigit *digits, int ndigits,
+					  unsigned char *out, int *err)
+{
+	NumericVar	result;
+
+	*err = 0;
+	result.ndigits = ndigits;
+	result.weight = weight;
+	result.sign = sign;
+	result.dscale = dscale;
+	result.buf = NULL;
+	result.digits = (NumericDigit *) digits;
+	result.dscale = get_min_scale(&result);
+	return pg_tail_make_result_opt_error(&result, out, err);
+}
