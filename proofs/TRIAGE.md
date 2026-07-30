@@ -139,7 +139,35 @@ Refinements, each measured:
    104-byte image buffer killed harnesses a 48-byte per-type buffer solved
    in 75s. Zero-fill unused slots with literals; assume-constraining does
    not substitute.
-7. **Memory walls are CAP-RELATIVE**: record the RSS cap with every wall
+7. **Retained-buffer allocator walls (DigitBuf / PgVec / pqformat
+   StringInfo class) — BROKEN 2026-07-30 by the stub-seam recipe**: any
+   shipped growable buffer whose realloc takes a SYMBOLIC size keeps its
+   entire grow arm (TLS pool `.with` → `_tlv_atexit` Kani-unsupported,
+   `Vec::reserve`/RawVec growth, drop-time pool return) in the formula even
+   when the plane provably fits an inline/fixed capacity —
+   `kani::assume(n <= cap)` NEVER prunes the not-taken arm (assume-never-
+   folds law); only a structural seam does.  Measured: every
+   `NumericVar::from_view` was an 8-11GB-class symex wall (25 ledger rows
+   `blocked(numeric DigitBuf)`), while the same pipeline with CONSTANT
+   alloc sizes proved fine (int64_to_numeric image rows).  Remedy (pure
+   behavior-identical code motion, the `word_buf_take` pattern):
+   - factor the GROW/ALLOC arm and the DROP-TIME pool return into `pub`
+     free functions with a proofs-comment (numeric: var.rs
+     `digit_buf_heap_realloc` + `digit_buf_put`);
+   - fence the harness plane inside the inline/fixed capacity, stub the
+     grow seam with a PANIC (loud trap — reaching it is a harness defect,
+     never a silent fence) and the pool-put seam with `mem::forget`;
+   - claim wording: "modulo inline-capacity allocator model (grow arm
+     unreachable under the fence, panics if reached)".
+   Demonstrators: numeric_min_scale (from_view at symbolic nd in-theorem,
+   16.1s) and numeric_trim_scale (full image byte-compare through
+   make_result, 241s), proofs/numeric-probe N4.  The same recipe is the
+   prescribed first move for the sibling walls: PgVec push/grow
+   (pg_snapshot_in, ~776K symex steps at concrete inputs — factor the grow
+   arm of PgVec's reserve path behind a pub seam, keep the write path
+   slice-based) and pqformat StringInfo growth (numeric_send 8-11GB symex —
+   seam StringInfo's enlarge, or land the proposed pq_send slice-core).
+8. **Memory walls are CAP-RELATIVE**: record the RSS cap with every wall
    verdict. A high-memory retry converted an entire "structurally walled"
    16-byte-element array family into 7/7 proved (721–1623s @40GB), and
    turned other memory walls into plain SAT timeouts. The retry tier is
