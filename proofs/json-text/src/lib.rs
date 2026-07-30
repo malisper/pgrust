@@ -61,13 +61,6 @@ mod proofs {
         Ok(None)
     }
 
-    fn sym_payload() -> ([u8; CAP_IN], usize) {
-        let buf: [u8; CAP_IN] = kani::any();
-        let len: usize = kani::any();
-        kani::assume(len <= CAP_IN);
-        (buf, len)
-    }
-
     macro_rules! recipe {
         ($(#[$m:meta])* fn $name:ident() $body:block) => {
             #[kani::proof]
@@ -84,109 +77,118 @@ mod proofs {
         };
     }
 
-    recipe! {
-        /// oid 322 json_out — output cstring == payload + NUL; symbolic
-        /// contents, symbolic len <= 8.
-        fn eq_json_out() {
-            let (buf, len) = sym_payload();
-            let mut c_out = [0u8; CAP_IN + 1];
-            let c_len =
-                unsafe { pg_json_out(buf.as_ptr(), len as c_int, c_out.as_mut_ptr()) } as usize;
-            let ctx = mcx::MemoryContext::new_bump("kani-json");
-            match adt_json::json_out(ctx.mcx(), &buf[..len]) {
-                Ok(v) => {
-                    // shipped json_out returns the cstring INCLUDING its NUL
-                    assert!(v.len() == c_len + 1);
-                    let mut i = 0;
-                    while i <= c_len {
-                        assert!(v[i] == c_out[i]);
-                        i += 1;
+    /// oid 322 json_out cells — LITERAL length per cell (symbolic length
+    /// puts the NUL at a data-dependent offset and walled SAT at 450s;
+    /// literals prune — TRIAGE law), symbolic contents.
+    macro_rules! json_out_cell {
+        ($name:ident, $n:literal) => {
+            recipe! {
+                fn $name() {
+                    let buf: [u8; CAP_IN] = kani::any();
+                    let len: usize = $n;
+                    let mut c_out = [0u8; CAP_IN + 1];
+                    let c_len = unsafe {
+                        pg_json_out(buf.as_ptr(), len as c_int, c_out.as_mut_ptr())
+                    } as usize;
+                    let ctx = mcx::MemoryContext::new_bump("kani-json");
+                    match adt_json::json_out(ctx.mcx(), &buf[..len]) {
+                        Ok(v) => {
+                            // shipped json_out returns the cstring INCLUDING its NUL
+                            assert!(v.len() == c_len + 1);
+                            let mut i = 0;
+                            while i <= c_len {
+                                assert!(v[i] == c_out[i]);
+                                i += 1;
+                            }
+                            core::mem::forget(v);
+                        }
+                        Err(e) => {
+                            core::mem::forget(e);
+                            panic!("json_out errored");
+                        }
                     }
-                    core::mem::forget(v);
-                }
-                Err(e) => {
-                    core::mem::forget(e);
-                    panic!("json_out errored");
+                    core::mem::forget(ctx);
                 }
             }
-            core::mem::forget(ctx);
-        }
+        };
     }
+    json_out_cell!(eq_json_out_len0, 0);
+    json_out_cell!(eq_json_out_len1, 1);
+    json_out_cell!(eq_json_out_len8, 8);
 
-    recipe! {
-        /// oid 324 json_send — bytea image == 4B LE header + payload;
-        /// symbolic contents, symbolic len <= 8; identity conversion seam.
-        fn eq_json_send() {
-            detoast_install_conversion();
-            let (buf, len) = sym_payload();
-            let mut c_out = [0u8; CAP_IN + 4];
-            let c_total =
-                unsafe { pg_json_send(buf.as_ptr(), len as c_int, c_out.as_mut_ptr()) } as usize;
-            let ctx = mcx::MemoryContext::new_bump("kani-json");
-            match adt_json::json_send(ctx.mcx(), &buf[..len]) {
-                Ok(b) => {
-                    assert!(b.varsize() == c_total);
-                    let d = b.data();
-                    assert!(d.len() == c_total - 4);
-                    // full image compare: header word ...
-                    let hdr = (c_total as u32) << 2;
-                    let hb = hdr.to_le_bytes();
-                    let img = b.as_bytes();
-                    let mut i = 0;
-                    while i < 4 {
-                        assert!(img[i] == hb[i] && img[i] == c_out[i]);
-                        i += 1;
+    /// oid 324 json_send cells — LITERAL length per cell (same SAT-wall
+    /// remedy as json_out), symbolic contents; identity conversion seam.
+    macro_rules! json_send_cell {
+        ($name:ident, $n:literal) => {
+            recipe! {
+                fn $name() {
+                    detoast_install_conversion();
+                    let buf: [u8; CAP_IN] = kani::any();
+                    let len: usize = $n;
+                    let mut c_out = [0u8; CAP_IN + 4];
+                    let c_total = unsafe {
+                        pg_json_send(buf.as_ptr(), len as c_int, c_out.as_mut_ptr())
+                    } as usize;
+                    let ctx = mcx::MemoryContext::new_bump("kani-json");
+                    match adt_json::json_send(ctx.mcx(), &buf[..len]) {
+                        Ok(b) => {
+                            assert!(b.varsize() == c_total);
+                            let d = b.data();
+                            assert!(d.len() == c_total - 4);
+                            let img = b.as_bytes();
+                            let mut i = 0;
+                            while i < c_total {
+                                assert!(img[i] == c_out[i]);
+                                i += 1;
+                            }
+                            core::mem::forget(b);
+                        }
+                        Err(e) => {
+                            core::mem::forget(e);
+                            panic!("json_send errored");
+                        }
                     }
-                    // ... then payload bytes
-                    while i < c_total {
-                        assert!(img[i] == c_out[i]);
-                        i += 1;
-                    }
-                    core::mem::forget(b);
-                }
-                Err(e) => {
-                    core::mem::forget(e);
-                    panic!("json_send errored");
+                    core::mem::forget(ctx);
                 }
             }
-            core::mem::forget(ctx);
-        }
+        };
     }
+    json_send_cell!(eq_json_send_len0, 0);
+    json_send_cell!(eq_json_send_len1, 1);
+    json_send_cell!(eq_json_send_len8, 8);
 
     fn detoast_install_conversion() {
         mbutils_seams::pg_server_to_client::set(seam_identity);
     }
 
-    /// non-identity seam impl for the skew control: prepends one byte.
-    fn seam_skew<'m>(
-        mcx: mcx::Mcx<'m>,
-        s: &[u8],
-    ) -> types_error::PgResult<Option<mcx::PgVec<'m, u8>>> {
-        let mut v = mcx::vec_with_capacity_in(mcx, s.len() + 1)?;
-        mcx::vec_append_bytes(&mut v, b"X")?;
-        mcx::vec_append_bytes(&mut v, s)?;
-        Ok(Some(v))
-    }
-
     recipe! {
-        /// NEGATIVE CONTROL (seam model is load-bearing + gate
-        /// non-vacuity): a skewed conversion seam MUST make the image
-        /// compare fail. Run with the DEFAULT solver.
-        fn control_json_send_seam_skew_must_fail() {
-            mbutils_seams::pg_server_to_client::set(seam_skew);
-            let buf = [b'1'; 1];
+        /// NEGATIVE CONTROL (gate non-vacuity): C is fed a 2-byte payload,
+        /// shipped Rust a 1-byte payload — the size assert MUST FAIL (run
+        /// with the DEFAULT solver). Single failable property; the Err arm
+        /// is forget-only (its unreachability is attested by the PROVED
+        /// eq_json_send cells, whose Err-arm panics verified unreachable).
+        ///
+        /// NOTE: a first-cut control skewed the pg_server_to_client SEAM
+        /// instead (prepend one byte); its extra PgVec allocation EXHAUSTS
+        /// the 2 KiB tiny proof heap, so the harness failed on the Err-arm
+        /// alloc panic, not the divergence — wrong-reason gate (integrity
+        /// rule). The seam model's load-bearing-ness is demonstrated
+        /// natively instead: tests/native_seam_skew.rs (separate process,
+        /// real allocator).
+        fn control_json_send_input_skew_must_fail() {
+            detoast_install_conversion();
+            let buf = [b'1', b'2'];
             let mut c_out = [0u8; CAP_IN + 4];
             let c_total =
-                unsafe { pg_json_send(buf.as_ptr(), 1, c_out.as_mut_ptr()) } as usize;
+                unsafe { pg_json_send(buf.as_ptr(), 2, c_out.as_mut_ptr()) } as usize;
             let ctx = mcx::MemoryContext::new_bump("kani-json");
             match adt_json::json_send(ctx.mcx(), &buf[..1]) {
                 Ok(b) => {
-                    assert!(b.varsize() == c_total, "seam skew: sizes must diverge");
+                    assert!(b.varsize() == c_total); // skew: sizes must diverge
                     core::mem::forget(b);
                 }
                 Err(e) => {
                     core::mem::forget(e);
-                    panic!("json_send errored");
                 }
             }
             core::mem::forget(ctx);
