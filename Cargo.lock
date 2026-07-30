@@ -14200,6 +14200,7 @@ dependencies = [
  "mcxt_seams",
  "parallel_seams",
  "pg_sema_seams",
+ "pgsync",
  "postgres_seams",
  "procsignal_seams",
  "s_lock_seams",

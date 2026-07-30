@@ -112,6 +112,187 @@ thread_local! {
     static MY_PROC_SIGNAL_SLOT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
+// ---------------------------------------------------------------------------
+// PRE-IDENTITY thread-signal targets (fast-shutdown startup-phase wedge).
+//
+// deliver_thread_signal routes by ProcSignal slot, and a slot carries a pid
+// only from ProcSignalInit — deep into InitPostgres. Every postmaster child
+// is signalable by pid BEFORE that (its pmchild slot pid is set at launch/
+// dispatch), so a broadcast landing in the window — TerminateChildren's
+// SIGTERM at fast shutdown against a backend still reading its startup
+// packet — returned ESRCH and was silently dropped. C cannot lose that
+// signal (kill() is kernel-queued and runs process_startup_packet_die when
+// unblocked); here the drop left the backend parked in secure_read forever:
+// PM_WAIT_BACKENDS never drained, the GL-GANGWEDGE-1 watchdog escalated to
+// immediate shutdown, and the next start ran crash recovery.
+//
+// The channel: the LAUNCHER registers `pid -> pending word` BEFORE the pid
+// becomes broadcast-visible (postmaster_child_launch / wpool dispatch); the
+// child ADOPTS the entry on its own thread (filling in its latch + interrupt
+// flag) as soon as it has them; ProcSignalInit consumes the entry, migrating
+// any pending bits into the freshly-published slot. Delivery that finds no
+// slot falls back here: bits are never lost anywhere in the window.
+//
+// Drain semantics: a pre-identity thread runs the dispositions it has
+// installed; a signo with no disposition yet stays PENDING (C parity — the
+// startup sigmask blocks everything a handler hasn't been installed for, and
+// pending signals deliver at unblock, i.e. after the main's pqsignal set).
+// ---------------------------------------------------------------------------
+
+struct PreIdentityTarget {
+    pid: i32,
+    bits: std::sync::Arc<AtomicU32>,
+    // LatchHandle::as_usize of the owner's latch; 0 until adopted (a
+    // not-yet-adopted target is a child that has not parked yet — it drains
+    // the word at its first drain point, no wake needed).
+    latch_word: AtomicUsize,
+    // Owner's leaked InterruptPending flag (CFI-visible pend), null until
+    // adopted.
+    interrupt_flag: std::sync::atomic::AtomicPtr<AtomicBool>,
+}
+
+// pgsync by crate law: locked by the postmaster (launch/deliver) and by
+// child threads (adopt/consume) — the CHILD_THREADS precedent.
+static PRE_IDENTITY_TARGETS: pgsync::Mutex<Vec<std::sync::Arc<PreIdentityTarget>>> =
+    pgsync::Mutex::new(Vec::new());
+
+thread_local! {
+    // The calling thread's adopted entry (pid + shared pending word).
+    static MY_PRE_IDENTITY: std::cell::RefCell<Option<(i32, std::sync::Arc<AtomicU32>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn pre_identity_targets()
+-> pgsync::MutexGuard<'static, Vec<std::sync::Arc<PreIdentityTarget>>> {
+    PRE_IDENTITY_TARGETS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Launcher side: make `pid` deliverable before the child thread runs (or,
+/// for a pooled standby claim, before the task pid becomes broadcast-
+/// visible). Idempotent per pid; pids are process-unique (reserve_child_pid).
+pub fn PreIdentitySignalPrepare(pid: i32) {
+    let mut v = pre_identity_targets();
+    if v.iter().any(|e| e.pid == pid) {
+        return;
+    }
+    v.push(std::sync::Arc::new(PreIdentityTarget {
+        pid,
+        bits: std::sync::Arc::new(AtomicU32::new(0)),
+        latch_word: AtomicUsize::new(0),
+        interrupt_flag: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+    }));
+}
+
+/// Launcher side: the child never came to exist (spawn/dispatch failure).
+pub fn PreIdentitySignalDiscard(pid: i32) {
+    let mut v = pre_identity_targets();
+    if let Some(i) = v.iter().position(|e| e.pid == pid) {
+        v.swap_remove(i);
+    }
+}
+
+/// Child side, on its own thread once MyLatch exists (InitPostmasterChild /
+/// the wretain re-key): bind the prepared entry to this thread so delivery
+/// can wake it, and remember the pending word for DrainThreadSignals.
+/// Also tolerates a missing entry (non-pmchild callers) by creating one.
+pub fn PreIdentitySignalAdopt(pid: i32) {
+    // A retained-thread re-key adopts a NEW pid; drop any stale binding
+    // (its entry was consumed by the previous task's ProcSignalInit).
+    let _ = take_pre_identity_registration();
+    let entry = {
+        let mut v = pre_identity_targets();
+        match v.iter().find(|e| e.pid == pid) {
+            Some(e) => std::sync::Arc::clone(e),
+            None => {
+                let e = std::sync::Arc::new(PreIdentityTarget {
+                    pid,
+                    bits: std::sync::Arc::new(AtomicU32::new(0)),
+                    latch_word: AtomicUsize::new(0),
+                    interrupt_flag: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                });
+                v.push(std::sync::Arc::clone(&e));
+                e
+            }
+        }
+    };
+    entry.interrupt_flag.store(
+        g::interrupt_pending_flag() as *const _ as *mut AtomicBool,
+        Release,
+    );
+    if let Some(l) = g::MyLatch() {
+        entry.latch_word.store(l.as_usize(), Release);
+    }
+    MY_PRE_IDENTITY.with(|c| {
+        *c.borrow_mut() = Some((pid, std::sync::Arc::clone(&entry.bits)));
+    });
+}
+
+/// Consume the calling thread's registration; returns undrained bits.
+fn take_pre_identity_registration() -> u32 {
+    let Some((pid, word)) = MY_PRE_IDENTITY.with(|c| c.borrow_mut().take()) else {
+        return 0;
+    };
+    {
+        let mut v = pre_identity_targets();
+        if let Some(i) = v.iter().position(|e| e.pid == pid) {
+            v.swap_remove(i);
+        }
+    }
+    word.swap(0, SeqCst)
+}
+
+/// Child side, at any exit path that never reached ProcSignalInit: drop the
+/// registration so the registry cannot grow. No-op when already consumed.
+pub fn PreIdentitySignalRelease() {
+    let _ = take_pre_identity_registration();
+}
+
+/// The pre-identity half of DrainThreadSignals: run installed dispositions;
+/// keep signos with none PENDING (see the module comment above).
+fn drain_pre_identity_signals() -> PgResult<()> {
+    let Some(word) =
+        MY_PRE_IDENTITY.with(|c| c.borrow().as_ref().map(|(_, w)| std::sync::Arc::clone(w)))
+    else {
+        return Ok(());
+    };
+    if word.load(Acquire) == 0 {
+        return Ok(());
+    }
+    let mut bits = word.swap(0, SeqCst);
+    let handlers = THREAD_SIGNAL_HANDLERS.with(Cell::get);
+    let mut still_blocked: u32 = 0;
+    while bits != 0 {
+        let signo = bits.trailing_zeros() as usize;
+        let bit = 1u32 << signo;
+        bits &= bits - 1;
+        let result = match handlers[signo] {
+            ThreadSignalHandler::Ignore => Ok(()),
+            ThreadSignalHandler::Simple(f) => {
+                f();
+                Ok(())
+            }
+            ThreadSignalHandler::Fallible(f) => f(),
+            // No disposition installed yet: C's startup mask has this signo
+            // blocked; it stays pending and migrates into the ProcSignal
+            // slot at init, where the main's full pqsignal set handles it.
+            ThreadSignalHandler::Unset => {
+                still_blocked |= bit;
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
+            if bits | still_blocked != 0 {
+                word.fetch_or(bits | still_blocked, SeqCst);
+            }
+            return Err(e);
+        }
+    }
+    if still_blocked != 0 {
+        word.fetch_or(still_blocked, SeqCst);
+    }
+    Ok(())
+}
+
 fn proc_signal() -> &'static ProcSignalHeader {
     PROC_SIGNAL
         .get()
@@ -248,6 +429,16 @@ fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgRes
     slot.pss_cancel_key_len.set(cancel_key.len() as i32);
     slot.pss_pid.store(g::MyProcPid(), Relaxed);
     slot.pss_mutex.unlock();
+
+    // Identity is now published: consume this thread's pre-identity target
+    // and migrate any bits a broadcast pended while we had no slot. Order
+    // matters — pid first, then the takedown — so a concurrent delivery
+    // always finds at least one of the two channels (double delivery merges
+    // by OR; a lost signal cannot happen).
+    let pre_identity_pending = take_pre_identity_registration();
+    if pre_identity_pending != 0 {
+        slot.pss_pendingThreadSignals.fetch_or(pre_identity_pending, SeqCst);
+    }
 
     if old_pss_pid != 0 {
         elog(
@@ -447,13 +638,39 @@ fn deliver_thread_signal(pid: i32, bit: u32) -> i32 {
             slot.pss_mutex.unlock();
         }
     }
+    // Pre-identity fallback (see PRE_IDENTITY_TARGETS): the target has no
+    // ProcSignal slot yet but the launcher made its pid deliverable. Pend
+    // the bit on the shared word and wake whatever the child has bound so
+    // far; an unadopted entry has no latch, and that is fine — the child is
+    // still running its prelude and drains the word at its first drain
+    // point before it can park.
+    let found = {
+        let v = pre_identity_targets();
+        v.iter().find(|e| e.pid == pid).map(|e| {
+            e.bits.fetch_or(bit, SeqCst);
+            let flag = e.interrupt_flag.load(Acquire);
+            if !flag.is_null() {
+                // SAFETY: only ever a leaked 'static (interrupt_pending_flag).
+                unsafe { &*flag }.store(true, SeqCst);
+            }
+            e.latch_word.load(Acquire)
+        })
+    };
+    if let Some(latch_word) = found {
+        if latch_word != 0 {
+            latch::SetLatch(types_storage::latch::LatchHandle::from_raw(latch_word));
+        }
+        return 0;
+    }
     set_errno(libc::ESRCH);
     -1
 }
 
 pub fn DrainThreadSignals() -> PgResult<()> {
     let Some(index) = MY_PROC_SIGNAL_SLOT.get() else {
-        return Ok(());
+        // No slot yet: drain the pre-identity word instead (the fast-
+        // shutdown SIGTERM against a startup-phase backend lands there).
+        return drain_pre_identity_signals();
     };
     let slot = &proc_signal().psh_slot[index];
     if slot.pss_pendingThreadSignals.load(Acquire) == 0 {
