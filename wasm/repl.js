@@ -803,7 +803,8 @@ bootBackend().then(() => {
   const engineNote = getEngineMode() === 'wire'
     ? 'one live protocol session (temp tables, prepared statements, and transactions span statements)'
     : 'single-user postgres over a persistent in-memory datadir';
-  pushLine('', `engine ready — ${getBuildInfo().label}, ${engineNote}.`, '#6f7785');
+  pushLine('', `engine ready — ${getBuildInfo().label}.`, '#6f7785');
+  pushLine('', `${engineNote}.`, '#6f7785');
   if (getPersistState().restored) {
     pushLine('', 'restored your persisted datadir from this browser’s storage (persist is on; reset wipes it).', '#7e8794');
   }
