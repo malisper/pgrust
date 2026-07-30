@@ -21,14 +21,22 @@
 //!    bytes trap). The detoast seam is installed as an identity byte-copy
 //!    (sound for plain images, which real detoast returns unchanged;
 //!    toasted/compressed inputs are out of proof).
-//!  - ndim FENCE 0..=MAXDIM on every row except array_ndims (full-i32
-//!    ndim): shipped read_dims_lbounds loops `0..ndim as usize` BEFORE the
-//!    wrapper's sanity check, so ndim < 0 or ndim > 6 (corruption-plane
-//!    images, unreachable from any constructed array) panics in Rust where
-//!    C returns NULL/garbage — recorded as a corruption-plane divergence
-//!    CANDIDATE (witness: tests/corruption_plane.rs), not provable and not
-//!    ruled here. array_ndims reads only the ndim field and IS proved over
-//!    the full i32 ndim plane including both sanity-check arms.
+//!  - ndim: NO FENCE — the full i32 plane, as the union of the in-range
+//!    literal cells (ndim in {0,1,2,6}, symbolic dims/lbounds) and the
+//!    *_ndim_corrupt cells (symbolic ndim with `ndim as u32 > MAXDIM`, i.e.
+//!    both ndim < 0 and ndim > MAXDIM, over a full symbolic 6-dim body).
+//!    HISTORY: this WAS fenced to 0..=MAXDIM, because shipped
+//!    read_dims_lbounds looped `0..ndim as usize` BEFORE the wrapper's
+//!    sanity check and panicked (dims[6] on a [i32; 6]; a ~2^64 range for
+//!    negative ndim) where C returns NULL. That was a real divergence, not
+//!    a solver limit, and it was FIXED (arrayfuncs: sanity-check ndim
+//!    BEFORE the dims read) — so the fence came off and the plane is
+//!    proved. tests/corruption_plane.rs is the standing native regression
+//!    witness that pgrust does not panic there.
+//!    array_cardinality is the asymmetric member (C has no sanity check):
+//!    non-positive ndim is dual-executed against C's VALUE 0, while above
+//!    MAXDIM C reads dim words past the datum, so there is no C answer —
+//!    that cell is a RUST-ONLY defined-error theorem, flagged as such.
 //!  - array_upper/array_dims ub FENCE: dims[i] + lb[i] - 1 stays in i32
 //!    (both the sum and sum-1) — the in-contract plane; C wraps under
 //!    -fwrapv, Rust release wraps identically, but the wrap plane is
@@ -90,6 +98,35 @@ pub fn mk_image(ndim: i32, dims: &[i32; MAXDIM], lbs: &[i32; MAXDIM]) -> [u8; CA
             img[l..l + 4].copy_from_slice(&lbs[i].to_ne_bytes());
         }
     }
+    img
+}
+
+/// CORRUPTION-PLANE image: all MAXDIM dim words and all MAXDIM lbound words
+/// are materialized at the offsets a 6-dimensional array would use, then the
+/// header ndim field is stamped with `ndim` VERBATIM — so the header can claim
+/// any i32 dimension count while the body carries a full 6-dim payload. This
+/// is the shape a corrupt page or a crafted binary-format value has; no array
+/// pgrust or C can construct reaches it (ArrayCheckBounds / array_recv cap
+/// ndim at MAXDIM).
+///
+/// Distinct from mk_image, which only fills lanes for a valid ndim: the
+/// corruption-plane harnesses need real (symbolic) bytes sitting in the dims
+/// area so the theorem is "both sides ignore them and null out", not "both
+/// sides read the same zeros".
+pub fn mk_corrupt_image(ndim: i32, dims: &[i32; MAXDIM], lbs: &[i32; MAXDIM]) -> [u8; CAP] {
+    let mut img = [0u8; CAP];
+    img[0..4].copy_from_slice(&datum::varlena::set_varsize_4b(CAP));
+    img[12..16].copy_from_slice(&23u32.to_ne_bytes());
+    let mut i = 0;
+    while i < MAXDIM {
+        let d = 16 + 4 * i;
+        img[d..d + 4].copy_from_slice(&dims[i].to_ne_bytes());
+        let l = 16 + 4 * MAXDIM + 4 * i;
+        img[l..l + 4].copy_from_slice(&lbs[i].to_ne_bytes());
+        i += 1;
+    }
+    // stamped LAST so it is unconditionally the raw claimed count
+    img[4..8].copy_from_slice(&ndim.to_ne_bytes());
     img
 }
 
@@ -407,6 +444,236 @@ mod proofs {
                 Err(e) => {
                     core::mem::forget(e);
                     panic!("fc_array_dims errored");
+                }
+            }
+            core::mem::forget(ctx);
+        }
+    }
+
+    // ---- CORRUPTION PLANE (ndim outside 0..=MAXDIM) ----
+    //
+    // The fence these replace was a DIVERGENCE, not a solver limit: shipped
+    // read_dims_lbounds looped `0..ndim as usize` on the raw header field
+    // before any wrapper's sanity check, so ndim=7 indexed dims[6] on a
+    // [i32; 6] and ndim<0 made a ~2^64 range — both panics, where C returns
+    // NULL. fix/array-hdr-corruption-plane moved the ndim check ahead of the
+    // fill, so the plane is now provable and the fence is gone: `ndim as u32 >
+    // MAXDIM` (one compare covering ndim < 0 and ndim > MAXDIM) with a FULL
+    // 6-dim symbolic body underneath, union'd with the in-range literal cells
+    // above = the full i32 ndim plane.
+    //
+    // C's check is `AARR_NDIM(v) <= 0 || AARR_NDIM(v) > MAXDIM`, so ndim == 0
+    // nulls too but is IN range for the fill; it stays covered by the n0
+    // cells, which read a valid (empty) body.
+    macro_rules! corrupt_ndim_cell {
+        ($name:ident, $c:ident, $rust:path) => {
+            recipe! {
+                fn $name() {
+                    install_detoast();
+                    let ndim: i32 = kani::any();
+                    kani::assume(ndim as u32 > MAXDIM as u32);
+                    let mut dims = [0i32; MAXDIM];
+                    let mut lbs = [0i32; MAXDIM];
+                    let mut i = 0;
+                    while i < MAXDIM {
+                        dims[i] = kani::any();
+                        lbs[i] = kani::any();
+                        i += 1;
+                    }
+                    let reqdim: i32 = kani::any();
+                    let img = mk_corrupt_image(ndim, &dims, &lbs);
+                    let mut c_null: c_int = 0;
+                    let c = unsafe { $c(img.as_ptr(), reqdim, &mut c_null) };
+                    let ctx = mcx::MemoryContext::new_bump("kani-arrhdr");
+                    let d = datum::Datum::from_usize(img.as_ptr() as usize);
+                    match call_wrapper($rust, d, datum::Datum::from_i32(reqdim), &ctx) {
+                        Ok((rnull, rv)) => {
+                            assert!(rnull == (c_null == 1));
+                            if !rnull {
+                                assert!(rv.as_i32() == c);
+                            }
+                        }
+                        Err(e) => {
+                            core::mem::forget(e);
+                            panic!("header reader errored on the corruption plane");
+                        }
+                    }
+                    // The whole point: C's sanity check fires, so NULL, and the
+                    // shipped wrapper agrees instead of panicking.
+                    assert!(c_null == 1);
+                    core::mem::forget(ctx);
+                }
+            }
+        };
+    }
+    corrupt_ndim_cell!(
+        eq_array_lower_ndim_corrupt,
+        pg_array_lower,
+        arrayfuncs::ops::fc_array_lower
+    );
+    corrupt_ndim_cell!(
+        eq_array_upper_ndim_corrupt,
+        pg_array_upper,
+        arrayfuncs::ops::fc_array_upper
+    );
+    corrupt_ndim_cell!(
+        eq_array_length_ndim_corrupt,
+        pg_array_length,
+        arrayfuncs::builtins::fc_array_length
+    );
+
+    recipe! {
+        /// oid 748 array_ndims over the corruption plane WITH a full symbolic
+        /// 6-dim body: the pre-existing full-i32 cell reads a header-only
+        /// image (dims/lbs literal zero), so this is the widening that puts
+        /// symbolic bytes in the area the old panic indexed into.
+        fn eq_array_ndims_ndim_corrupt() {
+            install_detoast();
+            let ndim: i32 = kani::any();
+            kani::assume(ndim as u32 > MAXDIM as u32);
+            let mut dims = [0i32; MAXDIM];
+            let mut lbs = [0i32; MAXDIM];
+            let mut i = 0;
+            while i < MAXDIM {
+                dims[i] = kani::any();
+                lbs[i] = kani::any();
+                i += 1;
+            }
+            let img = mk_corrupt_image(ndim, &dims, &lbs);
+            let mut c_null: c_int = 0;
+            let c = unsafe { pg_array_ndims(img.as_ptr(), &mut c_null) };
+            let ctx = mcx::MemoryContext::new_bump("kani-arrhdr");
+            let d = datum::Datum::from_usize(img.as_ptr() as usize);
+            match call_wrapper(arrayfuncs::ops::fc_array_ndims, d, datum::Datum::from_i32(0), &ctx) {
+                Ok((rnull, rv)) => {
+                    assert!(rnull == (c_null == 1));
+                    if !rnull {
+                        assert!(rv.as_i32() == c);
+                    }
+                }
+                Err(e) => {
+                    core::mem::forget(e);
+                    panic!("fc_array_ndims errored");
+                }
+            }
+            assert!(c_null == 1);
+            core::mem::forget(ctx);
+        }
+    }
+
+    recipe! {
+        /// oid 747 array_dims over the corruption plane. Cheap despite the
+        /// core::fmt wall on the value plane: the sanity check nulls out
+        /// before dims_text runs, so no fmt machinery is reachable here.
+        fn eq_array_dims_ndim_corrupt() {
+            install_detoast();
+            let ndim: i32 = kani::any();
+            kani::assume(ndim as u32 > MAXDIM as u32);
+            let mut dims = [0i32; MAXDIM];
+            let mut lbs = [0i32; MAXDIM];
+            let mut i = 0;
+            while i < MAXDIM {
+                dims[i] = kani::any();
+                lbs[i] = kani::any();
+                i += 1;
+            }
+            let img = mk_corrupt_image(ndim, &dims, &lbs);
+            let mut c_null: c_int = 0;
+            let mut c_out = [0u8; MAXDIM * 33 + 1];
+            let c = unsafe { pg_array_dims(img.as_ptr(), &mut c_null, c_out.as_mut_ptr()) };
+            assert!(c_null == 1 && c == 0);
+            let ctx = mcx::MemoryContext::new_bump("kani-arrhdr");
+            let d = datum::Datum::from_usize(img.as_ptr() as usize);
+            match call_wrapper(arrayfuncs::ops::fc_array_dims, d, datum::Datum::from_i32(0), &ctx) {
+                Ok((rnull, _rv)) => assert!(rnull),
+                Err(e) => {
+                    core::mem::forget(e);
+                    panic!("fc_array_dims errored");
+                }
+            }
+            core::mem::forget(ctx);
+        }
+    }
+
+    recipe! {
+        /// oid 3179 array_cardinality, NON-POSITIVE ndim. The asymmetric
+        /// member: it has NO sanity check, so C's ArrayGetNItems takes its own
+        /// `ndim <= 0 -> return 0` arm and yields the VALUE 0, not a NULL —
+        /// dual-executed here over full-i32 negative ndim with a symbolic
+        /// 6-dim body. (ndim == 0 is also covered by eq_array_cardinality_n0.)
+        fn eq_array_cardinality_ndim_nonpos() {
+            install_detoast();
+            let ndim: i32 = kani::any();
+            kani::assume(ndim <= 0);
+            let mut dims = [0i32; MAXDIM];
+            let mut lbs = [0i32; MAXDIM];
+            let mut i = 0;
+            while i < MAXDIM {
+                dims[i] = kani::any();
+                lbs[i] = kani::any();
+                i += 1;
+            }
+            let img = mk_corrupt_image(ndim, &dims, &lbs);
+            let mut c_err: c_int = 0;
+            let c = unsafe { pg_array_cardinality(img.as_ptr(), &mut c_err) };
+            assert!(c_err == 0 && c == 0);
+            let ctx = mcx::MemoryContext::new_bump("kani-arrhdr");
+            let d = datum::Datum::from_usize(img.as_ptr() as usize);
+            match call_wrapper(
+                arrayfuncs::ops::fc_array_cardinality,
+                d,
+                datum::Datum::from_i32(0),
+                &ctx,
+            ) {
+                Ok((rnull, rv)) => {
+                    assert!(!rnull);
+                    assert!(rv.as_i32() == c);
+                }
+                Err(e) => {
+                    core::mem::forget(e);
+                    panic!("fc_array_cardinality errored on non-positive ndim");
+                }
+            }
+            core::mem::forget(ctx);
+        }
+    }
+
+    recipe! {
+        /// oid 3179 array_cardinality, ndim ABOVE MAXDIM — RUST-ONLY theorem,
+        /// deliberately NOT dual-executed. C hands ArrayGetNItems a bare
+        /// `const int *dims` and reads `ndim` words, so above MAXDIM it reads
+        /// past the dims area and past the datum: there is no C answer to
+        /// match (the executed oracle returned a garbage product for a 7-dim
+        /// body and raised the array-size error for ndim=1000, purely
+        /// byte-dependent). pgrust takes a DEFINED error instead. Claim: a
+        /// catchable PgError with C's own dimension-count sqlstate, never a
+        /// panic and never a bogus Ok.
+        fn rust_array_cardinality_ndim_over_maxdim_errors() {
+            install_detoast();
+            let ndim: i32 = kani::any();
+            kani::assume(ndim > MAXDIM as i32);
+            let mut dims = [0i32; MAXDIM];
+            let mut lbs = [0i32; MAXDIM];
+            let mut i = 0;
+            while i < MAXDIM {
+                dims[i] = kani::any();
+                lbs[i] = kani::any();
+                i += 1;
+            }
+            let img = mk_corrupt_image(ndim, &dims, &lbs);
+            let ctx = mcx::MemoryContext::new_bump("kani-arrhdr");
+            let d = datum::Datum::from_usize(img.as_ptr() as usize);
+            match call_wrapper(
+                arrayfuncs::ops::fc_array_cardinality,
+                d,
+                datum::Datum::from_i32(0),
+                &ctx,
+            ) {
+                Ok((_rnull, _rv)) => panic!("over-MAXDIM ndim must not yield a value"),
+                Err(e) => {
+                    assert!(e.sqlstate == ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+                    assert!(e.level == ERROR);
+                    core::mem::forget(e);
                 }
             }
             core::mem::forget(ctx);
