@@ -469,7 +469,15 @@ pub fn poly_image<'m>(
 ) -> PgResult<Varlena<'m>> {
     let total = POLYGON_HEADER_SIZE + npts * POINT_SIZE;
     let mut img: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
-    img.resize(total, 0);
+    // Zero-fill via memset rather than resize's per-byte extend loop
+    // (behavior-identical; provability: proofs/geo-cmp box_poly — the
+    // per-byte loop is unwind-hostile under Kani).
+    // SAFETY: capacity >= total from the reservation above; every byte
+    // 0..total is initialized before set_len.
+    unsafe {
+        core::ptr::write_bytes(img.as_mut_ptr(), 0, total);
+        img.set_len(total);
+    }
     img[4..8].copy_from_slice(&(npts as i32).to_ne_bytes());
     for i in 0..npts {
         let p = get(i)?;

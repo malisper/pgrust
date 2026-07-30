@@ -849,7 +849,8 @@ pub fn fc_poly_box(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
     ret_box(fcinfo, crate::poly::poly_box(&p))
 }
 
-fn fc_box_poly(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// pub for proofs/geo-cmp (visibility-only; prove-target ruling 2026-07-28)
+pub fn fc_box_poly(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let b = unsafe { arg_box(fcinfo, 0) };
     let pts = [
