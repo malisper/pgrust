@@ -238,13 +238,13 @@ oid	name	source_file	status	class	notes
 334	spghandler	crates/backend/access/spgist/spgist_text/src/lib.rs	excluded(non-surface)	-	spgist_text/src/lib.rs:536 panic! guard
 338	amvalidate	crates/backend/commands/opclasscmds/src/builtins.rs	excluded(state)	-	opclass catalog state
 339	poly_same	crates/backend/utils/adt/geo/src/builtins.rs	proved(n=1 cell full-sym points + n-mismatch plane n in 1..=3) + wall(n=2,3: SAT no-verdict 420s default / 480s kissat+no-reach under 5-lane load; plist_same cyclic-match FPeq mux)	slow	148.4s DEFAULT solver (kissat re-enumerates: inversion) + 171.8s; proofs/geo-cmp ext3 2026-07-30
-340	poly_contain	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	poly_contain_poly poly.rs:165; bbox-fail early plane (box_contain_box lib.rs:73 FPge/FPle) fast full-symbolic; lseg_inside_poly recursion = wall
+340	poly_contain	crates/backend/utils/adt/geo/src/builtins.rs	proved(bbox-fail plane: literal separating coord, 7 bb coords + points full-sym, n=1, via PolyRef::from_parts; C deep walk = loud trap) + wall(lseg_inside_poly recursion); DURABLE: literal fold dies through varlena image decode - use from_parts	fast	2.9s kissat; proofs/geo-cmp ext5 2026-07-30
 341	poly_left	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 boundboxes incl NaN/Inf, exact compares; n=1 cell, wrapper-level varlena decode in-theorem)	fast	5.6s kissat; proofs/geo-cmp ext3 2026-07-30
 342	poly_overleft	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 boundboxes incl NaN/Inf; n=1 cell, wrapper-level)	fast	5.5s kissat; proofs/geo-cmp ext3 2026-07-30
 343	poly_overright	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 boundboxes incl NaN/Inf; n=1 cell, wrapper-level)	fast	5.8s kissat; proofs/geo-cmp ext3 2026-07-30
 344	poly_right	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 boundboxes incl NaN/Inf; n=1 cell, wrapper-level)	fast	6.0s kissat; proofs/geo-cmp ext3 2026-07-30
-345	poly_contained	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	arg-swapped poly_contain_poly; same plane/wall split
-346	poly_overlap	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	poly.rs:82; disjoint-boundbox plane (box_ov lib.rs:66) fast; interior na*nb lseg_interpt = wall
+345	poly_contained	crates/backend/utils/adt/geo/src/builtins.rs	proved(bbox-fail plane, arg-swapped; same rig as 340) + wall(lseg_inside_poly recursion)	fast	2.4s kissat; proofs/geo-cmp ext5 2026-07-30
+346	poly_overlap	crates/backend/utils/adt/geo/src/builtins.rs	proved(disjoint-bbox plane FPle(10,0) literal-fail; same rig) + wall(na x nb interpt + point_inside interior)	fast	2.0s kissat; proofs/geo-cmp ext5 2026-07-30
 347	poly_in	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: CNF width)	-	io::poly_in io.rs:554
 348	poly_out	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: CNF width)	-	io::poly_out io.rs:588
 350	btint2cmp	crates/backend/access/nbtree/compare/src/builtins.rs	proved(full-domain)	fast	<=0.03s; proofs/int-cmp
@@ -265,7 +265,7 @@ oid	name	source_file	status	class	notes
 367	close_pb	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: 53-bit)	-	proximity.rs:341
 368	close_sb	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: 53-bit)	-	proximity.rs:360
 369	on_ps	crates/backend/utils/adt/geo/src/builtins.rs	proved(9-cell one-sym-index axis-aligned grid incl eps-band/NaN/Inf/overflow-Err)	fast	33.3s kissat; proofs/geo-cmp ext2 relaunch 2026-07-29
-370	path_distance	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	path.rs:92 via fc builtins.rs:685; open x open have_min=false -> SQL NULL plane = scalar-verdict theorem; min-over-segments body wall
+370	path_distance	crates/backend/utils/adt/geo/src/builtins.rs	proved(no-segment plane: p2 open n=1 lit, p1 npts 1..=3 sym + full-i32 closed + full-sym points -> SQL NULL both sides; CORE-level, C closept = loud out-of-plane trap) + wall(min-over-segments body)	fast	2.4s kissat; proofs/geo-cmp ext5 2026-07-30
 371	dist_ppath	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: 53-bit)	-	dist_ppath_internal proximity.rs:27
 372	on_sb	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 domain, wrapper-level)	fast	1.4s kissat; proofs/geo-cmp ext2 relaunch 2026-07-29
 373	inter_sb	crates/backend/utils/adt/geo/src/builtins.rs	proved(9 literal axis-aligned cells) + wall(sym-index grid + full-sym probe memory>6GiB)	slow	3.1-10s kissat; proofs/geo-cmp ext2 relaunch 2026-07-29
@@ -527,12 +527,12 @@ oid	name	source_file	status	class	notes
 961	close_pl	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: 53-bit)	-	line_closept_point
 964	be_lo_unlink	crates/backend/libpq/be_fsstubs/src/fmgr_builtins.rs	excluded(state)	-	large-object catalog/buffer state
 972	hashbpcharextended	crates/backend/utils/adt/varchar/src/builtins.rs	proved(len<=4 symbolic trim + trim spots + covers; 3 extended spots wall-under-load, retry idle)	fast	proofs/hash-rows
-973	path_inter	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	path.rs:54; disjoint path_bound_box plane (path.rs:130) fast; i x j interpt body wall
+973	path_inter	crates/backend/utils/adt/geo/src/builtins.rs	proved(n=1 open plane full-sym points, box_ov + single-point bound boxes in-theorem, verdict false pinned; CORE-level) + wall(i x j interpt body)	fast	1.3s kissat; proofs/geo-cmp ext5 2026-07-30
 975	box_area	crates/backend/utils/adt/geo/src/builtins.rs	proved(zero-height plane full-sym + symbolic-index boundary grid incl ±EPSILON edges and error arms; full-symbolic area WALL per 53-bit law)	sloped-wall	6-7s; proofs/geo-cmp
 976	box_width	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 domain incl NaN payloads/±Inf/±0/subnormals; EPSILON fuzzy forms in-theorem; wrapper-level by-ref)	fast	0.8-30s; proofs/geo-cmp
 977	box_height	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 domain incl NaN payloads/±Inf/±0/subnormals; EPSILON fuzzy forms in-theorem; wrapper-level by-ref)	fast	0.8-30s; proofs/geo-cmp
 978	box_distance	crates/backend/utils/adt/geo/src/builtins.rs	proved(8-cell axis-aligned grid incl 22003 arm) + wall(hslice 550s both solvers @6GiB)	slow	26.0s; proofs/geo-cmp ext2 relaunch 2026-07-29
-979	path_area	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	path.rs:22; open-path -> SQL NULL plane clean scalar-verdict; shoelace sum = 53-bit wall
+979	path_area	crates/backend/utils/adt/geo/src/builtins.rs	proved(open-plane SQL-NULL parity, wrapper-level, npts 1..=3 sym + full-sym points) + wall(closed shoelace = 53-bit multiply chain, standing float-arith law)	slow	59.0s kissat; proofs/geo-cmp ext5 2026-07-30
 980	box_intersect	crates/backend/utils/adt/geo/src/builtins.rs	proved(full-sym incl SQL-NULL arm isnull parity; modulo allocator model)	slow	97.2s kissat; proofs/geo-cmp ext2 relaunch 2026-07-29
 981	box_diagonal	crates/backend/utils/adt/geo/src/builtins.rs	proved(full-sym by-ref image, modulo allocator model)	slow	46-55s; proofs/geo-cmp ext2 relaunch 2026-07-29
 982	path_n_lt	crates/backend/utils/adt/geo/src/builtins.rs	proved(npts 0..=3 symbolic both sides + full-i32 closed word; trusted varlena-builder fence, wrapper-level)	fast	24.4s kissat; proofs/geo-cmp ext3 2026-07-30
@@ -819,7 +819,7 @@ oid	name	source_file	status	class	notes
 1445	poly_npoints	crates/backend/utils/adt/geo/src/builtins.rs	proved(npts 0..=3 symbolic + full-sym boundbox; varlena decode in-theorem)	fast	3.6s kissat; proofs/geo-cmp ext3 2026-07-30
 1446	poly_box	crates/backend/utils/adt/geo/src/builtins.rs	proved(full-sym boundbox by-ref BOX image, modulo static-buffer allocator model)	slow	84.1s kissat; proofs/geo-cmp ext3 2026-07-30
 1447	poly_path	crates/backend/utils/adt/geo/src/builtins.rs	blocked(slice-core: path_image)	-	fc builtins.rs:741 symbolic npts
-1448	box_poly	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	fc builtins.rs:835 -> poly_image with npts LITERALLY 4 — concrete output length, the one constructor outside the width wall; mcx-stubs; covers bound_box lib.rs:279
+1448	box_poly	crates/backend/utils/adt/geo/src/builtins.rs	divergence(candidate: stored boundbox bytes differ - pgrust recomputes bound_box over the 4 corners, C box_construct normalizes from (high,low); native differential 6561-cell special-grid = 320 mismatches: 252 negative-zero placement + 68 NaN-plane; points/npts/header identical; kani FAILED playback walled; PENDING real-C-Postgres Linux ground-truth + ruling)	slow	witness tests/boxpoly_native.rs + scratch boxpoly_c_driver.c; kani 135s FAILED; proofs/geo-cmp ext5 2026-07-30
 1449	path_poly	crates/backend/utils/adt/geo/src/builtins.rs	blocked(slice-core: poly_image)	-	fc builtins.rs:731; open-path ereport arm = only scalar slice
 1450	circle_in	crates/backend/utils/adt/geo/src/builtins.rs	excluded(blocked: libc-strtod)	-	io.rs:592
 1451	circle_out	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: CNF width)	-	io.rs:650

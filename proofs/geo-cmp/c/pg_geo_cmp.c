@@ -3080,3 +3080,432 @@ pg_poly_send_w(int npts, const double *xy, unsigned char *out, int *olen)
 	*olen = buf->olen;
 	return pg_geo_errflag;
 }
+
+/* =====================================================================
+ * EXTENSION 5 (2026-07-30, path/poly PLANE slice: the scalar-verdict
+ * planes of the ladder rows whose general bodies are ratified walls).
+ *
+ * Provenance: src/backend/utils/adt/geo_ops.c @ REL_18_STABLE (fetched
+ * 2026-07-30): path_area, path_distance, path_inter, poly_contain_poly,
+ * poly_overlap_internal, poly_contain, poly_contained, poly_overlap —
+ * bodies verbatim, pg_ prefix + _w wrappers on staged PATH_S/POLY_S
+ * (trusted-builder fence, as EXTENSION 3).
+ *
+ * OUT-OF-PLANE TRAPS (literal-planes law): the deep helpers that are
+ * structurally unreachable inside every plane harness —
+ * lseg_closept_lseg (path_distance min body), lseg_inside_poly
+ * (poly_contain containment walk), point_inside (poly_overlap interior
+ * test) — are NOT vendored; each is a trap stub setting
+ * pg_geo_errflag = 99. A harness whose plane leaks into the deep arm
+ * fails its cerr assertion LOUDLY instead of proving against a wrong
+ * model. PG_RETURN_NULL -> *isnull out-param.
+ */
+
+/* out-of-plane traps (NOT Postgres code) */
+static float8
+lseg_closept_lseg(Point *result, LSEG *on_lseg, LSEG *to_lseg)
+{
+	pg_geo_errflag = 99;
+	return 0.0;
+}
+
+static bool
+lseg_inside_poly(Point *a, Point *b, POLY_S *poly, int start)
+{
+	pg_geo_errflag = 99;
+	return true;
+}
+
+static bool
+point_inside(Point *p, int npts, Point *plist)
+{
+	pg_geo_errflag = 99;
+	return true;
+}
+
+/* path_area, body verbatim */
+int
+pg_path_area_w(int closed, int npts, const double *xy, double *out, int *isnull)
+{
+	PATH_S		path_ = {npts, closed};
+	PATH_S	   *path = &path_;
+	Point		p[POLY_CAP];
+	float8		area = 0.0;
+	int			i,
+				j;
+	int			k;
+
+	for (k = 0; xy != NULL && k < npts && k < POLY_CAP; k++)
+	{
+		p[k].x = xy[2 * k];
+		p[k].y = xy[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+	*isnull = 0;
+
+	if (!path->closed)
+	{
+		*isnull = 1;			/* PG_RETURN_NULL() */
+		return pg_geo_errflag;
+	}
+
+	for (i = 0; i < path->npts; i++)
+	{
+		j = (i + 1) % path->npts;
+		area = float8_pl(area, float8_mul(p[i].x, p[j].y));
+		area = float8_mi(area, float8_mul(p[i].y, p[j].x));
+	}
+
+	*out = float8_div(fabs(area), 2.0);
+	return pg_geo_errflag;
+}
+
+/* path_distance, body verbatim (lseg_closept_lseg = out-of-plane trap) */
+int
+pg_path_distance_w(int closed1, int n1, const double *xy1,
+				   int closed2, int n2, const double *xy2,
+				   double *out, int *isnull)
+{
+	PATH_S		p1_ = {n1, closed1};
+	PATH_S		p2_ = {n2, closed2};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+	Point		pa[POLY_CAP];
+	Point		pb[POLY_CAP];
+	float8		min = 0.0;		/* initialize to keep compiler quiet */
+	bool		have_min = false;
+	float8		tmp;
+	int			i,
+				j;
+	LSEG		seg1,
+				seg2;
+	int			k;
+
+	for (k = 0; xy1 != NULL && k < n1 && k < POLY_CAP; k++)
+	{
+		pa[k].x = xy1[2 * k];
+		pa[k].y = xy1[2 * k + 1];
+	}
+	for (k = 0; xy2 != NULL && k < n2 && k < POLY_CAP; k++)
+	{
+		pb[k].x = xy2[2 * k];
+		pb[k].y = xy2[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+	*isnull = 0;
+
+	for (i = 0; i < p1->npts; i++)
+	{
+		int			iprev;
+
+		if (i > 0)
+			iprev = i - 1;
+		else
+		{
+			if (!p1->closed)
+				continue;
+			iprev = p1->npts - 1;	/* include the closure segment */
+		}
+
+		for (j = 0; j < p2->npts; j++)
+		{
+			int			jprev;
+
+			if (j > 0)
+				jprev = j - 1;
+			else
+			{
+				if (!p2->closed)
+					continue;
+				jprev = p2->npts - 1;	/* include the closure segment */
+			}
+
+			statlseg_construct(&seg1, &pa[iprev], &pa[i]);
+			statlseg_construct(&seg2, &pb[jprev], &pb[j]);
+
+			tmp = lseg_closept_lseg(NULL, &seg1, &seg2);
+			if (!have_min || float8_lt(tmp, min))
+			{
+				min = tmp;
+				have_min = true;
+			}
+		}
+	}
+
+	if (!have_min)
+	{
+		*isnull = 1;			/* PG_RETURN_NULL() */
+		return pg_geo_errflag;
+	}
+
+	*out = min;
+	return pg_geo_errflag;
+}
+
+/* path_inter, body verbatim */
+int
+pg_path_inter_w(int closed1, int n1, const double *xy1,
+				int closed2, int n2, const double *xy2, int *result)
+{
+	PATH_S		p1_ = {n1, closed1};
+	PATH_S		p2_ = {n2, closed2};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+	Point		pa[POLY_CAP];
+	Point		pb[POLY_CAP];
+	BOX			b1,
+				b2;
+	int			i,
+				j;
+	LSEG		seg1,
+				seg2;
+	int			k;
+
+	for (k = 0; xy1 != NULL && k < n1 && k < POLY_CAP; k++)
+	{
+		pa[k].x = xy1[2 * k];
+		pa[k].y = xy1[2 * k + 1];
+	}
+	for (k = 0; xy2 != NULL && k < n2 && k < POLY_CAP; k++)
+	{
+		pb[k].x = xy2[2 * k];
+		pb[k].y = xy2[2 * k + 1];
+	}
+
+	pg_geo_errflag = 0;
+
+	b1.high.x = b1.low.x = pa[0].x;
+	b1.high.y = b1.low.y = pa[0].y;
+	for (i = 1; i < p1->npts; i++)
+	{
+		b1.high.x = float8_max(pa[i].x, b1.high.x);
+		b1.high.y = float8_max(pa[i].y, b1.high.y);
+		b1.low.x = float8_min(pa[i].x, b1.low.x);
+		b1.low.y = float8_min(pa[i].y, b1.low.y);
+	}
+	b2.high.x = b2.low.x = pb[0].x;
+	b2.high.y = b2.low.y = pb[0].y;
+	for (i = 1; i < p2->npts; i++)
+	{
+		b2.high.x = float8_max(pb[i].x, b2.high.x);
+		b2.high.y = float8_max(pb[i].y, b2.high.y);
+		b2.low.x = float8_min(pb[i].x, b2.low.x);
+		b2.low.y = float8_min(pb[i].y, b2.low.y);
+	}
+	if (!box_ov(&b1, &b2))
+	{
+		*result = 0;
+		return pg_geo_errflag;
+	}
+
+	/* pairwise check lseg intersections */
+	for (i = 0; i < p1->npts; i++)
+	{
+		int			iprev;
+
+		if (i > 0)
+			iprev = i - 1;
+		else
+		{
+			if (!p1->closed)
+				continue;
+			iprev = p1->npts - 1;	/* include the closure segment */
+		}
+
+		for (j = 0; j < p2->npts; j++)
+		{
+			int			jprev;
+
+			if (j > 0)
+				jprev = j - 1;
+			else
+			{
+				if (!p2->closed)
+					continue;
+				jprev = p2->npts - 1;	/* include the closure segment */
+			}
+
+			statlseg_construct(&seg1, &pa[iprev], &pa[i]);
+			statlseg_construct(&seg2, &pb[jprev], &pb[j]);
+			if (lseg_interpt_lseg(NULL, &seg1, &seg2))
+			{
+				*result = 1;
+				return pg_geo_errflag;
+			}
+		}
+	}
+
+	/* if we dropped through, no two segs intersected */
+	*result = 0;
+	return pg_geo_errflag;
+}
+
+/* poly_contain_poly, body verbatim (lseg_inside_poly = trap) */
+static bool
+pg_poly_contain_poly(POLY_S *contains_poly, POLY_S *contained_poly)
+{
+	int			i;
+	LSEG		s;
+
+	if (!box_contain_box(&contains_poly->boundbox, &contained_poly->boundbox))
+		return false;
+
+	s.p[0] = contained_poly->p[contained_poly->npts - 1];
+
+	for (i = 0; i < contained_poly->npts; i++)
+	{
+		s.p[1] = contained_poly->p[i];
+		if (!lseg_inside_poly(s.p, s.p + 1, contains_poly, 0))
+			return false;
+		s.p[0] = s.p[1];
+	}
+
+	return true;
+}
+
+int
+pg_poly_contain_w(int na, const double *bba, const double *pa,
+				  int nb, const double *bbb, const double *pb, int *result)
+{
+	POLY_S		a_,
+				b_;
+
+	pg_poly_stage(&a_, na, bba[0], bba[1], bba[2], bba[3], pa);
+	pg_poly_stage(&b_, nb, bbb[0], bbb[1], bbb[2], bbb[3], pb);
+
+	pg_geo_errflag = 0;
+	*result = pg_poly_contain_poly(&a_, &b_) ? 1 : 0;
+	return pg_geo_errflag;
+}
+
+int
+pg_poly_contained_w(int na, const double *bba, const double *pa,
+					int nb, const double *bbb, const double *pb, int *result)
+{
+	POLY_S		a_,
+				b_;
+
+	pg_poly_stage(&a_, na, bba[0], bba[1], bba[2], bba[3], pa);
+	pg_poly_stage(&b_, nb, bbb[0], bbb[1], bbb[2], bbb[3], pb);
+
+	pg_geo_errflag = 0;
+	/* poly_contained(a, b) = poly_contain_poly(b, a) */
+	*result = pg_poly_contain_poly(&b_, &a_) ? 1 : 0;
+	return pg_geo_errflag;
+}
+
+/* poly_overlap_internal, body verbatim (point_inside = trap) */
+static bool
+pg_poly_overlap_internal(POLY_S *polya, POLY_S *polyb)
+{
+	bool		result;
+
+	/* Quick check by bounding box */
+	result = box_ov(&polya->boundbox, &polyb->boundbox);
+
+	/*
+	 * Brute-force algorithm - try to find intersected edges, if so then
+	 * polygons are overlapped else check is one polygon inside other or not
+	 * by testing single point of them.
+	 */
+	if (result)
+	{
+		int			ia,
+					ib;
+		LSEG		sa,
+					sb;
+
+		/* Init first of polya's edge with last point */
+		sa.p[0] = polya->p[polya->npts - 1];
+		result = false;
+
+		for (ia = 0; ia < polya->npts && !result; ia++)
+		{
+			/* Second point of polya's edge is a current one */
+			sa.p[1] = polya->p[ia];
+
+			/* Init first of polyb's edge with last point */
+			sb.p[0] = polyb->p[polyb->npts - 1];
+
+			for (ib = 0; ib < polyb->npts && !result; ib++)
+			{
+				sb.p[1] = polyb->p[ib];
+				result = lseg_interpt_lseg(NULL, &sa, &sb);
+				sb.p[0] = sb.p[1];
+			}
+
+			/*
+			 * move current endpoint to the first point of next edge
+			 */
+			sa.p[0] = sa.p[1];
+		}
+
+		if (!result)
+		{
+			result = (point_inside(polya->p, polyb->npts, polyb->p) ||
+					  point_inside(polyb->p, polya->npts, polya->p));
+		}
+	}
+
+	return result;
+}
+
+int
+pg_poly_overlap_w(int na, const double *bba, const double *pa,
+				  int nb, const double *bbb, const double *pb, int *result)
+{
+	POLY_S		a_,
+				b_;
+
+	pg_poly_stage(&a_, na, bba[0], bba[1], bba[2], bba[3], pa);
+	pg_poly_stage(&b_, nb, bbb[0], bbb[1], bbb[2], bbb[3], pb);
+
+	pg_geo_errflag = 0;
+	*result = pg_poly_overlap_internal(&a_, &b_) ? 1 : 0;
+	return pg_geo_errflag;
+}
+
+/* box_poly (EXTENSION 5 addendum): body verbatim; the palloc'd POLYGON
+ * image -> caller out buffer (104 bytes: 4B varlena header + npts +
+ * boundbox + 4 points; SET_VARSIZE = LE total<<2 as in EXTENSION 4).
+ * box_construct is the vendored verbatim inline (EXTENSION 2). */
+int
+pg_box_poly_w(double hx, double hy, double lx, double ly, unsigned char *out)
+{
+	BOX			box_ = {{hx, hy}, {lx, ly}};
+	BOX		   *box = &box_;
+	struct
+	{
+		int32		vl_len_;
+		int32		npts;
+		BOX			boundbox;
+		Point		p[4];
+	}			poly_,
+			   *poly = &poly_;
+	int			size;
+
+	pg_geo_errflag = 0;
+
+	/* map four corners of the box to a polygon */
+	size = 40 + sizeof(poly->p[0]) * 4;	/* offsetof(POLYGON, p) + 4 Points */
+
+	poly->npts = 4;
+
+	poly->p[0].x = box->low.x;
+	poly->p[0].y = box->low.y;
+	poly->p[1].x = box->low.x;
+	poly->p[1].y = box->high.y;
+	poly->p[2].x = box->high.x;
+	poly->p[2].y = box->high.y;
+	poly->p[3].x = box->high.x;
+	poly->p[3].y = box->low.y;
+
+	box_construct(&poly->boundbox, &box->high, &box->low);
+
+	/* SET_VARSIZE(poly, size): LE 4B header word = total << 2 */
+	poly->vl_len_ = (int32) (((uint32) size) << 2);
+	memcpy(out, &poly_, 104);
+	return pg_geo_errflag;
+}
