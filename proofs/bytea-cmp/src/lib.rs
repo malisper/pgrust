@@ -945,8 +945,6 @@ mod proofs {
     //    folds to masks/shifts — not the divider wall class.
     // ================================================================
 
-    use types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
-
     extern "C" {
         fn pg_bytea_int2(vdata: *const u8, len: c_int, err: *mut c_int) -> i16;
         fn pg_bytea_int4(vdata: *const u8, len: c_int, err: *mut c_int) -> i32;
