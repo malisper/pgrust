@@ -745,7 +745,7 @@ mac8	control_macaddr8_cmp_swap_must_fail	-Z c-ffi --c-lib csrc/mac8_shim.c	must-
 mbconv	proofs::eq_big5_to_euc_tw	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
 mbconv	proofs::eq_big5_to_mic	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
 mbconv	proofs::eq_big5_to_utf8	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
-mbconv	proofs::eq_check_encoding_conversion_args	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
+mbconv	proofs::eq_check_encoding_conversion_args	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --exact	green	per-commit	1.2	
 mbconv	proofs::eq_euc_cn_to_mic	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
 mbconv	proofs::eq_euc_cn_to_utf8	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
 mbconv	proofs::eq_euc_jis_2004_to_shift_jis_2004	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
@@ -828,7 +828,7 @@ mbconv	proofs::eq_win866_to_iso	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.
 mbconv	proofs::eq_win866_to_koi8r	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
 mbconv	proofs::eq_win866_to_mic	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
 mbconv	proofs::eq_win866_to_win1251	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	green	unmeasured	?	recipe INFERRED (no run script/doc flags); solver unrecorded; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
-mbconv	proofs::control_mismatched_table_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	must-fail	defect-witness	?	DEFAULT solver per doc; NOT in harnesses.txt; recipe CORRECTED 2026-07-28 (was all-26-c-libs, ~45s fixed cost); DEFAULT solver; per-verdict details in ledger
+mbconv	proofs::control_mismatched_table_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	must-fail	defect-witness	33.7	koi8r_to_win1251 Rust vs koi8r_to_win866 C shim; FAILED as required
 misc-ops	proofs::eq_booland_statefunc	-Z c-ffi -Z stubbing --exact	green	per-commit	1	c-lib via Cargo.toml kani metadata; DEFAULT solver (measured faster than kissat)
 misc-ops	proofs::eq_boolor_statefunc	-Z c-ffi -Z stubbing --exact	green	per-commit	1	
 misc-ops	proofs::eq_date_pli	-Z c-ffi -Z stubbing --exact	green	per-commit	3	PgError::new stub
@@ -1175,59 +1175,59 @@ pg_lsn	eq_pg_lsn_in_accept_8_6	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solv
 pg_lsn	eq_pg_lsn_in_accept_8_7	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat	green	release-gate	15	8-15s; accept_harness! 64-way split
 pg_lsn	eq_pg_lsn_in_accept_8_8	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat	green	release-gate	15	8-15s; accept_harness! 64-way split
 pg_lsn	control_pg_lsn_out_mismatch	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c	must-fail	defect-witness	?	DEFAULT solver; run-all.sh validates by counterexample (reconciled 2026-07-28)
-pseudotypes	proofs::eq_anyarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anyarray_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatiblearray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatiblearray_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anyenum_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anyrange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatiblerange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anymultirange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatiblemultirange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_shell_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_shell_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_pg_node_tree_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_pg_node_tree_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_pg_ddl_command_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_pg_ddl_command_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_pg_ddl_command_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_pg_ddl_command_send	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_any_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_any_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_trigger_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_trigger_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_event_trigger_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_event_trigger_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_language_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_language_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_fdw_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_fdw_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_table_am_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_table_am_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_index_am_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_index_am_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_tsm_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_tsm_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_internal_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_internal_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anyelement_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anyelement_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anynonarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anynonarray_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatible_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatible_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatiblenonarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_anycompatiblenonarray_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	err_stub_eq!; verdict+sqlstate+level parity; solver unstated for greens; name repaired
-pseudotypes	proofs::eq_void_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	shipped wrapper, no stubs; name repaired
-pseudotypes	proofs::eq_void_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	shipped wrapper, no stubs; name repaired
-pseudotypes	proofs::eq_void_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	shipped wrapper, no stubs; name repaired
-pseudotypes	proofs::eq_void_out_core	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	mcx static-buffer stub set; name repaired
+pseudotypes	proofs::eq_anyarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anyarray_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatiblearray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatiblearray_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anyenum_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anyrange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatiblerange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anymultirange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatiblemultirange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_shell_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_shell_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_pg_node_tree_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_pg_node_tree_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_pg_ddl_command_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_pg_ddl_command_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_pg_ddl_command_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_pg_ddl_command_send	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_any_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_any_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_trigger_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_trigger_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_event_trigger_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_event_trigger_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_language_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_language_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_fdw_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_fdw_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_table_am_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_table_am_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_index_am_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_index_am_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_tsm_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_tsm_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_internal_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_internal_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anyelement_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anyelement_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anynonarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anynonarray_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatible_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatible_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatiblenonarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_anycompatiblenonarray_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
+pseudotypes	proofs::eq_void_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	
+pseudotypes	proofs::eq_void_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	
+pseudotypes	proofs::eq_void_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	
+pseudotypes	proofs::eq_void_out_core	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	per-commit	12	tiny-proof-heap feature required
 pseudotypes	eq_cstring_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	missing	unmeasured	?	cstring_eq!; mcx stub set; cap 8; name repaired: no such harness in cargo kani list (pattern-name superseded or not landed)
 pseudotypes	eq_cstring_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	missing	unmeasured	?	name repaired: no such harness in cargo kani list (pattern-name superseded or not landed)
-pseudotypes	proofs::eq_void_send	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	unmeasured	?	mcx stub set; name repaired
+pseudotypes	proofs::eq_void_send	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	per-commit	26	DEFAULT solver (kissat external re-solve overruns)
 pseudotypes	eq_pg_node_tree_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	missing	unmeasured	?	mcx stub set; name repaired: no such harness in cargo kani list (pattern-name superseded or not landed)
 pseudotypes	eq_pg_node_tree_send	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	missing	unmeasured	?	pg_server_to_client seam pinned to identity arm; name repaired: no such harness in cargo kani list (pattern-name superseded or not landed)
-pseudotypes	proofs::control_shell_in_wrong_sqlstate	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	must-fail	defect-witness	?	DEFAULT solver explicit in doc; name repaired
+pseudotypes	proofs::control_shell_in_wrong_sqlstate	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	must-fail	defect-witness	1	FAILED as required; DEFAULT solver only
 scalar-misc	eq_chareq	-Z c-ffi --c-lib c/pg_scalar_misc.c --solver kissat	green	per-commit	0.2	recipe INFERRED (no run recipe recorded)
 scalar-misc	eq_charne	-Z c-ffi --c-lib c/pg_scalar_misc.c --solver kissat	green	per-commit	0.2	recipe INFERRED (no run recipe recorded)
 scalar-misc	eq_charlt	-Z c-ffi --c-lib c/pg_scalar_misc.c --solver kissat	green	per-commit	0.2	recipe INFERRED (no run recipe recorded)
@@ -1618,54 +1618,6 @@ text-slice	eq_text_substr_latin1	-Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c 
 text-slice	eq_textcat	-Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --solver kissat	wall-recorded	calibration	?	SAT residue >560s both solvers; idle rerun owed
 text-slice	eq_byteacat	-Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --solver kissat	wall-recorded	calibration	?	SAT residue both solvers; idle rerun owed
 text-slice	eq_textpos_utf8	-Z c-ffi -Z stubbing --c-lib c/pg_text_slice.c --solver kissat	wall-recorded	calibration	?	unwind(10) FAILED = unwinding artifact (documented); unwind(11/13) >6GiB
-pseudotypes	proofs::eq_pg_ddl_command_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_pg_ddl_command_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_pg_ddl_command_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_pg_ddl_command_send	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_pg_node_tree_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_pg_node_tree_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_table_am_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_table_am_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_index_am_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_index_am_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_any_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_any_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anyarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_trigger_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_trigger_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_language_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_language_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_internal_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_internal_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anyelement_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anyelement_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_shell_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_shell_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anyarray_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anynonarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anynonarray_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_fdw_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_fdw_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_tsm_handler_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_tsm_handler_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anyenum_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_event_trigger_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_event_trigger_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anyrange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatiblemultirange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anymultirange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatible_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatible_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatiblearray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatiblearray_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatiblenonarray_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatiblenonarray_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_anycompatiblerange_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	error stub, DEFAULT solver 0.5-0.7s
-pseudotypes	proofs::eq_void_in	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	
-pseudotypes	proofs::eq_void_recv	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	
-pseudotypes	proofs::eq_void_out	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	
-pseudotypes	proofs::eq_void_out_core	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	per-commit	12	tiny-proof-heap feature required
-pseudotypes	proofs::eq_void_send	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	per-commit	26	DEFAULT solver (kissat external re-solve overruns)
 pseudotypes	proofs::eq_cstring_in_spot_empty	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	per-commit	18	symbolic content = derived-length memory wall (ledger)
 pseudotypes	proofs::eq_cstring_in_spot_len1	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	per-commit	18	symbolic content = derived-length memory wall (ledger)
 pseudotypes	proofs::eq_cstring_in_spot_len3	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	per-commit	18	symbolic content = derived-length memory wall (ledger)
@@ -1691,7 +1643,6 @@ pseudotypes	proofs::eq_pg_node_tree_send_len6	-Z c-ffi -Z stubbing --c-lib c/pg_
 pseudotypes	proofs::eq_pg_node_tree_send_len7	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	release-gate	65	exact per-cell unwind; solver time under load ~7
 pseudotypes	proofs::eq_pg_node_tree_send_len8	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks	green	release-gate	65	exact per-cell unwind; solver time under load ~7
 pseudotypes	proofs::cover_node_tree_len_partition	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	green	per-commit	1	union-coverage witness for both node_tree splits
-pseudotypes	proofs::control_shell_in_wrong_sqlstate	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	must-fail	defect-witness	1	FAILED as required; DEFAULT solver only
 int-arith	proofs::eq_int2and	-Z c-ffi -Z stubbing --c-lib c/pg_int_arith.c --solver kissat --no-assertion-reach-checks --exact	green	per-commit	0.1-2	wave-3; name repaired
 int-arith	proofs::eq_int2or	-Z c-ffi -Z stubbing --c-lib c/pg_int_arith.c --solver kissat --no-assertion-reach-checks --exact	green	per-commit	0.1-2	wave-3; name repaired
 int-arith	proofs::eq_int2xor	-Z c-ffi -Z stubbing --c-lib c/pg_int_arith.c --solver kissat --no-assertion-reach-checks --exact	green	per-commit	0.1-2	wave-3; name repaired
@@ -1843,8 +1794,6 @@ geo-cmp	ext5::proofs_ext5::eq_poly_contained_bboxfail	-Z c-ffi -Z stubbing --c-l
 geo-cmp	ext5::proofs_ext5::eq_poly_overlap_bboxfail	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	green	per-commit	2.0	
 geo-cmp	ext5::proofs_ext5::eq_box_poly_img	-Z c-ffi -Z stubbing --c-lib c/pg_geo_cmp.c --no-overflow-checks --solver kissat	must-fail	defect-witness	135.2	DIVERGENCE WITNESS (candidate, box_poly boundbox -0.0/NaN classes): stays FAILED until adjudicated; native diff tests/boxpoly_native.rs
 mbconv	proofs::wiring_conv_builtins	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --exact	green	release-gate	223	84-entry CONV_BUILTINS foid+fn-ptr identity; sole CONV_BUILTINS reference; heavyweight by design
-mbconv	proofs::eq_check_encoding_conversion_args	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --exact	green	per-commit	1.2	
-mbconv	proofs::control_mismatched_table_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_mbconv_common.c --c-lib c/pg_conv_check.c --c-lib c/<FAMILY>.c --exact	must-fail	defect-witness	33.7	koi8r_to_win1251 Rust vs koi8r_to_win866 C shim; FAILED as required
 datetime-cmp	arith_proofs::eq_interval_um	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	2.7	
 datetime-cmp	arith_proofs::eq_interval_pl	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.7	
 datetime-cmp	arith_proofs::eq_interval_mi	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.8	
@@ -2184,3 +2133,17 @@ numeric-arith	proofs::eq_mul_fallback_routing	-Z c-ffi --c-lib c/pg_numeric_arit
 numeric-arith	proofs::cover_addsub_regimes	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	green	release-gate	152	7/7 covers at nd2 gate plane; default solver
 numeric-arith	proofs::cover_mul_regimes	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	green	release-gate	22	5/5 covers at nd1 gate plane; default solver
 numeric-arith	proofs::control_add_var_weight_skew	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	fail	defect-witness	143	must-FAIL; sole failing check = "assertion failed: ok" (assert_match); default solver
+pseudotypes	proofs::eq_cstring_send_spot_empty	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	24	w2-fmgr 2026-07-30: bytea image parity, strlen spot cells (pstrdup derived-length class); s2c seam identity arm; solver time at box load ~15-24
+pseudotypes	proofs::eq_cstring_send_spot_len1	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	30	w2-fmgr 2026-07-30 (see spot_empty note)
+pseudotypes	proofs::eq_cstring_send_spot_len3	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	42	w2-fmgr 2026-07-30 (see spot_empty note)
+pseudotypes	proofs::eq_cstring_send_spot_tail_garbage	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	43	w2-fmgr 2026-07-30: bytes after first NUL not transmitted
+pseudotypes	proofs::eq_cstring_recv_len0	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	16	w2-fmgr 2026-07-30: symbolic payload content per-len cells; in-harness StringInfo; c2s seam stubbed to identity arm; cursor-consumption in-theorem
+pseudotypes	proofs::eq_cstring_recv_len1	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	28	w2-fmgr 2026-07-30 (see recv_len0 note)
+pseudotypes	proofs::eq_cstring_recv_len3	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	32	w2-fmgr 2026-07-30 (see recv_len0 note)
+pseudotypes	proofs::eq_cstring_recv_len5	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	53	w2-fmgr 2026-07-30 (see recv_len0 note)
+pseudotypes	proofs::eq_cstring_recv_len5_cursor2	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact --no-assertion-reach-checks --solver kissat	green	release-gate	47	w2-fmgr 2026-07-30: nonzero-cursor cell, len-cursor subtraction in-theorem
+pseudotypes	proofs::control_cstring_recv_c2s_skew	-Z c-ffi -Z stubbing --c-lib c/pg_pseudotypes.c --exact	must-fail	defect-witness	39	w2-fmgr 2026-07-30: FAILED as required on the seam-skew check (c2s identity model load-bearing); DEFAULT solver only
+brin-opcinfo	proofs::eq_bloom_opcinfo	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact --solver kissat	green	per-commit	1	w2-fmgr 2026-07-30: 0.19s; full symbolic typoid metadata parity; typcache seam named-static model (proved-3383 mirror)
+brin-opcinfo	proofs::eq_minmax_multi_opcinfo	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact --solver kissat	green	per-commit	1	w2-fmgr 2026-07-30: 0.17s (see eq_bloom_opcinfo note)
+brin-opcinfo	proofs::eq_inclusion_opcinfo	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact --solver kissat	green	per-commit	2	w2-fmgr 2026-07-30: 1.5s; 3-column INCLUSION_* order in-theorem
+brin-opcinfo	proofs::control_bloom_wrong_summary_oid	-Z c-ffi --c-lib c/pg_brin_opcinfo.c --exact	must-fail	defect-witness	1	w2-fmgr 2026-07-30: FAILED as required on the summary-oid check; DEFAULT solver only

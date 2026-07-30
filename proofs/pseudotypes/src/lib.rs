@@ -1,6 +1,10 @@
 //! Kani C≡Rust equivalence: the pseudotype I/O family (pseudotypes.c —
 //! 51 pg_proc rows: 43 ereport-only error stubs, void_in/out/recv/send,
-//! cstring_in/cstring_out, pg_node_tree_out/pg_node_tree_send).
+//! cstring_in/cstring_out, pg_node_tree_out/pg_node_tree_send;
+//! + cstring_recv/cstring_send CORE lanes, w2-fmgr 2026-07-30 — the
+//! confirmed implemented-but-unregistered pair, ledger 2500/2501: proofs
+//! cover the shipped cores; the fc wrapper tier does not exist until the
+//! port lane registers them in PSEUDOTYPES_BUILTINS).
 //!
 //! Error-stub rows (43): the harness calls the SHIPPED fmgr wrapper
 //! (`adt_pseudotypes::builtins::fc_*`) through a real `LocalFcinfo<1>` frame
@@ -121,6 +125,8 @@ mod proofs {
         fn pg_void_send(out: *mut u8) -> c_int;
         fn pg_cstring_in(s: *const u8, out: *mut u8) -> c_int;
         fn pg_cstring_out(s: *const u8, out: *mut u8) -> c_int;
+        fn pg_cstring_recv(payload: *const u8, plen: c_int, out: *mut u8) -> c_int;
+        fn pg_cstring_send(s: *const u8, out: *mut u8) -> c_int;
         fn pg_pg_node_tree_out(payload: *const u8, plen: c_int, out: *mut u8) -> c_int;
         fn pg_pg_node_tree_send(payload: *const u8, plen: c_int, out: *mut u8) -> c_int;
     }
@@ -336,6 +342,205 @@ mod proofs {
         eq_cstring_out_spot_empty: cstring_out / pg_cstring_out = [0, 0xAA, 0x55, 0x7F];
         eq_cstring_out_spot_len1: cstring_out / pg_cstring_out = [b'a', 0, 0xFF, 0x01];
         eq_cstring_out_spot_len3: cstring_out / pg_cstring_out = [b'x', 0x80, b'z', 0];
+    }
+
+    // ---------- cstring_recv / cstring_send (w2-fmgr 2026-07-30) ----------
+    //
+    // CORE-fn proofs for the CONFIRMED implemented-but-unregistered pair
+    // (ledger 2500/2501: cores at pseudotypes/src/lib.rs:143/150, no
+    // PSEUDOTYPES_BUILTINS rows — the fc wrapper tier does not exist yet;
+    // when the port lane registers them, wrapper-tier harnesses become the
+    // cheapest next targets).
+    //
+    // cstring_send: strlen is position()-derived — the pstrdup
+    // derived-length wall class — so concrete SPOT cells only (empty /
+    // len 1 / len 3 / garbage-after-NUL), full bytea image parity.
+    // pg_server_to_client seam pinned to identity (node_tree_send
+    // precedent; the C shim models the same arm).
+    //
+    // cstring_recv: per-length cells with FULLY SYMBOLIC payload content
+    // (the copy length is the explicit slice extent, not code-derived —
+    // node_tree class, not pstrdup class), one nonzero-cursor cell so the
+    // len-cursor subtraction is in-theorem. pg_client_to_server stubbed to
+    // its identity arm (encoding validation/conversion leaves the proof —
+    // "modulo client-to-server encoding seam"; the ereport-on-underflow
+    // arm is statically dead in the shipped rawbytes framing, same as C).
+    fn c2s_identity<'mcx>(
+        _mcx: mcx::Mcx<'mcx>,
+        _s: &[u8],
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+        // lifetime stays LATE-bound (no where clause): the target
+        // mbutils::pg_client_to_server has 0 counted generics.
+        Ok(None)
+    }
+
+    macro_rules! cstring_send_spot {
+        ($($h:ident: $src:expr, $uw:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($uw)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            #[kani::stub(std::string::String::from_utf8_lossy, stubs::stub_from_utf8_lossy)]
+            fn $h() {
+                const N: usize = 4;
+                let src: [u8; N] = $src;
+
+                mbutils_seams::pg_server_to_client::set(s2c_identity);
+
+                let ctx = mcx::MemoryContext::new_bump("kani-pseudo");
+                let b = match adt_pseudotypes::cstring_send(ctx.mcx(), &src) {
+                    Ok(o) => o,
+                    Err(e) => { core::mem::forget(e); panic!("cstring_send errored") }
+                };
+                kani::cover!(true, "Ok arm reached");
+
+                let mut cbuf = [0xAAu8; N + 4];
+                let clen = unsafe { pg_cstring_send(src.as_ptr(), cbuf.as_mut_ptr()) };
+
+                // full bytea image parity: SET_VARSIZE header + strlen bytes
+                // (bytes after the first NUL must NOT be transmitted).
+                let img = b.as_bytes();
+                assert!(img.len() == clen as usize);
+                for i in 0..img.len() {
+                    assert!(img[i] == cbuf[i]);
+                }
+                core::mem::forget(b);
+                core::mem::forget(ctx);
+            }
+        )*};
+    }
+
+    cstring_send_spot! {
+        eq_cstring_send_spot_empty: [0, 0xAA, 0x55, 0x7F], 6;
+        eq_cstring_send_spot_len1: [b'a', 0, 0xFF, 0x01], 7;
+        eq_cstring_send_spot_len3: [b'x', 0x80, b'z', 0], 9;
+        eq_cstring_send_spot_tail_garbage: [b'q', 0, 0, 0xEE], 7;
+    }
+
+    macro_rules! cstring_recv_eq {
+        ($($h:ident @ $len:expr, cursor $cur:expr, $uw:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($uw)]
+            #[kani::stub(mbutils::pg_client_to_server, c2s_identity)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            #[kani::stub(std::string::String::from_utf8_lossy, stubs::stub_from_utf8_lossy)]
+            fn $h() {
+                const N: usize = 5;
+                let payload: [u8; N] = kani::any();
+                let len: usize = $len;
+                let cur: usize = $cur;
+
+                let ctx = mcx::MemoryContext::new_bump("kani-pseudo");
+                let mut msg = match stringinfo::StringInfo::new_in(ctx.mcx()) {
+                    Ok(m) => m,
+                    Err(e) => { core::mem::forget(e); panic!("StringInfo alloc failed") }
+                };
+                if let Err(e) = msg.append_bytes(&payload[..len]) {
+                    core::mem::forget(e);
+                    panic!("append failed");
+                }
+                msg.cursor = cur;
+
+                let out = match adt_pseudotypes::cstring_recv(ctx.mcx(), &mut msg) {
+                    Ok(o) => o,
+                    Err(e) => { core::mem::forget(e); panic!("cstring_recv errored") }
+                };
+                kani::cover!(true, "Ok arm reached");
+
+                let mut cbuf = [0xAAu8; N + 1];
+                let clen = unsafe {
+                    pg_cstring_recv(payload[cur..].as_ptr(), (len - cur) as c_int, cbuf.as_mut_ptr())
+                };
+
+                // cstring image parity: the unread region + NUL terminator.
+                assert!(out.len() == (clen as usize) + 1);
+                for i in 0..out.len() {
+                    assert!(out[i] == cbuf[i]);
+                }
+                // cursor fully consumed (C: msg->cursor += rawbytes).
+                assert!(msg.cursor == len);
+                core::mem::forget(out);
+                core::mem::forget(msg);
+                core::mem::forget(ctx);
+            }
+        )*};
+    }
+
+    cstring_recv_eq! {
+        eq_cstring_recv_len0 @ 0, cursor 0, 4;
+        eq_cstring_recv_len1 @ 1, cursor 0, 5;
+        eq_cstring_recv_len3 @ 3, cursor 0, 7;
+        eq_cstring_recv_len5 @ 5, cursor 0, 9;
+        eq_cstring_recv_len5_cursor2 @ 5, cursor 2, 7;
+    }
+
+    /// MUST FAIL — seam-skew control (seam rule: prove the c2s identity
+    /// model is load-bearing): the Rust side's pg_client_to_server is
+    /// stubbed to a CONVERTING arm (first byte flipped) while the C shim
+    /// stays identity, so the image assertions must produce a
+    /// counterexample. DEFAULT solver (kissat never terminates on failing
+    /// harnesses).
+    fn c2s_skew<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        s: &[u8],
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+        let mut v = mcx::slice_in(mcx, s)?;
+        if !v.is_empty() {
+            v[0] ^= 0xFF;
+        }
+        Ok(Some(v))
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::stub(mbutils::pg_client_to_server, c2s_skew)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(std::string::String::from_utf8_lossy, stubs::stub_from_utf8_lossy)]
+    fn control_cstring_recv_c2s_skew() {
+        const N: usize = 1;
+        let payload: [u8; N] = kani::any();
+
+        let ctx = mcx::MemoryContext::new_bump("kani-pseudo");
+        let mut msg = match stringinfo::StringInfo::new_in(ctx.mcx()) {
+            Ok(m) => m,
+            Err(e) => { core::mem::forget(e); panic!("StringInfo alloc failed") }
+        };
+        if let Err(e) = msg.append_bytes(&payload) {
+            core::mem::forget(e);
+            panic!("append failed");
+        }
+        msg.cursor = 0;
+
+        let out = match adt_pseudotypes::cstring_recv(ctx.mcx(), &mut msg) {
+            Ok(o) => o,
+            Err(e) => { core::mem::forget(e); panic!("cstring_recv errored") }
+        };
+
+        let mut cbuf = [0xAAu8; N + 1];
+        let _clen = unsafe { pg_cstring_recv(payload.as_ptr(), N as c_int, cbuf.as_mut_ptr()) };
+
+        // must FAIL here: the skewed conversion arm flips out[0].
+        assert!(out[0] == cbuf[0], "expected failure: c2s seam skew must be visible (rig is live)");
+        core::mem::forget(out);
+        core::mem::forget(msg);
+        core::mem::forget(ctx);
     }
 
     // ---------- void_send: empty bytea image parity ----------
