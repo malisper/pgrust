@@ -53,13 +53,12 @@
 //!     results; union is split per-n (2/3) — symbolic entry counts make
 //!     builder addresses symbolic (jsonb law).
 //!
-//! SCREENED DIVERGENCE PLANE (adjudication at solve time, do NOT record
-//! green over it): C gist_box_same compares with NaN-AWARE float8_eq
-//! (NaN == NaN -> true); shipped fc_gist_box_same uses raw f64 `==`
-//! (crates/backend/access/gist/gistproc/src/lib.rs:238-247).  A NaN
-//! coordinate shared by both keys is C-equal but Rust-unequal.
-//! probe_gist_box_same_nan_plane is the concrete expected-FAIL witness;
-//! eq_gist_box_same is fenced non-NaN and claims only that plane.
+//! HISTORICAL DIVERGENCE PLANES (both FIXED at fa583f02f2, 2026-07-30
+//! solve lane): gist_box_same raw f64 `==` -> NaN-aware float8_eq, and
+//! adjust_box raw </> -> NaN-aware float8_lt/gt (upstream #14238 class).
+//! probe_gist_box_same_nan_plane and eq_gist_box_union_n2/n3 now VERIFY
+//! against the fixed shipped code and stand as regression witnesses;
+//! eq_gist_box_same_full covers the whole plane, NaN included.
 //!
 //! Fallible harnesses stub types_error::PgError::error (field-identical
 //! minus Location/message text — value-space only) and std::fmt::format
@@ -484,20 +483,15 @@ mod proofs {
         (result, d.as_usize() == rptr.as_usize())
     }
 
-    /// Non-NaN plane: exact-equality lattice, result out-param + returned
-    /// pointer datum parity.  (The NaN plane is a screened divergence — see
-    /// module doc and the probe below.)
+    /// FULL plane (NaN included): exact-equality lattice, result out-param +
+    /// returned pointer datum parity.  The historical NaN divergence (raw
+    /// f64 `==` vs C NaN-aware float8_eq) was FIXED at fa583f02f2; the fence
+    /// this harness used to carry is retired and the plane is unrestricted.
     #[kani::proof]
-    #[kani::unwind(12)]
-    fn eq_gist_box_same_nonnan() {
+    #[kani::unwind(34)] // image compares need unwind > BOX image bytes + 1 (repair law)
+    fn eq_gist_box_same_full() {
         let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
         let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
-        kani::assume(
-            !k.high.x.is_nan() && !k.high.y.is_nan() && !k.low.x.is_nan() && !k.low.y.is_nan(),
-        );
-        kani::assume(
-            !q.high.x.is_nan() && !q.high.y.is_nan() && !q.low.x.is_nan() && !q.low.y.is_nan(),
-        );
         let (r, ret_is_arg2) = rust_box_same(Some(&k), Some(&q));
         let mut cres: c_int = 0;
         let cerr = unsafe {
@@ -534,10 +528,11 @@ mod proofs {
         assert!(r as c_int == cres);
     }
 
-    /// DIVERGENCE WITNESS (EXPECTED FAIL, default solver): concrete NaN
-    /// coordinate in both keys — C float8_eq says equal (NaN == NaN), the
-    /// shipped raw f64 `==` says unequal.  Decodable single-path
-    /// counterexample; adjudication owed before any fix.
+    /// REGRESSION WITNESS (now GREEN): concrete NaN coordinate in both keys.
+    /// Was the expected-FAIL divergence witness for the raw-== NaN bug; fix
+    /// fa583f02f2 (NaN-aware float8_eq, upstream #14238 class) landed and
+    /// this now VERIFIES (measured 2026-07-30, 5.4s).  Keep it: it pins the
+    /// NaN plane concretely and fails again on any regression.
     #[kani::proof]
     #[kani::unwind(34)]
     fn probe_gist_box_same_nan_plane() {
@@ -553,7 +548,7 @@ mod proofs {
             )
         };
         assert!(cerr == 0);
-        assert!(r as c_int == cres); // must fail: C true, Rust false
+        assert!(r as c_int == cres); // green since fa583f02f2 (both true)
     }
 
     // =================================================================
@@ -898,6 +893,11 @@ mod proofs {
         let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
         let strategy: u16 = kani::any();
         kani::assume((20..40).contains(&strategy));
+        // 29/30 are RTOldBelow/RTOldAbove: both sides REMAP them into group 0
+        // before the group split, where this harness wires different query
+        // points to C (literal 0,0) vs Rust (the box image) — they belong to
+        // the group0 harness (which includes them) and are fenced here.
+        kani::assume(strategy != 29 && strategy != 30);
         let leaf: bool = kani::any();
         let qimg = q.to_datum_bytes();
         let mut recheck = true;

@@ -1,0 +1,64 @@
+=== eq_gist_translate_cmptype_common ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 1.3153223s
+rc=0
+=== eq_gist_point_compress_noop ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.1439471s
+rc=0
+=== eq_gist_poly_compress_noop ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.2366247s
+rc=0
+=== eq_gist_circle_compress_noop ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 1.709976s
+rc=0
+=== eq_gist_box_penalty_degenerate_y ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.9423475s
+rc=0
+=== eq_gist_box_same_nonnan ===
+Failed Checks: unwinding assertion loop 0
+VERIFICATION:- FAILED
+Verification Time: 1.2884251s
+rc=0
+=== eq_gist_box_same_nulls ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.5482037s
+rc=0
+=== eq_gist_point_consistent_group0 ===
+rc=1
+=== eq_gist_point_consistent_group1 ===
+Failed Checks: assertion failed: v as c_int == cres
+VERIFICATION:- FAILED
+Verification Time: 13.838374s
+rc=0
+=== eq_gist_point_consistent_badgroup ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.1894886s
+rc=0
+=== eq_gist_box_same_nonnan ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.7001657s
+rc=0
+=== eq_gist_point_consistent_group1 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 15.134389s
+rc=0
+=== probe_gist_box_same_nan_plane ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.390223s
+rc=0
+=== eq_gist_box_same_full ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.9433398s
+rc=0
+=== eq_gist_box_union_n2 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 8.819922s
+rc=0
+=== eq_gist_box_union_n3 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 15.339647s
+rc=0
