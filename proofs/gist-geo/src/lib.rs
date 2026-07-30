@@ -458,6 +458,86 @@ mod proofs {
         }
     }
 
+    // Per-strategy literal split of the 2578 lattice (2026-07-30 solve
+    // lane): the full-symbolic-strategy harnesses above wall BOTH solvers
+    // at 450s under load 15-29 (12 fuzzy epsilon comparators muxed by a
+    // symbolic selector).  Literal strategy cells fold the switch
+    // (assume-never-folds law).  Partition is total by construction:
+    // cells s1..s12 x {leaf, internal} + the symbolic bad-strategy error
+    // harness below cover every u16 strategy; the full-symbolic rows stay
+    // as the CI-tier union claims.
+    macro_rules! box_consistent_cell {
+        ($($h:ident: $strat:literal, $leaf:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let mut recheck = true;
+                let r = rust_box_consistent(Some(&k), Some(&q), $strat, $leaf, &mut recheck);
+                let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+                let cerr = unsafe {
+                    pg_gist_box_consistent(
+                        0, k.high.x, k.high.y, k.low.x, k.low.y,
+                        0, q.high.x, q.high.y, q.low.x, q.low.y,
+                        $strat, $leaf as c_int, &mut crech, &mut cres,
+                    )
+                };
+                assert!(recheck as c_int == crech);
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    box_consistent_cell! {
+        eq_gbc_leaf_s1: 1u16, true;   eq_gbc_int_s1: 1u16, false;
+        eq_gbc_leaf_s2: 2u16, true;   eq_gbc_int_s2: 2u16, false;
+        eq_gbc_leaf_s3: 3u16, true;   eq_gbc_int_s3: 3u16, false;
+        eq_gbc_leaf_s4: 4u16, true;   eq_gbc_int_s4: 4u16, false;
+        eq_gbc_leaf_s5: 5u16, true;   eq_gbc_int_s5: 5u16, false;
+        eq_gbc_leaf_s6: 6u16, true;   eq_gbc_int_s6: 6u16, false;
+        eq_gbc_leaf_s7: 7u16, true;   eq_gbc_int_s7: 7u16, false;
+        eq_gbc_leaf_s8: 8u16, true;   eq_gbc_int_s8: 8u16, false;
+        eq_gbc_leaf_s9: 9u16, true;   eq_gbc_int_s9: 9u16, false;
+        eq_gbc_leaf_s10: 10u16, true; eq_gbc_int_s10: 10u16, false;
+        eq_gbc_leaf_s11: 11u16, true; eq_gbc_int_s11: 11u16, false;
+        eq_gbc_leaf_s12: 12u16, true; eq_gbc_int_s12: 12u16, false;
+    }
+
+    /// 2578 error arm: symbolic strategy OUTSIDE 1..=12, symbolic leaf —
+    /// both sides take the unrecognized-strategy path (verdict parity).
+    #[kani::proof]
+    #[kani::unwind(34)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_box_consistent_badstrategy() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let strategy: u16 = kani::any();
+        kani::assume(strategy < 1 || strategy > 12);
+        let leaf: bool = kani::any();
+        let mut recheck = true;
+        let r = rust_box_consistent(Some(&k), Some(&q), strategy, leaf, &mut recheck);
+        let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+        let cerr = unsafe {
+            pg_gist_box_consistent(
+                0, k.high.x, k.high.y, k.low.x, k.low.y,
+                0, q.high.x, q.high.y, q.low.x, q.low.y,
+                strategy, leaf as c_int, &mut crech, &mut cres,
+            )
+        };
+        assert!(recheck as c_int == crech);
+        assert!(cerr != 0 && cerr != 99);
+        assert!(r.is_err());
+        if let Err(e) = r {
+            core::mem::forget(e);
+        }
+    }
+
     // =================================================================
     // gist_box_same (oid 2584)
     // =================================================================
@@ -576,7 +656,7 @@ mod proofs {
     /// Full-symbolic probe: symbolic×symbolic 53-bit multiply in size_box —
     /// expected WALL per the float-arith cost law; run to record honestly.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(34)] // image-compare repair law
     #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
     #[kani::stub(std::fmt::format, stubs::stub_format)]
     fn probe_gist_box_penalty_full() {
@@ -645,7 +725,7 @@ mod proofs {
     /// measured superlinear symex growth): universally quantified over all
     /// 100 (orig, new) cells; multiply operands are 10-valued.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(34)] // image-compare repair law
     #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
     #[kani::stub(std::fmt::format, stubs::stub_format)]
     fn grid_gist_box_penalty() {
@@ -1522,6 +1602,112 @@ mod proofs {
         let f = fcn(IDX_CIRCLE_COMPRESS, 2592, "gist_circle_compress");
         let d = expect_ok(call(f, [eptr], false), 0);
         assert!(d.as_usize() == eptr.as_usize());
+    }
+
+    // Per-strategy literal split for the poly/circle consistent lattices
+    // (2591/2585): the full-symbolic-strategy harnesses above wall both
+    // solvers locally (same class as 2578).  Cells pin strategy to a
+    // literal, non-null keys; the null lattice keeps its own symbolic
+    // harnesses via the full rows (CI cluster tier).  Partition: s1..s12 cells
+    // + the shared bad-strategy arms of the full harnesses.
+    macro_rules! circle_consistent_cell {
+        ($($h:ident: $strat:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let c = CIRCLE { center: pt(any_f64(), any_f64()), radius: any_f64() };
+                let kimg = k.to_datum_bytes();
+                let qimg = c.to_datum_bytes();
+                let e = entry(dp(kimg.as_ptr()), 0, false, kani::any());
+                let f = fcn(IDX_CIRCLE_CONSISTENT, 2591, "gist_circle_consistent");
+                let mut recheck = false;
+                let r = call(
+                    f,
+                    [
+                        dp(&e as *const GISTENTRY),
+                        dp(qimg.as_ptr()),
+                        Datum::from_u16($strat),
+                        Datum::from_u16(0),
+                        dpm(&mut recheck as *mut bool),
+                    ],
+                    false,
+                )
+                .map(Datum::as_bool);
+                let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+                let cerr = unsafe {
+                    pg_gist_circle_consistent(
+                        0, k.high.x, k.high.y, k.low.x, k.low.y,
+                        0, c.center.x, c.center.y, c.radius,
+                        $strat, &mut crech, &mut cres,
+                    )
+                };
+                assert!(recheck as c_int == crech);
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    circle_consistent_cell! {
+        eq_gcc_s1: 1u16;  eq_gcc_s2: 2u16;  eq_gcc_s3: 3u16;  eq_gcc_s4: 4u16;
+        eq_gcc_s5: 5u16;  eq_gcc_s6: 6u16;  eq_gcc_s7: 7u16;  eq_gcc_s8: 8u16;
+        eq_gcc_s9: 9u16;  eq_gcc_s10: 10u16; eq_gcc_s11: 11u16; eq_gcc_s12: 12u16;
+    }
+
+    macro_rules! poly_consistent_cell {
+        ($($h:ident: $strat:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(72)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let bb = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let p0 = pt(any_f64(), any_f64());
+                let kimg = k.to_datum_bytes();
+                let qimg = poly_image(&bb, &p0);
+                let e = entry(dp(kimg.as_ptr()), 0, false, kani::any());
+                let f = fcn(IDX_POLY_CONSISTENT, 2585, "gist_poly_consistent");
+                let mut recheck = false;
+                let r = call(
+                    f,
+                    [
+                        dp(&e as *const GISTENTRY),
+                        dp(qimg.as_ptr()),
+                        Datum::from_u16($strat),
+                        Datum::from_u16(0),
+                        dpm(&mut recheck as *mut bool),
+                    ],
+                    true, // poly_at evaluates fcinfo.result_mcx()
+                )
+                .map(Datum::as_bool);
+                let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+                let cerr = unsafe {
+                    pg_gist_poly_consistent(
+                        0, k.high.x, k.high.y, k.low.x, k.low.y,
+                        0, bb.high.x, bb.high.y, bb.low.x, bb.low.y,
+                        $strat, &mut crech, &mut cres,
+                    )
+                };
+                assert!(recheck as c_int == crech);
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    poly_consistent_cell! {
+        eq_gpc_s1: 1u16;  eq_gpc_s2: 2u16;  eq_gpc_s3: 3u16;  eq_gpc_s4: 4u16;
+        eq_gpc_s5: 5u16;  eq_gpc_s6: 6u16;  eq_gpc_s7: 7u16;  eq_gpc_s8: 8u16;
+        eq_gpc_s9: 9u16;  eq_gpc_s10: 10u16; eq_gpc_s11: 11u16; eq_gpc_s12: 12u16;
     }
 
     // =================================================================
