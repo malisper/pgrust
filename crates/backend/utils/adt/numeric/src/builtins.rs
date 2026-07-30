@@ -586,10 +586,11 @@ fn poly_combine_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<Datum
                 (*state1).sum_x2 = state2.sum_x2;
             }
         } else if state2.n > 0 {
-            (*state1).n += state2.n;
-            (*state1).sum_x += state2.sum_x;
+            // C is compiled -fwrapv: overflow wraps silently.
+            (*state1).n = (*state1).n.wrapping_add(state2.n);
+            (*state1).sum_x = (*state1).sum_x.wrapping_add(state2.sum_x);
             if with_sum_x2 {
-                (*state1).sum_x2 += state2.sum_x2;
+                (*state1).sum_x2 = (*state1).sum_x2.wrapping_add(state2.sum_x2);
             }
         }
     }
@@ -903,8 +904,10 @@ macro_rules! fc_int_avg_accum {
             // SAFETY: validated 2-slot int8 payload behind td; the array
             // image starts ARR_OVERHEAD_NONULLS_1 bytes before it.
             unsafe {
-                *td += 1;
-                *td.add(1) += newval;
+                // C is compiled -fwrapv: overflow wraps silently. wrapping_add
+                // keeps debug builds identical to release and to C.
+                *td = (*td).wrapping_add(1);
+                *td.add(1) = (*td.add(1)).wrapping_add(newval);
                 Ok(Datum::from_usize(td.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize))
             }
         }
@@ -929,8 +932,9 @@ macro_rules! fc_int_avg_accum_inv {
             let td = unsafe { int8_transarray(fcinfo, !in_agg)? };
             // SAFETY: validated 2-slot int8 payload behind td.
             unsafe {
-                *td -= 1;
-                *td.add(1) -= newval;
+                // C is compiled -fwrapv: overflow wraps silently (see accum).
+                *td = (*td).wrapping_sub(1);
+                *td.add(1) = (*td.add(1)).wrapping_sub(newval);
                 Ok(Datum::from_usize(td.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize))
             }
         }
@@ -954,8 +958,9 @@ pub fn fc_int4_avg_combine(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     unsafe {
         let td1 = int8_transarray_at(fcinfo, 0, false)?;
         let td2 = int8_transarray_at(fcinfo, 1, false)?;
-        *td1 += *td2;
-        *td1.add(1) += *td2.add(1);
+        // C is compiled -fwrapv: overflow wraps silently (see accum).
+        *td1 = (*td1).wrapping_add(*td2);
+        *td1.add(1) = (*td1.add(1)).wrapping_add(*td2.add(1));
         Ok(Datum::from_usize(td1.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize))
     }
 }
