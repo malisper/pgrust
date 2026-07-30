@@ -108,3 +108,69 @@ proofs::eq_gist_translate_cmptype_common         | GREEN      | per-commit   | $
 #   6347: proved(full-i32)
 # Error arms: "value-space + verdict (+ sqlstate 22003 on float arms) only;
 # message text/location out of proof" (PgError::error + std::fmt::format stubbed).
+
+# =====================================================================
+# SOLVE LANE RESULTS 2026-07-30 (local, load 15-43 SATURATED — all times
+# are CBMC-reported Verification Time; walls are load-qualified).
+# Solver key: k=kissat, d=default.
+#
+# GREEN (39):
+#   eq_gist_translate_cmptype_common 1.3s k | eq_gist_point_compress_noop 3.1s k
+#   eq_gist_poly_compress_noop 4.2s k | eq_gist_circle_compress_noop 1.7s k
+#   eq_gist_box_penalty_degenerate_y 3.9s k | grid_gist_box_penalty 18.1s k (after unwind 12->34 repair)
+#   eq_gist_box_same_full 2.9s k (FULL plane incl NaN — fence retired post-fa583f02f2)
+#   eq_gist_box_same_nulls 2.5s k | probe_gist_box_same_nan_plane 5.4s d (NOW GREEN = regression witness)
+#   eq_gist_box_union_n2 8.8s k | eq_gist_box_union_n3 15.3s k (NOW GREEN post adjust_box fix)
+#   eq_gist_point_consistent_group1 15.1s k (after 29/30 remap fence — see REPAIRS)
+#   eq_gist_point_consistent_badgroup 2.2s k
+#   eq_gbc_leaf_s1..s12 3.9-34.9s k | eq_gbc_int_s1..s12 4.5-17.8s k (NEW per-strategy cells)
+#   eq_gist_box_consistent_badstrategy 3.3s k | eq_gist_box_consistent_nulls 13.1s k
+#   eq_gpc_s1..s12 4.1-17.0s k (NEW) | eq_gist_poly_consistent_nulls 7.1s k (NEW)
+#   eq_gcc_s1 62.0s k / 122.4s d, s2 77.9s, s4 49.1s, s5 74.6s, s9 65.7s, s10 60.5s, s11 71.7s, s12 44.7s k (NEW)
+#   eq_gist_circle_consistent_nulls 6.4s k (NEW)
+#   eq_gist_point_distance_inbox 98.7s k | _ystrip 214.1s d | _xstrip 345.4s d (kissat walls both — inversion)
+#   eq_gist_point_distance_badstrategy 59.5s k
+#   eq_gist_box_distance_inbox 144.5s k | eq_gist_circle_distance_inbox 64.0s k | eq_gist_poly_distance_inbox 69.8s k (NEW per-arm)
+#   eq_gist_point_compress_leaf 4.3s k | eq_gist_point_fetch 3.5s k | eq_gist_poly_compress_leaf 6.8s k
+# MUST-FAIL CONTROL: control_gist_box_consistent_leaf_vs_internal FAILED
+#   on the INTENDED check (v == cres) 2.8s d — gate non-vacuous.
+#
+# REPAIRS (harness defects, never divergences):
+#   - eq_gist_box_same / grid+probe penalty: unwind 12->34 (missed rows of
+#     the documented image-compare repair; "unwinding assertion loop 0").
+#   - eq_gist_point_consistent_group1: fenced strategies 29/30 (RTOld
+#     remaps land in group 0 where the harness wires literal-(0,0) query
+#     to C but the box image to Rust — fabricated 13.8s FAILED).
+#
+# ADJUDICATED (former expected-FAILs, fixed at fa583f02f2 fix(geo,gist)):
+#   probe_gist_box_same_nan_plane + eq_gist_box_union_n2/n3 all VERIFY;
+#   kept as regression witnesses. No open divergences in this family.
+#
+# WALL / FLEET-BOUND (expected=unmeasured, run on the CI cluster tier):
+#   eq_gist_box_consistent_leaf/_internal   wall(timeout-450s k+d, load 15-25) — superseded by cells, keep as union rows
+#   eq_gist_circle_consistent / eq_gist_poly_consistent (full-sym strategy) — same; superseded by cells + nulls
+#   eq_gcc_s3 (overlap) wall(k170+d450); eq_gcc_s6/s7/s8 wall(k170) — box_ov/box_contain_box over DERIVED bbox coords
+#   eq_gist_box/circle/poly_distance_strips (combined disjunctive) wall(k160, box also d450) — superseded by per-arm
+#   eq_gist_box/circle/poly_distance_ystrip/_xstrip (NEW per-arm) — UNRUN locally (point siblings needed d 214-345s; budget)
+#   grid_gist_point_distance_vertex wall(k250 + d450, load 19-29); grid_gist_box_distance_vertex UNRUN (same shape)
+#   probe_gist_box_penalty_full — WALL-EXPECTED per cost law, UNRUN locally
+#   eq_gist_point_distance_leaf_axis — UNRUN locally (240s row; budget)
+#   eq_gist_point_consistent_group0 / eq_gist_circle_compress_leaf — k-wall, d retry in flight at lane close (see results.log tail)
+# LANE CLOSE ADDENDUM (later same day, load dropped 43->6):
+#   GREEN adds: eq_gp0_s1/s5/s10/s11/s29/s30 3.0-15.9s k; eq_gp0_s6 241.8s d
+#     (kissat walls); eq_gist_point_consistent_group0_badstrategy 7.4s k;
+#     eq_gist_point_distance_leaf_axis 65.1s k;
+#     eq_gist_box_distance_ystrip 170.9s / _xstrip 164.3s d;
+#     eq_gist_circle_distance_ystrip 154.4s / _xstrip 160.0s d;
+#     eq_gist_poly_distance_ystrip 172.7s / _xstrip 154.8s d.
+#   WALLS CONFIRMED: grid_gist_box_distance_vertex walled k450 at LOAD 6
+#     (quiet machine) — GENUINE circuit wall (4 concrete point_dt/hypot
+#     cells under one symbolic index), not load; remedy = per-cell split
+#     (8 spot harnesses) or CI cluster high-mem tier.  probe_gist_box_penalty_full
+#     walled k120 as the float cost law predicts (sym x sym 53-bit multiply)
+#     — recorded honestly, do not chase.
+#   STILL FLEET-BOUND: eq_gist_circle_compress_leaf (k130+d300);
+#     eq_gcc_s3/s6/s7/s8; full-sym union rows; both vertex grids;
+#     eq_gist_point_consistent_group0 full-sym row (superseded by cells).
+# FINAL LOCAL TALLY: 62 green harnesses (61 eq/grid/probe + 1 must-fail
+#   control failing on its intended check), 0 open divergences.
