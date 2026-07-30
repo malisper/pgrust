@@ -763,6 +763,7 @@ name = "adt_pseudotypes"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "mbutils_seams",
  "mcx",
  "pqformat",
  "stringinfo",
