@@ -1,3 +1,24 @@
+# LANE RESULT 2026-07-30 (aclcheck resume lane, 450s wall cap): the
+# compile-gate expectations DO NOT survive contact with the solver. Every
+# fc-level harness measured (eq_has_table_privilege_id_id, _name_id,
+# eq_acldefault_sql, eq_aclitemin_len8, control_membership_skew, plus both
+# temp-toast full-pipeline probes and spot_acldefault_sql_bad_char at 60s)
+# is a SYMEX WALL — no VCCs by 450s, aborting-path spam inside
+# adt_acl::convert_any_priv_string's std::str pattern machinery
+# (MultiCharEqSearcher) and fc plumbing. This is the skill's symex class:
+# stubs/unwind are the levers. PROVED tier so far: eq_aclinsert (4s),
+# eq_aclremove (3s), diag_seam_visibility (0.03s), diag_c_probe_strip
+# (8.9s), probe_system_class_temp_toast_core (expected-FAIL witness, 3s).
+# Unmeasured rows below stay QUEUED — do not trust their expectations.
+# RECOMMENDED RESHAPE before rerunning this queue: factor harnesses to the
+# pg_class_aclmask/object_aclmask level (proven-solvable tier, see the
+# temp-toast _core witness) and prove the priv-string parse layer
+# SEPARATELY at the convert_*_priv_string slice level with a stubbed
+# splitter, or vendor a per-chunk comparator harness. Also see the
+# mixed-formula nondeterminism + Err-arm corruption anomalies recorded in
+# ADJUDICATION-TEMPTOAST-SYSCLASS.md ("Rig findings") before trusting any
+# surprising eq_* FAILED at this scale.
+#
 # proofs/aclcheck runqueue — WAVE 9 ACL privilege seam re-opens
 # (compile-only pre-build 2026-07-28; ZERO solves run — solver slots saturated).
 # Compile gate PASSED: cargo kani --only-codegen -Z c-ffi -Z stubbing (exit 0).
