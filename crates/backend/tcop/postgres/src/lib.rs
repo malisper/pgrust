@@ -765,6 +765,14 @@ pub fn FloatExceptionHandler() -> PgResult<()> {
 
 pub fn ProcessClientReadInterrupt(blocked: bool) -> PgResult<()> {
     use init_small::globals as g;
+    // C's SIGALRM interrupts a blocked client read directly; the thread
+    // model's timer wake only sets the latch, and before this drain the
+    // STARTUP_PACKET_TIMEOUT could never fire against a backend parked in
+    // its startup-packet read — authentication_timeout was a no-op there
+    // (a half-open connection held its backend forever).
+    if timeout_seams::process_timeout_interrupt::is_installed() {
+        timeout_seams::process_timeout_interrupt::call();
+    }
     procsignal::DrainThreadSignals()?;
     if DoingCommandRead() {
         check_for_interrupts()?;
@@ -787,6 +795,10 @@ pub fn ProcessClientReadInterrupt(blocked: bool) -> PgResult<()> {
 
 pub fn ProcessClientWriteInterrupt(blocked: bool) -> PgResult<()> {
     use init_small::globals as g;
+    // Same SIGALRM rendering as ProcessClientReadInterrupt above.
+    if timeout_seams::process_timeout_interrupt::is_installed() {
+        timeout_seams::process_timeout_interrupt::call();
+    }
     procsignal::DrainThreadSignals()?;
     if g::ProcDiePending() {
         if blocked {

@@ -361,6 +361,9 @@ fn fail_child_startup(
     client_sock: Option<ClientSocket>,
     e: &types_error::PgError,
 ) {
+    // The launcher-prepared pre-identity signal entry will never be adopted
+    // or consumed by a ProcSignalInit: drop it here.
+    procsignal::PreIdentitySignalDiscard(child_pid);
     // The child's own error reporting is not up yet (that is what failed),
     // so log the cause from here.
     let _ = elog::elog(
@@ -461,6 +464,12 @@ fn run_child_task(
         // new one.
         miscinit::InitProcessGlobals(child_pid);
         waiteventset_seams::rekey_wakeup_registry::call();
+        // Pre-identity signal window (wpool claim): the task pid became
+        // broadcast-visible at dispatch's set_child_pid, but this thread's
+        // ProcSignal slot is stamped only at the task's ProcSignalInit —
+        // bind the dispatch-prepared entry so a fast-shutdown SIGTERM in
+        // that window pends + wakes instead of vanishing (ESRCH).
+        procsignal::PreIdentitySignalAdopt(child_pid);
     } else {
         // Everything InitPostmasterChild acquires is a kernel resource that
         // can legitimately run out: the wake pipe and the latch wait set are
@@ -478,6 +487,16 @@ fn run_child_task(
             procsignal::signums::SIGQUIT,
             procsignal::ThreadSignalHandler::Simple(default_sigquit_handler),
         );
+        // Pre-identity signal window (fresh spawn): this pid is already in
+        // its pmchild slot (a TerminateChildren broadcast targets it) but
+        // its ProcSignal slot exists only from ProcSignalInit, deep into
+        // InitPostgres. Bind the launcher-prepared entry so a signal in the
+        // window pends + wakes instead of vanishing — the fast-shutdown
+        // startup-packet wedge (a backend parked in secure_read waiting for
+        // a startup packet never saw SIGTERM; PM_WAIT_BACKENDS never
+        // drained; the GL-GANGWEDGE-1 watchdog escalated to immediate
+        // shutdown and the next start ran crash recovery).
+        procsignal::PreIdentitySignalAdopt(child_pid);
     }
 
     // !shmem_attach detach + context switch: no-ops (module doc).
@@ -579,6 +598,12 @@ fn run_child_task(
         }
         eprintln!("{} (pid {})", forest, child_pid);
     }
+    // Pre-identity signal cleanup: normally consumed at the task's
+    // ProcSignalInit; a child that died before reaching it (startup-packet
+    // die, bring-up failure) still owns its entry — drop both halves so the
+    // registry cannot grow. No-ops when already consumed.
+    procsignal::PreIdentitySignalRelease();
+    procsignal::PreIdentitySignalDiscard(child_pid);
     if parks {
         wpool::mark_parked_announce(child_pid);
     }
@@ -630,6 +655,12 @@ pub fn postmaster_child_launch(
     };
 
     let child_pid = reserve_child_pid();
+    // Pre-identity signal window: make the pid deliverable BEFORE the caller
+    // publishes it (set_child_pid) — a fast-shutdown SIGTERM broadcast can
+    // land before the child thread has run a single instruction. The child
+    // binds its latch at InitPostmasterChild; ProcSignalInit consumes the
+    // entry; failure paths discard it.
+    procsignal::PreIdentitySignalPrepare(child_pid);
     let inherited = Inherited::capture();
     // Keep the process-wide BASE snapshot current with this (postmaster)
     // thread's store: first launch publishes the boot base, later launches
@@ -726,6 +757,7 @@ pub fn postmaster_child_launch(
             // spawn cannot leak a Runnable ghost into the schedule.
             #[cfg(pgrust_sim)]
             pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+            procsignal::PreIdentitySignalDiscard(child_pid);
             -1
         }
     }
@@ -1303,6 +1335,11 @@ pub mod wpool {
             // be queued at the postmaster; reusing its pid would let the
             // reaper's cleanup land on the new task.
             let task_pid = super::reserve_child_pid();
+            // Pre-identity signal window (claim): between set_child_pid below
+            // and the standby's per-task ProcSignalInit, a shutdown SIGTERM
+            // targets task_pid — make it deliverable first (the standby
+            // adopts at claim wake; run_child_task's tail discards).
+            procsignal::PreIdentitySignalPrepare(task_pid);
             pmchild_seams::set_child_pid::call(child_slot, task_pid);
             let task = StandbyTask {
                 child_pid: task_pid,
@@ -1316,6 +1353,7 @@ pub mod wpool {
                 }
                 Err(_) => {
                     pmchild_seams::release_postmaster_child_slot::call(child_slot);
+                    procsignal::PreIdentitySignalDiscard(task_pid);
                 }
             }
         }

@@ -195,9 +195,19 @@ fn backend_initialize(mcx: Mcx<'_>, client_sock: &ClientSocket, cac: CacState) -
 
     elog::config::set_where_to_send_output(CommandDest::Remote);
 
-    // pqsignal(SIGTERM, process_startup_packet_die): process-wide handler in
-    // the fork build; the thread rendering (a per-backend termination request
-    // channel) is postmaster-signal design. The per-thread mask below is real.
+    // pqsignal(SIGTERM, process_startup_packet_die), C BackendInitialize: a
+    // fast shutdown must be able to kill a backend still negotiating its
+    // startup packet. The thread rendering is a pqsignal_thread disposition
+    // drained at the client-IO wakes; delivery before ProcSignalInit rides
+    // the pre-identity channel (procsignal::PreIdentitySignalAdopt at
+    // launch). Without BOTH halves, TerminateChildren's SIGTERM was lost and
+    // a half-open connection wedged PM_WAIT_BACKENDS until the GL-GANGWEDGE
+    // watchdog forced crash recovery. PostgresMain's
+    // install_thread_signal_handlers replaces this with die(), as C does.
+    procsignal::pqsignal_thread(
+        procsignal::signums::SIGTERM,
+        procsignal::ThreadSignalHandler::Simple(process_startup_packet_die),
+    );
     timeout_seams::initialize_timeouts::call();
     libpq_pqsignal::block_startup_signals();
 
@@ -722,15 +732,22 @@ fn send_negotiate_protocol_version(
     Ok(())
 }
 
-// C `_exit(1)`s the child; a thread must never `_exit` the shared process,
-// so the rendering is a thread-fatal panic (shared memory untouched here —
-// the C precondition for skipping cleanup).
+// C `_exit(1)`s the child; a thread must never `_exit` the shared process.
+// The rendering is proc_exit(1) — this phase's exit-callback lists are empty
+// (backend_initialize asserts exactly that), so it is C's _exit(1) minus the
+// process teardown, and the announce is a NORMAL status-1 exit. The previous
+// panic! rendering announced SIGABRT, which HandleChildCrash escalates to a
+// whole-server crash restart — the opposite of C.
 pub fn startup_packet_timeout_handler() {
-    panic!("terminating backend thread: startup packet timeout (C _exit(1))");
+    startup_phase_exit()
 }
 
 pub fn process_startup_packet_die() {
-    panic!("terminating backend thread: SIGTERM during startup packet (C _exit(1))");
+    startup_phase_exit()
+}
+
+fn startup_phase_exit() -> ! {
+    ipc_seams::proc_exit::call(1, init_small::globals::MyProcPid())
 }
 
 // Err carries the GUC_check_errdetail text.

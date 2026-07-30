@@ -408,7 +408,12 @@ fn handle_sig_alarm() {
 
 /// Synchronous SIGALRM delivery: fires iff the timer thread posted a wake.
 pub fn ProcessTimeoutInterrupt() {
-    let posted = POSTED.with(|p| p.borrow().as_ref().map(Arc::clone));
+    // Load-first fast path: this now also runs on every client-IO interrupt
+    // check (the ProcessClientRead/WriteInterrupt SIGALRM rendering), so the
+    // no-wake case must not clone the Arc.
+    let posted = POSTED.with(|p| {
+        p.borrow().as_ref().filter(|a| a.load(Ordering::SeqCst)).map(Arc::clone)
+    });
     if let Some(posted) = posted {
         if posted.swap(false, Ordering::SeqCst) {
             handle_sig_alarm();
