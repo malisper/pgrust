@@ -7,6 +7,11 @@ use alloc::vec::Vec;
 
 use ::datum::Datum;
 use ::mcx::{vec_from_elem_in, vec_with_capacity_in, PgVec};
+// C rowtypes.c asks "is this whitespace?" through isspace((unsigned char) ch),
+// i.e. the C-locale set {HT, LF, VT, FF, CR, SP}.  Rust's
+// u8::is_ascii_whitespace omits VT (0x0b), so every site here goes through the
+// one shared model of C's predicate rather than re-deriving the set locally.
+use ::pg_string::isspace_c_locale;
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::types_fmgr::{
@@ -16,6 +21,11 @@ use ::types_fmgr::{
 use ::types_tuple::{
     HeapTupleData, HeapTupleHeaderData, ItemPointerData, SizeofHeapTupleHeader,
 };
+
+#[cfg(test)]
+mod c_cases;
+#[cfg(test)]
+mod ws_tests;
 
 struct ColumnIOData {
     column_type: Oid,
@@ -115,8 +125,8 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
                     || ch == b'('
                     || ch == b')'
                     || ch == b','
-                    || ch.is_ascii_whitespace()
-                    || ch == 0x0b
+                    // rowtypes.c:445 record_out needquote
+                    || isspace_c_locale(ch)
             });
         let extra = 2 * value.len() + 2;
         buf.try_reserve(extra).map_err(|_| mcx.oom(extra))?;
@@ -1169,7 +1179,8 @@ pub fn fc_record_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let bytes = string.to_bytes();
     let sdisplay = alloc::string::String::from_utf8_lossy(bytes);
     let mut pos = 0usize;
-    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+    // rowtypes.c:152 "Allow leading whitespace"
+    while pos < bytes.len() && isspace_c_locale(bytes[pos]) {
         pos += 1;
     }
     if pos >= bytes.len() || bytes[pos] != b'(' {
@@ -1296,7 +1307,8 @@ pub fn fc_record_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
             .unwrap_or(Datum::null()));
     }
     pos += 1;
-    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+    // rowtypes.c:290 "Allow trailing whitespace"
+    while pos < bytes.len() && isspace_c_locale(bytes[pos]) {
         pos += 1;
     }
     if pos < bytes.len() {
