@@ -2954,12 +2954,12 @@ oid	name	source_file	status	class	notes
 6416	hashdateextended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i32 x full seed)	fast	4.2s; proofs/datetime-b lane D
 6417	hashbool	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 6418	hashboolextended	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
-6419	hashxid	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-6420	hashxidextended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hash_uint32_extended scalar/src/builtins.rs:178 (hashfn proved). Host proofs/hash-rows
+6419	hashxid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level)	fast	0.75s kissat; same fc_hash_uint32 body/pointer as proved hashoid (453), C side verbatim xid.c hashxid; wave5::eq_hashxid first solve 2026-07-30; proofs/hash-rows
+6420	hashxidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 x full symbolic seed, wrapper-level)	fast	3.2s kissat; same fc_hash_uint32_extended body as proved hashoidextended (445); wave5::eq_hashxidextended first solve 2026-07-30; proofs/hash-rows
 6421	hashxid8	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hashxid8 scalar/src/builtins.rs:268 — sign-conditional hi/lo xor fold, full i64; highest-value of batch. Host proofs/hash-rows
 6422	hashxid8extended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	builtins.rs:277 — same fold + seeded mix
-6423	hashcid	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	fc_hash_uint32 builtins.rs:173 shared body w/ hashxid; one harness both oids
-6424	hashcidextended	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	fast	shared body with 6420
+6423	hashcid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level)	fast	0.77s kissat; same fc_hash_uint32 body as hashoid/hashxid, C side verbatim xid.c hashcid; wave5::eq_hashcid first solve 2026-07-30; proofs/hash-rows
+6424	hashcidextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 x full symbolic seed, wrapper-level)	fast	3.4s kissat; wave5::eq_hashcidextended first solve 2026-07-30; proofs/hash-rows
 6425	timestamptz_hash	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64; hashint8 fold + hash_uint32 in-theorem)	fast	3.6s; proofs/datetime-cmp wave7
 6426	timestamptz_hash_extended	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 x full-u64 seed)	fast	3.6s; proofs/datetime-cmp wave7
 6427	pg_get_sequence_data	crates/backend/commands/sequence/src/builtins.rs	candidate	seam	pending state-seam probe (sequence state)
