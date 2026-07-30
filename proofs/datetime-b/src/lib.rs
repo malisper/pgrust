@@ -3001,4 +3001,113 @@ mod rem {
         check_ts_typmodout(false, T[idx]);
         check_ts_typmodout(true, T[idx]);
     }
+
+    // ==== w2-timestamp lane (2026-07-30): row 1158 float8_timestamptz ====
+    // Planes (nonfinite lattice, range reject) are pure float compares =
+    // fast class; the in-range value arm multiplies a full-symbolic f64 by
+    // USECS_PER_SEC (53-bit constant multiply = wall class, TRIAGE float
+    // law) -> concrete spot grid + honest full screen (CI-bound).
+
+    extern "C" {
+        fn pg_ts_float8_timestamptz(seconds: f64, out: *mut i64, err: *mut c_int) -> c_int;
+    }
+
+    // SECS_PER_DAY * (DATETIME_MIN_JULIAN - UNIX_EPOCH_JDATE)
+    const F8TSTZ_LO: f64 = -210_866_803_200.0;
+    // SECS_PER_DAY * (TIMESTAMP_END_JULIAN - UNIX_EPOCH_JDATE)
+    const F8TSTZ_HI: f64 = 9_224_318_016_000.0;
+
+    /// Message-text-only stub (fmt_g6 feeds the out-of-range message; its
+    /// string munging walls symex; text is out of proof).
+    fn model_fmt_g6(_v: f64) -> String {
+        String::new()
+    }
+
+    fn check_f8tstz(seconds: f64) {
+        let mut c_out: i64 = 0;
+        let mut c_err: c_int = 0;
+        unsafe { pg_ts_float8_timestamptz(seconds, &mut c_out, &mut c_err) };
+        match adt_timestamp::float8_timestamptz(seconds) {
+            Ok(v) => {
+                kani::cover!(true, "Ok arm reachable");
+                assert!(c_err == 0);
+                assert!(v == c_out);
+            }
+            Err(e) => {
+                kani::cover!(true, "Err arm reachable");
+                assert!(c_err == 1);
+                assert!(e.sqlstate == ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+                assert!(e.level == ERROR);
+                core::mem::forget(e);
+            }
+        }
+    }
+
+    /// NaN (22008) + ±Inf (NOBEGIN/NOEND) plane — full nonfinite domain.
+    #[kani::proof]
+    #[kani::unwind(40)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_timestamp::fmt_g6, model_fmt_g6)]
+    fn eq_f8tstz_nonfinite() {
+        let s: f64 = kani::any();
+        kani::assume(!s.is_finite());
+        check_f8tstz(s);
+    }
+
+    /// Finite out-of-range reject plane (pure compares; both sides reject
+    /// BEFORE the 53-bit multiply).
+    #[kani::proof]
+    #[kani::unwind(40)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_timestamp::fmt_g6, model_fmt_g6)]
+    fn eq_f8tstz_range_reject() {
+        let s: f64 = kani::any();
+        kani::assume(s.is_finite());
+        kani::assume(s < F8TSTZ_LO || s >= F8TSTZ_HI);
+        check_f8tstz(s);
+    }
+
+    /// Value-arm spots (one symbolic index into a concrete grid: zero,
+    /// subsecond ties, epoch, both range edges, near-END recheck band).
+    #[kani::proof]
+    #[kani::unwind(40)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_timestamp::fmt_g6, model_fmt_g6)]
+    fn spot_f8tstz_value() {
+        const S: &[f64] = &[
+            0.0,
+            -0.5,
+            1.5e-6,          // sub-usec tie (rint ties-to-even)
+            2.5e-6,
+            946_684_800.0,   // PG epoch in unix seconds
+            F8TSTZ_LO,       // exact lower edge (valid)
+            F8TSTZ_LO + 0.25,
+            F8TSTZ_HI - 1.0,
+            F8TSTZ_HI - 0.002, // near-END: exercises the rint recheck band
+            -1.0,
+            86_400.000001,
+        ];
+        let idx: usize = kani::any();
+        kani::assume(idx < S.len());
+        check_f8tstz(S[idx]);
+    }
+
+    /// Honest full screen of the in-range value arm (53-bit constant
+    /// multiply + rint over full-symbolic f64). EXPECTED WALL locally —
+    /// authored for the CI cluster high-memory tier; if it walls there too the
+    /// planes + spots + native differential stand.
+    #[kani::proof]
+    #[kani::unwind(40)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_timestamp::fmt_g6, model_fmt_g6)]
+    fn eq_f8tstz_value_screen() {
+        let s: f64 = kani::any();
+        kani::assume(s.is_finite());
+        kani::assume(s >= F8TSTZ_LO && s < F8TSTZ_HI);
+        check_f8tstz(s);
+    }
 }

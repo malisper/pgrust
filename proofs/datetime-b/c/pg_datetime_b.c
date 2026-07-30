@@ -2873,3 +2873,62 @@ pg_ts_anytimestamp_typmodout(int istz, int32 typmod, char *res /* [64] */ )
 	res[len] = '\0';
 	return len;
 }
+
+/* ================= w2-timestamp lane (2026-07-30): row 1158 ==============
+ * timestamp.c: float8_timestamptz, fetched REL_18_STABLE 2026-07-30, body
+ * verbatim. Shims: fmgr unwrap -> plain (float8, int64 *out) signature;
+ * ereport(ERROR, 22008) -> *err = 1 + return (both error sites; message
+ * text incl "%g" formatting out of proof both sides). UNIX_EPOCH_JDATE
+ * from datetime.h. rint from CBMC's math model (== round_ties_even,
+ * machine-checked precedent, TRIAGE float law).
+ */
+#define UNIX_EPOCH_JDATE		2440588 /* == date2j(1970, 1, 1) */
+
+int
+pg_ts_float8_timestamptz(float8 seconds, int64 *out, int *err)
+{
+	TimestampTz result;
+
+	/* Deal with NaN and infinite inputs ... */
+	if (isnan(seconds))
+	{
+		*err = 1;
+		return 0;
+	}
+
+	if (isinf(seconds))
+	{
+		if (seconds < 0)
+			TIMESTAMP_NOBEGIN(result);
+		else
+			TIMESTAMP_NOEND(result);
+	}
+	else
+	{
+		/* Out of range? */
+		if (seconds <
+			(float8) SECS_PER_DAY * (DATETIME_MIN_JULIAN - UNIX_EPOCH_JDATE)
+			|| seconds >=
+			(float8) SECS_PER_DAY * (TIMESTAMP_END_JULIAN - UNIX_EPOCH_JDATE))
+		{
+			*err = 1;
+			return 0;
+		}
+
+		/* Convert UNIX epoch to Postgres epoch */
+		seconds -= ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
+
+		seconds = rint(seconds * USECS_PER_SEC);
+		result = (int64) seconds;
+
+		/* Recheck in case roundoff produces something just out of range */
+		if (!IS_VALID_TIMESTAMP(result))
+		{
+			*err = 1;
+			return 0;
+		}
+	}
+
+	*out = result;
+	return 0;
+}

@@ -2173,3 +2173,7 @@ datetime-b	rem::eq_tstypmodout_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c
 datetime-b	rem::eq_tstypmodout_d3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	16.5	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
 datetime-b	rem::eq_tstztypmodout_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.6	oid 2908; w2-timestamp 2026-07-30 (times under load 32-75)
 datetime-b	rem::spot_ts_typmodout	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.8	oid 2906+2908; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_f8tstz_nonfinite 0.8 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::eq_f8tstz_range_reject 0.9 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::spot_f8tstz_value 0.7 green per-commit	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
+datetime-b	rem::eq_f8tstz_value_screen unk unmeasured calibration	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact				oid 1158; w2-timestamp 2026-07-30
