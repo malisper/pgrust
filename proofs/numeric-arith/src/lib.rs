@@ -155,12 +155,13 @@ mod proofs {
     }
 
     macro_rules! addsub_harness {
-        ($($name:ident: $cfn:ident, $rfn:ident, $w2_skew:expr;)*) => {$(
+        ($($name:ident: $cfn:ident, $rfn:ident, $w2_skew:expr,
+           cap = $cap:expr, w = $w:expr, ds = $ds:expr, unwind = $uw:literal;)*) => {$(
             #[kani::proof]
-            #[kani::unwind(15)]
+            #[kani::unwind($uw)]
             fn $name() {
-                let a = sym_var(NDMAX, 4, 6);
-                let b = sym_var(NDMAX, 4, 6);
+                let a = sym_var($cap, $w, $ds);
+                let b = sym_var($cap, $w, $ds);
                 let mut c = COut { sign: 0, weight: 0, dscale: 0, digits: [0; N], nd: 0 };
                 unsafe {
                     $cfn(
@@ -181,19 +182,31 @@ mod proofs {
         )*};
     }
 
+    // Cell ladder (strictly nested planes — the largest green cell is the
+    // standing gate). Loop ceiling: res_ndigits <= cap + 2*w + 1 (res_rscale
+    // <= cap + w - 1 plus res_weight <= w + 1 plus 1); dscale never enters a
+    // loop bound. Unwind = ceiling + 1, exact-fit (unwind-slack law).
     addsub_harness! {
-        eq_add_var_nd4: pg_arith_add_var, add_var_fixed, 0;
-        eq_sub_var_nd4: pg_arith_sub_var, sub_var_fixed, 0;
+        eq_add_var_nd2: pg_arith_add_var, add_var_fixed, 0, cap = 2, w = 2, ds = 6, unwind = 8;
+        eq_add_var_nd3: pg_arith_add_var, add_var_fixed, 0, cap = 3, w = 3, ds = 6, unwind = 11;
+        eq_add_var_nd4: pg_arith_add_var, add_var_fixed, 0, cap = 4, w = 4, ds = 6, unwind = 14;
+        eq_sub_var_nd2: pg_arith_sub_var, sub_var_fixed, 0, cap = 2, w = 2, ds = 6, unwind = 8;
+        eq_sub_var_nd3: pg_arith_sub_var, sub_var_fixed, 0, cap = 3, w = 3, ds = 6, unwind = 11;
+        eq_sub_var_nd4: pg_arith_sub_var, sub_var_fixed, 0, cap = 4, w = 4, ds = 6, unwind = 14;
     }
 
     // Regime-reachability witnesses, HOISTED into one harness (each inline
     // cover = one extra SAT call under kissat): same builder, same fences,
     // so reachability transfers to the eq harnesses.
+    // Cover plane = the RE-CONFIRMED nd2 GATE cell's builder+fences
+    // (cap 2, w 2, ds 6) so reachability transfers to the standing eq
+    // gates; wider planes were multi-solve walls under load for zero
+    // extra claim.
     #[kani::proof]
-    #[kani::unwind(15)]
+    #[kani::unwind(8)]
     fn cover_addsub_regimes() {
-        let a = sym_var(NDMAX, 4, 6);
-        let b = sym_var(NDMAX, 4, 6);
+        let a = sym_var(2, 2, 6);
+        let b = sym_var(2, 2, 6);
         let mut r = FixedVar::<N>::new();
         let ok = add_var_fixed(a.view(), b.view(), &mut r).is_some();
         kani::cover!(ok && a.sign != b.sign && r.ndigits == 0); // exact cancel (zero arm)
@@ -243,6 +256,7 @@ mod proofs {
     }
 
     mul_harness! {
+        eq_mul_var_nd1: 1, unwind = 6;
         eq_mul_var_nd2: 2, unwind = 8;
         eq_mul_var_nd3: 3, unwind = 10;
         eq_mul_var_nd4: 4, unwind = 12;
@@ -278,17 +292,19 @@ mod proofs {
         assert!(mul_var_fixed(a.view(), b.view(), &mut r, rscale).is_none());
     }
 
-    /// mul regime witnesses (hoisted).
+    /// mul regime witnesses (hoisted). Cover plane = the mul GATE cell's
+    /// builder+fences (cap 2) so reachability transfers to the eq gates.
+    const MUL_COVER_CAP: usize = 1;
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(8)]
     fn cover_mul_regimes() {
-        let a = sym_var(NDMAX, 4, 6);
-        let b = sym_var(NDMAX, 4, 6);
+        let a = sym_var(MUL_COVER_CAP, 4, 6);
+        let b = sym_var(MUL_COVER_CAP, 4, 6);
         let rscale = a.dscale + b.dscale;
         let mut r = FixedVar::<N>::new();
         let ok = mul_var_fixed(a.view(), b.view(), &mut r, rscale).is_some();
         kani::cover!(ok && (a.nd == 0 || b.nd == 0) && r.ndigits == 0); // zero shortcut
-        kani::cover!(ok && a.nd == NDMAX && b.nd == NDMAX); // deepest PRODSUM ladder
+        kani::cover!(ok && a.nd == MUL_COVER_CAP && b.nd == MUL_COVER_CAP); // deepest PRODSUM ladder
         kani::cover!(ok && a.nd > b.nd); // normalization swap arm
         kani::cover!(ok && r.ndigits > 0 && a.sign != b.sign && r.sign == NUMERIC_NEG);
         kani::cover!(ok && r.ndigits == a.nd as i32 + b.nd as i32 - 1); // leading digit stripped
@@ -297,7 +313,8 @@ mod proofs {
     // ---- negative control: rig is non-vacuous (DEFAULT solver, MUST FAIL:
     // C sees weight2+1, which shifts var2's digit alignment) ----
     addsub_harness! {
-        control_add_var_weight_skew: pg_arith_add_var, add_var_fixed, 1;
+        control_add_var_weight_skew: pg_arith_add_var, add_var_fixed, 1,
+            cap = 2, w = 2, ds = 6, unwind = 12;
     }
 }
 

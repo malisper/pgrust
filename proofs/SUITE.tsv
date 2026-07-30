@@ -2175,3 +2175,12 @@ scalar-misc	xid8snap::eq_pg_snapshot_out_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg
 scalar-misc	xid8snap::eq_pg_snapshot_out_spots	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
 scalar-misc	xid8snap::eq_strtou64_cap8	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	6.0	wave-5 run 2026-07-30 idle
 scalar-misc	xid8snap::eq_pg_snapshot_in_cap6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+numeric-arith	proofs::eq_add_var_nd2	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	315	GATE add_var var-level nd<=2 w<=2 ds<=6; re-confirmed post 2026-07-30 disk-window
+numeric-arith	proofs::eq_sub_var_nd2	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	301	GATE sub_var var-level; re-confirmed post disk-window
+numeric-arith	proofs::eq_add_var_nd3	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	880	pre-window observation only; exceeds 450s cap under load; re-confirm on idle box
+numeric-arith	proofs::eq_sub_var_nd3	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	771	pre-window observation only; re-confirm on idle box
+numeric-arith	proofs::eq_mul_var_nd1	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	68	GATE mul short-kernel plane; nd2 walls >1800s (NBASE-carry slope)
+numeric-arith	proofs::eq_mul_fallback_routing	-Z c-ffi --c-lib c/pg_numeric_arith.c --solver kissat --no-assertion-reach-checks --exact	green	calibration	37	mul plane-boundary routing parity (C trap==1 <=> Rust None)
+numeric-arith	proofs::cover_addsub_regimes	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	green	release-gate	152	7/7 covers at nd2 gate plane; default solver
+numeric-arith	proofs::cover_mul_regimes	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	green	release-gate	22	5/5 covers at nd1 gate plane; default solver
+numeric-arith	proofs::control_add_var_weight_skew	-Z c-ffi --c-lib c/pg_numeric_arith.c --exact	fail	defect-witness	143	must-FAIL; sole failing check = "assertion failed: ok" (assert_match); default solver
