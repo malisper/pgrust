@@ -2145,3 +2145,7 @@ scalar-misc	xid8snap::eq_pg_snapshot_out_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg
 scalar-misc	xid8snap::eq_pg_snapshot_out_spots	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --c-lib ../intout/c/pg_intout.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
 scalar-misc	xid8snap::eq_strtou64_cap8	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --exact	green	per-commit	6.0	wave-5 run 2026-07-30 idle
 scalar-misc	xid8snap::eq_pg_snapshot_in_cap6	-Z c-ffi -Z stubbing --c-lib c/pg_xid8funcs.c --solver kissat --no-assertion-reach-checks --exact	info	release-gate	wall	600s
+datetime-b	proofs::eq_intervaltypmodin_n0	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.7	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodin_n1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.8	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodin_n2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.7	oid 2903; default solver; w2-timestamp 2026-07-30
+datetime-b	proofs::eq_intervaltypmodin_n3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	0.8	oid 2903; default solver; w2-timestamp 2026-07-30
