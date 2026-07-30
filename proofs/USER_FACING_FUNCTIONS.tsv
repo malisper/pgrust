@@ -347,10 +347,10 @@ oid	name	source_file	status	class	notes
 516	array_smaller	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 598	inet_abbrev	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
 599	cidr_abbrev	crates/backend/utils/adt/network/src/builtins.rs	excluded(wall: result-image)	-	cidr_ntop::pg_inet_cidr_ntop network/src/lib.rs:411; data-dependent text image + per-octet digit emission
-605	inet_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
+605	inet_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	proved(core; TOTAL: fenced inet x full-i32 bits; Ok struct eq incl -1 alias + unmasked copy; 22023 Err parity, value-space)	fast	0.65s; proofs/network; cover_set_masklen_arms 3/3; network-2026-07-30
 619	oidvectorne	crates/backend/utils/adt/scalar/src/builtins.rs	proved(sym dim<=4 both args + sym elements + lbound; layout-valid fence, value-space)	fast	0.5-1.5s, no case-split needed; proofs/scalar-misc
 626	hash_array	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
-635	cidr_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
+635	cidr_set_masklen	crates/backend/utils/adt/network/src/builtins.rs	proved(core; TOTAL: fenced inet x full-i32 bits; Ok struct eq incl -1 alias + partial-byte mask + zeroed tail; 22023 Err parity, value-space)	fast	1.0s; proofs/network; cover_set_masklen_arms 3/3; network-2026-07-30
 636	pg_indexam_has_property	crates/backend/utils/adt/adt_amutils/src/lib.rs	candidate	ladder	indexam_property adt_amutils/src/lib.rs:379 + am_flags table :96 + lookup_prop_name :69; amoid path = ONE pg_am seam (:497) state-seam pattern; machine-checked amcan* table transcription. Host new proofs/amutils-seam
 637	pg_index_has_property	crates/backend/utils/adt/adt_amutils/src/lib.rs	blocked(seam stack: pg_index + indoption + opclass/amop)	-	relid path :357/:364; viable only after bundled-seam rig
 638	pg_index_column_has_property	crates/backend/utils/adt/adt_amutils/src/lib.rs	blocked(seam stack)	-	as 637 + GIST/SPGIST am_property arms :273 + get_opfamily_proc
@@ -983,7 +983,7 @@ oid	name	source_file	status	class	notes
 1711	ceil	crates/backend/utils/adt/numeric/src/builtins.rs	blocked(numeric fixed-buffer core (DigitBuf))	ladder	numeric_ceil ops.rs:554 — from_view + trunc(0) + add_var
 1712	floor	crates/backend/utils/adt/numeric/src/builtins.rs	blocked(numeric fixed-buffer core (DigitBuf))	ladder	numeric_floor ops.rs:569 — from_view + trunc(0) + sub_var
 1714	pg_convert_from	crates/backend/utils/mb/mbutils/src/builtins.rs	excluded(blocked: conversion-proc dispatch + image)	-	convert_common mbutils/src/builtins.rs:32
-1715	inet_to_cidr	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
+1715	inet_to_cidr	crates/backend/utils/adt/network/src/builtins.rs	proved(core; full fenced inet domain, full output struct; both sides' invalid-bit-length arms asserted unreachable)	fast	0.73s; proofs/network; network-2026-07-30
 1716	pg_get_expr	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 1717	pg_convert_to	crates/backend/utils/mb/mbutils/src/builtins.rs	excluded(blocked: conversion-proc dispatch + image)	-	same core
 1718	numeric_eq	crates/backend/utils/adt/numeric/src/builtins.rs	proved(special lattice full; ndigits<=4/side ~16 decimal digits; verdict parity)	fast	19-22s; proofs/numeric-probe
