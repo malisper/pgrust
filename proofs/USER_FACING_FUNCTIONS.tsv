@@ -16,9 +16,9 @@ oid	name	source_file	status	class	notes
 48	tidin	crates/backend/utils/adt/scalar/src/builtins.rs	divergence(PLATFORM-DEPENDENT: glibc PG accepts empty fields '(,5)'->(0,5), BSD/macOS PG rejects — strtoul errno-on-no-conversion variance; pgrust matches BSD arm) + proved(len<=10 fenced + spots)	fast	ground-truthed on real PG 18 both platforms 2026-07-28; ruling pending: match glibc-target vs ratify; upstream-report-worthy (platform-dependent acceptance); proofs/misc-ops
 49	tidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved(block<1e4 x full-u16 + 12 spots; >=1e4 band = CBMC memcpy artifact, witnessed)	fast	proofs/misc-ops
 50	xidin	crates/backend/utils/adt/scalar/src/builtins.rs	proved(same core as oidin)	fast	proofs/misc-ops
-51	xidout	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+51	xidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved([0,1e7) magnitude bands (r1/d5/d6/d7a/d7b) + coverage + spots d8-d10 incl u32::MAX; remainder sloped wall)	fast	0.6-18s per band; SPEC-ANCHOR: C ref is pg_ultoa_n (C xidout itself is snprintf %lu — no CBMC model); proofs/scalar-misc wave5
 52	cidin	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-53	cidout	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+53	cidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved([0,1e7) magnitude bands (r1/d5/d6/d7a/d7b) + coverage + spots d8-d10 incl u32::MAX; remainder sloped wall)	fast	2.4-12.4s per band; same pg_ultoa_n spec-anchor; wrapper TLS scratch in-theorem; proofs/scalar-misc wave5
 54	oidvectorin	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
 55	oidvectorout	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
 56	boollt	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-bool2)	fast	proofs/bool; <1s; kissat
@@ -32,7 +32,7 @@ oid	name	source_file	status	class	notes
 66	int4lt	crates/backend/utils/adt/int/src/builtins.rs	proved(full-domain)	fast	<=0.03s; proofs/int-cmp
 67	texteq	crates/backend/utils/adt/varlena/src/builtins.rs	proved(wrapper-level varlena; C-collation fence; len<=8/side sym)	fast	1-5s; proofs/text-cmp
 68	xideq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level)	fast	0.12s; eq-only, modular ordering out of scope; proofs/scalar-misc
-69	cideq	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+69	cideq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level)	fast	0.35s; proofs/scalar-misc wave5
 70	charne	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 72	charle	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 73	chargt	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
@@ -646,7 +646,7 @@ oid	name	source_file	status	class	notes
 1178	timestamptz_date	crates/backend/utils/adt/adt_date/src/builtins.rs	excluded(wall: timestamp2tm + date2j both directions)	-	lib.rs:535
 1179	jsonb_path_query_tz	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
 1180	jsonb_path_query_array_tz	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
-1181	xid_age	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+1181	xid_age	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level, modulo GetStableLatestTransactionId seam model)	fast	0.29s; seam-skew control fails as designed; proofs/scalar-misc wave5
 1188	timestamp_mi	crates/backend/utils/adt/adt_date/src/builtins.rs	wall(divider: checked-sub feeds justify_hours /USECS_PER_DAY; probe 240s rc=124) + proved(spots: sentinels/inf-inf-err/sub-overflow/justify-carry 11.4s) + tested(differential 2M+grid)	wall	also discharges 2031 (same C fn + wrapper); proofs/datetime-cmp
 1189	timestamptz_pl_interval	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(planes: m0d0 LITERAL + NOBEGIN/NOEND; add-overflow + IS_VALID Err 22008 parity; julian arms OUT, loud-trapped both sides)	fast	1.3-2.0s/plane; NOT full-domain (j2date wall); proofs/datetime-cmp wave7
 1190	timestamptz_mi_interval	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(planes: m0d0 LITERAL + NOBEGIN/NOEND; Err 22008 parity; julian arms OUT)	fast	1.3-2.0s/plane; proofs/datetime-cmp wave7
@@ -1390,8 +1390,8 @@ oid	name	source_file	status	class	notes
 2415	textsend	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	varlena::textsend lib.rs:502 — canonical send-family member; prove first, siblings minutes each
 2416	unknownrecv	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	lib.rs:522 + trailing-NUL push
 2417	unknownsend	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(wall: derived-length copy)	-	lib.rs:529; length from position(NUL) = pstrdup class; concrete spot proofs only
-2418	oidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-2419	oidsend	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+2418	oidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	wall(symex: eq harness symex never completes — 0 VCCs at 300s BOTH solvers; stringinfo/mcx machinery; cursor-skew control DOES complete and fails as designed 62.8s so rig is non-vacuous)	wall	wave-5 2026-07-30; blocked:stringinfo-symex per runqueue — needs slice-core refactor; proofs/scalar-misc
+2419	oidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level, modulo static-buffer allocator model)	slow	70.4s kissat; wave-5 2026-07-30; proofs/scalar-misc
 2420	oidvectorrecv	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 2421	oidvectorsend	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 2422	namerecv	crates/backend/utils/adt/name/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	name/builtins.rs:196 + format! errdetail (fmt trap)
@@ -1410,12 +1410,12 @@ oid	name	source_file	status	class	notes
 2435	charsend	crates/backend/utils/adt/char/src/builtins.rs	candidate	ladder	char/src/lib.rs:52 fixed 1-byte image; smallest send-path calibration probe. Host proofs/char
 2436	boolrecv	crates/backend/utils/adt/bool/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	bool/src/builtins.rs:15 arg_stringinfo
 2437	boolsend	crates/backend/utils/adt/bool/src/builtins.rs	candidate	ladder	boolsend bool/src/lib.rs:95; fixed 1-byte send image; mcx-stubs. Host proofs/bool
-2438	tidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-2439	tidsend	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	fc_tidsend scalar/src/builtins.rs:362; fixed 6-byte image. Host proofs/scalar-misc
-2440	xidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	scalar/src/builtins.rs:159
-2441	xidsend	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	scalar/src/builtins.rs:165 fixed 4-byte send. Host proofs/scalar-misc
-2442	cidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	shared fc with xidrecv
-2443	cidsend	crates/backend/utils/adt/scalar/src/builtins.rs	candidate	ladder	shared fc body with xidsend; one harness both oids. Host proofs/scalar-misc
+2438	tidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	wall(symex: 0 VCCs at 300s kissat; stringinfo/mcx machinery — same class as oidrecv)	wall	wave-5 2026-07-30; blocked:stringinfo-symex; proofs/scalar-misc
+2439	tidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full symbolic 6-byte tid image, wrapper-level, modulo static-buffer allocator model)	slow	94.1s kissat; wave-5 2026-07-30; proofs/scalar-misc
+2440	xidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	wall(symex: eq harness symex never completes — 0 VCCs at 300s BOTH solvers; stringinfo/mcx machinery; cursor-skew control DOES complete and fails as designed 62.8s so rig is non-vacuous)	wall	wave-5 2026-07-30; blocked:stringinfo-symex per runqueue — needs slice-core refactor; proofs/scalar-misc
+2441	xidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level, modulo static-buffer allocator model)	slow	86.8s kissat; same registered fc_xidsend body as cidsend; wave-5 2026-07-30; proofs/scalar-misc
+2442	cidrecv	crates/backend/utils/adt/scalar/src/builtins.rs	wall(symex: eq harness symex never completes — 0 VCCs at 300s BOTH solvers; stringinfo/mcx machinery; cursor-skew control DOES complete and fails as designed 62.8s so rig is non-vacuous)	wall	wave-5 2026-07-30; blocked:stringinfo-symex per runqueue — needs slice-core refactor; proofs/scalar-misc
+2443	cidsend	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32, wrapper-level, modulo static-buffer allocator model)	slow	86.8s kissat; same registered fc_xidsend body as xidsend; wave-5 2026-07-30; proofs/scalar-misc
 2444	regprocrecv	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
 2445	regprocsend	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
 2446	regprocedurerecv	crates/backend/utils/adt/regproc/src/builtins.rs	excluded(state)	-	catalog name lookup (reg* io)
@@ -2319,7 +2319,7 @@ oid	name	source_file	status	class	notes
 3934	tsrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3937	tstzrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3938	tstzrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
-3939	mxid_age	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+3939	mxid_age	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32xu32, wrapper-level, modulo ReadNextMultiXactId seam model)	fast	0.29s; proofs/scalar-misc wave5
 3940	jsonb_extract_path_text	crates/backend/utils/adt/jsonb/src/builtins.rs	candidate	ladder	same core as 3217 (as_text=true) + value_as_text getfield.rs:16 Bool/String arms only (Numeric/Binary arms wall); cheap sibling
 3941	daterange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3942	daterange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
@@ -2730,8 +2730,8 @@ oid	name	source_file	status	class	notes
 5070	xid8in	crates/backend/utils/adt/scalar/src/builtins.rs	proved(len<=5 sym + 10 spots; len 6-12 wall)	fast	proofs/misc-ops
 5071	xid8toxid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64)	fast	0.11s; proofs/scalar-misc
 5081	xid8out	crates/backend/utils/adt/scalar/src/builtins.rs	proved(band+spots to u64::MAX incl 19/20-digit)	fast	proofs/misc-ops
-5082	xid8recv	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-5083	xid8send	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+5082	xid8recv	crates/backend/utils/adt/scalar/src/builtins.rs	wall(symex: 0 VCCs at 300s kissat; stringinfo/mcx machinery — same class as oidrecv)	wall	wave-5 2026-07-30; blocked:stringinfo-symex; proofs/scalar-misc
+5083	xid8send	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64, wrapper-level, modulo static-buffer allocator model)	slow	106.4s kissat; uint32send-skew control fails as designed 94.4s; wave-5 2026-07-30; proofs/scalar-misc
 5084	xid8eq	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64xu64, wrapper-level)	fast	0.11-0.15s; proofs/scalar-misc
 5085	xid8ne	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u64xu64, wrapper-level)	fast	0.11-0.15s; proofs/scalar-misc
 5086	anycompatible_in	crates/backend/utils/adt/pseudotypes/src/builtins.rs	proved(err-parity: verdict+sqlstate+level; all args ignored)	fast	~0.6s default solver; proofs/pseudotypes eq_anycompatible_in; wrapper-level via LocalFcinfo (call1, null Datum); C MAKE_SQLSTATE computed vs shipped with_sqlstate — 0A000 encoding in-theorem; message text/location out of proof; Err-arm cover! + shell_in must-fail control

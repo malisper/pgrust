@@ -1872,3 +1872,31 @@ uuid	wave5::control_generate_uuidv7_rng_skew	-Z c-ffi -Z stubbing --c-lib c/pg_u
 pg_lsn	wave5::eq_pg_lsn_recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	info	release-gate	wall	wall: unwind-16 truncation (AcctWeak retain, enlarge_slow) + 6.9GB RSS kill; FAILED = artifact
 pg_lsn	wave5::eq_pg_lsn_send	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	release-gate	140.4	wave-5 run 2026-07-30 idle; unwinding assertions pass
 pg_lsn	wave5::control_pg_lsn_send_skew	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --exact	must-fail	control	102.4	fails on img byte skew as designed
+scalar-misc	wave5::eq_cideq	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	per-commit	0.35	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xid_age	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	per-commit	0.29	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_mxid_age	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	per-commit	0.29	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::control_xid_age_seam_skew	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	must-fail	control	0.26	fails on seam skew as designed
+scalar-misc	wave5::eq_xidout_r1_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	2.0	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidout_d5	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	4.7	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidout_d6	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	9.2	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidout_d7a	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	17.9	info row proved green
+scalar-misc	wave5::eq_xidout_d7b	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	16.2	info row proved green
+scalar-misc	wave5::eq_xidout_spots	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	0.55	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::cover_xidout_split	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --exact	green	per-commit	0.01	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_r1_lt1e4	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	6.1	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_d5	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	4.3	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_d6	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	7.6	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_cidout_d7a	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	11.8	info row proved green
+scalar-misc	wave5::eq_cidout_d7b	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	release-gate	12.4	info row proved green
+scalar-misc	wave5::eq_cidout_spots	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --solver kissat --exact	green	per-commit	2.4	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::cover_cidout_split	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --c-lib ../intout/c/pg_intout.c --exact	green	per-commit	0.04	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_oidsend	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	70.4	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xidsend	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	86.8	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_xid8send	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	106.4	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::eq_tidsend	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	green	release-gate	94.1	wave-5 run 2026-07-30 idle
+scalar-misc	wave5::control_xid8send_vs_c_uint32send	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	must-fail	control	94.4	fails on u32-vs-u64 image skew as designed
+scalar-misc	wave5::eq_oidrecv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	info	release-gate	wall	symex wall 300s both solvers, 0 VCCs
+scalar-misc	wave5::eq_xid8recv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	wave5::eq_tidrecv_core	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --solver kissat --exact	info	release-gate	wall	symex wall 300s kissat
+scalar-misc	wave5::cover_recv_core_both_arms	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	info	per-commit	wall	timeout 120s, recv symex class
+scalar-misc	wave5::control_oidrecv_core_cursor_skew	-Z c-ffi -Z stubbing --c-lib c/pg_scalar_misc.c --exact	must-fail	control	62.8	fails on cursor skew as designed (completes where eq walls)
