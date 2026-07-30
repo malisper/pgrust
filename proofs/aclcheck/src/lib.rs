@@ -1142,108 +1142,328 @@ mod proofs {
     // =====================================================================
     // Controls (must FAIL; DEFAULT solver) + known-divergence probe
     // =====================================================================
-    acl_harness! {
-        /// Membership-oracle skew: identical inputs, C side answers all-true
-        /// while Rust answers all-false — MUST FAIL (seam load-bearing).
-        control_membership_skew, 20, {
-            let roleid: Oid = kani::any();
-            let objoid: Oid = kani::any();
-            arm_catalog();
-            arm_role_seams(roleid);
-            unsafe {
-                // no superuser/system shortcuts; force the aclmask walk
-                kani::assume(!R_CAT_ACL_ISNULL && R_CAT_NACL > 0 && R_CAT_FOUND);
-                for i in 0..2 {
-                    R_SUPER_ANS[i] = false;
-                    pgq_super_ans[i] = 0;
-                }
-                R_SUPER_DEFAULT = false;
-                pgq_super_default = 0;
-                for i in 0..8 {
-                    R_MEMB_ANS[i] = false;
-                    pgq_memb_ans[i] = 1; // SKEW
-                }
-                R_MEMB_DEFAULT = false;
-                pgq_memb_default = 1; // SKEW
+    // ---------------------------------------------------------------------
+    // Membership-oracle skew control — LITERAL-PINNED witness.
+    //
+    // History: the original form of this control drew roleid/objoid from
+    // kani::any() and shaped the catalog row with arm_catalog() +
+    // kani::assume() pins.  It NEVER produced a verdict (symex wall, no VCCs
+    // at 900s) — so every green in this family was unguarded against a
+    // vacuous rig.  House law: assume-pins over a symbolic lattice do not
+    // fold; only LITERAL pins prune.  Everything the witness needs is
+    // therefore a concrete constant here.  (Literal pins alone were NOT
+    // sufficient, though — measured 2026-07-30: the fc-level form with every
+    // input concrete still walled at 900s in the priv-string parse; see
+    // run_membership_witness below and runqueue.txt.)
+    //
+    // The witness configuration, chosen so that the ONLY thing separating a
+    // `true` verdict from a `false` verdict is the membership oracle:
+    //   * table_oid 50000 >= FirstUnpinnedObjectId (12000) and relnamespace
+    //     16384 != pg_toast, so IsSystemClass is false: no write strip.  (The
+    //     probed mode is ACL_SELECT anyway, which the strip never touches.)
+    //   * relkind 'r', catalog tuple found, ACL NOT null, exactly one
+    //     aclitem: grantee 555, grantor 999, privs = ACL_SELECT.
+    //   * roleid 100 is neither the grantee (555) nor the owner (999), and is
+    //     not superuser, so aclmask's direct-grant pass contributes nothing
+    //     and the goption/owner shortcut is unreachable (ACL_SELECT is not a
+    //     grant-option bit).
+    //   * Hence the verdict is decided in aclmask's INDIRECT pass, by exactly
+    //     one call: has_privs_of_role(100, 555).  With `memb` the answer the
+    //     C side gives and Rust giving `false`, the two sides return
+    //     different booleans iff memb == true.
+    //
+    // No privilege-string parsing is in the formula: "SELECT" is a literal on
+    // both sides, so convert_any_priv_string's std::str machinery (the wall
+    // class for this family) is concretely executed, not symbolically encoded.
+    fn arm_membership_witness(c_memb: bool) {
+        const GRANTEE: Oid = 555;
+        const GRANTOR: Oid = 999;
+        const ACL_SELECT: u64 = 1 << 1;
+        unsafe {
+            R_CAT_FOUND = true;
+            pgq_cat_found = 1;
+            R_CAT_OWNER = GRANTOR;
+            pgq_cat_owner = GRANTOR;
+            R_CAT_RELKIND = b'r';
+            pgq_cat_relkind = b'r' as c_int;
+            R_CAT_RELNS = 16384; // not pg_toast
+            pgq_cat_relnamespace = 16384;
+            R_CAT_ACL_ISNULL = false;
+            pgq_cat_acl_isnull = 0;
+            R_CAT_NACL = 1;
+            pgq_cat_nacl = 1;
+
+            let it = AclItem { ai_grantee: GRANTEE, ai_grantor: GRANTOR, ai_privs: ACL_SELECT };
+            R_CAT_ACL[0] = it;
+            pgq_set_cat_acl(0, it.ai_grantee, it.ai_grantor, it.ai_privs);
+            for i in 1..4 {
+                R_CAT_ACL[i] = ZERO_ITEM;
+            }
+            for i in 1..8 {
+                pgq_set_cat_acl(i as c_int, 0, 0, 0);
             }
 
-            const LIT: &[u8] = b"SELECT";
-            const F: PGFunction = builtin(1925);
-            let mut img = [0u8; 4 + 6];
-            img[0..4].copy_from_slice(&(((4 + 6) as u32) << 2).to_le_bytes());
-            img[4..].copy_from_slice(LIT);
-            let (r, isnull) = run_fc::<3>(
-                F,
-                [
-                    Datum::from_oid(roleid),
-                    Datum::from_oid(objoid),
-                    Datum::from_usize(img.as_ptr() as usize),
-                ],
-            );
-            let mut cp = [0u8; 7];
-            cp[..6].copy_from_slice(LIT);
-            let (mut cisnull, mut cerr) = (0 as c_int, 0 as c_int);
-            let c = unsafe {
-                pg_has_table_privilege_id_id(roleid, objoid, cp.as_mut_ptr() as *mut c_char, &mut cisnull, &mut cerr)
-            };
-            assert_same(r, isnull, c, cisnull, cerr);
+            // varlena aclitem[] image for the Rust decoder (allocacl layout)
+            let size: u32 = (4 + 20 + 16 * 1) as u32;
+            ACL_IMG = [0; 88];
+            ACL_IMG[0..4].copy_from_slice(&(size << 2).to_le_bytes());
+            ACL_IMG[4..8].copy_from_slice(&1i32.to_le_bytes()); // ndim
+            ACL_IMG[8..12].copy_from_slice(&0i32.to_le_bytes()); // dataoffset
+            ACL_IMG[12..16].copy_from_slice(&adt_acl::ACLITEMOID.to_le_bytes());
+            ACL_IMG[16..20].copy_from_slice(&1i32.to_le_bytes()); // dims
+            ACL_IMG[20..24].copy_from_slice(&1i32.to_le_bytes()); // lbound
+            ACL_IMG[24..28].copy_from_slice(&GRANTEE.to_le_bytes());
+            ACL_IMG[28..32].copy_from_slice(&GRANTOR.to_le_bytes());
+            ACL_IMG[32..40].copy_from_slice(&ACL_SELECT.to_le_bytes());
+
+            // membership oracle: Rust always false; C answers `c_memb`
+            for i in 0..8 {
+                R_MEMB_ROLE[i] = GRANTEE;
+                R_MEMB_ANS[i] = false;
+                pgq_memb_role[i] = GRANTEE;
+                pgq_memb_ans[i] = c_memb as c_int;
+            }
+            R_MEMB_DEFAULT = false;
+            pgq_memb_default = c_memb as c_int;
+
+            // no superuser bypass on either side
+            for i in 0..2 {
+                R_SUPER_ROLE[i] = 100;
+                R_SUPER_ANS[i] = false;
+                pgq_super_role[i] = 100;
+                pgq_super_ans[i] = 0;
+            }
+            R_SUPER_DEFAULT = false;
+            pgq_super_default = 0;
+
+            // scalar seams: concrete and unused by the id_id route
+            R_CURRENT_USER = 100;
+            pgq_current_user = 100;
+            R_OBJNAME_OID = 50000;
+            pgq_objname_oid = 50000;
+            R_ROLE_CALLS = 0;
+            pgq_role_calls = 0;
+            for i in 0..2 {
+                R_ROLE_FOUND[i] = true;
+                R_ROLE_OID[i] = 100;
+                pgq_role_found[i] = 1;
+                pgq_role_oid[i] = 100;
+            }
+            pgq_is_temp_namespace = 0;
+            pgq_temp_toast = 0;
+            pgq_my_database_id = 5;
+        }
+    }
+
+    /// Ask both sides for pg_class_aclmask(50000, 100, ACL_SELECT, ANY) under
+    /// the literal-pinned witness and require the two masks to agree.
+    ///
+    /// Entry point is the pg_class_aclmask CORE on both sides, NOT the fc
+    /// wrapper: the privilege-string parse layer is deliberately out of the
+    /// formula.  Measured: the fc-level form of this control (literal
+    /// "SELECT", every seam concrete) STILL walls — CBMC never finishes
+    /// symex, spinning in core::slice::memchr / std::str searcher loops
+    /// reached through the varlena text argument.  Parsing the privilege name
+    /// is incidental scaffolding for this control; the property under test is
+    /// "a skewed membership oracle changes the mask", and pg_class_aclmask is
+    /// where the membership oracle is consulted.  This is the same
+    /// proven-solvable tier as diag_c_probe_strip (8.9s) and
+    /// probe_system_class_temp_toast_core (3s).
+    fn run_membership_witness(c_memb: bool) {
+        const ACL_SELECT: u64 = 1 << 1;
+        arm_membership_witness(c_memb);
+
+        let rust = aclchk::pg_class_aclmask(50000, 100, ACL_SELECT, adt_acl::AclMaskHow::AclmaskAny);
+
+        let mut cout: u64 = 0;
+        let mut cerr: c_int = 0;
+        unsafe {
+            pg_class_aclmask_probe(50000, 100, ACL_SELECT, 1, &mut cout, &mut cerr);
+        }
+        assert!(cerr == 0, "C core must not error under the pinned witness");
+
+        match rust {
+            Ok(m) => {
+                // THE control property: the two masks must agree.  Under skew
+                // they cannot (C grants ACL_SELECT through the indirect
+                // membership pass, Rust grants nothing), so THIS is the assert
+                // a working control fails on.
+                assert!(m == cout, "membership-oracle skew must change the mask");
+            }
+            Err(e) => {
+                // No error arm is reachable under the pinned witness; if one
+                // is, the rig is broken, not the seam.
+                core::mem::forget(e);
+                assert!(false, "Rust core must not error under the pinned witness");
+            }
+        }
+    }
+
+    // NOTE: a temporary fc-level measurement harness (tmp_fc_literal_skew:
+    // the membership control run through run_fc with EVERY input literal)
+    // lived here during the 2026-07-30 lane and was deleted after measuring.
+    // Its result is load-bearing for the design above: NO-VERDICT at 900s
+    // (box load 5.0) even fully concrete — the wall is the parse layer
+    // itself, not input symbolism.  See runqueue.txt LANE RESULT.
+
+    acl_harness! {
+        /// Membership-oracle skew: identical inputs, the C side's membership
+        /// oracle answers TRUE where Rust's answers FALSE — MUST FAIL on
+        /// "membership-oracle skew must change the mask" (seam load-bearing).
+        control_membership_skew, 20, {
+            run_membership_witness(true); // SKEW
+        }
+    }
+
+    acl_harness! {
+        /// Guard-of-the-guard for control_membership_skew: the same witness
+        /// with the skew REMOVED (both oracles answer false).  MUST SUCCEED.
+        /// The pair is what makes the control meaningful — it shows the
+        /// control's failure is attributable to the membership skew alone and
+        /// not to unwinding, a codegen error, or an unrelated assert.
+        control_membership_noskew, 20, {
+            run_membership_witness(false); // no skew
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Catalog-owner skew control — LITERAL-PINNED witness at the
+    // pg_class_aclmask CORE level.
+    //
+    // History: the original form of this control ran through the fc wrapper
+    // (run_fc + a literal "SELECT" varlena) and NEVER produced a verdict —
+    // NO-VERDICT at 450s (2026-07-30, load 17.5) reconfirmed NO-VERDICT at
+    // 900s (load 8.6), unwinding-stage spin in
+    // core::slice::ascii::eq_ignore_ascii_case reached through
+    // convert_any_priv_string.  Same wall class, same treatment as
+    // control_membership_skew above: the priv-string parse is scaffolding,
+    // not the property; the property is "a skewed catalog OWNER read changes
+    // the mask", and pg_class_aclmask is where the owner is consulted.
+    //
+    // Witness configuration (everything concrete):
+    //   * catalog tuple found, relkind 'r', relnamespace 16384 (IsSystemClass
+    //     false; probed mode ACL_SELECT is untouched by the strip anyway),
+    //     ACL column NULL — so BOTH sides build the default ACL from the
+    //     owner they read (acldefault(OBJECT_TABLE, ownerId)).
+    //   * roleid 100, not superuser; membership oracle answers false for
+    //     every key on both sides (defaults false, no keyed entries hit).
+    //   * SKEW: Rust reads owner 100 (== roleid) -> the default aclitem's
+    //     grantee is 100, a DIRECT hit in aclmask's first pass -> SELECT
+    //     granted with no oracle involvement.  C reads owner 101 -> its
+    //     default aclitem's grantee is 101, no direct hit, indirect pass
+    //     consults has_privs_of_role(100, 101) = false, pg_read_all_data
+    //     fallback = false -> nothing granted.  Masks differ iff the skew
+    //     is present.
+    fn arm_owner_witness(rust_owner: Oid, c_owner: Oid) {
+        unsafe {
+            R_CAT_FOUND = true;
+            pgq_cat_found = 1;
+            R_CAT_OWNER = rust_owner;
+            pgq_cat_owner = c_owner;
+            R_CAT_RELKIND = b'r';
+            pgq_cat_relkind = b'r' as c_int;
+            R_CAT_RELNS = 16384; // not pg_toast
+            pgq_cat_relnamespace = 16384;
+            // ACL column NULL on both sides: the owner-derived default ACL
+            // is the only grant source, so the owner read is load-bearing.
+            R_CAT_ACL_ISNULL = true;
+            pgq_cat_acl_isnull = 1;
+            R_CAT_NACL = 0;
+            pgq_cat_nacl = 0;
+            for i in 0..4 {
+                R_CAT_ACL[i] = ZERO_ITEM;
+            }
+            for i in 0..8 {
+                pgq_set_cat_acl(i as c_int, 0, 0, 0);
+            }
+            ACL_IMG = [0; 88];
+
+            // membership oracle: all-false on BOTH sides (no skew here; the
+            // only cross-side difference is the owner read)
+            for i in 0..8 {
+                R_MEMB_ROLE[i] = 0;
+                R_MEMB_ANS[i] = false;
+                pgq_memb_role[i] = 0;
+                pgq_memb_ans[i] = 0;
+            }
+            R_MEMB_DEFAULT = false;
+            pgq_memb_default = 0;
+
+            // no superuser bypass on either side
+            for i in 0..2 {
+                R_SUPER_ROLE[i] = 100;
+                R_SUPER_ANS[i] = false;
+                pgq_super_role[i] = 100;
+                pgq_super_ans[i] = 0;
+            }
+            R_SUPER_DEFAULT = false;
+            pgq_super_default = 0;
+
+            // scalar seams: concrete and unused by the core route
+            R_CURRENT_USER = 100;
+            pgq_current_user = 100;
+            R_OBJNAME_OID = 50000;
+            pgq_objname_oid = 50000;
+            R_ROLE_CALLS = 0;
+            pgq_role_calls = 0;
+            for i in 0..2 {
+                R_ROLE_FOUND[i] = true;
+                R_ROLE_OID[i] = 100;
+                pgq_role_found[i] = 1;
+                pgq_role_oid[i] = 100;
+            }
+            pgq_is_temp_namespace = 0;
+            pgq_temp_toast = 0;
+            pgq_my_database_id = 5;
+        }
+    }
+
+    /// Ask both sides for pg_class_aclmask(50000, 100, ACL_SELECT, ANY) under
+    /// the literal-pinned owner witness and require the two masks to agree.
+    fn run_owner_witness(rust_owner: Oid, c_owner: Oid) {
+        const ACL_SELECT: u64 = 1 << 1;
+        arm_owner_witness(rust_owner, c_owner);
+
+        let rust = aclchk::pg_class_aclmask(50000, 100, ACL_SELECT, adt_acl::AclMaskHow::AclmaskAny);
+
+        let mut cout: u64 = 0;
+        let mut cerr: c_int = 0;
+        unsafe {
+            pg_class_aclmask_probe(50000, 100, ACL_SELECT, 1, &mut cout, &mut cerr);
+        }
+        assert!(cerr == 0, "C core must not error under the pinned owner witness");
+
+        match rust {
+            Ok(m) => {
+                // THE control property: under owner skew the masks cannot
+                // agree (Rust direct-grants via its owner-default aclitem, C
+                // grants nothing), so THIS is the assert a working control
+                // fails on.
+                assert!(m == cout, "catalog-owner skew must change the mask");
+            }
+            Err(e) => {
+                core::mem::forget(e);
+                assert!(false, "Rust core must not error under the pinned owner witness");
+            }
         }
     }
 
     acl_harness! {
         /// Catalog-seam skew: the C side reads a DIFFERENT owner than the
-        /// Rust side (concrete witness setup) — MUST FAIL.
+        /// Rust side (concrete witness setup) — MUST FAIL on
+        /// "catalog-owner skew must change the mask" (seam load-bearing).
         control_catalog_owner_skew, 20, {
-            arm_catalog();
-            arm_role_seams(100);
-            unsafe {
-                // concrete, verdict-splitting configuration
-                R_CAT_FOUND = true;
-                pgq_cat_found = 1;
-                R_CAT_ACL_ISNULL = true;
-                pgq_cat_acl_isnull = 1;
-                R_CAT_RELKIND = b'r';
-                pgq_cat_relkind = b'r' as c_int;
-                R_CAT_RELNS = 2200;
-                pgq_cat_relnamespace = 2200;
-                R_CAT_OWNER = 100;
-                pgq_cat_owner = 101; // SKEW
-                for i in 0..2 {
-                    R_SUPER_ANS[i] = false;
-                    pgq_super_ans[i] = 0;
-                }
-                R_SUPER_DEFAULT = false;
-                pgq_super_default = 0;
-                // membership true exactly on the (roleid==100, role==100) key
-                for i in 0..8 {
-                    let hit = R_MEMB_ROLE[i] == 100;
-                    R_MEMB_ANS[i] = hit;
-                    pgq_memb_ans[i] = hit as c_int;
-                }
-                R_MEMB_DEFAULT = false;
-                pgq_memb_default = 0;
-            }
+            run_owner_witness(100, 101); // SKEW
+        }
+    }
 
-            const LIT: &[u8] = b"SELECT";
-            const F: PGFunction = builtin(1925);
-            let mut img = [0u8; 4 + 6];
-            img[0..4].copy_from_slice(&(((4 + 6) as u32) << 2).to_le_bytes());
-            img[4..].copy_from_slice(LIT);
-            let (r, isnull) = run_fc::<3>(
-                F,
-                [
-                    Datum::from_oid(100),
-                    Datum::from_oid(50000),
-                    Datum::from_usize(img.as_ptr() as usize),
-                ],
-            );
-            let mut cp = [0u8; 7];
-            cp[..6].copy_from_slice(LIT);
-            let (mut cisnull, mut cerr) = (0 as c_int, 0 as c_int);
-            let c = unsafe {
-                pg_has_table_privilege_id_id(100, 50000, cp.as_mut_ptr() as *mut c_char, &mut cisnull, &mut cerr)
-            };
-            assert_same(r, isnull, c, cisnull, cerr);
+    acl_harness! {
+        /// Guard-of-the-guard for control_catalog_owner_skew: the same
+        /// witness with the skew REMOVED (both sides read owner 100).  MUST
+        /// SUCCEED.  The pair differs by exactly one Oid; run them together
+        /// or the control's failure is unattributed.
+        control_catalog_owner_noskew, 20, {
+            run_owner_witness(100, 100); // no skew
         }
     }
 
