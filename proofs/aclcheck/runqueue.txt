@@ -1,3 +1,38 @@
+# LANE RESULT 2026-07-30 (control-solvable lane): the vacuity guard now
+# produces a verdict.  Two measurements, both at box load ~5:
+#   (a) LITERAL PINS ALONE ARE NOT ENOUGH HERE.  The fc-level control with
+#       roleid/objoid/catalog/ACL/oracles ALL concrete and a literal "SELECT"
+#       still produced no verdict in >600s — CBMC never leaves symex, spinning
+#       in core::slice::memchr / std::str searcher loops reached through the
+#       varlena text argument.  So the wall is the privilege-string parse
+#       layer, not the symbolic lattice.
+#   (b) DROPPING THE PARSE OUT OF THE FORMULA SOLVES IT.  Comparing the
+#       pg_class_aclmask CORE on both sides (Rust aclchk::pg_class_aclmask vs
+#       C pg_class_aclmask_probe) under a literal-pinned witness:
+#       control_membership_skew FAILED in 42s on the intended named assert
+#       (1 of 1193 checks, unwinding assertions all SUCCESS), and the paired
+#       control_membership_noskew (skew removed, one boolean different)
+#       verified SUCCESSFUL in 42s.  This is the proven-solvable tier the
+#       RECOMMENDED RESHAPE below already named.
+# The fc-level eq_* rows below are UNCHANGED and still wall; nothing in this
+# lane touched arm_catalog / arm_role_seams / assert_same.
+#
+# ADDENDUM (same lane, after host restart): the TWO OTHER fc-level controls
+# also walled and were re-measured:
+#   * control_catalog_owner_skew — fc-level NO-VERDICT 450s (load 17.5,
+#     contaminated) RECONFIRMED NO-VERDICT 900s (load_start 8.6); restructured
+#     to the same pg_class_aclmask CORE tier (NULL-ACL owner-default witness):
+#     FAILED as designed in 6s on the intended named assert, 1 of 1144 checks;
+#     paired control_catalog_owner_noskew SUCCESSFUL in 6s (verdicts measured
+#     under 1-min load ~37 from unrelated builds — verdicts load-independent,
+#     wall-times contaminated upward if anything).
+#   * control_priv_map_mismatch — NO-VERDICT 450s at LOW load (5.95): honest
+#     wall, recorded, NOT restructurable (property = the parse layer itself).
+# Post-restructure family re-run (2026-07-30, f2_*.log): eq_aclinsert 2s,
+# eq_aclremove 3s, diag_seam_visibility 2s, diag_c_probe_strip 11s all
+# SUCCESSFUL; probe_system_class_temp_toast_core FAILED-as-designed 4s;
+# control_membership_skew FAILED-as-designed 42s / noskew SUCCESSFUL 41s.
+#
 # LANE RESULT 2026-07-30 (aclcheck resume lane, 450s wall cap): the
 # compile-gate expectations DO NOT survive contact with the solver. Every
 # fc-level harness measured (eq_has_table_privilege_id_id, _name_id,
@@ -114,9 +149,11 @@ proofs::cover_table_id_id_regimes | green | release-gate | timeout 600 cargo kan
 proofs::cover_aclitemin_regimes | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::cover_aclitemin_regimes --exact   # expect: all covers SATISFIED
 
 # ---- controls (DEFAULT solver; MUST FAIL with decodable counterexamples) ----
-proofs::control_membership_skew | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_membership_skew --exact   # expect: VERIFICATION FAILED (seam load-bearing)
-proofs::control_catalog_owner_skew | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_catalog_owner_skew --exact   # expect: VERIFICATION FAILED (catalog seam load-bearing)
-proofs::control_priv_map_mismatch | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_priv_map_mismatch --exact   # expect: VERIFICATION FAILED (plain-logic control)
+proofs::control_membership_skew | must-fail | defect-witness | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_membership_skew --exact   # RESTRUCTURED 2026-07-30 to the pg_class_aclmask CORE level (priv-string parse out of the formula); FAILED as designed in 42s on the intended named assert. RUN TOGETHER WITH control_membership_noskew.
+proofs::control_membership_noskew | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_membership_noskew --exact   # guard-of-the-guard: same witness, skew removed; SUCCESSFUL in 42s. Without this row the control's FAILED verdict is unattributed.
+proofs::control_catalog_owner_skew | must-fail | defect-witness | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_catalog_owner_skew --exact   # RESTRUCTURED 2026-07-30 to the pg_class_aclmask CORE level (NULL-ACL owner-default witness; parse out of the formula); FAILED as designed in 6s on "catalog-owner skew must change the mask". RUN TOGETHER WITH control_catalog_owner_noskew. fc-level form: NO-VERDICT 450s AND 900s (eq_ignore_ascii_case spin).
+proofs::control_catalog_owner_noskew | green | per-commit | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_catalog_owner_noskew --exact   # guard-of-the-guard: same witness, owner skew removed; SUCCESSFUL in 6s.
+proofs::control_priv_map_mismatch | must-fail | wall | timeout 450 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --harness proofs::control_priv_map_mismatch --exact   # HONEST WALL 2026-07-30: NO-VERDICT 450s at LOW load (5.95). NOT restructurable to core level — its property IS the priv-string map layer (TABLE vs SEQUENCE map on "TRIGGER"); dropping the parse deletes the property, and the parse walls even fully literal (900s @ load 5.0). Moot until any fc-level eq_* row solves; see SUITE.tsv note.
 
 # ---- known-divergence probe — RESOLVED 2026-07-30 (aclcheck lane): the
 # full-pipeline probe walls (symex, 450s: convert_any_priv_string std::str
