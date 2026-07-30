@@ -287,17 +287,14 @@ compile.
 
 ## Docker
 
-The repo's [`Dockerfile`](Dockerfile) builds a drop-in replacement for the
-official `postgres` image: same env vars (`POSTGRES_PASSWORD`,
-`POSTGRES_USER`, `POSTGRES_DB`, `PGDATA`, ...), same
-`/docker-entrypoint-initdb.d` init scripts, same data volume at
-`/var/lib/postgresql/data`. The build uses BuildKit cache mounts, so build it
-with buildx (the default on current Docker; on older installs run
-`DOCKER_BUILDKIT=1 docker build` instead):
+The prebuilt image on Docker Hub is a drop-in replacement for the official
+`postgres` image: same env vars (`POSTGRES_PASSWORD`, `POSTGRES_USER`,
+`POSTGRES_DB`, `PGDATA`, ...), same `/docker-entrypoint-initdb.d` init
+scripts, same data volume at `/var/lib/postgresql/data`. Multi-arch
+(amd64 + arm64):
 
 ```bash
-docker buildx build --load -t pgrust .
-docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 pgrust
+docker run -d --name pgrust -e POSTGRES_PASSWORD=secret -p 5432:5432 malisper/pgrust:v0.2
 ```
 
 Then connect:
@@ -306,8 +303,14 @@ Then connect:
 psql -h localhost -p 5432 -U postgres
 ```
 
-A prebuilt `malisper/pgrust:v0.2` image on Docker Hub is coming; until then,
-build from source as above.
+To build the image from source instead, the repo's
+[`Dockerfile`](Dockerfile) uses BuildKit cache mounts, so build it with buildx
+(the default on current Docker; on older installs run
+`DOCKER_BUILDKIT=1 docker build` instead):
+
+```bash
+docker buildx build --load -t pgrust .
+```
 
 ## What's new in v0.2
 
