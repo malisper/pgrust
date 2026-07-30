@@ -2257,3 +2257,390 @@ pg_inter_sb(LSEG_ARGS1, BOX_ARGS2_B, int *result)
 	*result = box_interpt_lseg(NULL, box, lseg);
 	return pg_geo_errflag;
 }
+
+/* =====================================================================
+ * EXTENSION 3 (2026-07-30, geo-varlena slice: PATH / POLYGON header and
+ * boundbox family).
+ *
+ * Provenance:
+ *   - src/backend/utils/adt/geo_ops.c @ postgres/postgres REL_18_STABLE
+ *     (fetched 2026-07-30)
+ *   - PATH / POLYGON layouts from src/include/utils/geo_decls.h @ same
+ *     ref (int32 npts; int32 closed; int32 dummy pad / int32 npts; BOX
+ *     boundbox; then the flexible Point array).
+ *
+ * Functions copied, bodies verbatim, renamed with pg_ prefix:
+ *   path_n_lt, path_n_gt, path_n_eq, path_n_le, path_n_ge,
+ *   path_isclosed, path_isopen, path_npoints,
+ *   poly_left, poly_overleft, poly_right, poly_overright, poly_below,
+ *   poly_overbelow, poly_above, poly_overabove, poly_same,
+ *   plist_same (static), poly_npoints, poly_box.
+ *
+ * Shims (plumbing only, never logic):
+ *   - PG_GETARG_PATH_P / PG_GETARG_POLYGON_P (detoast + unpack plumbing)
+ *     -> the wrapper takes the header fields / point coordinate arrays
+ *     the verbatim body reads and stages them into stack PATH_S / POLY_S
+ *     structs mirroring the geo_decls.h layouts minus the varlena word.
+ *     This is the TRUSTED-BUILDER fence: the harness feeds both sides
+ *     field-identical images; only the Rust side parses a real varlena.
+ *   - PG_FREE_IF_COPY -> no-op (memory plumbing).
+ *   - PG_RETURN_BOOL -> int 0/1 (BoolGetDatum collapses any nonzero
+ *     int32 to 1, preserved with ? 1 : 0); PG_RETURN_INT32 -> int.
+ *   - poly_box's palloc'd BOX result -> caller out4 (hx,hy,lx,ly).
+ * POLY_CAP bounds the staged point arrays (harness cells use n <= 4).
+ */
+
+#define POLY_CAP 4
+
+typedef struct
+{
+	int32		npts;
+	int32		closed;			/* is this a closed polygon? */
+} PATH_S;
+
+typedef struct
+{
+	int32		npts;
+	BOX			boundbox;
+	Point		p[POLY_CAP];
+} POLY_S;
+
+/* geo_ops.c plist_same, body verbatim */
+static bool
+pg_plist_same(int npts, Point *p1, Point *p2)
+{
+	int			i,
+				ii,
+				j;
+
+	/* find match for first point */
+	for (i = 0; i < npts; i++)
+	{
+		if (point_eq_point(&p2[i], &p1[0]))
+		{
+
+			/* match found? then look forward through remaining points */
+			for (ii = 1, j = i + 1; ii < npts; ii++, j++)
+			{
+				if (j >= npts)
+					j = 0;
+				if (!point_eq_point(&p2[j], &p1[ii]))
+					break;
+			}
+			if (ii == npts)
+				return true;
+
+			/* match not found forwards? then look backwards */
+			for (ii = 1, j = i - 1; ii < npts; ii++, j--)
+			{
+				if (j < 0)
+					j = (npts - 1);
+				if (!point_eq_point(&p2[j], &p1[ii]))
+					break;
+			}
+			if (ii == npts)
+				return true;
+		}
+	}
+
+	return false;
+}
+
+/* stage a POLY_S from harness fields (shim, not Postgres code) */
+static void
+pg_poly_stage(POLY_S *poly, int npts, double hx, double hy, double lx,
+			  double ly, const double *xy)
+{
+	int			k;
+
+	poly->npts = npts;
+	poly->boundbox.high.x = hx;
+	poly->boundbox.high.y = hy;
+	poly->boundbox.low.x = lx;
+	poly->boundbox.low.y = ly;
+	for (k = 0; xy != NULL && k < npts && k < POLY_CAP; k++)
+	{
+		poly->p[k].x = xy[2 * k];
+		poly->p[k].y = xy[2 * k + 1];
+	}
+}
+
+/* path_n_lt .. path_n_ge, bodies verbatim on staged PATH_S */
+int
+pg_path_n_lt(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts < p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_gt(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts > p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_eq(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts == p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_le(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts <= p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_n_ge(int n1, int n2)
+{
+	PATH_S		p1_ = {n1, 0};
+	PATH_S		p2_ = {n2, 0};
+	PATH_S	   *p1 = &p1_;
+	PATH_S	   *p2 = &p2_;
+
+	return (p1->npts >= p2->npts) ? 1 : 0;
+}
+
+int
+pg_path_isclosed(int closed)
+{
+	PATH_S		path_ = {0, closed};
+	PATH_S	   *path = &path_;
+
+	return (path->closed) ? 1 : 0;
+}
+
+int
+pg_path_isopen(int closed)
+{
+	PATH_S		path_ = {0, closed};
+	PATH_S	   *path = &path_;
+
+	return (!path->closed) ? 1 : 0;
+}
+
+int
+pg_path_npoints(int npts)
+{
+	PATH_S		path_ = {npts, 0};
+	PATH_S	   *path = &path_;
+
+	return path->npts;
+}
+
+/* poly position predicates: boundbox-only exact compares, verbatim */
+int
+pg_poly_left(double ahx, double ahy, double alx, double aly,
+			 double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.x < polyb->boundbox.low.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overleft(double ahx, double ahy, double alx, double aly,
+				 double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.x <= polyb->boundbox.high.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_right(double ahx, double ahy, double alx, double aly,
+			  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.x > polyb->boundbox.high.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overright(double ahx, double ahy, double alx, double aly,
+				  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.x >= polyb->boundbox.low.x;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_below(double ahx, double ahy, double alx, double aly,
+			  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.y < polyb->boundbox.low.y;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overbelow(double ahx, double ahy, double alx, double aly,
+				  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.high.y <= polyb->boundbox.high.y;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_above(double ahx, double ahy, double alx, double aly,
+			  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.y > polyb->boundbox.high.y;
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_overabove(double ahx, double ahy, double alx, double aly,
+				  double bhx, double bhy, double blx, double bly)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, 0, ahx, ahy, alx, aly, NULL);
+	pg_poly_stage(&b_, 0, bhx, bhy, blx, bly, NULL);
+
+	result = polya->boundbox.low.y >= polyb->boundbox.low.y;
+
+	return result ? 1 : 0;
+}
+
+/* poly_same, body verbatim (boundboxes not read; staged zero) */
+int
+pg_poly_same(int na, int nb, const double *pa, const double *pb)
+{
+	POLY_S		a_,
+				b_;
+	POLY_S	   *polya = &a_;
+	POLY_S	   *polyb = &b_;
+	bool		result;
+
+	pg_poly_stage(&a_, na, 0.0, 0.0, 0.0, 0.0, pa);
+	pg_poly_stage(&b_, nb, 0.0, 0.0, 0.0, 0.0, pb);
+
+	if (polya->npts != polyb->npts)
+		result = false;
+	else
+		result = pg_plist_same(polya->npts, polya->p, polyb->p);
+
+	return result ? 1 : 0;
+}
+
+int
+pg_poly_npoints(int npts)
+{
+	POLY_S		poly_;
+	POLY_S	   *poly = &poly_;
+
+	pg_poly_stage(&poly_, npts, 0.0, 0.0, 0.0, 0.0, NULL);
+	poly_.npts = npts;
+
+	return poly->npts;
+}
+
+int
+pg_poly_box(double hx, double hy, double lx, double ly, double *out4)
+{
+	POLY_S		poly_;
+	POLY_S	   *poly = &poly_;
+	BOX			box_;
+	BOX		   *box = &box_;
+
+	pg_poly_stage(&poly_, 0, hx, hy, lx, ly, NULL);
+
+	*box = poly->boundbox;
+
+	out4[0] = box->high.x;
+	out4[1] = box->high.y;
+	out4[2] = box->low.x;
+	out4[3] = box->low.y;
+	return 0;
+}
