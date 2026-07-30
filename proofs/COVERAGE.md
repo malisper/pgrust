@@ -130,7 +130,10 @@ The actionable logic gaps as of this capture include:
   67, 55 name a wrapper with no harness anywhere and 12 name one whose
   harnesses are calibration/release-gate tier only. The real float logic
   gaps are `io.rs` (482 SLOC of float parse/print, the fuzz axis' job) and
-  `aggregates.rs` (217 SLOC, no per-commit proof family exists).
+  `aggregates.rs` (217 SLOC) — which is NOT unproved: `proofs/float-agg`
+  covers it, but that family was solved on the CI cluster and was dark in
+  SUITE.tsv at capture time, so its coverage is invisible to a local
+  capture (known distortion 7).
 - geo: `builtins.rs:317-543` bands of fmgr wrapper glue for predicates
   the regress corpus never calls.
 
@@ -438,6 +441,33 @@ the three arrays; lines not in `sloc` are non-code (render neutral).
 6. **The instrumented server is slower** (counter increments +
    `fast-profile` codegen). Irrelevant to which lines execute, but do
    not reuse this binary for any perf number.
+7. **CI-solved families are entirely absent from local captures.**
+   A proof family whose solves happened on the CI cluster leaves NO kaniraw
+   on this laptop, so every function it proves reads 0% here — the
+   capture systematically zeroes exactly the hardest-won proofs.
+   Concrete case: `proofs/float-agg` (29 runqueue harnesses over the
+   float8[] aggregate transitions/finals — avg, var/stddev pop+samp,
+   covar, corr, regr_*) was solved on the CI cluster and re-verified at main
+   (`proofs/FLEET-DECODE-2026-07-30.md` §2: the three sqrt-bearing grids
+   prove 3.9/5.4/16.0 s under the det-sqrt model), yet at the time of
+   this capture it had **zero rows in SUITE.tsv** — a dark family — and
+   zero kaniraw locally. That is why `float/src/aggregates.rs` reads
+   0/225 Kani-covered in the table above despite ~29 proved-on-CI cluster
+   harnesses over its functions. (The dark-harness sweep, commit
+   `50b4e42892` on main, has since registered all 31 float-agg harnesses
+   as `expected=unmeasured`; the coverage number stays 0 until a capture
+   actually runs them.)
+   **Rule for any full-tree capture:** enumerate expected families from
+   SUITE.tsv, then either (a) include a CI cluster leg — run the CI-solved
+   families under `--coverage` on the CI cluster and merge their kaniraw plus
+   census like any local family — or (b) list every one of their
+   harnesses in `--allow-unmeasured` with reason `CI-solved, no local
+   coverage leg`, so the census records them UNMEASURED instead of
+   letting their functions masquerade as uncovered. The fail-closed
+   census makes silent omission an error only for harnesses the capture
+   *expected*; a family missing from the joblist entirely is invisible
+   to it, which is why the joblist must be derived from SUITE.tsv, not
+   from which families happen to build locally.
 
 ## Cost of a full-tree run (if wanted)
 
