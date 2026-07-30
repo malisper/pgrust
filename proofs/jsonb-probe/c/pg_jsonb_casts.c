@@ -332,8 +332,18 @@ set_var_from_var(const NumericVar *value, NumericVar *dest)
 	newbuf = casts_digitbuf_alloc(value->ndigits + 1);
 	newbuf[0] = 0;				/* spare digit for rounding */
 	if (value->ndigits > 0)		/* else value->digits might be null */
-		memcpy(newbuf + 1, value->digits,
-			   value->ndigits * sizeof(NumericDigit));
+	{
+		/* SHIM C7 (typed staging, family law "byte-punned cross-language
+		 * reads need typed staging"): upstream memcpy; CBMC's memcpy
+		 * builtin mis-models the byte-punned int16 copy out of the u8
+		 * harness image (measured: symbolic digits arrived corrupted while
+		 * a direct x.digits[0] read decodes correctly), so the copy is
+		 * spelled as the equivalent per-digit assignment loop. */
+		int			i_;
+
+		for (i_ = 0; i_ < value->ndigits; i_++)
+			newbuf[1 + i_] = value->digits[i_];
+	}
 
 	digitbuf_free(dest->buf);
 
@@ -852,4 +862,28 @@ pgp_jsonb_float4_special(JsonbContainer *c, int *errclass, int *errtype,
 
 	casts_abort = 1;			/* finite arm out of fence */
 	return 2;
+}
+
+/* Symbolic-decode diagnostic (harness plumbing, not a parity entry):
+ * exposes the C-side view of the embedded numeric. */
+int
+pgp_probe_numeric_decode(JsonbContainer *c, int *sign, int *weight,
+						 int *dsc, int *nd, int *d0)
+{
+	JsonbValue	v;
+	Numeric		num;
+	NumericVar	x;
+
+	if (!pg_JsonbExtractScalar(c, &v) || v.type != jbvNumeric)
+		return 0;
+	num = (Numeric) v.val.numeric;
+	if (NUMERIC_IS_SPECIAL(num))
+		return 0;
+	init_var_from_num(num, &x);
+	*sign = x.sign;
+	*weight = x.weight;
+	*dsc = x.dscale;
+	*nd = x.ndigits;
+	*d0 = x.ndigits > 0 ? x.digits[0] : -1;
+	return 1;
 }

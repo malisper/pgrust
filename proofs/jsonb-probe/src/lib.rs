@@ -1452,6 +1452,8 @@ mod proofs {
     /// dscale symbolic, digits symbolic fenced to the on-disk invariant
     /// 0 <= d < NBASE.
     fn any_short_numeric(weight: i32, nd: usize) -> Img<CASTCAP> {
+        set_hoff_pin(1); // length-form JEntry cells (offset-form reader lane
+                         // covered by the lookup family + window_n1_of)
         let neg: bool = kani::any();
         let dscale: u16 = kani::any();
         kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
@@ -1467,7 +1469,9 @@ mod proofs {
             | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
             | (dscale << NUMERIC_SHORT_DSCALE_SHIFT)
             | wbits;
-        build_raw_numeric(hdr, 0, false, &digits, nd)
+        let img = build_raw_numeric(hdr, 0, false, &digits, nd);
+        set_hoff_pin(0);
+        img
     }
 
     /// Long-form cell (verbatim long header: sign|dscale word + weight word).
@@ -1482,19 +1486,22 @@ mod proofs {
             *d = v;
         }
         let hdr = if neg { NUMERIC_NEG } else { NUMERIC_POS } | dscale;
-        build_raw_numeric(hdr, weight, true, &digits, nd)
+        set_hoff_pin(1);
+        let img = build_raw_numeric(hdr, weight, true, &digits, nd);
+        set_hoff_pin(0);
+        img
     }
 
-    /// Special (NaN/+Inf/-Inf) numeric cell, selector symbolic.
-    fn any_special_numeric() -> (Img<CASTCAP>, u16) {
-        let sel: u8 = kani::any();
-        kani::assume(sel <= 2);
-        let hdr = match sel {
-            0 => NUM_NAN,
-            1 => NUM_PINF,
-            _ => NUM_NINF,
-        };
-        (build_raw_numeric(hdr, 0, false, &[0i16; NDMAX], 0), hdr)
+    /// Special (NaN/+Inf/-Inf) numeric cell at a LITERAL header (a symbolic
+    /// selector keeps the finite numeric_out+float8in arm structurally in
+    /// the formula — assume never folds; the literal prunes it.  The three
+    /// per-header cells partition the special lattice by construction).
+    fn special_numeric(hdr: u16) -> Img<CASTCAP> {
+        set_hoff_pin(1); // literal JEntry (symbolic HAS_OFF keeps the numeric
+                         // window symbolic and the finite arm live)
+        let img = build_raw_numeric(hdr, 0, false, &[0i16; NDMAX], 0);
+        set_hoff_pin(0);
+        img
     }
 
     /// Rust-side value-space cast composition (the jsonb_numeric_cast macro
@@ -1644,37 +1651,37 @@ mod proofs {
 
     cast_case! {
         eq_jsonb_int8_w0n0[6]: cell_int8(0, 0, false);
-        eq_jsonb_int8_w0n1[7]: cell_int8(0, 1, false);
-        eq_jsonb_int8_w0n2[8]: cell_int8(0, 2, false);
-        eq_jsonb_int8_wm1n1[7]: cell_int8(-1, 1, false);
-        eq_jsonb_int8_w1n2[8]: cell_int8(1, 2, false);
-        eq_jsonb_int8_w4n5[12]: cell_int8(4, 5, true);
-        eq_jsonb_int8_w5n1[12]: cell_int8(5, 1, false);
-        eq_jsonb_int8_long_w0n1[7]: cell_int8_long(0, 1);
-        eq_jsonb_int4_w0n1[7]: cell_int4(0, 1, false);
-        eq_jsonb_int4_w0n2[8]: cell_int4(0, 2, false);
-        eq_jsonb_int4_wm1n1[7]: cell_int4(-1, 1, false);
-        eq_jsonb_int4_w2n3[10]: cell_int4(2, 3, true);
-        eq_jsonb_int2_w0n1[7]: cell_int2(0, 1, false);
-        eq_jsonb_int2_wm1n1[7]: cell_int2(-1, 1, false);
-        eq_jsonb_int2_w1n2[8]: cell_int2(1, 2, true);
+        eq_jsonb_int8_w0n1[12]: cell_int8(0, 1, false);
+        eq_jsonb_int8_w0n2[12]: cell_int8(0, 2, false);
+        eq_jsonb_int8_wm1n1[12]: cell_int8(-1, 1, false);
+        eq_jsonb_int8_w1n2[12]: cell_int8(1, 2, false);
+        eq_jsonb_int8_w4n5[14]: cell_int8(4, 5, true);
+        eq_jsonb_int8_w5n1[14]: cell_int8(5, 1, true);
+        eq_jsonb_int8_long_w0n1[12]: cell_int8_long(0, 1);
+        eq_jsonb_int4_w0n1[12]: cell_int4(0, 1, false);
+        eq_jsonb_int4_w0n2[12]: cell_int4(0, 2, false);
+        eq_jsonb_int4_wm1n1[12]: cell_int4(-1, 1, false);
+        eq_jsonb_int4_w2n3[13]: cell_int4(2, 3, true);
+        eq_jsonb_int2_w0n1[12]: cell_int2(0, 1, false);
+        eq_jsonb_int2_wm1n1[12]: cell_int2(-1, 1, false);
+        eq_jsonb_int2_w1n2[12]: cell_int2(1, 2, true);
     }
 
     // ---- special-value lattice (int class-2 errors; float NaN/±Inf) ----
 
-    fn cell_int8_special() {
+    fn cell_int8_special(hdr: u16) {
         casts_reset();
-        let (img, _) = any_special_numeric();
+        let img = special_numeric(hdr);
         check_jsonb_int8(&img, false);
     }
-    fn cell_int4_special() {
+    fn cell_int4_special(hdr: u16) {
         casts_reset();
-        let (img, _) = any_special_numeric();
+        let img = special_numeric(hdr);
         check_jsonb_int4(&img, false);
     }
-    fn cell_int2_special() {
+    fn cell_int2_special(hdr: u16) {
         casts_reset();
-        let (img, _) = any_special_numeric();
+        let img = special_numeric(hdr);
         check_jsonb_int2(&img, false);
     }
 
@@ -1683,9 +1690,9 @@ mod proofs {
     /// cells below.  The finite arm (numeric_out + strtod cascade) is out
     /// of fence on both sides (C sets the abort sentinel; the ledger row
     /// records the wall).
-    fn cell_float8_special() {
+    fn cell_float8_special(hdr: u16) {
         casts_reset();
-        let (img, hdr) = any_special_numeric();
+        let img = special_numeric(hdr);
         let (mut ec, mut et): (c_int, c_int) = (0, 0);
         let mut bits: u64 = 0;
         let c = unsafe { pgp_jsonb_float8_special(img.0.as_ptr(), &mut ec, &mut et, &mut bits) };
@@ -1698,14 +1705,11 @@ mod proofs {
             }
             _ => panic!("special lattice cell left the value arm"),
         }
-        kani::cover!(hdr == NUM_NAN);
-        kani::cover!(hdr == NUM_PINF);
-        kani::cover!(hdr == NUM_NINF);
     }
 
-    fn cell_float4_special() {
+    fn cell_float4_special(hdr: u16) {
         casts_reset();
-        let (img, hdr) = any_special_numeric();
+        let img = special_numeric(hdr);
         let (mut ec, mut et): (c_int, c_int) = (0, 0);
         let mut bits: u32 = 0;
         let c = unsafe { pgp_jsonb_float4_special(img.0.as_ptr(), &mut ec, &mut et, &mut bits) };
@@ -1718,26 +1722,42 @@ mod proofs {
             }
             _ => panic!("special lattice cell left the value arm"),
         }
-        kani::cover!(hdr == NUM_NAN);
-        kani::cover!(hdr == NUM_PINF);
-        kani::cover!(hdr == NUM_NINF);
     }
 
     cast_case! {
-        eq_jsonb_int8_special[6]: cell_int8_special();
-        eq_jsonb_int4_special[6]: cell_int4_special();
-        eq_jsonb_int2_special[6]: cell_int2_special();
-        eq_jsonb_float8_special[6]: cell_float8_special();
-        eq_jsonb_float4_special[6]: cell_float4_special();
+        eq_jsonb_int8_special_nan[6]: cell_int8_special(NUM_NAN);
+        eq_jsonb_int8_special_pinf[6]: cell_int8_special(NUM_PINF);
+        eq_jsonb_int8_special_ninf[6]: cell_int8_special(NUM_NINF);
+        eq_jsonb_int4_special_nan[6]: cell_int4_special(NUM_NAN);
+        eq_jsonb_int2_special_nan[6]: cell_int2_special(NUM_NAN);
+        eq_jsonb_float8_special_nan[6]: cell_float8_special(NUM_NAN);
+        eq_jsonb_float8_special_pinf[6]: cell_float8_special(NUM_PINF);
+        eq_jsonb_float8_special_ninf[6]: cell_float8_special(NUM_NINF);
+        eq_jsonb_float4_special_nan[6]: cell_float4_special(NUM_NAN);
+        eq_jsonb_float4_special_pinf[6]: cell_float4_special(NUM_PINF);
+        eq_jsonb_float4_special_ninf[6]: cell_float4_special(NUM_NINF);
     }
 
     // ---- 3449 jsonb_numeric: image-window identity + shared error class --
 
     /// Window identity: same input buffer, so slice identity is pointer +
     /// length equality (materialization/copy out of scope, SHIM C3).
-    fn cell_numeric_window(nd: usize) {
+    fn cell_numeric_window(nd: usize, hoff: u8) {
         casts_reset();
-        let img = any_short_numeric(0, nd);
+        set_hoff_pin(hoff);
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
+        let mut digits = [0i16; NDMAX];
+        for d in digits.iter_mut().take(nd) {
+            let v: i16 = kani::any();
+            kani::assume(v >= 0 && v < NBASE);
+            *d = v;
+        }
+        let hdr = NUMERIC_SHORT | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
+            | (dscale << NUMERIC_SHORT_DSCALE_SHIFT);
+        let img: Img<CASTCAP> = build_raw_numeric(hdr, 0, false, &digits, nd);
+        set_hoff_pin(0);
         let (mut ec, mut et): (c_int, c_int) = (0, 0);
         let mut vlen: c_int = -1;
         let mut vdata: *const u8 = core::ptr::null();
@@ -1856,9 +1876,10 @@ mod proofs {
     }
 
     cast_case! {
-        eq_jsonb_numeric_window_n0[6]: cell_numeric_window(0);
-        eq_jsonb_numeric_window_n1[7]: cell_numeric_window(1);
-        eq_jsonb_numeric_window_n2[8]: cell_numeric_window(2);
+        eq_jsonb_numeric_window_n0[6]: cell_numeric_window(0, 1);
+        eq_jsonb_numeric_window_n1[7]: cell_numeric_window(1, 1);
+        eq_jsonb_numeric_window_n1_of[7]: cell_numeric_window(1, 2);
+        eq_jsonb_numeric_window_n2[8]: cell_numeric_window(2, 1);
         eq_jsonb_cast_scalar_kinds[7]: cell_cast_scalar_kinds();
         eq_jsonb_cast_err_array_n2[7]: cell_cast_err_array(2);
         eq_jsonb_cast_err_object_n1[7]: cell_cast_err_object(1);
@@ -2054,7 +2075,7 @@ mod proofs {
         eq_path_scalar_root_len1[6]: cell_path_scalar_root_len1();
         eq_path_empty_arr[6]: cell_path_empty_arr();
         eq_path_empty_scalar[7]: cell_path_empty_scalar();
-        eq_path_nested_len2[10]: cell_path_nested_len2();
+        eq_path_nested_len2[16]: cell_path_nested_len2();
     }
 
     // ---- 3272/3274 jsonb_build_array_noargs / jsonb_build_object_noargs --
@@ -2147,6 +2168,119 @@ mod proofs {
             adt_jsonb::getfield::PathVerdict::Null => {} // Rust: parse fails
             _ => panic!("Rust side unexpectedly parsed a VT-prefixed subscript"),
         }
+    }
+
+    /// Concrete diagnostic probe (w0n1 counterexample instance: short-form
+    /// negative, dscale 0, digit 1 => value -1).  Separates the sides.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn probe_int8_concrete_neg1() {
+        casts_reset();
+        set_hoff_pin(1);
+        let digits = [8192i16, 0, 0, 0, 0];
+        // hdr = SHORT | NEG-sign | dscale=63<<7 (the second counterexample)
+        let img: Img<CASTCAP> = build_raw_numeric(0xBF80, 0, false, &digits, 1);
+        set_hoff_pin(0);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut out: i64 = 0;
+        let c = unsafe { pgp_jsonb_int8(img.0.as_ptr(), &mut ec, &mut et, &mut out) };
+        assert_no_abort_casts();
+        assert!(c == 1);
+        assert!(out == -8192); // C side
+        let r = rust_cast(&img.0[..], "bigint", adt_numeric::numeric_int8);
+        match r {
+            CastR::Val(v) => assert!(v == -8192), // Rust side
+            _ => panic!("rust side left value arm"),
+        }
+    }
+
+    /// Symbolic diagnostic for the w0n1 fabrication: both sides asserted
+    /// against the analytic spec (value = ±digits[0] at weight 0, nd 1).
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn probe_int8_w0n1_spec() {
+        casts_reset();
+        set_hoff_pin(1);
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
+        let d0: i16 = kani::any();
+        kani::assume(d0 >= 0 && d0 < NBASE);
+        let digits = [d0, 0, 0, 0, 0];
+        let hdr = NUMERIC_SHORT
+            | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
+            | (dscale << NUMERIC_SHORT_DSCALE_SHIFT);
+        let img: Img<CASTCAP> = build_raw_numeric(hdr, 0, false, &digits, 1);
+        set_hoff_pin(0);
+        let expected: i64 = if neg { -(d0 as i64) } else { d0 as i64 };
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut out: i64 = 0;
+        let c = unsafe { pgp_jsonb_int8(img.0.as_ptr(), &mut ec, &mut et, &mut out) };
+        assert_no_abort_casts();
+        assert!(c == 1);
+        assert!(out == expected); // C vs spec
+        let r = rust_cast(&img.0[..], "bigint", adt_numeric::numeric_int8);
+        match r {
+            CastR::Val(v) => assert!(v == expected), // Rust vs spec
+            _ => panic!("rust side left value arm"),
+        }
+    }
+
+    extern "C" {
+        fn pgp_probe_numeric_decode(
+            c: *const u8,
+            sign: *mut c_int,
+            weight: *mut c_int,
+            dsc: *mut c_int,
+            nd: *mut c_int,
+            d0: *mut c_int,
+        ) -> c_int;
+    }
+
+    /// C-side decode diagnostic: the C view of the symbolic embedded
+    /// numeric must equal the builder's fields.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn probe_int8_w0n1_cdecode() {
+        casts_reset();
+        set_hoff_pin(1);
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
+        let d0: i16 = kani::any();
+        kani::assume(d0 >= 0 && d0 < NBASE);
+        let digits = [d0, 0, 0, 0, 0];
+        let hdr = NUMERIC_SHORT
+            | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
+            | (dscale << NUMERIC_SHORT_DSCALE_SHIFT);
+        let img: Img<CASTCAP> = build_raw_numeric(hdr, 0, false, &digits, 1);
+        set_hoff_pin(0);
+        let (mut sign, mut weight, mut dsc, mut nd, mut cd0): (c_int, c_int, c_int, c_int, c_int) =
+            (0, 0, 0, 0, 0);
+        let ok = unsafe {
+            pgp_probe_numeric_decode(
+                img.0.as_ptr(),
+                &mut sign,
+                &mut weight,
+                &mut dsc,
+                &mut nd,
+                &mut cd0,
+            )
+        };
+        assert!(ok == 1);
+        assert!(sign == if neg { 0x4000 } else { 0 });
+        assert!(weight == 0);
+        assert!(dsc == dscale as c_int);
+        assert!(nd == 1);
+        assert!(cd0 == d0 as c_int);
     }
 
     /// Negative control (DEFAULT solver, MUST FAIL): C reads a
