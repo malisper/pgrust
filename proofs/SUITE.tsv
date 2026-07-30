@@ -1477,6 +1477,88 @@ varbit-rows	eq_bitlength_octetlength	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_ro
 varbit-rows	eq_bittoint4	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	1.8	solver not explicitly assigned
 varbit-rows	eq_bittoint8	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	1.6	
 varbit-rows	control_bitnot_bitlen_off_by_one	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	must-fail	defect-witness	1.1	DEFAULT solver; verified failing 1.1s 2026-07-28
+varbit-rows	control_bit_in_flipped_digit	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	must-fail	defect-witness	111	W10; DEFAULT solver; verified failing on image byte parity 111s 2026-07-30
+varbit-rows	control_bitgetbit_index_skew	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	must-fail	defect-witness	0.7	W10; DEFAULT solver; verified failing on 'v == c' 0.67s 2026-07-30
+varbit-rows	cover_w10_image_arms	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	unmeasured	?	W10 regime-witness
+varbit-rows	cover_w10_io_arms	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	unmeasured	?	W10 regime-witness
+varbit-rows	cover_w10_scalar_arms	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	per-commit	0.2	W10 regime-witness; 0.17s 2026-07-30
+varbit-rows	eq_anybit_typmodin	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	0.9	W10; 0.88s kissat 2026-07-30
+varbit-rows	eq_bit_bit_count	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	3.0	W10; 2.97s kissat 2026-07-30
+varbit-rows	eq_bit_coerce_err9	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_bit_coerce_ident_eq	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_bit_coerce_ident0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_bit_coerce_l16	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_bit_coerce_l9	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_bit_in_bare_l3	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_bit_in_bare_l3_tm7	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_bit_in_bare_l6_tm6	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_bit_in_bpfx_l6	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_bit_in_len0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_bit_in_xpfx_l6	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_bit_recv_c_hdr_short	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	137	W10; ledger 96-137s band
+varbit-rows	eq_bit_recv_c_max	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	137	W10; ledger 96-137s band
+varbit-rows	eq_bit_recv_c_mismatch	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	137	W10; ledger 96-137s band
+varbit-rows	eq_bit_recv_c_neg	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	137	W10; ledger 96-137s band
+varbit-rows	eq_bit_recv_c12	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	wall-recorded	calibration	?	W10 memory wall @6GiB BOTH solvers (recv Ok-IMAGE arm); live for CI cluster 40GB retry tier; protocol/err planes proved
+varbit-rows	eq_bit_recv_c12_short	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	137	W10; ledger 96-137s band
+varbit-rows	eq_bitcat_l0_7	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	193	W10; l12_9 193.2s 2026-07-30 (ledger 170-191s)
+varbit-rows	eq_bitcat_l12_9	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	193	W10; l12_9 193.2s 2026-07-30 (ledger 170-191s)
+varbit-rows	eq_bitcat_l16_8	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	193	W10; l12_9 193.2s 2026-07-30 (ledger 170-191s)
+varbit-rows	eq_bitcat_l5_0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	193	W10; l12_9 193.2s 2026-07-30 (ledger 170-191s)
+varbit-rows	eq_bitfromint4_t0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	83	W10; ledger 62-83s band
+varbit-rows	eq_bitfromint4_t1	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	83	W10; ledger 62-83s band
+varbit-rows	eq_bitfromint4_t33	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	83	W10; ledger 62-83s band
+varbit-rows	eq_bitfromint4_t47	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	83	W10; ledger 62-83s band
+varbit-rows	eq_bitfromint4_t64	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	83	W10; ledger 62-83s band
+varbit-rows	eq_bitfromint4_tmax	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	83	W10; ledger 62-83s band
+varbit-rows	eq_bitfromint4_tmin	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	83	W10; ledger 62-83s band
+varbit-rows	eq_bitfromint8_t0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	68	W10; ledger 63-68s band
+varbit-rows	eq_bitfromint8_t1	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	68	W10; ledger 63-68s band
+varbit-rows	eq_bitfromint8_t47	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	68	W10; ledger 63-68s band
+varbit-rows	eq_bitfromint8_t64	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	68	W10; ledger 63-68s band
+varbit-rows	eq_bitfromint8_tmax	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	68	W10; ledger 63-68s band
+varbit-rows	eq_bitgetbit	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	2.1	W10; 2.09s kissat 2026-07-30
+varbit-rows	eq_bitoverlay_c_err_ovf	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	59	W10; ledger 57-59s band
+varbit-rows	eq_bitoverlay_c_err_sp0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	59	W10; ledger 57-59s band
+varbit-rows	eq_bitoverlay_c_err_spneg	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	59	W10; ledger 57-59s band
+varbit-rows	eq_bitoverlay_c_mid	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	wall-recorded	calibration	?	W10 memory wall @6GiB BOTH solvers (composed 2-substring+2-catenate image); live for CI cluster 40GB retry tier; kernels + err planes proved
+varbit-rows	eq_bitoverlay_c_tail	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	wall-recorded	calibration	?	W10 memory wall @6GiB BOTH solvers (composed 2-substring+2-catenate image); live for CI cluster 40GB retry tier; kernels + err planes proved
+varbit-rows	eq_bitoverlay_no_len_c	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	wall-recorded	calibration	?	W10 memory wall @6GiB BOTH solvers (composed 2-substring+2-catenate image); live for CI cluster 40GB retry tier; kernels + err planes proved
+varbit-rows	eq_bitposition_p_empty_str	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	2.0	W10; ledger 0.26-2.0s band; empty-str/empty-sub/long-sub cells 0.29s 2026-07-30
+varbit-rows	eq_bitposition_p_empty_sub	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	2.0	W10; ledger 0.26-2.0s band; empty-str/empty-sub/long-sub cells 0.29s 2026-07-30
+varbit-rows	eq_bitposition_p_long_sub	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	2.0	W10; ledger 0.26-2.0s band; empty-str/empty-sub/long-sub cells 0.29s 2026-07-30
+varbit-rows	eq_bitposition_y1_1	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	2.0	W10; ledger 0.26-2.0s band; empty-str/empty-sub/long-sub cells 0.29s 2026-07-30
+varbit-rows	eq_bitposition_y2_1	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	2.0	W10; ledger 0.26-2.0s band; empty-str/empty-sub/long-sub cells 0.29s 2026-07-30
+varbit-rows	eq_bitposition_y3_2	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c --solver kissat	green	per-commit	2.0	W10; ledger 0.26-2.0s band; empty-str/empty-sub/long-sub cells 0.29s 2026-07-30
+varbit-rows	eq_bits_out_l0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	182	W10; l12 181.9s 2026-07-30 (ledger 152-164s)
+varbit-rows	eq_bits_out_l12	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	182	W10; l12 181.9s 2026-07-30 (ledger 152-164s)
+varbit-rows	eq_bits_out_l16	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	182	W10; l12 181.9s 2026-07-30 (ledger 152-164s)
+varbit-rows	eq_bits_send	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	162	W10; ledger 159-162s band
+varbit-rows	eq_bits_send_l0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	162	W10; ledger 159-162s band
+varbit-rows	eq_bitsetbit_l12	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	87	W10; DEFAULT solver; l12 87.1s 2026-07-30 (ledger 72s)
+varbit-rows	eq_bitsetbit_l16	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	87	W10; DEFAULT solver; l12 87.1s 2026-07-30 (ledger 72s)
+varbit-rows	eq_bitsubstr_c_aligned	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_c_clamp	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_c_empty_past	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_c_empty_zero	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_c_err	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_c_neg_s	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_c_ovf	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_c_shift	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_bitsubstr_no_len_c	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	187	W10; ledger 55-187s band
+varbit-rows	eq_varbit_coerce_err9	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_varbit_coerce_ident_ge	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_varbit_coerce_ident0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_varbit_coerce_l16	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_varbit_coerce_l9	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	82	W10; ledger 56-82s band
+varbit-rows	eq_varbit_in_bare_l3	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_varbit_in_bare_l3_tm8	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_varbit_in_len0	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_varbit_in_xpfx_l6	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_varbit_in_xpfx_l6_tm4	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	100	W10; ledger 71-100s band
+varbit-rows	eq_varbit_recv_c_neg	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	137	W10; ledger 96-137s band
+varbit-rows	eq_varbit_recv_c_trunc	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	green	calibration	137	W10; ledger 96-137s band
+varbit-rows	eq_varbit_recv_c12	-Z c-ffi -Z stubbing --c-lib c/pg_varbit_rows.c	wall-recorded	calibration	?	W10 memory wall @6GiB BOTH solvers (recv Ok-IMAGE arm); live for CI cluster 40GB retry tier; protocol/err planes proved
 records	eq_record_cmp_int4x_2col	-Z c-ffi --c-lib c/pg_records.c --solver kissat --no-assertion-reach-checks	green	release-gate	14.8	record_cmp_core, 2-col (int4,{int4|date|nocmp})
 records	eq_record_eq_int4x_2col	-Z c-ffi --c-lib c/pg_records.c --solver kissat --no-assertion-reach-checks	green	release-gate	11.6	record_eq_core, 2-col
 records	eq_record_cmp_int4_2v3col	-Z c-ffi --c-lib c/pg_records.c --solver kissat --no-assertion-reach-checks	green	release-gate	20.5	count-mismatch plane, 2v3 all-int4
@@ -1817,7 +1899,25 @@ encnames	proofs::control_encoding_to_char_frame_shifted	-Z c-ffi --c-lib c/pg_en
 bytea-cmp	proofs::eq_bytea_get_byte	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	0.89	ledger 721: proved(len<=8, full-i32 n; value+verdict+sqlstate 2202E); fcinfo tested tier
 bytea-cmp	proofs::eq_bytea_get_bit	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	1.13	ledger 723: proved(len<=8, full-i64 n; value+verdict+sqlstate 2202E)
 bytea-cmp	proofs::eq_bytea_set_byte	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	wall-recorded	calibration	104.9	ledger 722: proved(len=4 spot, full-i32 n, truncation+2202E planes) + wall(CNF width-bound at symbolic len<=8, both solvers); DEFAULT solver; grow/dealloc mcx stubs load-bearing (TRIAGE RVR)
+bytea-cmp	proofs::probe_set_byte_len4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	104.9	ledger 722 proving cell: len=4 literal, full-i32 n/new_byte; DEFAULT solver; mcx-stubs recipe
 bytea-cmp	proofs::eq_bytea_set_bit	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	wall-recorded	calibration	?	ledger 724: wall(CNF width-bound at symbolic len<=8, both solvers; same circuit as 722 — per-length split expected identical)
+bytea-cmp	proofs::probe_set_bit_len4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	99.9	ledger 724 proving cell: len=4 literal, full-i64 n + full-i32 new_bit, 3 arms + covers; DEFAULT solver; 99.9s 2026-07-30
+bytea-cmp	proofs::eq_bytea_int4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	1.2	ledger 6371: value + 22003 parity, both arms covered; 2026-07-30
+bytea-cmp	proofs::eq_bytea_int8	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	1.3	ledger 6372: cap 9 so the 22003 arm is reachable; 2026-07-30
+bytea-cmp	proofs::eq_int4_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	75.8	ledger 6368: BE payload image, full-symbolic i32; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_int8_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	78.1	ledger 6369: BE payload image, full-symbolic i64; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_bytea_int2	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	1.4	ledger 6370: cap 3 so the 22003 arm is reachable; 2026-07-30
+bytea-cmp	proofs::eq_int2_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	86.1	ledger 6367: BE payload image, full-symbolic i16; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_bytea_bit_count	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	1.1	ledger 6163: scalar table path len<=7; SIMD path excluded(blocked:simd); 2026-07-30
+bytea-cmp	proofs::eq_bytea_reverse_l0	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	87.8	ledger 6382 image cell; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_bytea_reverse_l4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	87.1	ledger 6382 image cell; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_bytea_reverse_l8	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	90.7	ledger 6382 image cell; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_bs_l2	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	71.1	ledger 1244 kernel cell (backslash-escape form); DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_octal2_l4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	97.1	ledger 1244 kernel cell (octal form, 2 literal + 2 symbolic digits); both covers; DEFAULT solver; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_plain1_l2	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	84.8	ledger 1244 kernel cell (plain copy + trailing-backslash reject); cover 1 structurally unsat in this cell (no multi-byte unit); DEFAULT solver; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_verdict	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	wall-recorded	calibration	?	ledger 1244 symbolic-len claim: CNF wall 450s BOTH solvers at 6GiB box; live for a high-mem/long-tier retry; 2026-07-30
+bytea-cmp	proofs::eq_byteasend_l0	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	72.8	ledger 2413 identity-image cell; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_byteasend_l8	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	76.9	ledger 2413 identity-image cell; DEFAULT solver; mcx-stubs; 2026-07-30
 bytea-cmp	proofs::control_get_byte_short_c_len	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	must-fail	defect-witness	?	DEFAULT solver mandatory; negative control (get/set wave)
 bytea-cmp	eq_bytea_int2	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.3	oid 6370; len<=9; value+verdict+sqlstate 22003
 bytea-cmp	eq_bytea_int4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat	green	per-commit	1.3	oid 6371

@@ -70,6 +70,15 @@
 //! Extra negative control for the wave: control_get_byte_short_c_len
 //! (C sees len-1 — verdict mismatch at n == len-1; MUST FAIL, DEFAULT
 //! solver).
+//!
+//! ------------------------------------------------------------------
+//! BYTEA <-> INT CASTS (ledger 6368/6369/6371/6372, varbit W10
+//! continuation 2026-07-30) — see the casts section of the proofs
+//! module.  bytea_int4/bytea_int8: scalar value + 22003 parity, both
+//! arms covered (int8 cap 9 so its error arm is reachable).
+//! int4_bytea/int8_bytea (alias intNsend): fixed-width big-endian
+//! payload image + varsize parity over fully symbolic arguments,
+//! modulo static-buffer allocator model.
 
 #[cfg(kani)]
 mod proofs {
@@ -444,6 +453,436 @@ mod proofs {
         kani::cover!(cerr == 1);
         core::mem::forget(ctx);
     }
+
+    // ---- set_bit width-1 cell (varbit W10 continuation 2026-07-30):
+    // literal len=4 per the set_byte precedent — clears the CNF width wall
+    // the fully-symbolic-length harness hits; n/new_bit stay full-domain so
+    // all three arms (Ok / 2202E / 22023) remain in-theorem.
+    #[kani::proof]
+    #[kani::unwind(14)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn probe_set_bit_len4() {
+        let buf: [u8; 8] = kani::any();
+        let len: usize = 4; // LITERAL width-1 cell
+        let n: i64 = kani::any(); // full i64 index domain
+        let new_bit: i32 = kani::any(); // full i32 — 22023 plane in-theorem
+        let mut cbuf = buf;
+        let mut cerr: c_int = 0;
+        unsafe { pg_byteaSetBit(cbuf.as_mut_ptr(), len as c_int, n, new_bit, &mut cerr) };
+        let ctx = mcx::MemoryContext::new_bump("kani-bytea-set");
+        match varlena::bytea::bytea_set_bit(ctx.mcx(), &buf[..len], n, new_bit) {
+            Ok(v) => {
+                assert!(cerr == 0);
+                assert!(v.varsize() == varlena::VARHDRSZ + len);
+                let d = v.data();
+                assert!(d.len() == len);
+                let mut i = 0;
+                while i < len {
+                    assert!(d[i] == cbuf[i]);
+                    i += 1;
+                }
+                core::mem::forget(v);
+            }
+            Err(e) => {
+                // C checks range (flag 1 / 2202E) BEFORE bit value
+                // (flag 2 / 22023); the shipped core mirrors that order.
+                assert!(cerr == 1 || cerr == 2);
+                if cerr == 1 {
+                    assert!(e.sqlstate == ERRCODE_ARRAY_SUBSCRIPT_ERROR);
+                } else {
+                    assert!(e.sqlstate == ERRCODE_INVALID_PARAMETER_VALUE);
+                }
+                assert!(e.level == ERROR);
+                core::mem::forget(e);
+            }
+        }
+        kani::cover!(cerr == 0);
+        kani::cover!(cerr == 1);
+        kani::cover!(cerr == 2);
+        core::mem::forget(ctx);
+    }
+
+    // ================================================================
+    // bytea <-> int casts (ledger 6368/6369/6371/6372) — varbit W10
+    // continuation 2026-07-30. C: REL_18_STABLE varlena.c bytea_int4/
+    // bytea_int8 (BE fold + length check) and int4_bytea/int8_bytea
+    // (alias intNsend: the 4/8-byte big-endian payload image).
+    //
+    // Claims:
+    //  - bytea_intN: scalar value parity over fully symbolic content and
+    //    symbolic len <= 8, both arms (Ok value / 22003 sqlstate+level),
+    //    arm covers. Value-space only (message text/location stubbed).
+    //  - intN_bytea: full payload image parity (LITERAL length 4/8) over
+    //    a fully symbolic argument + varsize check; modulo static-buffer
+    //    allocator model (mcx-stubs recipe).
+    // ================================================================
+
+    use types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
+
+    macro_rules! bytea_int_harness {
+        // $cap must exceed the C sizeof(result) so the 22003 arm is
+        // REACHABLE (the int8 arm needs len 9 — a plain sym_bytea cap of
+        // 8 made that cover vacuous, caught by the cover witness).
+        ($harness:ident, $cfn:ident, $rfn:ident, $rty:ty, $cap:expr) => {
+            #[kani::proof]
+            #[kani::unwind(12)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let buf: [u8; $cap] = kani::any();
+                let len: usize = kani::any();
+                kani::assume(len <= $cap);
+                let mut cerr: c_int = 0;
+                let c = unsafe { $cfn(buf.as_ptr(), len as c_int, &mut cerr) };
+                match varlena::bytea::$rfn(&buf[..len]) {
+                    Ok(r) => {
+                        assert!(cerr == 0);
+                        assert!(r == c as $rty);
+                    }
+                    Err(e) => {
+                        assert!(cerr == 1);
+                        assert!(e.sqlstate == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+                kani::cover!(cerr == 0);
+                kani::cover!(cerr == 1);
+            }
+        };
+    }
+
+
+    macro_rules! int_bytea_harness {
+        ($harness:ident, $cfn:ident, $aty:ty, $w:expr) => {
+            #[kani::proof]
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let a: $aty = kani::any(); // fully symbolic argument
+                let mut cimg = [0u8; $w];
+                unsafe { $cfn(a, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-int-bytea");
+                match varlena::bytea::int_bytea(ctx.mcx(), &a.to_be_bytes()) {
+                    Ok(v) => {
+                        // fixed-width image: varsize + full payload parity
+                        assert!(v.varsize() == varlena::VARHDRSZ + $w);
+                        let d = v.data();
+                        assert!(d.len() == $w);
+                        let mut i = 0;
+                        while i < $w {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Err(e) => {
+                        // alloc failure is outside the static-buffer model
+                        core::mem::forget(e);
+                        // unreachable under the mcx-stub allocator
+                        assert!(false);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+
+
+    // ---- bytea_reverse (ledger 6382) ----
+    // Same-length image, reversed bytes. The shipped core pushes per byte
+    // into a PgVec (std-Vec-wall class at symbolic len), so the cells are
+    // LITERAL lengths 0/4/8 with fully symbolic content (per-cell literal
+    // law), under the mcx-stubs recipe.
+
+    extern "C" {
+        fn pg_bytea_reverse(d: *const u8, len: c_int, out: *mut u8) -> c_int;
+    }
+
+    macro_rules! reverse_cell {
+        ($harness:ident, $w:expr) => {
+            #[kani::proof]
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let buf: [u8; 8] = kani::any();
+                let len: usize = $w; // LITERAL cell
+                let mut cimg = [0u8; 8];
+                unsafe { pg_bytea_reverse(buf.as_ptr(), len as c_int, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-bytea-rev");
+                match varlena::bytea::bytea_reverse(ctx.mcx(), &buf[..len]) {
+                    Ok(v) => {
+                        assert!(v.varsize() == varlena::VARHDRSZ + len);
+                        let d = v.data();
+                        assert!(d.len() == len);
+                        let mut i = 0;
+                        while i < len {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Err(e) => {
+                        core::mem::forget(e);
+                        // unreachable under the mcx-stub allocator
+                        assert!(false);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    reverse_cell!(eq_bytea_reverse_l0, 0);
+    reverse_cell!(eq_bytea_reverse_l4, 4);
+    reverse_cell!(eq_bytea_reverse_l8, 8);
+
+    // ---- byteain, traditional escaped arm (ledger 1244) ----
+    // Input is the post-protocol cstring contract: symbolic bytes with a
+    // trailing NUL and NUL-FREE content (fence); the "\x" hex arm is
+    // fenced out (hex decode separately proved, proofs/bytea-varbit).
+    // The combined verdict+image claim at symbolic len<=8 WALLS at 450s
+    // on BOTH solvers (result-image law: the 1/2/4-byte unit boundaries
+    // make every output offset data-dependent), so the claim is split:
+    //  - eq_byteain_esc_verdict: symbolic len<=8 — accept/reject verdict,
+    //    22P02 sqlstate/level parity, and decoded-LENGTH parity (scalar
+    //    projection of the image);
+    //  - eq_byteain_esc_img_l4/_l8: literal input lengths, fully symbolic
+    //    content — full payload image parity.
+    // Modulo static-buffer allocator model; escontext = None (hard-error
+    // path; soft-error routing is fmgr-tier).
+
+    extern "C" {
+        fn pg_byteain_esc(
+            input: *const u8,
+            out: *mut u8,
+            outlen: *mut c_int,
+            err: *mut c_int,
+        ) -> c_int;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_byteain_esc_verdict() {
+        const CAP: usize = 8;
+        let mut buf: [u8; CAP + 1] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= CAP);
+        let mut i = 0;
+        while i < CAP + 1 {
+            if i < len {
+                kani::assume(buf[i] != 0); // cstring contract: no interior NUL
+            } else {
+                buf[i] = 0; // literal NUL fill (dead-symbolic-byte rule)
+            }
+            i += 1;
+        }
+        // fence out the hex arm ("\x" prefix) — both sides dispatch on it
+        kani::assume(!(len >= 2 && buf[0] == b'\\' && buf[1] == b'x'));
+
+        let mut cout = [0u8; CAP];
+        let mut coutlen: c_int = 0;
+        let mut cerr: c_int = 0;
+        unsafe { pg_byteain_esc(buf.as_ptr(), cout.as_mut_ptr(), &mut coutlen, &mut cerr) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-byteain");
+        match varlena::bytea::byteain(ctx.mcx(), &buf[..len], None) {
+            Ok(Some(v)) => {
+                assert!(cerr == 0);
+                // scalar projection: decoded length parity
+                assert!(v.data().len() == coutlen as usize);
+                core::mem::forget(v);
+            }
+            Ok(None) => {
+                // soft-error return needs an escontext; unreachable here
+                assert!(false);
+            }
+            Err(e) => {
+                assert!(cerr == 1);
+                assert!(e.sqlstate == types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+                assert!(e.level == ERROR);
+                core::mem::forget(e);
+            }
+        }
+        kani::cover!(cerr == 0 && coutlen < len as c_int); // an escape actually decoded
+        kani::cover!(cerr == 1);
+        core::mem::forget(ctx);
+    }
+
+    macro_rules! byteain_img_cell {
+        ($harness:ident, $w:expr, $pin:expr) => {
+            #[kani::proof]
+            #[kani::unwind(12)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                const CAP: usize = 8;
+                let len: usize = $w; // LITERAL cell
+                let mut buf: [u8; CAP + 1] = kani::any();
+                let mut i = 0;
+                while i < CAP + 1 {
+                    if i < len {
+                        kani::assume(buf[i] != 0); // no interior NUL
+                    } else {
+                        buf[i] = 0; // literal NUL fill
+                    }
+                    i += 1;
+                }
+                #[allow(clippy::redundant_closure_call)]
+                ($pin)(&mut buf);
+                // fence out the hex arm
+                kani::assume(!(len >= 2 && buf[0] == b'\\' && buf[1] == b'x'));
+
+                let mut cout = [0u8; CAP];
+                let mut coutlen: c_int = 0;
+                let mut cerr: c_int = 0;
+                unsafe {
+                    pg_byteain_esc(buf.as_ptr(), cout.as_mut_ptr(), &mut coutlen, &mut cerr)
+                };
+
+                let ctx = mcx::MemoryContext::new_bump("kani-byteain");
+                match varlena::bytea::byteain(ctx.mcx(), &buf[..len], None) {
+                    Ok(Some(v)) => {
+                        assert!(cerr == 0);
+                        let d = v.data();
+                        assert!(d.len() == coutlen as usize);
+                        let mut i = 0;
+                        while i < d.len() {
+                            assert!(d[i] == cout[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Ok(None) => {
+                        assert!(false);
+                    }
+                    Err(e) => {
+                        assert!(cerr == 1);
+                        assert!(e.sqlstate == types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+                kani::cover!(cerr == 0 && coutlen < len as c_int);
+                kani::cover!(cerr == 1);
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    // Fully-symbolic-content cells wall in CNF even at literal len=4
+    // (both solvers, 450s; symex completes — the 1/2/4-byte unit
+    // segmentation is itself content-dependent, so every output offset
+    // remains a byte-mux). Form-PINNED cells instead (varbit bits_in
+    // precedent: a literal first byte pins the parse form), decode-kernel
+    // coverage per unit shape:
+    //  - plain_l4: no backslash anywhere — identity copy;
+    //  - octal1_l4: literal '\\' at 0, symbolic tail — valid-octal
+    //    accept (1-byte unit), '\\\\' + plain tail, and reject all live;
+    //  - bs_l2: literal '\\' at 0, len 2 — '\\\\' unit vs reject.
+    // Plain-form cells WALL whenever the pin is an ASSUME (never folds;
+    // measured: assume-pinned l4 AND l2 both 450s walls while literal
+    // bs_l2 proves in 71s). Only LITERAL pins prune: byte 0 is a literal
+    // plain byte, byte 1 stays fully symbolic — identity copy, trailing-
+    // backslash reject, and '\\\\'-after-plain planes all live.
+    byteain_img_cell!(eq_byteain_esc_plain1_l2, 2, |buf: &mut [u8; 9]| {
+        buf[0] = b'A'; // LITERAL plain byte
+    });
+    // octal cell with only buf[0] literal WALLS at len 4 (450s both the
+    // one-literal pin and fully-symbolic variants); two literal bytes
+    // ('\\','1') leave the two octal-range bytes symbolic — accept
+    // (single 1-byte unit) and reject planes both live.
+    byteain_img_cell!(eq_byteain_esc_octal2_l4, 4, |buf: &mut [u8; 9]| {
+        buf[0] = b'\\'; // LITERAL form selector
+        buf[1] = b'1'; // LITERAL first octal digit
+    });
+    byteain_img_cell!(eq_byteain_esc_bs_l2, 2, |buf: &mut [u8; 9]| {
+        buf[0] = b'\\'; // LITERAL form selector
+    });
+
+    // ---- byteasend (ledger 2413) ----
+    // C is an identity copy of the detoasted payload (the wire image IS
+    // the payload); Rust rebuilds the image via image_with_header +
+    // vec_append_bytes. Literal-length cells per the derived-length-copy
+    // law; fully symbolic content.
+
+    extern "C" {
+        fn pg_byteasend(d: *const u8, len: c_int, out: *mut u8) -> c_int;
+    }
+
+    macro_rules! byteasend_cell {
+        ($harness:ident, $w:expr) => {
+            #[kani::proof]
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let buf: [u8; 8] = kani::any();
+                let len: usize = $w; // LITERAL cell
+                let mut cimg = [0u8; 8];
+                unsafe { pg_byteasend(buf.as_ptr(), len as c_int, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-bytea-send");
+                match varlena::bytea::byteasend(ctx.mcx(), &buf[..len]) {
+                    Ok(v) => {
+                        assert!(v.varsize() == varlena::VARHDRSZ + len);
+                        let d = v.data();
+                        assert!(d.len() == len);
+                        let mut i = 0;
+                        while i < len {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Err(e) => {
+                        core::mem::forget(e);
+                        // unreachable under the mcx-stub allocator
+                        assert!(false);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    byteasend_cell!(eq_byteasend_l0, 0);
+    byteasend_cell!(eq_byteasend_l8, 8);
 
     // ---- wave negative control: rig is non-vacuous ----
     // C sees a one-shorter payload length: at n == len-1 C raises 2202E

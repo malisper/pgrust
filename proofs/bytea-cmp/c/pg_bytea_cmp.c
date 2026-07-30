@@ -736,3 +736,127 @@ pg_byteain_escaped_count(const char *inputText, int *err)
 
 	return bc;
 }
+
+/* bytea_reverse: palloc'd same-length image, bytes reversed.
+ * REL_18_STABLE varlena.c:
+ *   const char *p = VARDATA_ANY(v);
+ *   ... char *dst = VARDATA(result) + VARSIZE(result) - VARHDRSZ;
+ *   while (p < endp) *(--dst) = *p++;
+ * Shim: result payload -> caller buffer (len bytes). */
+int
+pg_bytea_reverse(const unsigned char *d, int len, unsigned char *out)
+{
+	const unsigned char *p = d;
+	const unsigned char *endp = d + len;
+	unsigned char *dst = out + len;
+
+	while (p < endp)
+		*(--dst) = *p++;
+
+	return 0;					/* shim: PG_RETURN_BYTEA_P(result) */
+}
+
+/* ====================================================================
+ * byteain — traditional escaped arm (varbit W10 continuation 2026-07-30)
+ *
+ * Provenance: REL_18_STABLE varlena.c byteain (~line 299), fetched
+ * 2026-07-30. The hex arm ("\x" prefix) delegates hex_decode_safe and is
+ * FENCED OUT by the harness (hex decode is separately proved in
+ * proofs/bytea-varbit); only the escaped-style two-pass body is vendored.
+ *
+ * SHIMS (bodies otherwise verbatim):
+ *  - PG_GETARG_CSTRING -> const char *inputText (NUL-terminated; the
+ *    harness appends the NUL and fences interior NULs per the cstring
+ *    contract);
+ *  - ereturn(escontext, ...) invalid input syntax -> *err = 1 + return
+ *    (PROOF_EREPORT_FLAG convention; 22P02);
+ *  - palloc(bc) result image -> caller buffer `out` (payload only);
+ *    SET_VARSIZE -> *outlen (the same integer the harness checks against
+ *    Rust's varsize);
+ *  - VAL(CH) macro from varlena.c: ((CH) - '0').
+ */
+#define VAL(CH) ((CH) - '0')
+
+int
+pg_byteain_esc(const char *inputText, unsigned char *out, int *outlen, int *err)
+{
+	const char *tp;
+	unsigned char *rp;
+	int			bc;
+
+	/* Else, it's the traditional escaped style */
+	for (bc = 0, tp = inputText; *tp != '\0'; bc++)
+	{
+		if (tp[0] != '\\')
+			tp++;
+		else if ((tp[0] == '\\') &&
+				 (tp[1] >= '0' && tp[1] <= '3') &&
+				 (tp[2] >= '0' && tp[2] <= '7') &&
+				 (tp[3] >= '0' && tp[3] <= '7'))
+			tp += 4;
+		else if ((tp[0] == '\\') &&
+				 (tp[1] == '\\'))
+			tp += 2;
+		else
+		{
+			/*
+			 * one backslash, not followed by another or ### valid octal
+			 */
+			/* shim: ereturn(escontext, ..., ERRCODE_INVALID_TEXT_REPRESENTATION,
+			 * "invalid input syntax for type bytea") */
+			*err = 1;
+			return 0;
+		}
+	}
+
+	*outlen = bc;				/* shim: bc += VARHDRSZ; SET_VARSIZE(result, bc) */
+
+	tp = inputText;
+	rp = out;					/* shim: rp = VARDATA(result) */
+	while (*tp != '\0')
+	{
+		if (tp[0] != '\\')
+			*rp++ = *tp++;
+		else if ((tp[0] == '\\') &&
+				 (tp[1] >= '0' && tp[1] <= '3') &&
+				 (tp[2] >= '0' && tp[2] <= '7') &&
+				 (tp[3] >= '0' && tp[3] <= '7'))
+		{
+			bc = VAL(tp[1]);
+			bc <<= 3;
+			bc += VAL(tp[2]);
+			bc <<= 3;
+			*rp++ = bc + VAL(tp[3]);
+
+			tp += 4;
+		}
+		else if ((tp[0] == '\\') &&
+				 (tp[1] == '\\'))
+		{
+			*rp++ = '\\';
+			tp += 2;
+		}
+
+		/*
+		 * We should never get here. The first pass should not allow it.
+		 */
+	}
+
+	return 0;					/* shim: PG_RETURN_BYTEA_P(result) */
+}
+
+/* byteasend (REL_18_STABLE bytea_sendrecv section, varlena.c ~line 445):
+ *   bytea *vlena = PG_GETARG_BYTEA_P_COPY(0);
+ *   PG_RETURN_BYTEA_P(vlena);
+ * The wire image IS the detoasted payload (identity copy). Shim: the
+ * P_COPY copy -> caller buffer; header carried as the same integer both
+ * sides (asserted at harness level as varsize == VARHDRSZ + len). */
+int
+pg_byteasend(const unsigned char *d, int len, unsigned char *out)
+{
+	int			i;
+
+	for (i = 0; i < len; i++)	/* shim: PG_GETARG_BYTEA_P_COPY's memcpy */
+		out[i] = d[i];
+	return 0;					/* shim: PG_RETURN_BYTEA_P(vlena) */
+}
