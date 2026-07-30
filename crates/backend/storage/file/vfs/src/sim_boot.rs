@@ -7,7 +7,7 @@
 //! SELF-CONTAINED: this module pre-populates SimVfs with the read-only,
 //! host-born assets bootstrap reads through the vfs — the initdb'd datadir
 //! snapshot plus the share trees (timezone, timezonesets, tsearch) named by
-//! the checked-in manifest `dst/asset-manifest.toml` — before any secondary
+//! the checked-in manifest `crates/backend/storage/file/vfs/src/asset-manifest.toml` — before any secondary
 //! thread performs a vfs op and before any fault plan installs. The ingest
 //! precedes the schedule by construction and emits no events.
 //!
@@ -33,7 +33,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::sim::SimVfs;
 
-const MANIFEST: &str = include_str!("../../../../../../dst/asset-manifest.toml");
+const MANIFEST: &str = include_str!("asset-manifest.toml");
 const MANIFEST_VERSION: u32 = 1;
 
 /// Symlink-dereferencing walks refuse to recurse forever (cp -RL trap).
@@ -332,7 +332,7 @@ pub fn compose_boot_namespace(datadir_abs: &str) -> Result<String, String> {
     // 2. Share asset roots (manifest-declared, harness-located).
     let share = std::env::var("PGRUST_PGSHAREDIR").map_err(|_| {
         "PGRUST_PGSHAREDIR not set: a whole-server sim boot needs the share \
-         asset trees (dst/asset-manifest.toml [share] roots)"
+         asset trees (crates/backend/storage/file/vfs/src/asset-manifest.toml [share] roots)"
             .to_string()
     })?;
     if !share.starts_with('/') {
