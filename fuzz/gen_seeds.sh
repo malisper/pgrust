@@ -38,4 +38,36 @@ printf '\x06\x06\x04ABCD' > corpus/wire_pqformat/bytes
 # multibyte edges under UTF8: truncated 2-byte lead
 printf '\x06\x08\xc3' > corpus/wire_pqformat/utf8_trunc
 
+# --- differential targets (C-oracle vs shipped Rust) -------------------------
+mkdir -p corpus/float_in_diff corpus/float_out_diff corpus/geo_diff
+python3 - <<'PY'
+import struct, os
+
+# float_in_diff: [sel][text]; sel bit0: 0=f8, 1=f4
+strs = ["0","-0","1.5"," 1.5 ","1e-45","1e309","1e-323","5e-324","2.5e-324",
+        "1.7976931348623157e308","2.2250738585072011e-308","3.4028236e38",
+        "7.038531e-26","0.1","1e","..5","NaN","nan(1234)","-Infinity","inf",
+        "0x1p3","0x1p-1074","9007199254740993","1.5junk","+","1,5"]
+for i, s in enumerate(strs):
+    for sel in (0, 1):
+        open(f"corpus/float_in_diff/s{sel}_{i:02d}", "wb").write(bytes([sel]) + s.encode())
+
+# float_out_diff: [sel][le bits]; sel bit0: 0=f8 (8 bytes), 1=f4 (4 bytes)
+f64s = [0.0, -0.0, 1.0, 0.1, 2**53, 1e23, 5e-324, 1.7976931348623157e308,
+        float("inf"), float("-inf"), float("nan"), 2.2250738585072014e-308]
+for i, v in enumerate(f64s):
+    open(f"corpus/float_out_diff/d{i:02d}", "wb").write(b"\x00" + struct.pack("<d", v))
+    open(f"corpus/float_out_diff/f{i:02d}", "wb").write(b"\x01" + struct.pack("<f", struct.unpack("<f", struct.pack("<f", min(max(v, -3e38), 3e38) if v == v and abs(v) != float("inf") else v))[0]))
+
+# geo_diff: sel 0 = point_out [x][y]; sel 1 = on_ppath [closed][pt][pts...]
+pts = [(0.0, 0.0), (1.5, -2.5), (1e300, 1e-300), (float("nan"), 1.0),
+       (float("inf"), float("-inf"))]
+for i, (x, y) in enumerate(pts):
+    open(f"corpus/geo_diff/po{i:02d}", "wb").write(b"\x00" + struct.pack("<dd", x, y))
+tri = struct.pack("<dd", 0.5, 0.5) + struct.pack("<dd", 0.0, 0.0) + \
+      struct.pack("<dd", 1.0, 0.0) + struct.pack("<dd", 0.0, 1.0)
+open("corpus/geo_diff/path_open", "wb").write(b"\x01\x00" + tri)
+open("corpus/geo_diff/path_closed", "wb").write(b"\x01\x01" + tri)
+PY
+
 echo "seed corpus written under $(pwd)/corpus/"
