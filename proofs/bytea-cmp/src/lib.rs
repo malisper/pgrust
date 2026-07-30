@@ -445,6 +445,60 @@ mod proofs {
         core::mem::forget(ctx);
     }
 
+    // ---- set_bit width-1 cell (varbit W10 continuation 2026-07-30):
+    // literal len=4 per the set_byte precedent — clears the CNF width wall
+    // the fully-symbolic-length harness hits; n/new_bit stay full-domain so
+    // all three arms (Ok / 2202E / 22023) remain in-theorem.
+    #[kani::proof]
+    #[kani::unwind(14)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn probe_set_bit_len4() {
+        let buf: [u8; 8] = kani::any();
+        let len: usize = 4; // LITERAL width-1 cell
+        let n: i64 = kani::any(); // full i64 index domain
+        let new_bit: i32 = kani::any(); // full i32 — 22023 plane in-theorem
+        let mut cbuf = buf;
+        let mut cerr: c_int = 0;
+        unsafe { pg_byteaSetBit(cbuf.as_mut_ptr(), len as c_int, n, new_bit, &mut cerr) };
+        let ctx = mcx::MemoryContext::new_bump("kani-bytea-set");
+        match varlena::bytea::bytea_set_bit(ctx.mcx(), &buf[..len], n, new_bit) {
+            Ok(v) => {
+                assert!(cerr == 0);
+                assert!(v.varsize() == varlena::VARHDRSZ + len);
+                let d = v.data();
+                assert!(d.len() == len);
+                let mut i = 0;
+                while i < len {
+                    assert!(d[i] == cbuf[i]);
+                    i += 1;
+                }
+                core::mem::forget(v);
+            }
+            Err(e) => {
+                // C checks range (flag 1 / 2202E) BEFORE bit value
+                // (flag 2 / 22023); the shipped core mirrors that order.
+                assert!(cerr == 1 || cerr == 2);
+                if cerr == 1 {
+                    assert!(e.sqlstate == ERRCODE_ARRAY_SUBSCRIPT_ERROR);
+                } else {
+                    assert!(e.sqlstate == ERRCODE_INVALID_PARAMETER_VALUE);
+                }
+                assert!(e.level == ERROR);
+                core::mem::forget(e);
+            }
+        }
+        kani::cover!(cerr == 0);
+        kani::cover!(cerr == 1);
+        kani::cover!(cerr == 2);
+        core::mem::forget(ctx);
+    }
+
     // ---- wave negative control: rig is non-vacuous ----
     // C sees a one-shorter payload length: at n == len-1 C raises 2202E
     // while Rust returns Ok — MUST FAIL with a decodable counterexample.
