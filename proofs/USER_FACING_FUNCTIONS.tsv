@@ -646,7 +646,7 @@ oid	name	source_file	status	class	notes
 1178	timestamptz_date	crates/backend/utils/adt/adt_date/src/builtins.rs	excluded(wall: timestamp2tm + date2j both directions)	-	lib.rs:535
 1179	jsonb_path_query_tz	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
 1180	jsonb_path_query_array_tz	crates/backend/utils/adt/jsonpath_exec/src/builtins.rs	excluded(engine)	-	jsonpath executor engine
-1181	xid_age	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+1181	xid_age	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 xid x full-u32 seam value; modulo GetStableLatestTransactionId seam model)	fast	0.28s kissat wrapper-level; state-seam pattern (shared symbolic `now` both sides, quantified over all seam outputs); control_xid_age_seam_skew FAILED on the equality check as required; wave5 pre-built, first solve 2026-07-30; proofs/scalar-misc
 1188	timestamp_mi	crates/backend/utils/adt/adt_date/src/builtins.rs	wall(divider: checked-sub feeds justify_hours /USECS_PER_DAY; probe 240s rc=124) + proved(spots: sentinels/inf-inf-err/sub-overflow/justify-carry 11.4s) + tested(differential 2M+grid)	wall	also discharges 2031 (same C fn + wrapper); proofs/datetime-cmp
 1189	timestamptz_pl_interval	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(planes: m0d0 LITERAL + NOBEGIN/NOEND; add-overflow + IS_VALID Err 22008 parity; julian arms OUT, loud-trapped both sides)	fast	1.3-2.0s/plane; NOT full-domain (j2date wall); proofs/datetime-cmp wave7
 1190	timestamptz_mi_interval	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(planes: m0d0 LITERAL + NOBEGIN/NOEND; Err 22008 parity; julian arms OUT)	fast	1.3-2.0s/plane; proofs/datetime-cmp wave7
@@ -2319,7 +2319,7 @@ oid	name	source_file	status	class	notes
 3934	tsrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3937	tstzrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3938	tstzrange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
-3939	mxid_age	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+3939	mxid_age	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-u32 xid x full-u32 seam value; modulo ReadNextMultiXactId seam model)	fast	0.25s kissat wrapper-level; state-seam pattern shared with xid_age (same skew control); wave5 pre-built, first solve 2026-07-30; proofs/scalar-misc
 3940	jsonb_extract_path_text	crates/backend/utils/adt/jsonb/src/builtins.rs	candidate	ladder	same core as 3217 (as_text=true) + value_as_text getfield.rs:16 Bool/String arms only (Numeric/Binary arms wall); cheap sibling
 3941	daterange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 3942	daterange	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
