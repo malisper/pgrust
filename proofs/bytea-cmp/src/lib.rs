@@ -469,4 +469,270 @@ mod proofs {
             }
         }
     }
+
+    // ================================================================
+    // SCALAR-CAST / MINMAX / BIT-COUNT / TO-BASE WAVE (lane pick-a
+    // 2026-07-30; oids 6370/6371/6372 bytea_int2/4/8, 6163 bytea_bit_count, 2089/2090/6330/6331/
+    // 6332/6333 to_hex/bin/oct 32/64).
+    //
+    // Rust cores (shipped, path-dep):
+    //  - varlena::bytea::{bytea_int2, bytea_int4, bytea_int8}
+    //    (bytea.rs:499-520, bytea_uint_be BE fold + width check)
+    //  - varlena::bytea::bytea_bit_count (bytea.rs:484 -> pg_bitutils::
+    //    pg_popcount; len<=7 = table path.  The len>=8 arm is aarch64
+    //    NEON on this host: SIMD is Kani-unsupported, excluded
+    //    (blocked:simd) and fenced out by the cap)
+    //  - varlena::convert_to_base_frame (lib.rs:473, pure frame core
+    //    factored from convert_to_base for this proof — behavior
+    //    identical, the shipped convert_to_base calls it)
+    //
+    // C: REL_18_STABLE varlena.c / pg_bitutils.c, vendored in
+    // c/pg_bytea_cmp.c (provenance + shims in the wave header there).
+    //
+    // Claims:
+    //  - casts: Ok-arm VALUE parity + verdict/sqlstate(22003)/level
+    //    parity on the Err arm, symbolic len<=9 (one past the widest
+    //    cast width, so bytea_int8's Err arm is in-domain).  Error
+    //    message text out of proof (value-space only).
+    //  - bit_count: exact i64 value parity, symbolic len<=7 (table
+    //    path; see NEON note above).
+    //  - to_hex/bin/oct: full-frame RESULT IMAGE parity + start-index
+    //    parity over the full 32/64-bit input domain.  Both sides fill
+    //    the tail of a zero-initialized (literal) 64-byte frame, so
+    //    whole-frame equality == image equality without symbolic-range
+    //    reads (dead-symbolic-bytes law).  The fc wrapper cast chain
+    //    (i32 as u32 as u64 / i64 as u64) is mirrored in-harness.
+    //    Bases are literals (2/8/16, powers of two): the % / /= chain
+    //    folds to masks/shifts — not the divider wall class.
+    // ================================================================
+
+    use types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
+
+    extern "C" {
+        fn pg_bytea_int2(vdata: *const u8, len: c_int, err: *mut c_int) -> i16;
+        fn pg_bytea_int4(vdata: *const u8, len: c_int, err: *mut c_int) -> i32;
+        fn pg_bytea_int8(vdata: *const u8, len: c_int, err: *mut c_int) -> i64;
+        fn pg_bytea_bit_count(vdata: *const u8, len: c_int) -> i64;
+        fn pg_convert_to_base(value: u64, base: c_int, out: *mut u8) -> c_int;
+    }
+
+    /// bytea payload, cap 9: one past the widest cast width (8) so the
+    /// bytea_int8 error arm is reachable.
+    fn sym_bytea9() -> ([u8; 9], usize) {
+        let buf: [u8; 9] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 9);
+        (buf, len)
+    }
+
+    macro_rules! cast_harness {
+        ($harness:ident, $cfn:ident, $rfn:ident) => {
+            #[kani::proof]
+            #[kani::unwind(11)] // BE fold loop <= 9 iterations + exit
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let (buf, len) = sym_bytea9();
+                let mut cerr: c_int = 0;
+                let c = unsafe { $cfn(buf.as_ptr(), len as c_int, &mut cerr) };
+                match varlena::bytea::$rfn(&buf[..len]) {
+                    Ok(r) => {
+                        assert!(cerr == 0);
+                        assert!(r == c);
+                    }
+                    Err(e) => {
+                        assert!(cerr == 1);
+                        assert!(e.sqlstate == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+                kani::cover!(cerr == 0);
+                kani::cover!(cerr == 1);
+            }
+        };
+    }
+
+    cast_harness!(eq_bytea_int2, pg_bytea_int2, bytea_int2);
+    cast_harness!(eq_bytea_int4, pg_bytea_int4, bytea_int4);
+    cast_harness!(eq_bytea_int8, pg_bytea_int8, bytea_int8);
+
+    // larger/smaller (oids 6393/6394): harnessed in the comparator wave
+    // above (winner-identity minmax_harness) — run + recorded by this lane.
+
+    // ---- bit_count: table path, len <= 7 ----
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn eq_bytea_bit_count() {
+        let buf: [u8; 7] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 7);
+        let c = unsafe { pg_bytea_bit_count(buf.as_ptr(), len as c_int) };
+        let r = varlena::bytea::bytea_bit_count(&buf[..len]);
+        assert!(c == r);
+    }
+
+    // ---- to_bin/to_oct/to_hex: full-frame image + start index ----
+
+    macro_rules! to_base_harness {
+        ($harness:ident, $ty:ty, $uty:ty, $base:expr) => {
+            #[kani::proof]
+            // 66: digit loop <= 64 iterations (to_bin64) + frame compare
+            // over the 64-byte arrays; shift/mask circuit tolerates the
+            // slack on the narrower bases
+            #[kani::unwind(66)]
+            fn $harness() {
+                let v: $ty = kani::any();
+                let value = v as $uty as u64; // fc wrapper cast chain
+                let mut cf = [0u8; 64]; // literal zero: untouched prefix
+                let mut rf = [0u8; 64]; // identical on both sides
+                let start_c = unsafe { pg_convert_to_base(value, $base, cf.as_mut_ptr()) };
+                let start_r = varlena::convert_to_base_frame(value, $base as u64, &mut rf);
+                assert!(start_c as usize == start_r);
+                assert!(cf == rf);
+            }
+        };
+    }
+
+    to_base_harness!(eq_to_bin32, i32, u32, 2);
+    to_base_harness!(eq_to_bin64, i64, u64, 2);
+    to_base_harness!(eq_to_oct32, i32, u32, 8);
+    to_base_harness!(eq_to_oct64, i64, u64, 8);
+    to_base_harness!(eq_to_hex32, i32, u32, 16);
+    to_base_harness!(eq_to_hex64, i64, u64, 16);
+
+    // ---- wave negative control: image rig is non-vacuous ----
+    // C converts value+1: frames/start must differ somewhere — MUST FAIL
+    // with a decodable counterexample.  DEFAULT solver (kissat never
+    // terminates on failures).
+    #[kani::proof]
+    #[kani::unwind(66)]
+    fn control_to_base_skewed_value() {
+        let v: i32 = kani::any();
+        let value = v as u32 as u64;
+        let mut cf = [0u8; 64];
+        let mut rf = [0u8; 64];
+        let start_c = unsafe { pg_convert_to_base(value.wrapping_add(1), 16, cf.as_mut_ptr()) };
+        let start_r = varlena::convert_to_base_frame(value, 16, &mut rf);
+        assert!(start_c as usize == start_r && cf == rf); // fails
+    }
+
+
+    // ---- int2/int4/int8_bytea (oids 6367/6368/6369): fixed BE image ----
+    //
+    // C "can just use intNsend()" (varlena.c): pq_writeintN BE image,
+    // vendored with the little-endian pg_hton arm (see the C wave header).
+    // Rust: fc wrapper passes v.to_be_bytes() to bytea::int_bytea, which
+    // builds header + payload; the cast chain is mirrored in-harness.
+    // Claim: payload image == C image, varsize == VARHDRSZ + N (the
+    // fixed-width result-image class — offsets literal, no CNF wall).
+    // Harness scaffolding qualifier: "modulo static-buffer allocator
+    // model" (same mcx recipe as the Set* wave above).
+
+    extern "C" {
+        fn pg_int2_bytea(arg1: i16, out: *mut u8) -> c_int;
+        fn pg_int4_bytea(arg1: i32, out: *mut u8) -> c_int;
+        fn pg_int8_bytea(arg1: i64, out: *mut u8) -> c_int;
+    }
+
+    macro_rules! int_bytea_harness {
+        ($harness:ident, $cfn:ident, $ty:ty, $n:expr) => {
+            #[kani::proof]
+            // image build copies VARHDRSZ + N <= 12 bytes; result compare
+            // <= 8; +slack for the AcctWeak retain loop (Set* precedent)
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let v: $ty = kani::any();
+                let mut cimg = [0u8; $n];
+                let clen = unsafe { $cfn(v, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-int-bytea");
+                match varlena::bytea::int_bytea(ctx.mcx(), &v.to_be_bytes()) {
+                    Ok(r) => {
+                        assert!(clen as usize == $n);
+                        assert!(r.varsize() == varlena::VARHDRSZ + $n);
+                        let d = r.data();
+                        assert!(d.len() == $n);
+                        let mut i = 0;
+                        while i < $n {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(r);
+                    }
+                    Err(e) => {
+                        // alloc failure is harness-model territory, not a
+                        // C-parity arm; unreachable under the static-buffer
+                        // allocator
+                        assert!(false);
+                        core::mem::forget(e);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    int_bytea_harness!(eq_int2_bytea, pg_int2_bytea, i16, 2);
+    int_bytea_harness!(eq_int4_bytea, pg_int4_bytea, i32, 4);
+    int_bytea_harness!(eq_int8_bytea, pg_int8_bytea, i64, 8);
+
+
+    // ---- byteain escaped-style pass one (oid 1244) ----
+    //
+    // Rust core: varlena::bytea::byteain_escaped_count (pure core
+    // factored from byteain pass one — behavior identical, byteain
+    // calls it).  C: REL_18 byteain first loop, cstring contract.
+    // Claim: accept/reject verdict + output byte COUNT parity over
+    // symbolic len<=8 NUL-free bytes (fmgr cstring protocol; the C
+    // buffer is the same bytes + literal NUL terminator).  Full domain
+    // incl. hex-looking inputs: at core level both sides reject
+    // "\\x.." identically; the wrappers route the hex arm to
+    // hex_decode by the same 2-byte prefix test on both sides
+    // (hex_decode is proofs/hex).  Pass two (image build) and the
+    // 22P02 sqlstate stay out of this scalar claim (core-level).
+
+    extern "C" {
+        fn pg_byteain_escaped_count(input_text: *const core::ffi::c_char, err: *mut c_int) -> c_int;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn eq_byteain_escaped_count() {
+        const M: usize = 8;
+        let buf: [u8; M] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= M);
+        let mut cbuf = [0u8; M + 1]; // literal-zero tail = NUL terminator
+        let mut k = 0;
+        while k < M {
+            if k < len {
+                kani::assume(buf[k] != 0); // cstring contract: no interior NUL
+                cbuf[k] = buf[k];
+            }
+            k += 1;
+        }
+        let mut cerr: c_int = 0;
+        let c = unsafe {
+            pg_byteain_escaped_count(cbuf.as_ptr() as *const core::ffi::c_char, &mut cerr)
+        };
+        match varlena::bytea::byteain_escaped_count(&buf[..len]) {
+            Some(bc) => {
+                assert!(cerr == 0);
+                assert!(c >= 0);
+                assert!(c as usize == bc);
+            }
+            None => assert!(cerr == 1),
+        }
+        kani::cover!(cerr == 0);
+        kani::cover!(cerr == 1);
+    }
+
 }

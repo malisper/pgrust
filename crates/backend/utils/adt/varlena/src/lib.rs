@@ -469,10 +469,11 @@ pub fn text_overlay<'mcx>(
 }
 
 // C: convert_to_base (workhorse for to_bin/to_oct/to_hex); base in 2..=16.
-pub fn convert_to_base<'mcx>(mcx: Mcx<'mcx>, mut value: u64, base: u64) -> PgResult<Varlena<'mcx>> {
+// Pure frame core factored out for proofs/bytea-cmp (behavior identical):
+// fills the tail of the 64-byte frame, returns the start index of the digits.
+pub fn convert_to_base_frame(mut value: u64, base: u64, buf: &mut [u8; u64::BITS as usize]) -> usize {
     debug_assert!(base > 1 && base <= 16);
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut buf = [0u8; u64::BITS as usize];
     let mut i = buf.len();
     loop {
         i -= 1;
@@ -482,6 +483,12 @@ pub fn convert_to_base<'mcx>(mcx: Mcx<'mcx>, mut value: u64, base: u64) -> PgRes
             break;
         }
     }
+    i
+}
+
+pub fn convert_to_base<'mcx>(mcx: Mcx<'mcx>, value: u64, base: u64) -> PgResult<Varlena<'mcx>> {
+    let mut buf = [0u8; u64::BITS as usize];
+    let i = convert_to_base_frame(value, base, &mut buf);
     cstring_to_text(mcx, &buf[i..])
 }
 

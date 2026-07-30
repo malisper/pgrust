@@ -316,7 +316,7 @@ oid	name	source_file	status	class	notes
 453	hashoid	crates/backend/utils/adt/scalar/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows
 454	hashchar	crates/backend/utils/adt/int/src/builtins.rs	proved(v>=0 portable plane + full-i8 zero-extend pinned model, wrapper-level)	fast	0.2s; proofs/hash-rows; high-bit plane = KNOWN C-PG char-signedness platform split (v0.2 ships unsigned arm = Linux-aarch64 C PG); see proofs/char/ADJUDICATION-CHAR-SIGNEDNESS.md; CI-decode 2026-07-30
 455	hashname	crates/backend/utils/adt/name/src/builtins.rs	proved(len<=8 + len-16 spot, NUL-scan in-theorem; 2 interior lengths unresolved-under-load, retry idle)	fast	proofs/hash-rows
-456	hashvarlena	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	hash_bytes over detoasted payload, no collation arm; hashtext 400 rig (len<=8 per-length + mix-boundary spot); host proofs/hash-rows
+456	hashvarlena	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: hash_bytes sym len<=48 + fixed-len grid; wrapper is direct delegation, hash_any = inline hash_bytes alias REL_18 hashfn.h:31; fmgr/detoast plumbing tested-tier)	fast	lane pick-a 2026-07-30; proofs/hash hash_bytes_symlen48 et al
 457	hashoidvector	crates/backend/utils/adt/scalar/src/builtins.rs	proved(dim<=4 per-length + coverage; valid-oidvector fence)	fast	FIXED 2026-07-28: release-effective check_valid_oidvector gate added; proofs/hash-rows
 458	text_larger	crates/backend/utils/adt/varlena/src/builtins.rs	proved(wrapper-level varlena; C-collation fence; len<=8/side sym)	fast	1-5s; proofs/text-cmp
 459	text_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	proved(wrapper-level varlena; C-collation fence; len<=8/side sym)	fast	1-5s; proofs/text-cmp
@@ -411,7 +411,7 @@ oid	name	source_file	status	class	notes
 769	int4smaller	crates/backend/utils/adt/int/src/builtins.rs	proved(full domain, wrapper-level)	fast	0.1s; proofs/int-arith
 770	int2larger	crates/backend/utils/adt/int/src/builtins.rs	proved(full domain, wrapper-level)	fast	0.1s; proofs/int-arith
 771	int2smaller	crates/backend/utils/adt/int/src/builtins.rs	proved(full domain, wrapper-level)	fast	0.1s; proofs/int-arith
-772	hashvarlenaextended	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	= 456 + full symbolic seed (hashoidextended 445 precedent); one harness both
+772	hashvarlenaextended	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: hash_bytes_extended sym len<=16 x full-u64 seed + len8 grid; hash_any_extended = inline alias; plumbing tested-tier)	ladder	216s kissat; lane pick-a 2026-07-30; proofs/hash hash_bytes_extended_symlen16
 776	hashoidvectorextended	crates/backend/utils/adt/scalar/src/builtins.rs	proved(dim<=4 per-length + coverage; valid-oidvector fence)	fast	FIXED 2026-07-28: release-effective check_valid_oidvector gate added; proofs/hash-rows
 777	hash_aclitem_extended	crates/backend/utils/adt/acl/src/builtins.rs	proved(full item x seed, wrapper-level)	seam	3.0s; proofs/state-seam-probe
 778	hashmacaddrextended	crates/backend/utils/adt/mac/src/builtins.rs	proved(full block + seed, wrapper-level)	fast	1-13s; proofs/hash-rows
@@ -674,7 +674,7 @@ oid	name	source_file	status	class	notes
 1241	nameicregexne	crates/backend/utils/adt/regexp/src/builtins.rs	excluded(engine)	-	regex engine internals
 1242	boolin	crates/backend/utils/adt/bool/src/builtins.rs	proved(len<=8)	fast	7.7s; proofs/bool-parse; trailing-space==NUL comment claim machine-checked; also case-split l0-l6 + union coverage in proofs/bool
 1243	boolout	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-bool; byte+NUL)	fast	proofs/bool; <1s; kissat
-1244	byteain	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	SCALAR CORE byteain pass one varlena/src/bytea.rs:151-170: escape-count + accept/reject (invalid_bytea_input); symbolic len<=8; pass-two image walls; \x arm delegates hex_decode — fence out. Octal-escape acceptance parity
+1244	byteain	crates/backend/utils/adt/varlena/src/builtins.rs	proved(escaped pass-one core: accept/reject verdict + output count, sym len<=8 NUL-free; hex arm = proofs/hex; pass-two image + 22P02 sqlstate out of claim)	fast	4.5s kissat; core byteain_escaped_count factored (behavior identical); lane pick-a 2026-07-30; proofs/bytea-cmp eq_byteain_escaped_count
 1245	charin	crates/backend/utils/adt/char/src/builtins.rs	proved(cstr len<=4; 8-bit datum-value parity)	fast	0.97s; proofs/char; CI cluster FAIL = shim widening artifact (fixed)
 1246	charlt	crates/backend/utils/adt/char/src/builtins.rs	proved(full-i8xi8, wrapper-level)	fast	0.1-0.2s; unsigned-compare comment claim machine-checked; proofs/scalar-misc
 1250	unique_key_recheck	crates/backend/commands/constraint_cmd/src/lib.rs	excluded(state)	-	constraint catalog state
@@ -1207,8 +1207,8 @@ oid	name	source_file	status	class	notes
 2086	bytea_substr_no_len	crates/backend/utils/adt/varlena/src/builtins.rs	wall(SAT/memory; symex completes 35-108s; both solvers; result-image (check_bytes) subfamily — scalar-verdict proves, image-compare walls; measured under multi-agent load, idle rerun owed)	wall	LATIN1/bytea arms SAT residue >490-560s, UTF8 arms >6GiB RSS; clamp arithmetic witnessed reachable by green cover; proofs/text-slice
 2087	replace_text	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(wall: result-image + std-Vec push)	-	lib.rs:777 text_position scan + Vec push build
 2088	split_part	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	varlena/src/lib.rs:810; SCALAR SLICE = selected field WINDOW + 22023 fldnum==0 + empty-sep/no-match arms; text_position_setup lib.rs:560 alloc-free fixed skiptable; B-M-H loop sets unwind floor; fence collid C
-2089	to_hex32	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	convert_to_base lib.rs:472 base16 = pow2 shift/mask, NO divider wall; per-digit-count bands (<=8) make start offset concrete; <=8B image + hdr; mcx-stubs
-2090	to_hex64	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	= 2089 over u64; 16 digit-count bands, exact unwind per band
+2089	to_hex32	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i32; full-frame image + start index; frame core factored, shipped convert_to_base calls it)	fast	1.0s kissat; base literal 16 folds to shifts; proofs/bytea-cmp eq_to_hex32
+2090	to_hex64	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i64; full-frame image + start index)	fast	1.5s kissat; proofs/bytea-cmp eq_to_hex64
 2091	array_lower	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	candidate	fast	pure array-header arithmetic (arrayfuncs/ops.rs:711)
 2092	array_upper	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	candidate	fast	pure array-header arithmetic (arrayfuncs/ops.rs:724)
 2096	pg_terminate_backend	crates/backend/storage/ipc/signalfuncs/src/lib.rs	excluded(state)	-	process signaling
@@ -2769,7 +2769,7 @@ oid	name	source_file	status	class	notes
 6160	text_to_table	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: SRF tuplestore)	-	split_text::fc_text_to_table ReturnSetInfo/tuplestore
 6161	text_to_table_null	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: SRF tuplestore)	-	same body
 6162	bit_bit_count	crates/backend/utils/adt/varbit/src/lib.rs	proved(shipped fc wrapper through LocalFcinfo, len<=8 symbolic)	fast	1.6s; proofs/varbit-rows relaunch 2026-07-29 (re-derived)
-6163	bytea_bit_count	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea.rs:484 pg_popcount fold, per-length <=8; VERIFY pg_bitutils takes scalar path under cfg(kani) (core::arch arm = unsupported_construct)
+6163	bytea_bit_count	crates/backend/utils/adt/varlena/src/builtins.rs	proved(sym len<=7 = table path; len>=8 aarch64 NEON excluded blocked:simd)	fast	0.8s kissat; C dispatch resolved to pg_popcount_portable (word block compiled out, unreachable at len<=7); proofs/bytea-cmp eq_bytea_bit_count
 6168	pg_xact_commit_timestamp_origin	crates/backend/access/transam/commit_ts/src/fmgr_builtins.rs	excluded(state: SLRU/shmem)	-	commit_ts fmgr_builtins.rs:90
 6169	pg_stat_get_replication_slot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
 6170	pg_stat_reset_replication_slot	crates/backend/utils/adt/pgstatfuncs/src/lib.rs	excluded(state)	-	pg_stat shared-memory/catalog reads
@@ -2889,10 +2889,10 @@ oid	name	source_file	status	class	notes
 6324	interval_avg_serialize	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	candidate	fast	builtins.rs:785 FIXED 40-byte BE image at literal offsets — NOT data-dependent-width class; mcx-stub for PgVec tail
 6325	interval_avg_deserialize	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	candidate	fast	builtins.rs:806 fixed-offset from_be_bytes; prove as round-trip inverse of 6324; agg_context stubbed both sides
 6326	interval_sum	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	candidate	fast	CORE interval_sum_final interval.rs:1321; pure lattice + i64 adds over symbolic state; cheapest agg row
-6330	to_bin32	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	convert_to_base base2 pow2; 32 digit-count bands; exact unwind per band
-6331	to_bin64	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	convert_to_base base2; 64 bands
-6332	to_oct32	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	convert_to_base base8 pow2; <=11 bands
-6333	to_oct64	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	convert_to_base base8; <=22 bands
+6330	to_bin32	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i32; full-frame image + start index)	fast	1.8s kissat; 32-digit loop unwind 66; proofs/bytea-cmp eq_to_bin32
+6331	to_bin64	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i64; full-frame image + start index)	fast	1.7s kissat; 64-digit loop; proofs/bytea-cmp eq_to_bin64
+6332	to_oct32	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i32; full-frame image + start index)	fast	1.5s kissat; proofs/bytea-cmp eq_to_oct32
+6333	to_oct64	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i64; full-frame image + start index)	fast	1.2s kissat; proofs/bytea-cmp eq_to_oct64
 6334	timestamptz_at_local	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(planes as 2027)	fast	0.75s; proofs/datetime-cmp wave7
 6335	timestamp_at_local	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	proved(full-i64 modulo shared tz-seam ±86400)	fast	1.9s; proofs/datetime-cmp wave7
 6336	timetz_at_local	crates/backend/utils/adt/adt_date/src/builtins.rs	excluded(state: same seams as 2037)	-	proofs/datetime-b lane D
@@ -2919,12 +2919,12 @@ oid	name	source_file	status	class	notes
 6363	pg_restore_attribute_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6364	crc32_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	fc_crc32_bytea cryptohashfuncs/src/lib.rs:55 -> traditional_crc32 table loop; cap len<=8 + fixed-len spots; VARLENA fence. Host proofs/hash or new proofs/crc
 6365	crc32c_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	lib.rs:61 -> pg_comp_crc32c; SCREEN aarch64 CRC intrinsics arm (unsupported_construct) — prove sb8 table path
-6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	int_bytea bytea.rs:523 fixed 2-byte be image = int2send shape (int4send 2407 proved); free sibling; siblings 6368/6369 land same harness
-6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	bytea::int_bytea bytea.rs:522 FIXED 4-byte BE image; mcx-stubs sweet spot; pins "aliases int4send"
-6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	same core 8 bytes; free sibling
-6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea_uint_be bytea.rs:499 shift-or fold len<=2 + 22003 err class; full domain per length
-6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea_uint_be bytea.rs:513; SCALAR verdict: length-check error class + BE assembly (shift/or); symbolic len<=8; VARLENA fence
-6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea.rs:517 same rig 8-byte
+6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i16; payload image + varsize; modulo static-buffer allocator model; little-endian pg_hton arm pinned)	ladder	100s DEFAULT solver (kissat inversion, mixed-arm trap); lane pick-a 2026-07-30; proofs/bytea-cmp eq_int2_bytea
+6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i32; payload image + varsize; modulo static-buffer allocator model; little-endian pg_hton arm pinned)	ladder	89s DEFAULT solver; proofs/bytea-cmp eq_int4_bytea
+6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(full-i64; payload image + varsize; modulo static-buffer allocator model; little-endian pg_hton arm pinned)	ladder	88s DEFAULT solver; proofs/bytea-cmp eq_int8_bytea
+6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	proved(sym len<=9; value+verdict+sqlstate 22003+level; message text out of proof)	fast	1.3s kissat; lane pick-a 2026-07-30; proofs/bytea-cmp eq_bytea_int2
+6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	proved(sym len<=9; value+verdict+sqlstate 22003+level; message text out of proof)	fast	1.3s kissat; proofs/bytea-cmp eq_bytea_int4
+6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	proved(sym len<=9; value+verdict+sqlstate 22003+level; message text out of proof)	fast	1.4s kissat; Err arm in-domain at len 9; proofs/bytea-cmp eq_bytea_int8
 6375	record_larger	crates/backend/utils/adt/rowtypes/src/lib.rs	excluded(typcache)	-	generic record ops need typcache
 6376	record_smaller	crates/backend/utils/adt/rowtypes/src/lib.rs	excluded(typcache)	-	generic record ops need typcache
 6378	array_append_support	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
@@ -2940,16 +2940,16 @@ oid	name	source_file	status	class	notes
 6389	array_sort_order	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6390	array_sort_order_nulls_first	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 6391	range_sortsupport	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
-6393	bytea_larger	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	byteacmp + WINNER-INPUT-DATUM identity theorem incl tie plane (network_larger 3562 precedent); lens<=4 both sides; host proofs/bytea-cmp
-6394	bytea_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	= 6393 (op <)
+6393	bytea_larger	crates/backend/utils/adt/varlena/src/builtins.rs	proved(WINNER-IDENTITY incl full-tie plane; sym len<=8/side)	fast	2.9s kissat; harness pre-existed unrecorded, run by lane pick-a 2026-07-30; proofs/bytea-cmp eq_bytea_larger
+6394	bytea_smaller	crates/backend/utils/adt/varlena/src/builtins.rs	proved(WINNER-IDENTITY incl full-tie plane; sym len<=8/side)	fast	3.2s kissat; proofs/bytea-cmp eq_bytea_smaller
 6397	pg_clear_relation_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6398	pg_clear_attribute_stats	crates/backend/statistics/stats_import/src/lib.rs	excluded(state)	-	stats catalog writes
 6399	pg_get_aios	crates/backend/storage/aio/aio_funcs/src/lib.rs	excluded(state: SRF + AIO shmem handles)	-	aio_funcs/src/lib.rs InitMaterializedSRF over live pgaio handle table; same class as 6248/6318 SRF rows
 6400	pg_ls_summariesdir	crates/backend/utils/adt/genfile/src/builtins.rs	excluded(state)	-	server filesystem access
 6401	pg_timezone_abbrevs_zone	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	excluded(SRF)	-	builtins.rs:1252
 6412	casefold	crates/backend/utils/adt/oracle_compat/src/builtins.rs	blocked(seam+image: pg_newlocale_from_collation + UTF8-only gate)	-	casemap.rs str_casefold: UTF8 encoding gate + locale provider dispatch; no ascii fast arm to slice
-6413	hashbytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	= 456 same hash_bytes core; one harness covers 456/6413
-6414	hashbyteaextended	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	= 772; one harness covers 772/6414
+6413	hashbytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: same registration as hashvarlena — fc_hashvarlena; rides the same theorems)	fast	lane pick-a 2026-07-30; proofs/hash
+6414	hashbyteaextended	crates/backend/utils/adt/varlena/src/builtins.rs	proved(core-level: same registration as hashvarlenaextended — fc_hashvarlenaextended)	ladder	lane pick-a 2026-07-30; proofs/hash
 6415	hashdate	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i32 x full seed, wrapper-level)	fast	0.75s; proofs/datetime-b lane D
 6416	hashdateextended	crates/backend/utils/adt/adt_date/src/builtins.rs	proved(full-i32 x full seed)	fast	4.2s; proofs/datetime-b lane D
 6417	hashbool	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-domain incl full symbolic seed, wrapper-level)	fast	0.2-5.3s; hashint8 fold full-i64; proofs/hash-rows

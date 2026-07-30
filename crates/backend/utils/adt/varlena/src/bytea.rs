@@ -134,21 +134,10 @@ pub fn hex_decode_into(
     Ok(Some(()))
 }
 
-pub fn byteain<'mcx>(
-    mcx: Mcx<'mcx>,
-    input: &[u8],
-    mut escontext: Option<&mut SoftErrorContext>,
-) -> PgResult<Option<Varlena<'mcx>>> {
-    if input.first() == Some(&b'\\') && input.get(1) == Some(&b'x') {
-        // C: palloc((len-2)/2 + VARHDRSZ) then decode to the actual length.
-        let mut image = image_with_header(mcx, (input.len() - 2) / 2)?;
-        return match hex_decode_into(&input[2..], escontext.as_deref_mut(), &mut image)? {
-            Some(()) => Ok(Some(Varlena::from_image(image))),
-            None => Ok(None),
-        };
-    }
-
-    // Escaped style: C's two passes — count + validate, then decode.
+// Pass one of escaped-style byteain (C's count + validate loop): returns the
+// output byte count, or None for invalid input.  Pure core factored out for
+// proofs/bytea-cmp (behavior identical; byteain calls it).
+pub fn byteain_escaped_count(input: &[u8]) -> Option<usize> {
     let mut bc = 0usize;
     let mut i = 0usize;
     while i < input.len() {
@@ -164,10 +153,32 @@ pub fn byteain<'mcx>(
         } else if tp.len() >= 2 && tp[1] == b'\\' {
             i += 2;
         } else {
-            return ereturn(escontext.as_deref_mut(), None, invalid_bytea_input());
+            return None;
         }
         bc += 1;
     }
+    Some(bc)
+}
+
+pub fn byteain<'mcx>(
+    mcx: Mcx<'mcx>,
+    input: &[u8],
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<Varlena<'mcx>>> {
+    if input.first() == Some(&b'\\') && input.get(1) == Some(&b'x') {
+        // C: palloc((len-2)/2 + VARHDRSZ) then decode to the actual length.
+        let mut image = image_with_header(mcx, (input.len() - 2) / 2)?;
+        return match hex_decode_into(&input[2..], escontext.as_deref_mut(), &mut image)? {
+            Some(()) => Ok(Some(Varlena::from_image(image))),
+            None => Ok(None),
+        };
+    }
+
+    // Escaped style: C's two passes — count + validate, then decode.
+    let bc = match byteain_escaped_count(input) {
+        Some(bc) => bc,
+        None => return ereturn(escontext.as_deref_mut(), None, invalid_bytea_input()),
+    };
 
     let mut image = image_with_header(mcx, bc)?;
     let old = image.len();
