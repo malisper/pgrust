@@ -1242,3 +1242,283 @@ fn array_nulls_guc_governs_unquoted_null() {
     crate::set_array_nulls(true);
     assert_eq!(out, r#"{"NULL","NULL"}"#);
 }
+
+// Malformed array images whose header ndim field is outside 0..=MAXDIM: a
+// corrupt page or a crafted binary-format value, unreachable from any array
+// pgrust can construct (ArrayCheckBounds caps ndim at MAXDIM). Every one of
+// these used to PANIC inside read_dims_lbounds, which looped `0..ndim` before
+// the wrappers' sanity check ever ran; C returns SQL NULL (or, for
+// array_cardinality, a value / an error — it has no sanity check at all).
+//
+// Expected values are the EXECUTED output of the vendored PG 18 bodies
+// (utils/adt/arrayfuncs.c + arrayutils.c @ 62d6c7d3df, run as a standalone
+// oracle over byte-identical images):
+//
+//   ndim         ndims  lower/upper/length  dims   cardinality
+//   -1           NULL   NULL                NULL   0
+//   INT_MIN      NULL   NULL                NULL   0
+//    0           NULL   NULL                NULL   0
+//    1              1   1 / 2 / 2           [1:2]  2
+//    6              6   1 / 2 / 2           [1:2]… 6
+//    7           NULL   NULL                NULL   6 (product of the 7 dim
+//    1000        NULL   NULL                NULL   words C happens to read
+//                                                  past the dims area, or
+//                                                  the array-size error —
+//                                                  undefined, see below)
+mod corruption_plane {
+    use super::*;
+    use crate::foundation::{read_dims, read_dims_lbounds, MAXDIM};
+
+    // Flat 4B-header image, PACKED on-disk layout: dims[0..n] right after the
+    // 16-byte header, lbounds[0..n] right after the dims (ARR_LBOUND is
+    // base + 16 + 4*ndim — ndim-dependent). `ndim` is written to the header
+    // verbatim; `n` is how many dim/lbound pairs are actually materialized,
+    // so a corrupt header can claim more dimensions than the body carries.
+    fn mk_image<'m>(mcx: Mcx<'m>, ndim: i32, dims: &[i32], lbs: &[i32]) -> PgVec<'m, u8> {
+        let n = dims.len();
+        assert_eq!(n, lbs.len());
+        let total = 16 + 8 * n;
+        let mut img = vec_with_capacity_in(mcx, total).unwrap();
+        vec_append_bytes(&mut img, &::datum::varlena::set_varsize_4b(total)).unwrap();
+        vec_append_bytes(&mut img, &ndim.to_ne_bytes()).unwrap();
+        vec_append_bytes(&mut img, &0i32.to_ne_bytes()).unwrap(); // dataoffset: no nulls
+        vec_append_bytes(&mut img, &INT4OID.to_ne_bytes()).unwrap();
+        for d in dims {
+            vec_append_bytes(&mut img, &d.to_ne_bytes()).unwrap();
+        }
+        for l in lbs {
+            vec_append_bytes(&mut img, &l.to_ne_bytes()).unwrap();
+        }
+        assert_eq!(img.len(), total);
+        img
+    }
+
+    // Every wrapper's verdict for one image: (ndims, lower(1), upper(1),
+    // length(1), dims, cardinality); None = SQL NULL, Err = ereport.
+    struct Verdicts {
+        ndims: Option<i32>,
+        lower1: Option<i32>,
+        upper1: Option<i32>,
+        length1: Option<i32>,
+        dims: Option<String>,
+        cardinality: Result<i32, String>,
+    }
+
+    fn call1(f: ::types_fmgr::PGFunction, mcx: Mcx<'_>, img: &[u8]) -> (PgResult<Datum>, bool) {
+        let mut fcinfo = LocalFcinfo::<2>::new(0);
+        // SAFETY: mcx outlives the call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        fcinfo.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_i32(1)); // reqdim = 1 for the 2-arg members
+        let r = f(None, &mut fcinfo);
+        (r, fcinfo.isnull)
+    }
+
+    fn verdicts(mcx: Mcx<'_>, img: &[u8]) -> Verdicts {
+        let int_of = |f: ::types_fmgr::PGFunction| -> Option<i32> {
+            let (r, isnull) = call1(f, mcx, img);
+            let d = r.expect("header readers never ereport on this plane");
+            if isnull {
+                None
+            } else {
+                Some(d.as_i32())
+            }
+        };
+        let dims = {
+            let (r, isnull) = call1(crate::ops::fc_array_dims, mcx, img);
+            let d = r.unwrap();
+            if isnull {
+                None
+            } else {
+                Some(as_str_lossy(varlena_payload(d)))
+            }
+        };
+        let cardinality = match call1(crate::ops::fc_array_cardinality, mcx, img) {
+            (Ok(d), false) => Ok(d.as_i32()),
+            (Ok(_), true) => panic!("C array_cardinality never returns NULL"),
+            (Err(e), _) => Err(e.message().to_string()),
+        };
+        Verdicts {
+            ndims: int_of(crate::ops::fc_array_ndims),
+            lower1: int_of(crate::ops::fc_array_lower),
+            upper1: int_of(crate::ops::fc_array_upper),
+            length1: int_of(crate::builtins::fc_array_length),
+            dims,
+            cardinality,
+        }
+    }
+
+    fn as_str_lossy(v: &[u8]) -> String {
+        String::from_utf8_lossy(v).into_owned()
+    }
+
+    fn setup() -> MemoryContext {
+        detoast_construct::install_test_detoast();
+        MemoryContext::new_bump("corruption-plane")
+    }
+
+    // read_dims_lbounds is the first thing every dims-reading wrapper does
+    // with the image; ndim=7 indexed dims[6] on a [i32; 6] (panic), ndim<0
+    // made `0..ndim as usize` a ~2^64 range (panic on the first arr_dim
+    // slice read). It must now come back clean, ndim RAW and dims zeroed.
+    #[test]
+    fn read_dims_lbounds_survives_out_of_range_ndim() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [-1, i32::MIN, 7, 1000, i32::MAX] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            let (got, dims, lbs) = read_dims_lbounds(&img);
+            assert_eq!(got, ndim, "ndim must come back RAW, never clamped");
+            assert_eq!(dims, [0; MAXDIM], "out-of-range ndim fills nothing");
+            assert_eq!(lbs, [0; MAXDIM]);
+        }
+    }
+
+    // read_dims (the dims-only sibling the unnest/selectivity/hstore sites
+    // used to open-code) carries the same contract.
+    #[test]
+    fn read_dims_survives_out_of_range_ndim() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [-1, i32::MIN, 7, 1000, i32::MAX] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            assert_eq!(read_dims(&img), (ndim, [0; MAXDIM]));
+        }
+        for n in 0..=MAXDIM {
+            let dims: std::vec::Vec<i32> = (0..n as i32).map(|i| i + 2).collect();
+            let img = mk_image(mcx, n as i32, &dims, &vec![1; n]);
+            let (got_n, got_dims) = read_dims(&img);
+            assert_eq!(got_n, n as i32);
+            assert_eq!(&got_dims[..n], &dims[..], "ndim={n}");
+        }
+    }
+
+    // The valid plane, including both boundaries (0 and MAXDIM), must be
+    // untouched by the reordering.
+    #[test]
+    fn read_dims_lbounds_valid_plane_unchanged() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        // ndim = 0: nothing to fill, and that IS a valid header field value.
+        let img = mk_image(mcx, 0, &[], &[]);
+        assert_eq!(read_dims_lbounds(&img), (0, [0; MAXDIM], [0; MAXDIM]));
+        // 1..=MAXDIM: every dim/lbound pair read, MAXDIM included.
+        for n in 1..=MAXDIM {
+            let dims: std::vec::Vec<i32> = (0..n as i32).map(|i| i + 2).collect();
+            let lbs: std::vec::Vec<i32> = (0..n as i32).map(|i| i - 3).collect();
+            let img = mk_image(mcx, n as i32, &dims, &lbs);
+            let (got_n, got_dims, got_lbs) = read_dims_lbounds(&img);
+            assert_eq!(got_n, n as i32);
+            assert_eq!(&got_dims[..n], &dims[..], "ndim={n}");
+            assert_eq!(&got_lbs[..n], &lbs[..], "ndim={n}");
+            assert_eq!(&got_dims[n..], &[0; MAXDIM][n..], "tail must stay zero");
+        }
+    }
+
+    // C, executed: ndims/lower/upper/length/dims = NULL, cardinality = 0.
+    #[test]
+    fn negative_ndim_matches_c() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [-1, i32::MIN] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            let v = verdicts(mcx, &img);
+            assert_eq!(v.ndims, None, "array_ndims ndim={ndim}");
+            assert_eq!(v.lower1, None, "array_lower ndim={ndim}");
+            assert_eq!(v.upper1, None, "array_upper ndim={ndim}");
+            assert_eq!(v.length1, None, "array_length ndim={ndim}");
+            assert_eq!(v.dims, None, "array_dims ndim={ndim}");
+            // ArrayGetNItems' own `ndim <= 0 -> 0` arm: a VALUE, not a NULL.
+            assert_eq!(v.cardinality, Ok(0), "array_cardinality ndim={ndim}");
+        }
+    }
+
+    // C, executed: same NULLs. cardinality is the undefined cell — C reads
+    // dim words past the dims area (it returned 6 for a 7-dim body and the
+    // array-size error for ndim=1000, both byte-dependent), so pgrust raises
+    // the dimension-count error instead of inventing a number. What matters:
+    // an Err, not a panic.
+    #[test]
+    fn over_maxdim_ndim_matches_c() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [7, 1000, i32::MAX] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            let v = verdicts(mcx, &img);
+            assert_eq!(v.ndims, None, "array_ndims ndim={ndim}");
+            assert_eq!(v.lower1, None, "array_lower ndim={ndim}");
+            assert_eq!(v.upper1, None, "array_upper ndim={ndim}");
+            assert_eq!(v.length1, None, "array_length ndim={ndim}");
+            assert_eq!(v.dims, None, "array_dims ndim={ndim}");
+            assert_eq!(
+                v.cardinality,
+                Err(alloc::format!(
+                    "number of array dimensions ({ndim}) exceeds the maximum allowed ({MAXDIM})"
+                )),
+                "array_cardinality ndim={ndim}"
+            );
+        }
+    }
+
+    // The boundary values C accepts must keep working — the fix must not
+    // over-tighten. ndim=0 is a VALID header field (C still nulls the
+    // wrappers via `<= 0`, and cardinality returns 0); ndim=MAXDIM is the
+    // last accepted dimension count and must return real values.
+    #[test]
+    fn boundary_ndim_0_and_maxdim_match_c() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+
+        // ndim = 0
+        let img = mk_image(mcx, 0, &[], &[]);
+        let v = verdicts(mcx, &img);
+        assert_eq!(v.ndims, None);
+        assert_eq!(v.lower1, None);
+        assert_eq!(v.upper1, None);
+        assert_eq!(v.length1, None);
+        assert_eq!(v.dims, None);
+        assert_eq!(v.cardinality, Ok(0));
+
+        // ndim = 1 (the ordinary case, as a control)
+        let img = mk_image(mcx, 1, &[2], &[1]);
+        let v = verdicts(mcx, &img);
+        assert_eq!(v.ndims, Some(1));
+        assert_eq!(v.lower1, Some(1));
+        assert_eq!(v.upper1, Some(2));
+        assert_eq!(v.length1, Some(2));
+        assert_eq!(v.dims.as_deref(), Some("[1:2]"));
+        assert_eq!(v.cardinality, Ok(2));
+
+        // ndim = MAXDIM
+        let img = mk_image(mcx, 6, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+        let v = verdicts(mcx, &img);
+        assert_eq!(v.ndims, Some(6));
+        assert_eq!(v.lower1, Some(1));
+        assert_eq!(v.upper1, Some(2));
+        assert_eq!(v.length1, Some(2));
+        assert_eq!(v.dims.as_deref(), Some("[1:2][1:3][1:1][1:1][1:1][1:1]"));
+        assert_eq!(v.cardinality, Ok(6));
+    }
+
+    // Every OTHER read_dims_lbounds caller that feeds the raw ndim to
+    // array_get_n_items had the same panic (dims[i] on a 6-long slice); the
+    // central guard turns all of them into the same catchable error.
+    #[test]
+    fn array_get_n_items_rejects_ndim_wider_than_dims() {
+        assert_eq!(::arrayutils::array_get_n_items(0, &[]).unwrap(), 0);
+        assert_eq!(::arrayutils::array_get_n_items(-5, &[]).unwrap(), 0);
+        assert_eq!(::arrayutils::array_get_n_items(6, &[1; 6]).unwrap(), 1);
+        let e = ::arrayutils::array_get_n_items(7, &[1i32; 6]).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "number of array dimensions (7) exceeds the maximum allowed (6)"
+        );
+        // A soft-error context gets the same verdict softly (C's ereturn).
+        let mut soft = ::types_error::SoftErrorContext::new(false);
+        assert_eq!(
+            ::arrayutils::array_get_n_items_safe(7, &[1i32; 6], Some(&mut soft)).unwrap(),
+            -1
+        );
+        assert!(soft.error_occurred());
+    }
+}

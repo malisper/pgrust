@@ -176,11 +176,7 @@ pub fn fc_array_unnest(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
         let elemtype = crate::foundation::arr_elemtype(&array);
         let (elmlen, elmbyval, elmalign) = ::lsyscache::get_typlenbyvalalign(elemtype)
             .map(|(l, b, a)| (l as i32, b, a as u8))?;
-        let ndim = crate::foundation::arr_ndim(&array);
-        let mut dims = [0i32; crate::foundation::MAXDIM];
-        for i in 0..ndim as usize {
-            dims[i] = crate::foundation::arr_dim(&array, i);
-        }
+        let (ndim, dims) = crate::foundation::read_dims(&array);
         let numelems = ::arrayutils::array_get_n_items(ndim, &dims)?;
         let pos = crate::foundation::arr_data_offset(&array);
         let state = ArrayUnnestFctx {
@@ -237,11 +233,7 @@ pub fn fc_array_unnest_support(
             let ap = c.constvalue.as_usize() as *const u8;
             // SAFETY: non-null array Const addresses a live flat varlena image.
             let arr = unsafe { core::slice::from_raw_parts(ap, varsize_any(ap)) };
-            let ndim = crate::foundation::arr_ndim(arr);
-            let mut dims = [0i32; crate::foundation::MAXDIM];
-            for i in 0..ndim as usize {
-                dims[i] = crate::foundation::arr_dim(arr, i);
-            }
+            let (ndim, dims) = crate::foundation::read_dims(arr);
             ::arrayutils::array_get_n_items(ndim, &dims)? as f64
         }
     } else if let Some(a) = arg1.as_array_expr() {

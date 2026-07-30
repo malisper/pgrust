@@ -75,6 +75,20 @@ pub fn arr_lbound(a: &[u8], i: usize) -> i32 {
 }
 
 // Read ndim + dims[] + lbound[] into stack arrays.
+//
+// The returned ndim is the RAW header field, never clamped: every caller
+// re-derives its own verdict from it (C's wrappers each run their own
+// `ndim <= 0 || ndim > MAXDIM` sanity check on the raw field). Only the
+// dims/lbounds fill is bounded: on a malformed image whose ndim field is
+// outside 0..=MAXDIM (a corrupt page, or a crafted binary-format value --
+// no array pgrust can construct gets there, ArrayCheckBounds caps ndim at
+// MAXDIM) the arrays come back all-zero and the caller's sanity check
+// fires, where the pre-check loop used to index dims[6] on a [i32; 6] and
+// panic. C returns NULL / 0 for these; a backend panic is strictly worse.
+//
+// The early return is also why the fill loop is bounds-check-free: with
+// `ndim as u32 <= MAXDIM` established, LLVM proves `i < MAXDIM`.
+//
 // inline(always): outlined, the 52-byte tuple returns via an sret stack buffer
 // (store-to-load forwarding stall on Neoverse V2 — bench-crate §3b).
 #[inline(always)]
@@ -82,11 +96,31 @@ pub fn read_dims_lbounds(a: &[u8]) -> (i32, [i32; MAXDIM], [i32; MAXDIM]) {
     let ndim = arr_ndim(a);
     let mut dims = [0i32; MAXDIM];
     let mut lbs = [0i32; MAXDIM];
+    // One unsigned compare covers both ndim < 0 and ndim > MAXDIM.
+    if ndim as u32 > MAXDIM as u32 {
+        return (ndim, dims, lbs);
+    }
     for i in 0..ndim as usize {
         dims[i] = arr_dim(a, i);
         lbs[i] = arr_lbound(a, i);
     }
     (ndim, dims, lbs)
+}
+
+// Dims-only sibling of read_dims_lbounds, same corruption-plane contract:
+// raw ndim out, dims filled only for ndim in 0..=MAXDIM. Callers that need
+// just the dims used to open-code the loop and inherit the panic.
+#[inline(always)]
+pub fn read_dims(a: &[u8]) -> (i32, [i32; MAXDIM]) {
+    let ndim = arr_ndim(a);
+    let mut dims = [0i32; MAXDIM];
+    if ndim as u32 > MAXDIM as u32 {
+        return (ndim, dims);
+    }
+    for i in 0..ndim as usize {
+        dims[i] = arr_dim(a, i);
+    }
+    (ndim, dims)
 }
 
 #[inline]

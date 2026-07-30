@@ -745,7 +745,15 @@ pub fn fc_array_cardinality(
     let mcx = fcinfo.result_mcx();
     let array = arg_array_bytes(fcinfo, 0, mcx)?;
     let (ndim, dims, _lbs) = read_dims_lbounds(&array);
-    Ok(Datum::from_i32(::arrayutils::array_get_n_items(ndim, &dims)?))
+    // C array_cardinality is the one member of this family with NO sanity
+    // check: the raw ndim goes straight to ArrayGetNItems. ndim <= 0 yields 0
+    // -- C's own answer, NOT the siblings' null verdict, so do not "fix" it
+    // into one. Above MAXDIM C reads dims past the datum (undefined), so
+    // there is no C answer to match; array_get_n_items raises the
+    // dimension-count error there rather than panicking.
+    Ok(Datum::from_i32(::arrayutils::array_get_n_items(
+        ndim, &dims,
+    )?))
 }
 
 pub(crate) fn text_result<'m>(mcx: Mcx<'m>, bytes: &[u8]) -> PgResult<Datum> {
