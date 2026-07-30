@@ -1909,6 +1909,10 @@ bytea-cmp	proofs::eq_bytea_bit_count	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp
 bytea-cmp	proofs::eq_bytea_reverse_l0	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	87.8	ledger 6382 image cell; DEFAULT solver; mcx-stubs; 2026-07-30
 bytea-cmp	proofs::eq_bytea_reverse_l4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	87.1	ledger 6382 image cell; DEFAULT solver; mcx-stubs; 2026-07-30
 bytea-cmp	proofs::eq_bytea_reverse_l8	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	90.7	ledger 6382 image cell; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_bs_l2	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	71.1	ledger 1244 kernel cell (backslash-escape form); DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_octal2_l4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	97.1	ledger 1244 kernel cell (octal form, 2 literal + 2 symbolic digits); both covers; DEFAULT solver; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_plain1_l2	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	84.8	ledger 1244 kernel cell (plain copy + trailing-backslash reject); cover 1 structurally unsat in this cell (no multi-byte unit); DEFAULT solver; 2026-07-30
+bytea-cmp	proofs::eq_byteain_esc_verdict	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	wall-recorded	calibration	?	ledger 1244 symbolic-len claim: CNF wall 450s BOTH solvers at 6GiB box; live for a high-mem/long-tier retry; 2026-07-30
 bytea-cmp	proofs::control_get_byte_short_c_len	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	must-fail	defect-witness	?	DEFAULT solver mandatory; negative control (get/set wave)
 datetime-cmp	wave7_proofs::eq_timestamp_finite	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	0.16	
 datetime-cmp	wave7_proofs::eq_timestamp_hash	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.6	

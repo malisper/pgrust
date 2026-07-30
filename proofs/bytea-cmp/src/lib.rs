@@ -700,6 +700,181 @@ mod proofs {
     reverse_cell!(eq_bytea_reverse_l4, 4);
     reverse_cell!(eq_bytea_reverse_l8, 8);
 
+    // ---- byteain, traditional escaped arm (ledger 1244) ----
+    // Input is the post-protocol cstring contract: symbolic bytes with a
+    // trailing NUL and NUL-FREE content (fence); the "\x" hex arm is
+    // fenced out (hex decode separately proved, proofs/bytea-varbit).
+    // The combined verdict+image claim at symbolic len<=8 WALLS at 450s
+    // on BOTH solvers (result-image law: the 1/2/4-byte unit boundaries
+    // make every output offset data-dependent), so the claim is split:
+    //  - eq_byteain_esc_verdict: symbolic len<=8 — accept/reject verdict,
+    //    22P02 sqlstate/level parity, and decoded-LENGTH parity (scalar
+    //    projection of the image);
+    //  - eq_byteain_esc_img_l4/_l8: literal input lengths, fully symbolic
+    //    content — full payload image parity.
+    // Modulo static-buffer allocator model; escontext = None (hard-error
+    // path; soft-error routing is fmgr-tier).
+
+    extern "C" {
+        fn pg_byteain_esc(
+            input: *const u8,
+            out: *mut u8,
+            outlen: *mut c_int,
+            err: *mut c_int,
+        ) -> c_int;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_byteain_esc_verdict() {
+        const CAP: usize = 8;
+        let mut buf: [u8; CAP + 1] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= CAP);
+        let mut i = 0;
+        while i < CAP + 1 {
+            if i < len {
+                kani::assume(buf[i] != 0); // cstring contract: no interior NUL
+            } else {
+                buf[i] = 0; // literal NUL fill (dead-symbolic-byte rule)
+            }
+            i += 1;
+        }
+        // fence out the hex arm ("\x" prefix) — both sides dispatch on it
+        kani::assume(!(len >= 2 && buf[0] == b'\\' && buf[1] == b'x'));
+
+        let mut cout = [0u8; CAP];
+        let mut coutlen: c_int = 0;
+        let mut cerr: c_int = 0;
+        unsafe { pg_byteain_esc(buf.as_ptr(), cout.as_mut_ptr(), &mut coutlen, &mut cerr) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-byteain");
+        match varlena::bytea::byteain(ctx.mcx(), &buf[..len], None) {
+            Ok(Some(v)) => {
+                assert!(cerr == 0);
+                // scalar projection: decoded length parity
+                assert!(v.data().len() == coutlen as usize);
+                core::mem::forget(v);
+            }
+            Ok(None) => {
+                // soft-error return needs an escontext; unreachable here
+                assert!(false);
+            }
+            Err(e) => {
+                assert!(cerr == 1);
+                assert!(e.sqlstate == types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+                assert!(e.level == ERROR);
+                core::mem::forget(e);
+            }
+        }
+        kani::cover!(cerr == 0 && coutlen < len as c_int); // an escape actually decoded
+        kani::cover!(cerr == 1);
+        core::mem::forget(ctx);
+    }
+
+    macro_rules! byteain_img_cell {
+        ($harness:ident, $w:expr, $pin:expr) => {
+            #[kani::proof]
+            #[kani::unwind(12)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                const CAP: usize = 8;
+                let len: usize = $w; // LITERAL cell
+                let mut buf: [u8; CAP + 1] = kani::any();
+                let mut i = 0;
+                while i < CAP + 1 {
+                    if i < len {
+                        kani::assume(buf[i] != 0); // no interior NUL
+                    } else {
+                        buf[i] = 0; // literal NUL fill
+                    }
+                    i += 1;
+                }
+                #[allow(clippy::redundant_closure_call)]
+                ($pin)(&mut buf);
+                // fence out the hex arm
+                kani::assume(!(len >= 2 && buf[0] == b'\\' && buf[1] == b'x'));
+
+                let mut cout = [0u8; CAP];
+                let mut coutlen: c_int = 0;
+                let mut cerr: c_int = 0;
+                unsafe {
+                    pg_byteain_esc(buf.as_ptr(), cout.as_mut_ptr(), &mut coutlen, &mut cerr)
+                };
+
+                let ctx = mcx::MemoryContext::new_bump("kani-byteain");
+                match varlena::bytea::byteain(ctx.mcx(), &buf[..len], None) {
+                    Ok(Some(v)) => {
+                        assert!(cerr == 0);
+                        let d = v.data();
+                        assert!(d.len() == coutlen as usize);
+                        let mut i = 0;
+                        while i < d.len() {
+                            assert!(d[i] == cout[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Ok(None) => {
+                        assert!(false);
+                    }
+                    Err(e) => {
+                        assert!(cerr == 1);
+                        assert!(e.sqlstate == types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+                kani::cover!(cerr == 0 && coutlen < len as c_int);
+                kani::cover!(cerr == 1);
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    // Fully-symbolic-content cells wall in CNF even at literal len=4
+    // (both solvers, 450s; symex completes — the 1/2/4-byte unit
+    // segmentation is itself content-dependent, so every output offset
+    // remains a byte-mux). Form-PINNED cells instead (varbit bits_in
+    // precedent: a literal first byte pins the parse form), decode-kernel
+    // coverage per unit shape:
+    //  - plain_l4: no backslash anywhere — identity copy;
+    //  - octal1_l4: literal '\\' at 0, symbolic tail — valid-octal
+    //    accept (1-byte unit), '\\\\' + plain tail, and reject all live;
+    //  - bs_l2: literal '\\' at 0, len 2 — '\\\\' unit vs reject.
+    // Plain-form cells WALL whenever the pin is an ASSUME (never folds;
+    // measured: assume-pinned l4 AND l2 both 450s walls while literal
+    // bs_l2 proves in 71s). Only LITERAL pins prune: byte 0 is a literal
+    // plain byte, byte 1 stays fully symbolic — identity copy, trailing-
+    // backslash reject, and '\\\\'-after-plain planes all live.
+    byteain_img_cell!(eq_byteain_esc_plain1_l2, 2, |buf: &mut [u8; 9]| {
+        buf[0] = b'A'; // LITERAL plain byte
+    });
+    // octal cell with only buf[0] literal WALLS at len 4 (450s both the
+    // one-literal pin and fully-symbolic variants); two literal bytes
+    // ('\\','1') leave the two octal-range bytes symbolic — accept
+    // (single 1-byte unit) and reject planes both live.
+    byteain_img_cell!(eq_byteain_esc_octal2_l4, 4, |buf: &mut [u8; 9]| {
+        buf[0] = b'\\'; // LITERAL form selector
+        buf[1] = b'1'; // LITERAL first octal digit
+    });
+    byteain_img_cell!(eq_byteain_esc_bs_l2, 2, |buf: &mut [u8; 9]| {
+        buf[0] = b'\\'; // LITERAL form selector
+    });
+
     // ---- wave negative control: rig is non-vacuous ----
     // C sees a one-shorter payload length: at n == len-1 C raises 2202E
     // while Rust returns Ok — MUST FAIL with a decodable counterexample.
