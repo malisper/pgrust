@@ -1,0 +1,349 @@
+===============================================================================
+GL-AUDITKIT-1 — OLTP SERVER LOAD RECORD
+Host: oltp-server (i8g.xlarge, 4 vCPU / 32 GB / 872.6 GB instance-store NVMe)
+      AL2023 aarch64, kernel 6.1.176-221.367.amzn2023.aarch64
+Prepared: 2026-07-27 (UTC).  All timestamps in this file are UTC.
+===============================================================================
+
+-------------------------------------------------------------------------------
+1. ENGINES UNDER TEST
+-------------------------------------------------------------------------------
+pgrust (release candidate)
+  path            /opt/pgrust/bin/postgres
+  sha256          70a473036bd78c299bc23ee63f2d16b65d790f19d4f00c8eab05b02cf68869b5
+  gated sha       3e6cb16b1d22f6c754451dcc1f82c007934732fb   (pgrust-fast)
+  build           dist-pgo
+  reports itself  "PostgreSQL 18.3 (pgrust) on aarch64-unknown-linux-gnu, 64-bit"
+  NOT REPLACED by this preparation.
+
+C PostgreSQL 18.3 (the comparison arm)
+  path            /usr/pgsql-18/bin/postgres
+  version         postgres (PostgreSQL) 18.3
+  build           PGDG official RPMs for RHEL 9 aarch64 (NOT a local source build)
+  packages        postgresql18-18.3-1PGDG.rhel9.7.aarch64
+                  postgresql18-libs-18.3-1PGDG.rhel9.7.aarch64
+                  postgresql18-server-18.3-1PGDG.rhel9.7.aarch64
+                  postgresql18-contrib-18.3-1PGDG.rhel9.7.aarch64
+  origin          https://download.postgresql.org/pub/repos/yum/18/redhat/rhel-9-aarch64
+  GPG             all four RPMs verify against PGDG-RPM-GPG-KEY-AARCH64-RHEL
+                  (key id 177b343bb9738825): "digests signatures OK"
+  version pinned  18.3 exactly.  The pgdg repo definition in
+                  /etc/yum.repos.d/pgdg.repo is left DISABLED (enabled=0) so a
+                  routine "dnf update" cannot silently move this arm to 18.4.
+
+  See section 7 for the two AL2023-vs-RHEL9 compatibility shims that were
+  required to run the PGDG binaries on Amazon Linux 2023.
+
+-------------------------------------------------------------------------------
+2. STORAGE
+-------------------------------------------------------------------------------
+Device      /dev/nvme1n1 (872.6 GB instance-store NVMe)
+Filesystem  xfs, label "auditdata", UUID 33807044-e2d9-44e6-a8ac-162feca98d67
+Mount       /data   options: defaults,noatime,nofail
+fstab       an entry exists so /data remounts across a REBOOT.
+
+  *** INSTANCE STORE IS EPHEMERAL ***
+  The fstab entry documents the mount only.  A STOP/START (as opposed to a
+  reboot) of this instance destroys /dev/nvme1n1 and every dataset below it.
+  There is no backup.  Rebuilding all four datadirs takes roughly 2 hours.
+
+-------------------------------------------------------------------------------
+3. THE FOUR DATADIRS
+-------------------------------------------------------------------------------
+  /data/ro-pgrust   sysbench oltp_read_only dataset, served by pgrust
+  /data/ro-cpg      the same dataset,        served by C PostgreSQL 18.3
+  /data/rw-pgrust   pgbench scale 6849,      served by pgrust
+  /data/rw-cpg      the same dataset,        served by C PostgreSQL 18.3
+
+All four were created with the C 18.3 initdb:
+    initdb -D <datadir> --no-locale --encoding=UTF8
+pgrust has no bootstrap mode of its own (it exits with
+"BootstrapModeMain unported: unit backend-bootstrap (initdb runs against C
+postgres)"), so the C initdb is the only way to make a datadir for either
+engine.  Both engines then run against byte-identical initdb output, which is
+also what makes the two arms' datadirs directly comparable.
+
+Owner of all four datadirs: unix user "postgres" (uid 26), mode 0700.
+The benchmark database in every one of the four is named  bench .
+Authentication: "trust" from 172.31.0.0/16 (appended to each pg_hba.conf).
+Port 5432 is reachable only from members of the audit security group.
+
+-------------------------------------------------------------------------------
+4. CONFIGURATION APPLIED TO BOTH ENGINES
+-------------------------------------------------------------------------------
+Every datadir's postgresql.conf ends with exactly this line:
+
+    include_if_exists = '/opt/audit/audit.conf'
+
+so all four clusters read ONE physical file.  The two arms are therefore
+identically configured by construction, not by copy-and-compare.  Contents of
+/opt/audit/audit.conf:
+
+    shared_buffers = 16GB
+    effective_cache_size = 48GB
+    work_mem = 64MB
+    effective_io_concurrency = 200
+    max_parallel_workers = 8
+    listen_addresses = '*'
+    max_connections = 500
+    io_method = sync
+    max_stack_depth = 60000
+    max_wal_size = 8GB
+
+Everything else is stock initdb output.  autovacuum is ON (default) on all four.
+
+Notes:
+  * effective_cache_size = 48GB on a 32 GB box is intentional.  It is
+    PlanetScale's published value and it is a planner hint, not an allocation.
+    It is applied equally to both arms.
+  * max_stack_depth = 60000 (kB) exceeds the default 8 MB stack rlimit and
+    PostgreSQL refuses to start if the rlimit is lower.  The launcher raises
+    the stack rlimit to 204800 kB before dropping privileges; the same limit is
+    published to interactive logins via
+    /etc/security/limits.d/99-audit-stack.conf.
+  * nofile is 1048576 (set at instance bootstrap, and re-applied by the
+    launcher).  This is load-bearing for pgrust, which is a single process with
+    one thread per connection: at the AL2023 default of 8192 the server hits fd
+    exhaustion during connection setup, panics, and hangs the client.
+
+Verified live on both engines (identical on both):
+    autovacuum=on  effective_cache_size=6291456*8kB (48GB)
+    effective_io_concurrency=200  io_method=sync  listen_addresses=*
+    max_connections=500  max_parallel_workers=8  max_stack_depth=60000kB
+    max_wal_size=8192MB  shared_buffers=2097152*8kB (16GB)  work_mem=65536kB
+    server_version=18.3
+
+-------------------------------------------------------------------------------
+5. LOAD TIMES, ROW COUNTS AND SIZES
+-------------------------------------------------------------------------------
+Loads were driven FROM the client box (<client-private-ip>) over the private network
+against <server-private-ip>:5432, one server arm at a time.
+
+--- /data/ro-pgrust  (pgrust) -------------------------------------------------
+  command   sysbench oltp_read_only --pgsql-host=<server-private-ip> --pgsql-port=5432
+              --pgsql-user=postgres --pgsql-db=<db> --tables=10
+              --table-size=130000000 --threads=10 --report-interval=1
+              --db-driver=pgsql prepare
+  threads   10  (one per table; the charter asked for more than 2)
+  window    2026-07-27T04:59:20Z -> 05:44:34Z
+  prepare        2681 s   (44 m 41 s)
+  VACUUM ANALYZE   33 s
+  TOTAL          2714 s   (45 m 14 s)
+  rows      10 tables x 130,000,000 = 1,300,000,000  (exact count(*), all ten)
+  indexes   20 (PRIMARY KEY + secondary index k_N per table)
+  db size   308 GB     datadir 316 GiB
+  heap      3,513,514 pages/table, relallvisible 3,513,514 -> 100.0% all-visible
+
+--- /data/ro-cpg  (C PostgreSQL 18.3) -----------------------------------------
+  command   identical to the above
+  threads   10
+  window    2026-07-27T06:00:03Z -> 06:56:38Z
+  prepare        2826 s   (47 m 06 s)
+  VACUUM ANALYZE  569 s
+  TOTAL          3395 s   (56 m 35 s)
+  rows      10 tables x 130,000,000 = 1,300,000,000  (exact count(*))
+  indexes   20
+  db size   308 GB     datadir 316 GiB
+  heap      3,513,514 pages/table, relallvisible 3,513,514 -> 100.0% all-visible
+
+  The two read-only arms have IDENTICAL relpages and identical 100% visibility
+  map coverage, so index-only-scan behaviour is comparable between them.
+
+  Why the VACUUM ANALYZE times differ so much (33 s vs 569 s): on the pgrust
+  arm, autovacuum finished covering the tables during the load, so the explicit
+  VACUUM could skip all-visible pages.  On the C arm, autovacuum was repeatedly
+  cancelled by lock conflicts with the CREATE INDEX statements ("canceling
+  autovacuum task" x15 in the server log), so the explicit VACUUM did the full
+  scan itself.  Both arms end in the same state (100% all-visible, analysed).
+  This is a difference in WHEN the vacuum work happened, not in whether it did.
+
+--- /data/rw-pgrust  (pgrust) -------------------------------------------------
+  command   pgbench -i -s 6849 -h <server-private-ip> -p 5432 -U postgres -d bench
+  window    2026-07-27T06:58:20Z -> 07:07:14Z
+  pgbench -i      531 s   (8 m 51 s)
+                  (client-side generate 295.48 s, vacuum 2.40 s,
+                   primary keys 233.25 s)
+  VACUUM ANALYZE    3 s
+  TOTAL           534 s   (8 m 54 s)
+  rows      pgbench_accounts 684,900,000 | pgbench_branches 6,849
+            pgbench_tellers     68,490   | pgbench_history       0 at load time
+  db size   100 GB     datadir 109 GiB
+  pgbench_accounts 11,227,869 pages, 100.0% all-visible
+
+--- /data/rw-cpg  (C PostgreSQL 18.3) -----------------------------------------
+  command   identical to the above
+  window    2026-07-27T07:19:02Z -> 07:27:28Z
+  pgbench -i      506 s   (8 m 26 s)
+                  (client-side generate 334.18 s, vacuum 0.31 s,
+                   primary keys 171.37 s)
+  VACUUM ANALYZE    0 s
+  TOTAL           506 s   (8 m 26 s)
+  rows      pgbench_accounts 684,900,000 | pgbench_branches 6,849
+            pgbench_tellers     68,490   | pgbench_history       0 at load time
+  db size   100 GB     datadir 109 GiB
+  pgbench_accounts 11,227,869 pages, 100.0% all-visible
+
+  An explicit VACUUM ANALYZE was run after pgbench -i on BOTH read-write arms.
+  pgbench's own vacuum step runs BEFORE the primary keys are built, so it
+  leaves pgbench_accounts un-analysed with respect to its index.  Applied
+  identically to both arms, so it cannot bias the comparison.  It completes in
+  seconds because pgbench's COPY runs in the same transaction that creates the
+  table, which lets PostgreSQL mark the pages frozen and all-visible as they
+  are written -- the visibility map is already complete when VACUUM starts.
+
+  A read-write SMOKE was later run against both arms (see section 8), so
+  pgbench_history in both rw datadirs is no longer empty and some accounts rows
+  have been updated.  That is normal pgbench state and does not invalidate the
+  datasets.
+
+-------------------------------------------------------------------------------
+6. DISK BUDGET  (this allocation is deliberate and it is TIGHT)
+-------------------------------------------------------------------------------
+  /data capacity                873 GiB  (866 GiB usable after xfs metadata)
+  /data/ro-pgrust               316 GiB
+  /data/ro-cpg                  316 GiB
+  /data/rw-pgrust               109 GiB
+  /data/rw-cpg                  109 GiB
+  ----------------------------------------
+  used                          855 GiB   (98%)
+  FREE REMAINING                 19 GiB
+
+Each datadir carries up to 8 GiB of recycled WAL (max_wal_size=8GB), which is
+included in the figures above.
+
+The 500 GB read-write shape mentioned in the charter does NOT fit alongside the
+two ~300 GB read-only datasets and was not attempted.
+
+WARNING for whoever runs the benchmarks: 19 GiB is the entire margin.  Do not
+create additional databases, do not raise max_wal_size, and do not run anything
+that spills large temp files on this box while the four datadirs are resident.
+
+-------------------------------------------------------------------------------
+7. COMPATIBILITY SHIMS REQUIRED TO RUN THESE BINARIES ON AL2023
+-------------------------------------------------------------------------------
+These were necessary; they are recorded here because an auditor will see them.
+
+(a) libldap.so.2 for the PGDG RPMs.
+    PGDG's EL9 build of postgresql18-libs and postgresql18-server links
+    libldap.so.2 (openldap 2.6, which is what RHEL 9 ships).  AL2023 ships
+    openldap 2.4, whose sonames are libldap-2.4.so.2 / liblber-2.4.so.2 --
+    different filenames, so nothing on the box provides libldap.so.2.
+    Resolution: libldap.so.2 and liblber.so.2 were extracted from the public
+    AlmaLinux 9 package openldap-2.6.8-4.el9.aarch64.rpm and placed in
+        /opt/audit/compat-lib
+    published to the dynamic linker by
+        /etc/ld.so.conf.d/99-audit-el9compat.conf
+    AL2023's own openldap 2.4 is untouched and still present; the two coexist
+    because their sonames differ.  The four PGDG RPMs were then installed with
+    "rpm -ivh --nodeps" after every OTHER dependency had been installed
+    normally from the AL2023 repositories.  Verification: "ldd" on every binary
+    in /usr/pgsql-18/bin reports no missing objects.
+    Cosmetic consequence: "rpm -V postgresql18-server" still reports
+    libldap.so.2 as an unsatisfied dependency, because the library is present
+    on disk but is not owned by any RPM.  The binaries link and run correctly.
+    Nothing else about the PGDG binaries was modified -- they are the official
+    PGDG build, GPG-verified.
+
+(b) A share directory for pgrust.
+    pgrust resolves its share directory at the compiled-in Debian-style path
+    /usr/share/postgresql/18, whereas PGDG installs to /usr/pgsql-18/share.
+    /usr/share/postgresql/18 was created as a directory of symlinks to each
+    entry of /usr/pgsql-18/share.
+    In addition, PGDG configures --with-system-tzdata and therefore ships no
+    $SHAREDIR/timezone at all, while pgrust expects one; PostgreSQL timezone
+    files are plain TZif, the same format as the system zoneinfo tree, so
+        /usr/share/postgresql/18/timezone -> /usr/share/zoneinfo
+    Without this, pgrust refuses to start with
+    'invalid value for parameter "TimeZone": "UTC"'.
+
+(c) /etc/profile.d/pgsql18.sh puts /usr/pgsql-18/bin on PATH for all users.
+    PGDG installs psql/pgbench/pg_isready outside the default PATH; the audit
+    kit's run-oltp-rw.sh invokes "pgbench" unqualified and fails without this.
+
+-------------------------------------------------------------------------------
+8. ARM SWITCHING
+-------------------------------------------------------------------------------
+Only ONE server may run at a time: all four datadirs bind port 5432, and the
+box has 4 vCPU and 32 GB against a 16 GB shared_buffers setting.
+
+    /opt/audit/switch-arm.sh {ro-pgrust|ro-cpg|rw-pgrust|rw-cpg|stop|status}
+
+  * Requires root; it re-executes itself under "sudo -n" if you do not.
+  * It identifies what is running by DATADIR -- it looks for a live
+    postmaster.pid under each /data/<arm> -- never by program name.  Both
+    engines present as "postgres" in ps output, so a name-based guard would be
+    ambiguous.  "status" prints the arm, the pid, and the resolved
+    /proc/<pid>/exe so you can see WHICH BINARY is actually serving.
+  * Stopping escalates SIGINT (fast) -> 120 s -> SIGQUIT -> 60 s -> SIGKILL,
+    then sweeps stale pidfiles and confirms port 5432 is free.
+  * Starting raises the stack rlimit (for max_stack_depth) and nofile, drops to
+    the postgres user, and waits up to 180 s for pg_isready.
+  * Startup stderr goes to /data/logs/<arm>.log; the running server's own log
+    goes to <datadir>/log/ (PGDG's postgresql.conf.sample enables the logging
+    collector).
+
+Verified working from the client as user <audit-user> over ssh.
+
+-------------------------------------------------------------------------------
+9. SMOKE RUNS (path proofs -- NOT official readings)
+-------------------------------------------------------------------------------
+Run 2026-07-27 from the client via the audit kit's own runners, 60 s legs:
+
+  sysbench oltp_read_only, 32 threads, 60 s (after a 60 s discarded warmup)
+      pgrust   qps 78681.04   tps 4917.57   p99 16.12 ms   ignored errors 0
+      C 18.3   qps 62450.82   tps 3903.18   p99 21.89 ms   ignored errors 0
+
+  pgbench -M prepared -c 32 -j 8, 60 s (after a 30 s discarded warmup)
+      pgrust   tps 14393.96   latency avg 2.223 ms   failed transactions 0
+      C 18.3   tps 11729.05   latency avg 2.725 ms   failed transactions 0
+
+These are 60-second smokes on a ~300 GB / ~100 GB working set with a 60 s or
+30 s warmup.  They prove the client -> server -> arm-switch path works end to
+end.  They are far too short to be quoted as results.
+
+-------------------------------------------------------------------------------
+10. HEALTH AT HANDOVER
+-------------------------------------------------------------------------------
+  Server log scan, all four datadirs, whole preparation INCLUDING the smokes:
+      PANIC                 0
+      "panicked" (Rust)     0
+      backend crashes       0
+      out-of-disk failures  0
+      autovacuum worker deaths 0
+
+  ro-pgrust : 8 FATAL, 1 ERROR
+  ro-cpg    : 3 FATAL, 15 ERROR
+  rw-pgrust : 5 FATAL, 0 ERROR
+  rw-cpg    : 0 FATAL, 0 ERROR
+
+  Every one of those lines was classified; all are benign:
+    * "terminating connection due to administrator command" -- exactly one per
+      clean shutdown, emitted as fast shutdown closes a background connection.
+      This accounts for all of rw-pgrust's 5 and 6 of ro-pgrust's 8.
+    * 'role "root" does not exist' -- an early pg_isready readiness probe that
+      ran as root before the launcher was changed to pass -U postgres.  Two on
+      ro-pgrust, three on ro-cpg.  Cosmetic; the probe still detected
+      readiness correctly.
+    * "canceling autovacuum task" / "canceling statement due to user request"
+      (autovacuum context) -- autovacuum yielding to a conflicting CREATE INDEX
+      or explicit VACUUM.  Normal PostgreSQL behaviour.  15 on ro-cpg, 1 on
+      ro-pgrust.
+  Autovacuum workers are alive and have run on every table; no worker deaths.
+
+  All four servers are STOPPED at handover.
+
+-------------------------------------------------------------------------------
+11. CROSS-NODE SSH KEY FOR THE AUDIT RUNNERS
+-------------------------------------------------------------------------------
+The audit kit's run-oltp-ro.sh and run-oltp-rw.sh drive the benchmark from the
+client and switch server arms by ssh-ing to <audit-user>@<server-private-ip>.  That needs
+<audit-user> on the client to be able to reach <audit-user> on the server, so a
+DEDICATED ed25519 keypair was generated as <audit-user> ON the client
+(~/.ssh/id_ed25519) and its public half appended to <audit-user>'s
+authorized_keys ON the server.  It exists only to let the runners switch arms.
+No administrative key was copied to either box, and neither box holds AWS
+credentials, ~/.aws files, or an instance profile.
+
+===============================================================================
+end of record
+===============================================================================

@@ -1,0 +1,7 @@
+#!/bin/bash
+. "$(dirname "$0")/env.sh"
+pid=$(head -1 "$CB_DD/postmaster.pid" 2>/dev/null)
+[ -n "$pid" ] || exit 0
+kill -INT "$pid" 2>/dev/null || exit 0
+for i in $(seq 1 120); do kill -0 "$pid" 2>/dev/null || exit 0; sleep 0.5; done
+exit 0

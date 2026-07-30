@@ -1,0 +1,4 @@
+#!/bin/bash
+set -e
+. "$(dirname "$0")/env.sh"
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -t -c 'SELECT 1' >/dev/null

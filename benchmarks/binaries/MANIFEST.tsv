@@ -1,0 +1,29 @@
+# pgrust RC binary manifest — the trust anchor for update-binary.sh
+#
+# One row per publishable binary. update-binary.sh installs ONLY a binary whose
+# sha256 matches a row here, so a tampered, truncated or simply wrong download
+# cannot be installed silently. THE SHA256 IS THE TRUST ANCHOR AND IT IS
+# PERMANENT; the URL is a convenience and may expire.
+#
+# Adding a row is how we publish a build. If the fix you are waiting for is not
+# listed with a real sha256, it has not been published — do not accept a binary
+# for it from any source, including us.
+#
+# Columns, TAB separated:
+#   name         short handle you pass to update-binary.sh
+#   sha256       the trust anchor. 'PENDING-NOT-YET-PUBLISHED' = refuse.
+#   source_sha   pgrust-fast commit the binary was built from
+#   status       current | superseded | pending
+#   url          fetch URL, or '-' if none. MAY EXPIRE — see the note below.
+#   notes        free text
+#
+# ON URLs: our artifact store is private, so URLs here were time-limited
+# pre-signed links, issued directly to the auditor. They are redacted ('-')
+# in this public copy: pass your own source with --from PATH or --url URL.
+# The sha256 in this file still verifies whatever you fetch, so a missing
+# link costs you a round trip, never your ability to check our work.
+#
+# name	sha256	source_sha	status	url	notes
+rc1-pgo	70a473036bd78c299bc23ee63f2d16b65d790f19d4f00c8eab05b02cf68869b5	3e6cb16b1d22f6c754451dcc1f82c007934732fb	superseded	-	The originally preinstalled RC. dist-pgo. CRASHES on grouped MIN/MAX(text) at high repetition (GL-SINKCRASH-2). Superseded by rc1-sinkfix; kept so you can reproduce the crash and A/B against the fix.
+rc1-sinkfix	3efae04bdbdbae5b1e4619eca7678bbf872b3b5bf14543746e54610148b18c69	94f498ea6cd62097c9eaa1cb6118c113c5082612	superseded	-	The FROZEN RC, and the binary you should be measuring. Contains GL-SINKCRASH-1 + GL-SINKCRASH-2, which fix the grouped MIN/MAX(text) crash present in rc1-pgo. Built by fleet job pgrust-build-dist-pgo-1785174379-72ac-13953 with the SAME dist-pgo recipe as rc1-pgo (fresh PGO retrain, same corpus) so a cross-check against the superseded binary is apples-to-apples. 45,730,312 bytes, ELF aarch64.
+rc1-pmfix	a481d517c39b197c37f082fb4676d95309a23ddc3d7adf2e8f1ead4577389bdd	3409cb61620247795efc40076f1ca5e0675ea36b	current	-	rc1-sinkfix + the postmaster busy-spin fix (cherry-pick 3409cb6162 of 04e2dd9ba3). Fixes a 100% CPU epoll_pwait(...,0) spin that engaged on EVERY server after 60s of uptime (the GL-GANGWEDGE stall-watchdog early-wake in DetermineSleepTime was not gated on shutdown-in-progress). Critical for perf measurement: the spin steals a core in the background. SAME dist-pgo recipe as rc1-sinkfix. Built by fleet job pgrust-build-dist-pgo-1785352055-59c5-98399. 45,795,848 bytes, ELF aarch64. URL redacted in the public copy; sha256 is the permanent anchor.

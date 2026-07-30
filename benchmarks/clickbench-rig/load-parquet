@@ -1,0 +1,35 @@
+#!/bin/bash
+# PARQUET variant of ./load (admin-prepared 2026-07-28): identical PARLOAD
+# recipe, load source hits.parquet via COPY (FREEZE, FORMAT 'parquet') with the
+# parallel parquet decoder armed. Targets its own datadir; never touches the
+# delivered banks. Source file is KEPT for reruns.
+set -eu
+D="$(dirname "$0")"
+export PGDATA_CB=${PGDATA_CB:-/data2/cb-parquet/pgdata}
+. "$D/env.sh"
+HITS=${HITS_PARQUET:-/data2/parquet-stage/hits.parquet}
+PARLOAD_ENV="PGRUST_RUNTIME=1 PGRUST_COPY_PRESORT=counterid,eventdate,userid,eventtime,watchid PGRUST_PARALLEL_COPY=1 PGRUST_PARALLEL_COPY_SORT=1 PGRUST_PARALLEL_COPY_TRACE=1 PGRUST_PARALLEL_COPY_DOP=16 PGRUST_CBSTORE_FASTHASH=1 PGRUST_PARALLEL_COPY_STITCH_POOL=8 PGRUST_PARALLEL_COPY_FILL_V2=1 PGRUST_PARALLEL_COPY_FILL_PREFETCH=6 PGRUST_PARALLEL_COPY_SORT_MEM=512 PGRUST_COPY_RUNLZ4=1 PGRUST_ANALYZE_SAMPLE_POOL=12 PGRUST_ANALYZE_TRACE=1 PGRUST_CBSTORE_DICT_FRAMES=1 PGRUST_PARALLEL_COPY_SORT_MEMRUNS=${CB_MEMRUNS_MB:-15360} PGRUST_PARQUET_PARALLEL=1 PGRUST_PARQUET_BUDGET_MB=4096"
+[ -r "$HITS" ] || { echo "FATAL: $HITS unreadable"; exit 1; }
+"$D/stop" || true
+env RUST_MIN_STACK=33554432 RUST_BACKTRACE=1 \
+  PGRUST_TZDIR="$PGTZDIR" PGRUST_PGSHAREDIR="$PGSHARE" \
+  $PARLOAD_ENV \
+  "$CB_BIN" -D "$CB_DD" -k "$CB_SOCK" -p 5432 -c listen_addresses="" \
+  >>"$CB_DD/server.log" 2>&1 &
+for i in $(seq 1 300); do "$D/check" >/dev/null 2>&1 && break; sleep 1; done
+"$D/check" >/dev/null
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -t -c "DROP DATABASE IF EXISTS test"
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -t -c "CREATE DATABASE test"
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -v ON_ERROR_STOP=1 test -t < "$D/create.sql"
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -v ON_ERROR_STOP=1 test <<SQL
+BEGIN;
+TRUNCATE TABLE hits;
+COPY hits FROM '$HITS' WITH (FREEZE, FORMAT 'parquet', COERCE_EPOCH true);
+COMMIT;
+SQL
+"$PSQL" -h "$CB_SOCK" -p 5432 -U postgres -v ON_ERROR_STOP=1 test -t -c "VACUUM ANALYZE hits"
+"$D/stop"
+"$D/start"
+for i in $(seq 1 300); do "$D/check" >/dev/null 2>&1 && break; sleep 1; done
+"$D/check" >/dev/null
+sync
