@@ -154,14 +154,14 @@ fn main() {
     for d in ["/usr/lib", "/usr/local/lib", "/opt/homebrew/lib", triplet_dir.as_str()] {
         lib_dirs.push(PathBuf::from(d));
     }
-    // Static linking serves the Linux bench/dist pods (no runtime .so
-    // dependency on the shipped binary). On macOS prefer the dylib: the
-    // homebrew static archive needs an abseil closure that is not reliably
-    // resolvable (pkg-config is often absent), and nothing ships from a mac.
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let static_dir = (target_os == "linux")
-        .then(|| lib_dirs.iter().find(|d| d.join("libre2.a").exists()))
-        .flatten();
+    // Static linking serves shipped binaries on every OS (no runtime .so/.dylib
+    // dependency): prefer libre2.a wherever one is on the search path. Dev macs
+    // are unaffected — homebrew ships only the dylib, so they still fall
+    // through to dynamic linking; macOS release builds provide a static re2
+    // prefix via PKG_CONFIG_PATH (v0.2 macOS artifacts ship this way). When a
+    // static archive has an abseil closure (newer re2), it must be resolvable
+    // via pkg-config's static view or the link fails loudly.
+    let static_dir = lib_dirs.iter().find(|d| d.join("libre2.a").exists());
     match static_dir {
         Some(d) => {
             println!("cargo:rustc-link-search=native={}", d.display());
