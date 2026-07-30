@@ -1645,6 +1645,8 @@ mod c_locale_whitespace {
         assert!(bad.is_empty(), "{} cell(s) diverge from PostgreSQL 18.4:\n{}", bad.len(), bad.join("\n"));
     }
 
+}
+
 // Malformed array images whose header ndim field is outside 0..=MAXDIM: a
 // corrupt page or a crafted binary-format value, unreachable from any array
 // pgrust can construct (ArrayCheckBounds caps ndim at MAXDIM). Every one of
