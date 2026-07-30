@@ -1,9 +1,10 @@
 //! fmgr wrappers (`fc_*`) + `PSEUDOTYPES_BUILTINS` for fmgr-core. Registered:
 //! every ereport-only stub, void_in/void_out/void_recv/void_send,
 //! cstring_in/cstring_out (fn_extra scratch / cstring_result frame, the
-//! varlena unknownin precedent), pg_node_tree_out (varlena fc_textout
-//! delegate), pg_node_tree_send (varlena textsend delegate). Not registrable:
-//! cstring_recv/cstring_send (wire, no pg_proc callers) and the *_out/*_send
+//! varlena unknownin precedent), cstring_recv/cstring_send (binary wire:
+//! COPY BINARY and binary-format parameters/results), pg_node_tree_out
+//! (varlena fc_textout delegate), pg_node_tree_send (varlena textsend
+//! delegate). Not registrable: the *_out/*_send
 //! delegates whose target unit is unported
 //! (anyarray/anycompatiblearray/anyenum/anyrange/anycompatiblerange/
 //! anymultirange/anycompatiblemultirange).
@@ -124,6 +125,20 @@ pub fn fc_cstring_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_usize(buf.as_ptr() as usize))
 }
 
+pub fn fc_cstring_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let mcx = fcinfo.result_mcx();
+    Ok(cstring_result(crate::cstring_recv(mcx, buf)?))
+}
+
+pub fn fc_cstring_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of cstring_send is a non-null cstring (strict fn).
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::cstring_send(mcx, s)?))
+}
+
 pub fn fc_pg_node_tree_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     varlena::builtins::fc_textout(flinfo, fcinfo)
 }
@@ -176,6 +191,8 @@ pub const PSEUDOTYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(2313, "anyelement_out", 1, true, fc_anyelement_out),
     b(2398, "shell_in", 1, false, fc_shell_in),
     b(2399, "shell_out", 1, true, fc_shell_out),
+    b(2500, "cstring_recv", 1, true, fc_cstring_recv),
+    b(2501, "cstring_send", 1, true, fc_cstring_send),
     b(2502, "anyarray_recv", 1, true, fc_anyarray_recv),
     b(2777, "anynonarray_in", 1, true, fc_anynonarray_in),
     b(2778, "anynonarray_out", 1, true, fc_anynonarray_out),
