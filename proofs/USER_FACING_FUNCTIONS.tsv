@@ -239,10 +239,10 @@ oid	name	source_file	status	class	notes
 338	amvalidate	crates/backend/commands/opclasscmds/src/builtins.rs	excluded(state)	-	opclass catalog state
 339	poly_same	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	plist_same lib.rs:394 — pure point_eq/FPeq, NO arithmetic; per-n cells n=2..4 + n-mismatch plane. Host new geo-varlena (PolyRef) lane
 340	poly_contain	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	poly_contain_poly poly.rs:165; bbox-fail early plane (box_contain_box lib.rs:73 FPge/FPle) fast full-symbolic; lseg_inside_poly recursion = wall
-341	poly_left	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-342	poly_overleft	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-343	poly_overright	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-344	poly_right	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
+341	poly_left	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+342	poly_overleft	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+343	poly_overright	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+344	poly_right	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
 345	poly_contained	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	arg-swapped poly_contain_poly; same plane/wall split
 346	poly_overlap	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	poly.rs:82; disjoint-boundbox plane (box_ov lib.rs:66) fast; interior na*nb lseg_interpt = wall
 347	poly_in	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: CNF width)	-	io::poly_in io.rs:554
@@ -801,9 +801,9 @@ oid	name	source_file	status	class	notes
 1427	cidr_out	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
 1428	poly_contain_pt	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	point_inside lib.rs:306 + lseg_crossing lib.rs:341; add/sub + sign/FPzero arms green -> per-n cells (n=3,4) with z-multiply arm fenced (or one-symbolic-index vertex grid); full-symbolic z arm wall
 1429	pt_contained_poly	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	identical core, arg order; marginal minutes
-1430	path_isclosed	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-1431	path_isopen	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-1432	path_npoints	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
+1430	path_isclosed	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+1431	path_isopen	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+1432	path_npoints	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
 1433	path_close	crates/backend/utils/adt/geo/src/builtins.rs	blocked(slice-core: io::path_image takes Mcx+PgVec)	-	fc builtins.rs:656; unblock = thin &mut [u8] frame core, then per-n cells under mcx-stubs
 1434	path_open	crates/backend/utils/adt/geo/src/builtins.rs	blocked(slice-core: io::path_image)	-	same seam, closed flag byte differs
 1435	path_add	crates/backend/utils/adt/geo/src/builtins.rs	excluded(wall: CNF width)	-	total=a.n()+b.n() CODE-DERIVED length feeding path_image; wraparound guard path.rs:145 = only scalar slice
@@ -816,7 +816,7 @@ oid	name	source_file	status	class	notes
 1442	point_sub	crates/backend/utils/adt/geo/src/builtins.rs	proved(full, core; error lattice in-theorem)	fast	20-23s; wrapper-level by-ref, full f64 domain incl NaN/Inf/±0/subnormals unless sliced; proofs/geo-cmp ext; NAN shim pinned canonical (CBMC NAN model defect, native-replayed)
 1443	point_mul	crates/backend/utils/adt/geo/src/builtins.rs	proved(sym-index pow2plane + 10x10 grid)	slow	143s kissat + 45s; proofs/geo-cmp ext2 relaunch 2026-07-29
 1444	point_div	crates/backend/utils/adt/geo/src/builtins.rs	proved(sym-index pow2plane + 10x10 grid; div sqlstate parity via native differential)	slow	187s default + 77s; proofs/geo-cmp ext2 relaunch 2026-07-29
-1445	poly_npoints	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
+1445	poly_npoints	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
 1446	poly_box	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	poly.rs:241 returns stored boundbox; header field copy + by-ref BOX read + trusted POLYGON fence; release-gate
 1447	poly_path	crates/backend/utils/adt/geo/src/builtins.rs	blocked(slice-core: path_image)	-	fc builtins.rs:741 symbolic npts
 1448	box_poly	crates/backend/utils/adt/geo/src/builtins.rs	candidate	ladder	fc builtins.rs:835 -> poly_image with npts LITERALLY 4 — concrete output length, the one constructor outside the width wall; mcx-stubs; covers bound_box lib.rs:279
@@ -878,8 +878,8 @@ oid	name	source_file	status	class	notes
 1541	box_diagonal	crates/backend/utils/adt/geo/src/builtins.rs	proved(full-sym by-ref image, modulo allocator model)	slow	46-55s; proofs/geo-cmp ext2 relaunch 2026-07-29
 1542	box_center	crates/backend/utils/adt/geo/src/builtins.rs	proved(FULL domain at core — /2.0 power-of-two divide provable; + concrete error spots)	fast	84s default solver, calibration tier; proofs/geo-cmp
 1543	circle_center	crates/backend/utils/adt/geo/src/builtins.rs	proved(full, core; wrapper ride = result-mcx palloc)	fast	0.03s; wrapper-level by-ref, full f64 domain incl NaN/Inf/±0/subnormals unless sliced; proofs/geo-cmp ext; NAN shim pinned canonical (CBMC NAN model defect, native-replayed)
-1545	path_npoints	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-1556	poly_npoints	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
+1545	path_npoints	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+1556	poly_npoints	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
 1564	bit_in	crates/backend/utils/adt/varbit/src/lib.rs	proved(bits_in cells len 0/3/6 x bare/b/x forms, literal first byte pins parse form; typmod Ok/mismatch/truncation planes; sqlstates 22026/22001/22P02/54000; hex-too-long arm outside 6-char cap — bounds)	slow	71-100s release-gate; proofs/varbit-rows relaunch 2026-07-29 (re-derived)
 1565	bit_out	crates/backend/utils/adt/varbit/src/lib.rs	proved(bits_out cells bitlen 0/12/16, full output incl NUL)	slow	152-164s release-gate; proofs/varbit-rows relaunch 2026-07-29 (re-derived)
 1569	like	crates/backend/utils/adt/like/src/builtins.rs	excluded(engine)	-	LIKE matcher engine
@@ -1510,10 +1510,10 @@ oid	name	source_file	status	class	notes
 2563	box_overbelow	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 domain incl NaN payloads/±Inf/±0/subnormals; EPSILON fuzzy forms in-theorem; wrapper-level by-ref)	fast	0.8-30s; proofs/geo-cmp
 2564	box_overabove	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 domain incl NaN payloads/±Inf/±0/subnormals; EPSILON fuzzy forms in-theorem; wrapper-level by-ref)	fast	0.8-30s; proofs/geo-cmp
 2565	box_above	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64 domain incl NaN payloads/±Inf/±0/subnormals; EPSILON fuzzy forms in-theorem; wrapper-level by-ref)	fast	0.8-30s; proofs/geo-cmp
-2566	poly_below	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-2567	poly_overbelow	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-2568	poly_overabove	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
-2569	poly_above	crates/backend/utils/adt/geo/src/builtins.rs	untriaged		
+2566	poly_below	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+2567	poly_overbelow	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+2568	poly_overabove	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
+2569	poly_above	crates/backend/utils/adt/geo/src/builtins.rs	in-progress		geopoly lane 2026-07-30
 2578	gist_box_consistent	crates/backend/access/gist/gistproc/src/lib.rs	candidate	fast	gist_box_leaf_consistent :144 + rtree_internal_consistent :165; 12-strategy lattice, wrapper-level, trace parity on strategy arm
 2580	jsonb_float8	crates/backend/utils/adt/jsonb/src/builtins.rs	candidate	ladder	fc builtins.rs:781 -> io::extract_scalar io.rs:401 + numeric_float8; FENCE: prove extraction+cast-error class + NaN/±Inf lattice; finite arm walls
 2581	gist_box_penalty	crates/backend/access/gist/gistproc/src/lib.rs	candidate	ladder	box_penalty :138 -> rt_box_size :119 (53-bit multiply); zero-plane + boundary grid + f64->f32 cast; NaN/inf legs cheap
