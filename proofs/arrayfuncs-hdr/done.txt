@@ -1,0 +1,17 @@
+proofs::eq_array_lower_n0 VERIFICATION:- SUCCESSFUL Verification Time: 83.74334s
+proofs::eq_array_lower_n2 VERIFICATION:- SUCCESSFUL Verification Time: 182.97789s
+proofs::eq_array_lower_n6 VERIFICATION:- SUCCESSFUL Verification Time: 169.82755s
+proofs::eq_array_length_n0 VERIFICATION:- SUCCESSFUL Verification Time: 101.82192s
+proofs::eq_array_length_n1 VERIFICATION:- SUCCESSFUL Verification Time: 173.77287s
+proofs::eq_array_length_n2 VERIFICATION:- SUCCESSFUL Verification Time: 156.31763s
+proofs::eq_array_upper_n1 VERIFICATION:- SUCCESSFUL Verification Time: 158.9923s
+proofs::eq_array_upper_n6 VERIFICATION:- SUCCESSFUL Verification Time: 150.72281s
+proofs::eq_array_cardinality_n1 VERIFICATION:- SUCCESSFUL Verification Time: 152.28229s
+proofs::eq_array_cardinality_n6 TIMEOUT-OR-ERROR 
+proofs::eq_array_ndims VERIFICATION:- SUCCESSFUL Verification Time: 79.042786s
+proofs::eq_array_dims_nullplane VERIFICATION:- SUCCESSFUL Verification Time: 67.57091s
+proofs::control_array_lower_reqdim_skew_must_fail VERIFICATION:- FAILED Verification Time: 91.420815s
+proofs::eq_array_length_n6 VERIFICATION:- SUCCESSFUL Verification Time: 160.96971s
+proofs::eq_array_upper_n0 VERIFICATION:- SUCCESSFUL Verification Time: 70.34617s
+proofs::eq_array_upper_n2 VERIFICATION:- SUCCESSFUL Verification Time: 139.97308s
+proofs::eq_array_cardinality_n0 VERIFICATION:- SUCCESSFUL Verification Time: 68.675s
