@@ -15,7 +15,7 @@ from collections import OrderedDict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NODES_SRC = os.path.join(HERE, "../../../_support/types/nodes/src")
-C_ROOT = sys.argv[1] if len(sys.argv) > 1 else "/Users/malisper/workspace/work/pgrust/postgres-18.3"
+C_ROOT = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PG_C_ROOT", "./postgres-18.3")
 C_NODES = os.path.join(C_ROOT, "src/backend/nodes")
 
 MODULES = ["primnodes", "parsenodes", "rawnodes", "plannodes"]
