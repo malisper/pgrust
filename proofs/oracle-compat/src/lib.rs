@@ -1350,7 +1350,11 @@ mod proofs {
         /// (fixed-length result — scalar-verdict class, name-cmp
         /// precedent). Symbolic over both encodings (no mb dispatch on
         /// this arm). fast.
-        #[kani::unwind(11)]
+        /// unwind 66: the NAMEDATALEN(64)-iteration result-compare loop is
+        /// the harness floor (pre-build unwind(11) FAILED its unwinding
+        /// assertion on first solve, 2026-07-30 — harness defect, not a
+        /// divergence).
+        #[kani::unwind(66)]
         fn eq_bpchar_name_short() {
             let enc = if kani::any() { PG_UTF8 } else { PG_LATIN1 };
             install_vc(enc);
