@@ -18,7 +18,7 @@ oid	name	source_file	status	class	notes
 50	xidin	crates/backend/utils/adt/scalar/src/builtins.rs	proved(same core as oidin)	fast	proofs/misc-ops
 51	xidout	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
 52	cidin	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
-53	cidout	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
+53	cidout	crates/backend/utils/adt/scalar/src/builtins.rs	proved([0,1e7) bands + spots d8-d10 incl u32::MAX; remainder sloped wall)	fast	wrapper-level (fc_cidout TLS scratch + NUL in-theorem); C ref = pg_ultoa_n SPEC-ANCHOR (C cidout is snprintf %u, no CBMC model); 5 bands 4.2-11.4s kissat + spots 2.2s + union coverage; wave5 pre-built, first solve 2026-07-30; proofs/scalar-misc
 54	oidvectorin	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
 55	oidvectorout	crates/backend/utils/adt/scalar/src/builtins.rs	untriaged		
 56	boollt	crates/backend/utils/adt/bool/src/builtins.rs	proved(full-bool2)	fast	proofs/bool; <1s; kissat
