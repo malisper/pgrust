@@ -712,6 +712,7 @@ const updatesFormEl = document.getElementById('updates-form');
 const updatesEmailEl = document.getElementById('updates-email');
 const updatesSubmitEl = document.getElementById('updates-submit');
 const updatesStatusEl = document.getElementById('updates-status');
+const updatesSuccessEl = document.getElementById('updates-success');
 let updatesPlacement = 'direct';
 let updatesReturnFocus = null;
 
@@ -720,7 +721,10 @@ function openUpdatesDialog(placement, trigger) {
   updatesReturnFocus = trigger || document.activeElement;
   updatesDialogEl.hidden = false;
   captureAnalytics('wasm_demo_updates_opened', { placement: updatesPlacement });
-  window.setTimeout(() => updatesEmailEl.focus(), 0);
+  window.setTimeout(() => {
+    if (updatesFormEl.hidden) updatesSuccessEl.focus();
+    else updatesEmailEl.focus();
+  }, 0);
 }
 
 function closeUpdatesDialog() {
@@ -764,9 +768,9 @@ updatesFormEl.addEventListener('submit', async (event) => {
     if (!response.ok || result?.success === false) {
       throw new Error(result?.message || 'Signup failed. Please try again.');
     }
-    updatesFormEl.dataset.complete = 'true';
-    updatesStatusEl.dataset.state = 'success';
-    updatesStatusEl.textContent = 'Check your inbox to confirm your subscription.';
+    updatesFormEl.hidden = true;
+    updatesSuccessEl.hidden = false;
+    updatesSuccessEl.focus();
     captureAnalytics('wasm_demo_updates_succeeded', { placement: updatesPlacement });
     updatesFormEl.reset();
   } catch (error) {

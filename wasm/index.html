@@ -219,8 +219,42 @@
   }
   .updates-status { min-height: 18px; color: #9fb89a; }
   .updates-status[data-state="error"] { color: #e58073; }
-  .updates-form[data-complete="true"] .updates-form-row,
-  .updates-form[data-complete="true"] .updates-note { display: none; }
+  .updates-success {
+    margin-top: 18px;
+    padding: 18px;
+    background: rgba(224,121,74,0.09);
+    border: 1px solid rgba(224,121,74,0.48);
+    border-left: 3px solid var(--accent, #e0794a);
+    border-radius: 6px;
+    outline: none;
+  }
+  .updates-success[hidden] { display: none; }
+  .updates-success-eyebrow {
+    color: var(--accent, #e0794a);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .updates-success-title {
+    margin: 5px 0 7px;
+    color: #f0f2f5;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 18px;
+    line-height: 1.3;
+  }
+  .updates-success-copy {
+    margin: 0;
+    color: #c6ccd6;
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .updates-success-hint {
+    margin: 10px 0 0;
+    color: #8f98a5;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
   @keyframes boot-spin {
     to { transform: rotate(360deg); }
   }
@@ -472,6 +506,12 @@
       <p class="updates-note">Confirm by email. Unsubscribe anytime.</p>
       <p id="updates-status" class="updates-status" role="status" aria-live="polite"></p>
     </form>
+    <section id="updates-success" class="updates-success" role="status" aria-live="polite" tabindex="-1" hidden>
+      <div class="updates-success-eyebrow">One more step</div>
+      <h3 class="updates-success-title">Check your inbox</h3>
+      <p class="updates-success-copy">Open the confirmation email from pgrust and click the confirmation link. You won't receive updates until you confirm.</p>
+      <p class="updates-success-hint">Can't find it? Check your spam or promotions folder.</p>
+    </section>
   </section>
 </div>
 
