@@ -73,3 +73,27 @@ Harness state (proofs/hash-rows/src/lib.rs, pinned-model pattern):
     (sign-extending) behavior against the vendored hash core
     (pg_hashint4(v as i32)) — 0.2s/5.4s local. These pin what pgrust DOES,
     not what is ratified; re-point them if the ruling picks (b).
+
+## ADDENDUM — v0.2 lineage (CI-decode lane, 2026-07-30)
+
+The section-2 description of the shipped arm is STALE on the new lineage.
+At main cbaa2c7117 (v0.2 tree), fc_hashchar / fc_hashcharextended
+(crates/backend/utils/adt/int/src/builtins.rs:259/265) ship the
+ZERO-EXTENDING arm (`as_char() as u8 as u32`) — i.e. the tree has de facto
+taken option (b): pgrust now MATCHES C Postgres on Linux-aarch64 (the
+deployment platform) and diverges from C PG on signed-char hosts
+(macOS, Linux-x86-64) for the 128 high-bit chars.
+
+Consequences applied this lane:
+- model_hashchar_signed_full / model_hashcharextended_signed_full were
+  pinning the OLD lineage's behavior and FAILED against v0.2 shipped code
+  (locally reproduced, 0.19s). Re-pointed to
+  model_hashchar_unsigned_full / model_hashcharextended_unsigned_full
+  (pg_hashint4(zext v)); both PROVED (0.23s / 2.5s).
+- eq_hashchar/_extended keep the v >= 0 portable-plane fence — they are
+  green on any suite host regardless of the host's char signedness.
+- The 6-row CI cluster cluster verdict stands: 4 char rows = harness-shim
+  widening artifact (fixed; all 4 re-proved 0.42-0.97s on 2026-07-30);
+  2 hash rows = the KNOWN C-PG char-signedness platform split (upstream
+  report class), NOT a distinct pgrust defect. On v0.2 the divergence
+  direction is vs signed-char C PG hosts only.
