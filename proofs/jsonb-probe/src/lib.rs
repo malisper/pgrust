@@ -1865,6 +1865,290 @@ mod proofs {
         eq_jsonb_int8_scalar_kinds[7]: cell_int8_scalar_kinds();
     }
 
+    // ---- 3217 jsonb_extract_path (#>): path-resolution verdict ----
+    //
+    // Rust target: shipped getfield::resolve_path (the jsonb_get_element
+    // walk factored out; materialization + the fc-level null-element
+    // pre-screen of get_jsonb_path_all stay in the tested tier).  C:
+    // c/pg_jsonb_path.c pgp_get_element (verbatim walk; strtol -> total
+    // C-locale model, SHIM P3).  Path-element fences: no NUL bytes (SQL
+    // text cannot contain them) and no 0x0B in the EQ cells — C-locale
+    // strtol skips '\v' as whitespace while Rust trim_ascii_start() does
+    // NOT (u8::is_ascii_whitespace excludes VT): that is a REAL divergence
+    // candidate, carried by the standing witness harness
+    // witness_path_vt_subscript below and recorded in the ledger.
+
+    extern "C" {
+        fn pgp_path_take_abort() -> c_int;
+        fn pgp_get_element(
+            c: *const u8,
+            paths: *const *const u8,
+            plens: *const c_int,
+            npath: c_int,
+            vtype: *mut c_int,
+            vdata: *mut *const u8,
+            vlen: *mut c_int,
+            vbool: *mut c_int,
+        ) -> c_int;
+    }
+
+    fn run_get_element(img: &[u8], path: &[&[u8]]) -> (c_int, c_int, *const u8, c_int, c_int) {
+        let mut ptrs = [core::ptr::null::<u8>(); 2];
+        let mut lens = [0 as c_int; 2];
+        for (i, p) in path.iter().enumerate() {
+            ptrs[i] = p.as_ptr();
+            lens[i] = p.len() as c_int;
+        }
+        let (mut vtype, mut vlen, mut vbool): (c_int, c_int, c_int) = (0, 0, 0);
+        let mut vdata: *const u8 = core::ptr::null();
+        let c = unsafe {
+            pgp_get_element(
+                img.as_ptr(),
+                ptrs.as_ptr(),
+                lens.as_ptr(),
+                path.len() as c_int,
+                &mut vtype,
+                &mut vdata,
+                &mut vlen,
+                &mut vbool,
+            )
+        };
+        assert!(unsafe { pgp_path_take_abort() } == 0);
+        (c, vtype, vdata, vlen, vbool)
+    }
+
+    fn check_get_element(img: &[u8], path: &[&[u8]]) {
+        let (c, vtype, vdata, vlen, vbool) = run_get_element(img, path);
+        match adt_jsonb::getfield::resolve_path(img, path) {
+            adt_jsonb::getfield::PathVerdict::Null => assert!(c == 0),
+            adt_jsonb::getfield::PathVerdict::Input => assert!(c == 2),
+            adt_jsonb::getfield::PathVerdict::Item(it) => {
+                assert!(c == 1);
+                assert_item_matches(1, vtype, vdata, vlen, vbool, Some(it));
+            }
+        }
+    }
+
+    /// Symbolic path-element text, fenced: no NUL (SQL text), no VT (the
+    /// known strtol-whitespace divergence, witnessed separately).
+    fn any_path_elem(bytes: &mut [u8; 8], cap: usize) -> usize {
+        let len: usize = kani::any();
+        kani::assume(len <= cap);
+        for b in bytes.iter_mut().take(cap) {
+            let v: u8 = kani::any();
+            kani::assume(v != 0 && v != 0x0b);
+            *b = v;
+        }
+        len
+    }
+
+    fn cell_path_obj_n2_len1() {
+        unsafe { pgp_reset() };
+        let keys: [Key; MAXN] = [any_key_len(1), any_key_len(2), any_key_len(2)];
+        let vals: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_object(&keys, &vals, 2);
+        let probe = any_key();
+        check_get_element(&img.0[..], &[&probe.bytes[..probe.len]]);
+    }
+
+    /// Per-length case split (assumes never fold; literal len prunes the
+    /// parse circuit).  hoff_pin: 0 symbolic, 1/2 pinned length/offset form.
+    fn cell_path_arr_sub_len(sl: usize, hoff_pin: u8) {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        set_hoff_pin(hoff_pin);
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        set_hoff_pin(0);
+        let mut sub = [0u8; 8];
+        for b in sub.iter_mut().take(sl) {
+            let v: u8 = kani::any();
+            kani::assume(v != 0 && v != 0x0b);
+            *b = v;
+        }
+        check_get_element(&img.0[..], &[&sub[..sl]]);
+    }
+
+    /// Subscript-parse regime witnesses for the array cell (hoisted).
+    fn cover_path_arr_subscr() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        let mut sub = [0u8; 8];
+        let sl = any_path_elem(&mut sub, 4);
+        let (c, _, _, _, _) = run_get_element(&img.0[..], &[&sub[..sl]]);
+        kani::cover!(c == 1 && sub[0] == b'-'); // negative subscript hit
+        kani::cover!(c == 1 && sub[0] == b' '); // leading-whitespace parse
+        kani::cover!(c == 1 && sub[0] == b'+'); // explicit plus sign
+        kani::cover!(c == 0 && sl == 2 && sub[0] == b'1'); // trailing junk null
+        kani::cover!(c == 0 && sl == 0); // empty string null
+    }
+
+    /// i32-overflow subscript lane (11 symbolic digits > INT_MAX: C strtoint
+    /// flags ERANGE, Rust flags the i32 range check — both null).
+    fn cell_path_arr_bigsub() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        let mut sub = [0u8; 12];
+        let first: u8 = kani::any();
+        kani::assume(first >= b'1' && first <= b'9');
+        sub[0] = first;
+        for b in sub.iter_mut().skip(1) {
+            let v: u8 = kani::any();
+            kani::assume(v.is_ascii_digit());
+            *b = v;
+        }
+        let (c, _, _, _, _) = run_get_element(&img.0[..], &[&sub[..]]);
+        assert!(c == 0);
+        match adt_jsonb::getfield::resolve_path(&img.0[..], &[&sub[..]]) {
+            adt_jsonb::getfield::PathVerdict::Null => {}
+            _ => panic!("11-digit subscript must be null on both sides"),
+        }
+    }
+
+    fn cell_path_scalar_root_len1() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(true), any_scalar(true), any_scalar(true)];
+        let img: Img<CMPCAP> = build_array(&elems, 1, true);
+        let mut sub = [0u8; 8];
+        let sl = any_path_elem(&mut sub, 2);
+        check_get_element(&img.0[..], &[&sub[..sl]]);
+    }
+
+    fn cell_path_empty_arr() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_array(&elems, 1, false);
+        check_get_element(&img.0[..], &[]);
+    }
+
+    fn cell_path_empty_scalar() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(true), any_scalar(true), any_scalar(true)];
+        let img: Img<CMPCAP> = build_array(&elems, 1, true);
+        check_get_element(&img.0[..], &[]);
+    }
+
+    /// Depth-2 walk: outer array [ <child array>, bool ], path len 2 —
+    /// first subscript must resolve the container element, second recurses.
+    fn cell_path_nested_len2() {
+        unsafe { pgp_reset() };
+        let img: Img<CMPCAP> = build_array_nested(2, 2, false);
+        let mut s1 = [0u8; 8];
+        let l1 = any_path_elem(&mut s1, 2);
+        let mut s2 = [0u8; 8];
+        let l2 = any_path_elem(&mut s2, 2);
+        check_get_element(&img.0[..], &[&s1[..l1], &s2[..l2]]);
+    }
+
+    per_n! {
+        eq_path_obj_n2_len1[6]: cell_path_obj_n2_len1();
+        eq_path_arr_sub_len1_lf[8]: cell_path_arr_sub_len(1, 1);
+        eq_path_arr_sub_len1_of[8]: cell_path_arr_sub_len(1, 2);
+        eq_path_arr_sub_len2_lf[8]: cell_path_arr_sub_len(2, 1);
+        eq_path_arr_sub_len2_of[8]: cell_path_arr_sub_len(2, 2);
+        eq_path_arr_sub_len3_lf[8]: cell_path_arr_sub_len(3, 1);
+        eq_path_arr_sub_len0[8]: cell_path_arr_sub_len(0, 1);
+        cover_path_arr_subscr_regimes[8]: cover_path_arr_subscr();
+        eq_path_arr_bigsub[14]: cell_path_arr_bigsub();
+        eq_path_scalar_root_len1[6]: cell_path_scalar_root_len1();
+        eq_path_empty_arr[6]: cell_path_empty_arr();
+        eq_path_empty_scalar[7]: cell_path_empty_scalar();
+        eq_path_nested_len2[10]: cell_path_nested_len2();
+    }
+
+    // ---- 3272/3274 jsonb_build_array_noargs / jsonb_build_object_noargs --
+    //
+    // Constant empty-container images through the SHIPPED build pipeline
+    // (JsonbPush + convert_to_jsonb) vs the verbatim C writer subset
+    // (c/pg_jsonb_build.c).  Full varlena image byte-compared.  Rust
+    // allocation via token ctx + mcx stubs (allocation strategy out of
+    // scope); fcinfo/variadic-extraction stays in the tested tier.
+
+    extern "C" {
+        fn pgp_build_take_abort() -> c_int;
+        fn pgp_build_array_noargs(out: *mut u8, outcap: c_int) -> c_int;
+        fn pgp_build_object_noargs(out: *mut u8, outcap: c_int) -> c_int;
+    }
+
+    fn check_build_noargs(object: bool) {
+        let mut out = [0u8; 16];
+        let clen = unsafe {
+            if object {
+                pgp_build_object_noargs(out.as_mut_ptr(), 16)
+            } else {
+                pgp_build_array_noargs(out.as_mut_ptr(), 16)
+            }
+        };
+        assert!(unsafe { pgp_build_take_abort() } == 0);
+        let ctx: &'static mcx::MemoryContext = token_ctx();
+        let r = if object {
+            adt_jsonb::tojsonb::jsonb_build_object_worker(ctx.mcx(), &[], &[], &[], false, false)
+        } else {
+            adt_jsonb::tojsonb::jsonb_build_array_worker(ctx.mcx(), &[], &[], &[], false)
+        };
+        let v = match r {
+            Ok(v) => v,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("noargs builder errored");
+            }
+        };
+        assert!(clen >= 0);
+        assert!(clen as usize == v.len());
+        let vs: &[u8] = &v;
+        for i in 0..16 {
+            if i < vs.len() {
+                assert!(out[i] == vs[i]);
+            }
+        }
+        core::mem::forget(v);
+    }
+
+    macro_rules! build_case {
+        ($($name:ident[$unwind:literal]: $check:ident($($arg:expr),*);)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($unwind)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(mcx::vec_with_capacity_in, mcx_stubs::stub_vec_with_capacity_in)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $name() { $check($($arg),*); }
+        )*};
+    }
+
+    build_case! {
+        eq_build_array_noargs[8]: check_build_noargs(false);
+        eq_build_object_noargs[8]: check_build_noargs(true);
+    }
+
+    /// STANDING DIVERGENCE WITNESS (must PASS — it asserts the two sides
+    /// DIFFER): subscript text "\x0b1" over a 2-element array.  C-locale
+    /// strtol (glibc) skips '\v' as whitespace and parses index 1; Rust's
+    /// trim_ascii_start() does not trim VT, the parse fails, and the walk
+    /// yields SQL NULL.  Recorded as divergence(candidate) on oid 3217;
+    /// target-platform ground-truth replay owed before any filing.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn witness_path_vt_subscript() {
+        unsafe { pgp_reset() };
+        // fully concrete instance (a witness needs ONE case): false,false
+        // elements, length-form JEntrys.
+        let e = Scalar { kind: 1, sbytes: [0u8; VL], slen: 0 };
+        let elems: [Scalar; MAXN] = [e, e, e];
+        set_hoff_pin(1);
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        set_hoff_pin(0);
+        let sub: [u8; 2] = [0x0b, b'1'];
+        let (c, _, _, _, _) = run_get_element(&img.0[..], &[&sub[..]]);
+        assert!(c == 1); // C: '\v' skipped, index 1 found
+        match adt_jsonb::getfield::resolve_path(&img.0[..], &[&sub[..]]) {
+            adt_jsonb::getfield::PathVerdict::Null => {} // Rust: parse fails
+            _ => panic!("Rust side unexpectedly parsed a VT-prefixed subscript"),
+        }
+    }
+
     /// Negative control (DEFAULT solver, MUST FAIL): C reads a
     /// weight-skewed image (weight+1 in the header the C side sees) on a
     /// plane where the value parity is otherwise provable — the int8 cell

@@ -26,12 +26,28 @@ timeout 450 cargo kani -Z c-ffi -Z stubbing --harness "$h" "$@" > $log 2>&1 &
 PID=$!
 memkill=0
 sleep 15
+# descendant-tree RSS only (never a path-pattern grep: other lanes compile
+# this crate too and their rustc false-fires a pattern watchdog — measured)
+tree_rss() {
+  local pids=$1 out=0 new
+  while [ -n "$pids" ]; do
+    out=$((out + $(ps -o rss= -p ${=pids} 2>/dev/null | awk '{s+=$1} END {print s+0}')))
+    new=$(pgrep -P ${pids// /,} 2>/dev/null | tr '\n' ' ')
+    pids=$new
+  done
+  echo $out
+}
 while kill -0 $PID 2>/dev/null; do
-  rss=$(ps axo rss=,command= | grep -E "proof_jsonb_probe|jsonb-probe" | grep -vE "grep|run-w2" | awk '{s+=$1} END {print s+0}')
+  rss=$(tree_rss $PID)
   if [ "${rss:-0}" -gt 6291456 ]; then
     memkill=1
-    kill -- -$PID 2>/dev/null || kill $PID 2>/dev/null
-    pkill -f "proof_jsonb_probe.*\.out" 2>/dev/null
+    # own tree only (never pkill by name on a shared box)
+    victims=$(pgrep -P $PID | tr '\n' ' '); all="$PID"
+    while [ -n "$victims" ]; do
+      all="$all $victims"
+      victims=$(pgrep -P ${victims// /,} 2>/dev/null | tr '\n' ' ')
+    done
+    kill -- -$PID 2>/dev/null; kill ${=all} 2>/dev/null
     break
   fi
   sleep 15
