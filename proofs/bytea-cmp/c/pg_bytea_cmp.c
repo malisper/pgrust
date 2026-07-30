@@ -635,3 +635,19 @@ pg_byteain_esc(const char *inputText, unsigned char *out, int *outlen, int *err)
 
 	return 0;					/* shim: PG_RETURN_BYTEA_P(result) */
 }
+
+/* byteasend (REL_18_STABLE bytea_sendrecv section, varlena.c ~line 445):
+ *   bytea *vlena = PG_GETARG_BYTEA_P_COPY(0);
+ *   PG_RETURN_BYTEA_P(vlena);
+ * The wire image IS the detoasted payload (identity copy). Shim: the
+ * P_COPY copy -> caller buffer; header carried as the same integer both
+ * sides (asserted at harness level as varsize == VARHDRSZ + len). */
+int
+pg_byteasend(const unsigned char *d, int len, unsigned char *out)
+{
+	int			i;
+
+	for (i = 0; i < len; i++)	/* shim: PG_GETARG_BYTEA_P_COPY's memcpy */
+		out[i] = d[i];
+	return 0;					/* shim: PG_RETURN_BYTEA_P(vlena) */
+}

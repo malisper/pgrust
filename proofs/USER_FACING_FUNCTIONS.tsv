@@ -1385,7 +1385,7 @@ oid	name	source_file	status	class	notes
 2410	int2vectorrecv	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 2411	int2vectorsend	crates/backend/utils/adt/arrayfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
 2412	bytearecv	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-2413	byteasend	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	bytea::byteasend -> varlena::textsend lib.rs:502; EXPLICIT-length copy, send precedent green; mcx-stubs + fmt stub + unwind
+2413	byteasend	crates/backend/utils/adt/varlena/src/builtins.rs	proved(identity wire image, cells len 0/8 fully symbolic content + varsize parity; modulo static-buffer allocator model)	ladder	72.8/76.9s default; eq_byteasend_l0/_l8; C = PG_GETARG_BYTEA_P_COPY identity; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 2414	textrecv	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	builtins.rs:279 arg_stringinfo + pg_verify_mbstr; re-opens on slice-core refactor
 2415	textsend	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	varlena::textsend lib.rs:502 — canonical send-family member; prove first, siblings minutes each
 2416	unknownrecv	crates/backend/utils/adt/varlena/src/builtins.rs	excluded(blocked: recv ABI pointer-datum)	-	lib.rs:522 + trailing-NUL push

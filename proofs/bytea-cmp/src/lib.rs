@@ -875,6 +875,59 @@ mod proofs {
         buf[0] = b'\\'; // LITERAL form selector
     });
 
+    // ---- byteasend (ledger 2413) ----
+    // C is an identity copy of the detoasted payload (the wire image IS
+    // the payload); Rust rebuilds the image via image_with_header +
+    // vec_append_bytes. Literal-length cells per the derived-length-copy
+    // law; fully symbolic content.
+
+    extern "C" {
+        fn pg_byteasend(d: *const u8, len: c_int, out: *mut u8) -> c_int;
+    }
+
+    macro_rules! byteasend_cell {
+        ($harness:ident, $w:expr) => {
+            #[kani::proof]
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let buf: [u8; 8] = kani::any();
+                let len: usize = $w; // LITERAL cell
+                let mut cimg = [0u8; 8];
+                unsafe { pg_byteasend(buf.as_ptr(), len as c_int, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-bytea-send");
+                match varlena::bytea::byteasend(ctx.mcx(), &buf[..len]) {
+                    Ok(v) => {
+                        assert!(v.varsize() == varlena::VARHDRSZ + len);
+                        let d = v.data();
+                        assert!(d.len() == len);
+                        let mut i = 0;
+                        while i < len {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Err(e) => {
+                        core::mem::forget(e);
+                        // unreachable under the mcx-stub allocator
+                        assert!(false);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    byteasend_cell!(eq_byteasend_l0, 0);
+    byteasend_cell!(eq_byteasend_l8, 8);
+
     // ---- wave negative control: rig is non-vacuous ----
     // C sees a one-shorter payload length: at n == len-1 C raises 2202E
     // while Rust returns Ok — MUST FAIL with a decodable counterexample.
