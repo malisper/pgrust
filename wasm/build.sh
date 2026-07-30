@@ -26,7 +26,7 @@
 #   PGRUST_WASM_PROFILE=wasm-release wasm/wasm-build.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
 ASSETS="${PGRUST_ASSETS:-$HERE/assets}"
 mkdir -p "$ASSETS"
 
