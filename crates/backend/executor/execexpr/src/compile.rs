@@ -2529,7 +2529,7 @@ fn init_array_expr<'mcx>(
 
     Ok(Step::ArrayExprStep {
         elems,
-        nelems: nelems as u16,
+        nelems: nelems as u32,
         frame: frame_ix,
         elmtype: arr.element_typeid,
         elmlen,
@@ -3303,7 +3303,7 @@ fn init_row_expr<'mcx>(
             .write(core::mem::transmute::<TupleDescData<'mcx>, TupleDescData<'static>>(desc));
     }
 
-    Ok(Step::RowExprStep { elems, nelems: nelems as u16, frame: frame_ix, desc: desc_ptr, out })
+    Ok(Step::RowExprStep { elems, nelems: nelems as u32, frame: frame_ix, desc: desc_ptr, out })
 }
 
 // C ExecInitExprRec T_JsonConstructorExpr (execExpr.c:2379): args evaluate
@@ -4006,7 +4006,7 @@ fn init_minmax<'mcx>(
     Ok(Step::MinMax {
         call,
         slots,
-        nelems: nelems as u16,
+        nelems: nelems as u32,
         least: mm.op == ::types_nodes::primnodes::MinMaxOp::IS_LEAST,
         out,
     })

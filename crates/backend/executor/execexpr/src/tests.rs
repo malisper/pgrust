@@ -1616,6 +1616,68 @@ fn array_expr_builds_array_consumable_by_saop() {
     });
 }
 
+/// ArrayExprStep.nelems was u16, so an ARRAY[] literal with 65536 elements
+/// truncated to 0 and silently evaluated to an EMPTY array — no error, just a
+/// wrong answer (found by pgjdbc's 64K-binds test; `array_length(...)` came
+/// back NULL against pgrust and 65536 against C). C's execExpr.h keeps this
+/// count in an `int`, so there is no 16-bit ceiling to honour. Walk the
+/// boundary: 65535 was already correct, 65536/65537 are the regression.
+#[test]
+fn array_expr_element_count_survives_the_16_bit_boundary() {
+    for n in [65535usize, 65536, 65537] {
+        with_mcx(|mcx| {
+            let mut elems = NodeList::make1(mcx, mk_int4_const(mcx, Some(1))).unwrap();
+            for _ in 1..n {
+                elems.lappend(mcx, mk_int4_const(mcx, Some(1))).unwrap();
+            }
+            let ae = Node::mk(
+                mcx,
+                ::types_nodes::ArrayExpr {
+                    array_typeid: INT4ARRAYOID,
+                    array_collid: 0,
+                    element_typeid: INT4OID,
+                    elements: elems,
+                    multidims: false,
+                    list_start: -1,
+                    list_end: -1,
+                    location: -1,
+                },
+            )
+            .unwrap();
+            let mut state = exec_init_expr(mcx, Some(ae), ParamBind::NONE).unwrap().unwrap();
+            // The step must carry the true count, not a wrapped one. Under the
+            // old u16 this was 0 for 65536 and 1 for 65537.
+            let carried = state
+                .steps()
+                .iter()
+                .find_map(|s| match s {
+                    Step::ArrayExprStep { nelems, .. } => Some(*nelems),
+                    _ => None,
+                })
+                .expect("ArrayExpr compiles to an ArrayExprStep");
+            assert_eq!(carried as usize, n, "ArrayExprStep.nelems wrapped at {n} elements");
+
+            // And the evaluated array must actually hold n elements.
+            state.arm_result_mcx(mcx);
+            let mut slots = EvalSlots::default();
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert!(!r.isnull, "ARRAY[] of {n} elements evaluated to NULL");
+            // SAFETY: a non-null array datum addresses a live varlena; the
+            // ARRAY[] result is built with a plain 4-byte header.
+            let img = unsafe {
+                let p = r.value.as_usize() as *const u8;
+                core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+            };
+            assert_eq!(::arrayfuncs::arr_ndim(img), 1);
+            assert_eq!(
+                ::arrayfuncs::arr_dim(img, 0) as usize,
+                n,
+                "ARRAY[] of {n} elements built the wrong length"
+            );
+        });
+    }
+}
+
 #[test]
 fn fused_func_chain_evaluates_like_unfused() {
     with_mcx(|mcx| {

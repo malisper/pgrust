@@ -3383,7 +3383,10 @@ impl<'a> Estate<'a> {
         if let Some(h) = err_hint {
             b = b.errhint(h);
         }
-        b.finish(types_error::ErrorLocation::new("pl_exec.c", 0, "exec_stmt_raise"))?;
+        // pl_exec.c:3909 — the `ereport(stmt->elog_level, ...)` that RAISE
+        // lands on (verified against the REL_18_3 source, and against what a
+        // stock server reports for the same RAISE).
+        b.finish(types_error::ErrorLocation::new("pl_exec.c", 3909, "exec_stmt_raise"))?;
         Ok(RC_OK)
     }
 
