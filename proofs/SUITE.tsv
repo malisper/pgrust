@@ -2161,7 +2161,7 @@ arrayfuncs-hdr	proofs::eq_array_upper_n6	-Z c-ffi -Z stubbing --c-lib c/pg_array
 arrayfuncs-hdr	proofs::eq_array_cardinality_n0	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	69	
 arrayfuncs-hdr	proofs::eq_array_cardinality_n1	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	152	
 arrayfuncs-hdr	proofs::eq_array_cardinality_n2	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	248	
-arrayfuncs-hdr	proofs::eq_array_cardinality_n6	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	unmeasured	wall	timeout-450s local (load 9-28), chained i64 multiply slope; FLEET-BOUND
+arrayfuncs-hdr	proofs::eq_array_cardinality_n6	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	unmeasured	wall	timeout-450s at load 9-28 and at idle load ~5 retry — genuine chained-i64-multiply sloped wall; FLEET-BOUND
 arrayfuncs-hdr	proofs::eq_array_dims_nullplane	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --solver kissat --exact	green	calibration	68	value plane = native diff (result-image fmt wall)
 arrayfuncs-hdr	proofs::control_array_lower_reqdim_skew_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_arrayhdr.c --exact	must-fail	defect-witness	61	fails on exactly 'rv.as_i32() == c'; DEFAULT solver; single-property control (kani check-attribution artifact with multi-assert controls, see src comment + tests/control_replay.rs)
 json-text	proofs::eq_json_out_len0	-Z c-ffi -Z stubbing --c-lib c/pg_json_text.c --solver kissat --exact	green	calibration	244	w2-arrayjson 2026-07-30
