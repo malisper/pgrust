@@ -1,15 +1,14 @@
 //! tsvector_op.c tsvector_update_trigger (oid 3752, config named in the
-//! trigger arguments; the regconfig-column variant 3759 stays loud).
+//! trigger arguments; oid 3753 takes the config from a regconfig column).
 
 use ::datum::{Datum, Varlena};
-use ::mcx::Mcx;
 use ::to_tsany::env::CacheEnv;
 use ::to_tsany::vector::make_tsvector;
 use ::ts_parse::{parsetext, ParsedText};
 use ::types_core::Oid;
 use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_UNDEFINED_COLUMN,
+    ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_UNDEFINED_COLUMN,
 };
 use ::types_fmgr::{varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use ::types_trigger::{
@@ -21,6 +20,8 @@ use ::types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
 use ::types_tuple::HeapTupleData;
 
 use crate::{detoasted_image, TEXTOID, TSVECTOROID};
+
+const REGCONFIGOID: Oid = 3734;
 
 #[track_caller]
 #[cold]
@@ -40,10 +41,17 @@ pub fn fc_tsvector_update_trigger_byid(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    tsvector_update_trigger(fcinfo)
+    tsvector_update_trigger(fcinfo, false)
 }
 
-fn tsvector_update_trigger(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_tsvector_update_trigger_bycolumn(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    tsvector_update_trigger(fcinfo, true)
+}
+
+fn tsvector_update_trigger(fcinfo: &mut Fcinfo, config_column: bool) -> PgResult<Datum> {
     // SAFETY: the trigger call machinery keeps the TriggerData live for the
     // duration of the call.
     let Some(td) = (unsafe { trigger_data_from_fcinfo(fcinfo) }) else {
@@ -93,20 +101,53 @@ fn tsvector_update_trigger(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
         ));
     }
 
-    // Config named in the trigger args; schema qualification is required so
-    // results are not search_path dependent.
-    let names = ::varlena::textToQualifiedNameList(mcx, trigger.tgargs[1].as_str())?;
-    if names.len() < 2 {
-        return Err(col_err(
-            ERRCODE_INVALID_PARAMETER_VALUE,
-            format!(
-                "text search configuration name \"{}\" must be schema-qualified",
-                trigger.tgargs[1].as_str()
-            ),
-        ));
-    }
-    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let cfg_id: Oid = ::ts_cache::get_ts_config_oid(&name_refs, false)?;
+    let cfg_id: Oid = if config_column {
+        let config_attr_num = ::spi::SPI_fnumber(tupdesc, trigger.tgargs[1].as_str());
+        if config_attr_num == ::spi::SPI_ERROR_NOATTRIBUTE {
+            return Err(col_err(
+                ERRCODE_UNDEFINED_COLUMN,
+                format!(
+                    "configuration column \"{}\" does not exist",
+                    trigger.tgargs[1].as_str()
+                ),
+            ));
+        }
+        if !::coerce::IsBinaryCoercible(
+            ::spi::SPI_gettypeid(tupdesc, config_attr_num),
+            REGCONFIGOID,
+        )? {
+            return Err(col_err(
+                ERRCODE_DATATYPE_MISMATCH,
+                format!("column \"{}\" is not of regconfig type", trigger.tgargs[1].as_str()),
+            ));
+        }
+        let (d, isnull) = ::spi::SPI_getbinval(rettuple, tupdesc, config_attr_num);
+        if isnull {
+            return Err(col_err(
+                ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                format!(
+                    "configuration column \"{}\" must not be null",
+                    trigger.tgargs[1].as_str()
+                ),
+            ));
+        }
+        d.as_oid()
+    } else {
+        // Config named in the trigger args; schema qualification is required
+        // so results are not search_path dependent.
+        let names = ::varlena::textToQualifiedNameList(mcx, trigger.tgargs[1].as_str())?;
+        if names.len() < 2 {
+            return Err(col_err(
+                ERRCODE_INVALID_PARAMETER_VALUE,
+                format!(
+                    "text search configuration name \"{}\" must be schema-qualified",
+                    trigger.tgargs[1].as_str()
+                ),
+            ));
+        }
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        ::ts_cache::get_ts_config_oid(&name_refs, false)?
+    };
 
     let mut prs = ParsedText::with_capacity(mcx, 32)?;
     // Lazy env: resolution happens at parsetext (C ts_parse.c), same as C's
