@@ -742,6 +742,7 @@ pub fn spgFormNodeTuple<'mcx>(
     Ok(tup)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_row_too_big(size: usize, max: usize) -> Box<PgError> {

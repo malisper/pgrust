@@ -35,6 +35,7 @@ const BLCKSZ: usize = types_core::BLCKSZ;
 const RM_SMGR_ID: u8 = 2;
 const XLR_SPECIAL_REL_UPDATE: u8 = 0x01;
 
+#[track_caller]
 #[cold]
 fn invalid_block_err() -> Box<PgError> {
     Box::new(PgError::error("invalid block number").with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))

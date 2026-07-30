@@ -538,6 +538,7 @@ fn read_fill_buffer(core: &mut TapeSetCore<'_>, lt: &mut LogicalTape<'_>) -> PgR
     Ok(lt.nbytes > 0)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn seek_failed(blocknum: i64) -> Box<PgError> {

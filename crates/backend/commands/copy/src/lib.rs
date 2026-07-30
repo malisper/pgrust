@@ -582,6 +582,7 @@ fn def_reject_limit(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<i64> {
     Ok(reject_limit)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn requires_csv(name: &str) -> Box<PgError> {
@@ -591,6 +592,7 @@ fn requires_csv(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_in_binary(name: &str) -> Box<PgError> {
@@ -600,6 +602,7 @@ fn cannot_in_binary(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_in_parquet(name: &str) -> Box<PgError> {
@@ -1103,6 +1106,7 @@ fn force_flags<'mcx>(
 }
 
 // errorConflictingDefElem (define.c).
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn conflicting_option(src: Option<&str>, location: types_core::ParseLoc) -> Box<PgError> {
@@ -1178,6 +1182,7 @@ fn string_node<'a>(n: Node<'a>) -> &'a str {
     n.as_string().expect("attlist member is String").sval
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn from_file_denied() -> Box<PgError> {
@@ -1195,6 +1200,7 @@ fn from_file_denied() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn to_file_denied() -> Box<PgError> {

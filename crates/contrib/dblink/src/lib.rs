@@ -137,6 +137,7 @@ fn res_error(
     b.finish(loc("dblink_res_error"))
 }
 
+#[track_caller]
 #[cold]
 fn connect_failed(msg: &str) -> Box<PgError> {
     Box::new(

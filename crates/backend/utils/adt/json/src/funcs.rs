@@ -199,6 +199,7 @@ impl<'mcx> JsonSem<'mcx> for UniqueState<'mcx> {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate_json_object_key() -> Box<PgError> {

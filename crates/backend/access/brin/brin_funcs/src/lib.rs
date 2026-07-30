@@ -15,6 +15,7 @@ use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PG
 use ::types_nodes::parsenodes::ObjectType;
 use ::types_rel::{Relation, ShareUpdateExclusiveLock, RELKIND_INDEX};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn recovery_in_progress_error() -> Box<PgError> {
@@ -25,6 +26,7 @@ fn recovery_in_progress_error() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn block_number_out_of_range(heapBlk64: i64) -> Box<PgError> {
@@ -34,6 +36,7 @@ fn block_number_out_of_range(heapBlk64: i64) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_a_brin_index(indexRel: &Relation<'_>) -> Box<PgError> {
@@ -43,6 +46,7 @@ fn not_a_brin_index(indexRel: &Relation<'_>) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_parent_table(indexRel: &Relation<'_>) -> Box<PgError> {

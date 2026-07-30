@@ -888,6 +888,7 @@ fn verify_common_type_from_oids(common_type: Oid, typeids: &[Oid]) -> PgResult<b
     Ok(true)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn argument_types_mismatch(ptype: Oid, ntype: Oid) -> Box<PgError> {
@@ -1060,12 +1061,14 @@ pub fn IsBinaryCoercibleWithCast(srctype: Oid, targettype: Oid) -> PgResult<(boo
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn poly_mismatch(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn poly_not_alike(what: &str, a: Oid, b: Oid) -> Box<PgError> {
@@ -1080,6 +1083,7 @@ fn poly_not_alike(what: &str, a: Oid, b: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn poly_not_consistent(a_name: &str, b_name: &str, a: Oid, b: Oid) -> Box<PgError> {
@@ -1096,6 +1100,7 @@ fn poly_not_consistent(a_name: &str, b_name: &str, a: Oid, b: Oid) -> Box<PgErro
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_array_type_for(elem: Oid) -> Box<PgError> {
@@ -1647,6 +1652,7 @@ pub fn enforce_generic_type_consistency(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn conversion_not_found(inputTypeId: Oid, targetTypeId: Oid) -> Box<PgError> {
@@ -1658,6 +1664,7 @@ fn conversion_not_found(inputTypeId: Oid, targetTypeId: Oid) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_lookup_failed(typid: Oid) -> Box<PgError> {
@@ -1801,6 +1808,7 @@ fn build_coercion_expression<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn function_lookup_failed(funcid: Oid) -> Box<PgError> {
@@ -2400,6 +2408,7 @@ pub fn select_common_typmod(exprs: &[(Oid, i32)], common_type: Oid) -> i32 {
     result
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn common_type_mismatch(
@@ -2423,6 +2432,7 @@ fn common_type_mismatch(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_coerce(
@@ -2450,6 +2460,7 @@ fn cannot_coerce(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn construct_type_mismatch(
@@ -2478,6 +2489,7 @@ fn construct_type_mismatch(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn returns_set(

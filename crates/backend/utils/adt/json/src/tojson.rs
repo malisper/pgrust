@@ -60,6 +60,7 @@ impl TypeCat {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_param(msg: &'static str) -> Box<PgError> {
@@ -72,6 +73,7 @@ pub fn no_input_type() -> Box<PgError> {
     invalid_param("could not determine input data type")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_object_key() -> Box<PgError> {
@@ -155,6 +157,7 @@ fn varlena_payload(image: &[u8]) -> &[u8] {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn timestamp_out_of_range() -> Box<PgError> {
@@ -547,6 +550,7 @@ pub fn datum_to_json_cat<'mcx>(
     varlena::cstring_to_text(mcx, result.as_bytes())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn odd_argument_list() -> Box<PgError> {
@@ -560,6 +564,7 @@ fn odd_argument_list() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate_json_object_key(key: &[u8]) -> Box<PgError> {
@@ -665,6 +670,7 @@ pub fn json_build_array_worker<'mcx>(
     varlena::cstring_to_text(mcx, result.as_bytes())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn subscript_error(msg: &'static str) -> Box<PgError> {

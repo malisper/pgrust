@@ -12,6 +12,7 @@ use types_tuple::HeapTupleData;
 
 const LIBRARY: &str = "lo";
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn internal_err(msg: String) -> Box<PgError> {

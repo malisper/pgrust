@@ -124,6 +124,7 @@ pub fn exec_foreign_scan<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn foreign_scan_unported(what: &str) -> Box<PgError> {

@@ -513,6 +513,7 @@ fn exec_make_function_result_set<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn setof_record_not_accepted() -> Box<PgError> {
@@ -524,6 +525,7 @@ fn setof_record_not_accepted() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn materialize_violated() -> Box<PgError> {
@@ -533,6 +535,7 @@ fn materialize_violated() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn value_per_call_violated() -> Box<PgError> {

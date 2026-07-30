@@ -832,6 +832,7 @@ unsafe fn arg_name_str(fcinfo: &Fcinfo, i: usize) -> String {
     String::from_utf8_lossy(&raw[..end]).into_owned()
 }
 
+#[track_caller]
 #[cold]
 fn invalid_encoding_name_error(name: &str) -> Box<PgError> {
     Box::new(
@@ -840,6 +841,7 @@ fn invalid_encoding_name_error(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn no_default_conversion_error(src_encoding: i32, dest_encoding: i32) -> Box<PgError> {
     Box::new(

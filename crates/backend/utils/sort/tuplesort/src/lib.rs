@@ -569,6 +569,7 @@ impl CmpCtx<'_> {
 // comparetup_index_btree (tuplesortvariants.c): errdetail via the
 // BuildIndexValueDescription seam; C's key_desc==NULL arm ("Duplicate keys
 // exist.") covers the hidden-key gates and the uninstalled-seam test paths.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unique_violation_error(
@@ -3047,12 +3048,14 @@ fn heap_replace_top_n(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_state(caller: &'static str) -> Box<PgError> {
     Box::new(PgError::error(format!("invalid tuplesort state in {caller}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_bounded() -> Box<PgError> {

@@ -29,6 +29,7 @@ fn relation_closer(relid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn could_not_open(relationId: Oid) -> Box<PgError> {

@@ -127,6 +127,7 @@ pub(crate) fn _hash_datum2hashkey_type(
     invoke_hash_proc(&mut finfo, collation, key)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_support_function(rel: &Relation<'_>, lefttype: Oid, righttype: Oid) -> Box<PgError> {

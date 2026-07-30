@@ -17,6 +17,7 @@ fn c_isspace(c: u8) -> bool {
     c == b' ' || (0x09..=0x0d).contains(&c)
 }
 
+#[track_caller]
 #[cold]
 fn invalid_size(s: &str) -> Box<PgError> {
     Box::new(
@@ -25,6 +26,7 @@ fn invalid_size(s: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn invalid_unit(arg: &str, unit: &str) -> Box<PgError> {
     Box::new(

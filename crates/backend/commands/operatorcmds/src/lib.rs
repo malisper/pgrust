@@ -31,6 +31,7 @@ fn OidIsValid(oid: Oid) -> bool {
     oid != InvalidOid
 }
 
+#[track_caller]
 #[cold]
 fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))

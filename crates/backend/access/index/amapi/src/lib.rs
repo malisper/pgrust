@@ -388,6 +388,7 @@ fn unported_translate(amoid: Oid) -> ! {
     panic!("unported: amtranslatestrategy/amtranslatecmptype for non-btree AM {amoid}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn am_lookup_failed(amoid: Oid) -> Box<PgError> {
@@ -396,6 +397,7 @@ fn am_lookup_failed(amoid: Oid) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_index_am(name: String) -> Box<PgError> {
@@ -405,6 +407,7 @@ fn not_index_am(name: String) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_handler(name: String) -> Box<PgError> {

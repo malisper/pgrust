@@ -98,6 +98,7 @@ pub fn fc_hashvarlenaextended(
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(key.data(), seed)))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn hash_collation_err() -> Box<PgError> {
@@ -790,12 +791,14 @@ fc_convert_to_base! {
 // share the fn_extra-memoized argtype typlen lookup.
 struct ArgTypLen(i16);
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_cache_lookup_failed(typid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_compression_method_id(cmid: u32) -> Box<PgError> {

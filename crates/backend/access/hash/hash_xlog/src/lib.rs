@@ -33,6 +33,7 @@ fn block_data<'a>(record: &'a XLogReaderState, block_id: u8) -> &'a [u8] {
     unsafe { record.block(block_id).data_bytes() }
 }
 
+#[track_caller]
 #[cold]
 fn panic_err(msg: String) -> Box<PgError> {
     Box::new(PgError::new(types_error::PANIC, msg))

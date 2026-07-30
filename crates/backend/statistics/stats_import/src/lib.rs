@@ -264,6 +264,7 @@ fn stats_check_arg_type(argname: &str, argtype: Oid, expectedtype: Oid) -> PgRes
     Ok(true)
 }
 
+#[track_caller]
 #[cold]
 fn pairs_error() -> Box<PgError> {
     Box::new(
@@ -454,6 +455,7 @@ fn RangeVarCallbackForStats(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for OID {oid}")))

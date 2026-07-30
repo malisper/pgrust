@@ -365,6 +365,7 @@ pub fn _hash_init(
     Ok(num_buckets)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn out_of_overflow_pages(rel: &Relation<'_>) -> Box<PgError> {

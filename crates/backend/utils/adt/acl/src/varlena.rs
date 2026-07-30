@@ -54,6 +54,7 @@ pub fn check_acl_payload(payload: &[u8]) -> PgResult<usize> {
     Ok(n as usize)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn acl_shape_error(msg: &str, sqlstate: types_error::SqlState) -> Box<PgError> {

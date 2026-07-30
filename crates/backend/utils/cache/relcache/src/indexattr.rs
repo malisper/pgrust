@@ -115,6 +115,7 @@ pub(crate) fn forget(relid: Oid) {
     });
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_missing(index_oid: Oid) -> Box<PgError> {

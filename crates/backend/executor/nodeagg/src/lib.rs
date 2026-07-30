@@ -815,12 +815,14 @@ fn make_agg_state_node<'mcx>(
     Ok(p)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn agg_lookup_failed(aggfnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for aggregate {aggfnoid}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn agg_permission_denied(aggfnoid: Oid) -> Box<PgError> {
@@ -837,6 +839,7 @@ fn agg_permission_denied(aggfnoid: Oid) -> Box<PgError> {
 // unported: node families this walker does not know raise a clean
 // ERRCODE_FEATURE_NOT_SUPPORTED error at ExecInitAgg time (C uses the
 // generic expression_tree_walker, which cannot miss a family).
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn agg_tlist_unported(tag: ::types_nodes::NodeTag) -> Box<PgError> {
@@ -2517,6 +2520,7 @@ fn hashagg_spill_tuple<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tape_eof_error(requested: usize, got: usize) -> Box<PgError> {

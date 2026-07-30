@@ -24,11 +24,13 @@ use types_nodes::NodeList;
 
 const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 
+#[track_caller]
 #[cold]
 fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+#[track_caller]
 #[cold]
 fn def_err(msg: &str) -> Box<PgError> {
     err(ERRCODE_INVALID_FUNCTION_DEFINITION, msg.to_string())

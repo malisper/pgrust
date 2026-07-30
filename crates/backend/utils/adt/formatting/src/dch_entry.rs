@@ -57,6 +57,7 @@ fn copy_tm(dst: &mut FmtTm, src: &pg_tm) {
     dst.tm_gmtoff = src.tm_gmtoff;
 }
 
+#[track_caller]
 #[cold]
 fn timestamp_out_of_range() -> Box<PgError> {
     Box::new(
@@ -65,6 +66,7 @@ fn timestamp_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn date_out_of_range(date_txt: &[u8]) -> Box<PgError> {
     Box::new(

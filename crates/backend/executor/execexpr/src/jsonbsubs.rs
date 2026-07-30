@@ -21,6 +21,7 @@ pub struct JsonbSbsState {
     pub resmcx: ResMcx,
 }
 
+#[track_caller]
 #[cold]
 fn null_subscript_error() -> Box<PgError> {
     Box::new(

@@ -28,6 +28,7 @@ fn walker_unported(what: &str) -> ! {
     panic!("unported: dependency.c find_expr_references_walker {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn walker_error(msg: String) -> Box<PgError> {

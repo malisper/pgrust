@@ -287,6 +287,7 @@ pub fn fc_any_value_transfn(
     Ok(fcinfo.arg(0))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn collations_not_supported(type_be: String) -> Box<PgError> {

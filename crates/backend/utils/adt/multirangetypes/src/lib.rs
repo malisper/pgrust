@@ -43,6 +43,7 @@ pub struct MultirangeInfo {
     pub rng: RangeInfo,
 }
 
+#[track_caller]
 #[cold]
 fn not_a_multirange_type(oid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("type {oid} is not a multirange type")))

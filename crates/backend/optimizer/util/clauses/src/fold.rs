@@ -1541,6 +1541,7 @@ fn inline_function<'mcx>(
     Ok(Some(result.unwrap_or(newexpr)))
 }
 
+#[track_caller]
 #[cold]
 fn sql_inline_recursion_error<'mcx>(
     mcx: Mcx<'mcx>,

@@ -26,6 +26,7 @@ pub(crate) struct AggCats {
     key: Option<ValCategory>,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_aggregate_context(name: &str) -> Box<PgError> {
@@ -34,6 +35,7 @@ fn non_aggregate_context(name: &str) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_param(msg: &'static str) -> Box<PgError> {

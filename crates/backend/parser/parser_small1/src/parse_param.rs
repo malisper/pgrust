@@ -168,6 +168,7 @@ pub fn setup_parse_sql_fn_parameters<'p>(
     pstate.p_ref_hook_state = ParseRefHookState::SqlFnParams(parstate);
 }
 
+#[track_caller]
 #[cold]
 fn no_parameter_err(paramno: i32, errpos: i32, funcname: &'static str) -> Box<PgError> {
     Box::new(

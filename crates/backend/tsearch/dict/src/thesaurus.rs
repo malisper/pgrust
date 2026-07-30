@@ -44,6 +44,7 @@ pub struct DictThesaurus {
     arena: PgVec<'static, LexemeInfo>,
 }
 
+#[track_caller]
 #[cold]
 fn config_file_error(msg: String) -> Box<PgError> {
     PgError::error(msg).with_sqlstate(ERRCODE_CONFIG_FILE_ERROR).into()

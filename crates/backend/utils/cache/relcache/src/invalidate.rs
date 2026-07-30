@@ -63,6 +63,7 @@ fn replace_entry(relid: Oid, newrel: &Rc<RelationData<'static>>) {
     });
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn deleted_while_in_use(relid: Oid) -> Box<PgError> {

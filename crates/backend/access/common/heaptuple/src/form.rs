@@ -14,6 +14,7 @@ use ::types_tuple::{
 use crate::fill::{fill_val, heap_fill_tuple, heap_compute_data_size};
 use crate::tuple::{alloc_image, HeapTuple, MinimalTuple};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_columns(natts: usize) -> Box<PgError> {

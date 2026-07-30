@@ -321,6 +321,7 @@ pub(crate) fn scan_pg_statistic_ext_oids<'mcx>(
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cache_lookup_failed(relid: Oid) -> Box<PgError> {
@@ -330,6 +331,7 @@ fn cache_lookup_failed(relid: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unexpected_null_pg_index(relid: Oid, attno: i32) -> Box<PgError> {
@@ -341,6 +343,7 @@ fn unexpected_null_pg_index(relid: Oid, attno: i32) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bogus_pg_index(relid: Oid) -> Box<PgError> {
@@ -350,6 +353,7 @@ fn bogus_pg_index(relid: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_amproc(num: i16, opc: Oid) -> Box<PgError> {
@@ -359,6 +363,7 @@ fn invalid_amproc(num: i16, opc: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn opclass_not_found(opc: Oid) -> Box<PgError> {

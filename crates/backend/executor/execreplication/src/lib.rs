@@ -198,6 +198,7 @@ fn RelationGetReplicaIndex<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResu
         .unwrap_or(InvalidOid))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_invalid_column_reference(rel_name: &str, update: bool, detail: &str) -> Box<PgError> {
@@ -213,6 +214,7 @@ fn err_invalid_column_reference(rel_name: &str, update: bool, detail: &str) -> B
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_no_replica_identity(rel_name: &str, update: bool) -> Box<PgError> {

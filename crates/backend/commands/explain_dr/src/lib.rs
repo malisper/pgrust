@@ -200,6 +200,7 @@ impl<'mcx> SerializeDestReceiver<'mcx> {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unsupported_format_code(format: i8) -> Box<PgError> {

@@ -12,6 +12,7 @@ use crate::fcinfo::{function_call1_coll_in, FmgrInfo, LocalFcinfo};
 // Binary-wire fmgr frame; extends the by-ref result convention
 // (notes/fc-wire-convention.md).
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn receive_returned_non_null(fn_oid: Oid) -> Box<PgError> {
@@ -20,6 +21,7 @@ fn receive_returned_non_null(fn_oid: Oid) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn receive_returned_null(fn_oid: Oid) -> Box<PgError> {

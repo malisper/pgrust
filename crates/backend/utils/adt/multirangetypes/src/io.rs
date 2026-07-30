@@ -21,6 +21,7 @@ pub struct MultirangeIOData {
     pub typioparam: Oid,
 }
 
+#[track_caller]
 #[cold]
 fn no_binary_io(recv: bool, rngtypid: Oid) -> Box<PgError> {
     let what = if recv { "input" } else { "output" };

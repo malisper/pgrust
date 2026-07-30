@@ -12,6 +12,7 @@ use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_tuple::TupleDescData;
 use funcapi_srf::{no_rsinfo, srf_context_error};
 
+#[track_caller]
 #[cold]
 fn materialize_not_allowed() -> Box<PgError> {
     Box::new(

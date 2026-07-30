@@ -265,12 +265,14 @@ fn check_constant_qual(qual: &::types_nodes::list::NodeList<'_>, is_const_false:
 // ERRORS, not can't-happen panics: `elog(ERROR, "mergejoin input data is out
 // of order")` is user-reachable on misdeclared collations/opfamilies
 // (LANE-MERGEJOIN contract §2.1).
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn mergejoin_out_of_order() -> Box<PgError> {
     Box::new(PgError::error("mergejoin input data is out of order".to_string()))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_mergeable_join_cond(jointype: JoinType) -> Box<PgError> {

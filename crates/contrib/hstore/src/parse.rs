@@ -168,6 +168,7 @@ fn at(input: &[u8], ptr: usize) -> u8 {
 }
 
 // prssyntaxerror: snippet is the pg_mblen bytes at ptr.
+#[track_caller]
 #[cold]
 fn syntax_error(input: &[u8], ptr: usize) -> Box<PgError> {
     let snippet_len = match input.get(ptr) {
@@ -192,6 +193,7 @@ fn syntax_error(input: &[u8], ptr: usize) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn eof_error() -> Box<PgError> {
     Box::new(

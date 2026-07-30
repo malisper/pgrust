@@ -1175,6 +1175,7 @@ fn exec_without_overlaps_not_empty(
 const TYPTYPE_RANGE: i8 = b'r' as i8;
 const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn deferrable_arbiter(heap: &Relation<'_>, index: &Relation<'_>) -> Box<PgError> {

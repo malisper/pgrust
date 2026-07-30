@@ -168,6 +168,7 @@ pub fn fc_range_constructor2(
     byref_result(mcx, &img)
 }
 
+#[track_caller]
 #[cold]
 fn null_flags_arg() -> Box<PgError> {
     Box::new(
@@ -376,6 +377,7 @@ pub fn fc_range_intersect(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     range_result(fcinfo, &img)
 }
 
+#[track_caller]
 #[cold]
 fn non_aggregate_context(what: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("{what} called in non-aggregate context")))

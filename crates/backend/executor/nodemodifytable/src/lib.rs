@@ -1218,6 +1218,7 @@ fn check_valid_result_rel<'mcx>(
 
 // error_view_not_updatable (rewriteHandler.c), executor-check leg (no
 // errdetail, per C's CheckValidResultRel call).
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn error_view_not_updatable(rel: &Relation<'_>, operation: CmdType) -> Box<PgError> {
@@ -1248,6 +1249,7 @@ fn error_view_not_updatable(rel: &Relation<'_>, operation: CmdType) -> Box<PgErr
 
 // error_view_not_updatable (rewriteHandler.c), CMD_MERGE arm: MERGE hints
 // omit rules (MERGE doesn't support them).
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn error_view_not_updatable_merge(rel: &Relation<'_>, action: CmdType) -> Box<PgError> {
@@ -3320,6 +3322,7 @@ fn exec_merge_not_matched<'mcx>(
     Ok(None)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn merge_self_modified(
@@ -4748,6 +4751,7 @@ fn exec_delete<'mcx>(
     Ok(true)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn serialization_conflict(kind: &str) -> Box<PgError> {
@@ -4759,6 +4763,7 @@ fn serialization_conflict(kind: &str) -> Box<PgError> {
 
 // ExecBRInsertTriggers (trigger.c): tgisclone replacement tuple failed the
 // partition constraint re-verify.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn moved_row_before_trigger<'mcx>(
@@ -4789,6 +4794,7 @@ fn moved_row_before_trigger<'mcx>(
 
 // ExecCrossPartitionUpdate (nodeModifyTable.c): ON CONFLICT DO UPDATE may
 // not move a row to another partition.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_on_update_specification() -> Box<PgError> {
@@ -5567,6 +5573,7 @@ fn exec_get_all_null_slot<'mcx>(
     Ok(id)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn self_modified_violation(verb: &str) -> Box<PgError> {
@@ -7477,6 +7484,7 @@ fn clear_slot<'mcx>(estate: &mut EStateData<'mcx>, slot_id: ExecSlotId) {
     exectuples::exec_clear_tuple(&mut estate.es_tupleTable[slot_id.0 as usize], mcx);
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cardinality_violation() -> Box<PgError> {
@@ -7723,6 +7731,7 @@ fn exec_view_check_options<'mcx>(
     Err(view_wco_violation(mcx, wcos[i].relname, vrel, slot, root_rel, Some(&mod_cols)))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn view_wco_violation<'mcx>(
@@ -7743,6 +7752,7 @@ fn view_wco_violation<'mcx>(
     Box::new(e)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wco_violation(w: &WcoExpr<'_>) -> Box<PgError> {
@@ -8082,6 +8092,7 @@ fn schema_name_of(mcx: mcx::Mcx<'_>, rel: &Relation<'_>) -> String {
         .unwrap_or_default()
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_null_violation<'mcx>(
@@ -8128,6 +8139,7 @@ fn root_slot_value_description<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn check_violation<'mcx>(
@@ -8158,6 +8170,7 @@ fn check_violation<'mcx>(
     Box::new(e)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn plan_output_mismatch(detail: impl Into<String>) -> Box<PgError> {

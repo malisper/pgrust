@@ -592,6 +592,7 @@ pub fn ExecCallTriggerFunc<'a, 'mcx>(
     Ok(NonNull::new(result.as_usize() as *mut HeapTupleData<'a>))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn returned_null(fn_oid: types_core::Oid) -> Box<PgError> {

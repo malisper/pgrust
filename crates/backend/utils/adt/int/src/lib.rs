@@ -60,6 +60,7 @@ pub(crate) fn pg_add_s64_overflow(a: i64, b: i64, result: &mut i64) -> bool {
     o
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn integer_out_of_range() -> Box<PgError> {
@@ -68,6 +69,7 @@ fn integer_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn smallint_out_of_range() -> Box<PgError> {
@@ -76,12 +78,14 @@ fn smallint_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn division_by_zero() -> Box<PgError> {
     Box::new(PgError::error("division by zero").with_sqlstate(ERRCODE_DIVISION_BY_ZERO))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_preceding_following() -> Box<PgError> {

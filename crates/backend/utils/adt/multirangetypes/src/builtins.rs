@@ -118,6 +118,7 @@ pub fn fc_multirange_send(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(varlena_result(crate::io::multirange_send(mcx, cache, &mr)?))
 }
 
+#[track_caller]
 #[cold]
 fn null_member() -> Box<PgError> {
     Box::new(
@@ -159,11 +160,13 @@ pub fn fc_multirange_constructor1(
     mr_result(fcinfo, &img)
 }
 
+#[track_caller]
 #[cold]
 fn constructor_type_mismatch(rngtypid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("type {rngtypid} does not match constructor type")))
 }
 
+#[track_caller]
 #[cold]
 fn multidimensional_array() -> Box<PgError> {
     Box::new(
@@ -293,6 +296,7 @@ pub fn fc_multirange_intersect(
     mr_result(fcinfo, &img)
 }
 
+#[track_caller]
 #[cold]
 fn non_aggregate_context(what: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("{what} called in non-aggregate context")))

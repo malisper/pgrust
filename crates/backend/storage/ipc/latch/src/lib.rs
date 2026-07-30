@@ -168,6 +168,7 @@ pub fn OwnLatch(latch: LatchHandle) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn latch_already_owned(owner_pid: i32) -> Box<PgError> {

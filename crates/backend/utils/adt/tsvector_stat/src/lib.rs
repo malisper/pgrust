@@ -55,6 +55,7 @@ pub(crate) fn detoasted_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> 
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn one_tsvector_column() -> Box<PgError> {

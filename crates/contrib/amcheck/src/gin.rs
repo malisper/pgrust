@@ -44,6 +44,7 @@ unsafe fn copy_itup_arena(amcx: Mcx<'_>, itup: ITup) -> PgResult<ITup> {
     Ok(p)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn corrupt(msg: String) -> Box<PgError> {

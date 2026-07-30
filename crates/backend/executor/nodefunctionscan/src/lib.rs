@@ -466,6 +466,7 @@ fn build_function_tupdesc<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn value_per_call_violated() -> Box<PgError> {
@@ -475,6 +476,7 @@ fn value_per_call_violated() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn materialize_violated() -> Box<PgError> {
@@ -725,6 +727,7 @@ fn run_value_per_call<'mcx, const N: usize>(
     Ok(store)
 }
 
+#[track_caller]
 #[cold]
 fn tupledesc_mismatch(detail: String) -> Box<PgError> {
     Box::new(

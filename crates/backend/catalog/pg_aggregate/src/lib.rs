@@ -60,6 +60,7 @@ pub fn AGGKIND_IS_ORDERED_SET(kind: i8) -> bool {
     kind != AGGKIND_NORMAL
 }
 
+#[track_caller]
 #[cold]
 fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
@@ -113,6 +114,7 @@ fn type_acl_check(typeId: Oid) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 fn detail_error(msg: &str, sqlstate: types_error::SqlState, detail: String) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()).with_sqlstate(sqlstate).with_detail(detail))

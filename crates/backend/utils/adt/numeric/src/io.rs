@@ -200,6 +200,7 @@ pub fn numeric_send<'mcx>(mcx: Mcx<'mcx>, num: Num<'_>) -> PgResult<Bytea<'mcx>>
     Ok(pqformat::pq_endtypsend(buf))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn recv_error(msg: &'static str) -> Box<PgError> {

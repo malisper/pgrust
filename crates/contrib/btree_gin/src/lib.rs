@@ -25,6 +25,7 @@ const BT_EQUAL: u16 = 3;
 const BT_GREATER_EQUAL: u16 = 4;
 const BT_GREATER: u16 = 5;
 
+#[track_caller]
 #[cold]
 fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
     Box::new(PgError::error(format!("unrecognized strategy number: {strategy}")))
@@ -329,6 +330,7 @@ fn compare_prefix(
     })
 }
 
+#[track_caller]
 #[cold]
 fn internal_symbol_via_fmgr() -> Box<PgError> {
     Box::new(PgError::error(

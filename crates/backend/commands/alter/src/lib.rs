@@ -258,6 +258,7 @@ fn begin_oid_scan<'mcx>(
     genam::systable_beginscan(mcx, rel, oid_index, true, None, &keys)
 }
 
+#[track_caller]
 #[cold]
 fn row_missing(rel: &Relation<'_>, object_id: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(

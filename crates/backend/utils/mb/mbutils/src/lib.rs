@@ -1157,6 +1157,7 @@ pub fn report_invalid_encoding(encoding: pg_enc, mbstr: &[u8]) -> Box<PgError> {
     report_invalid_encoding_int(encoding, mbstr, l, mbstr.len() as i32)
 }
 
+#[track_caller]
 #[cold]
 fn report_invalid_encoding_int(
     encoding: pg_enc,
@@ -1174,6 +1175,7 @@ fn report_invalid_encoding_int(
     )
 }
 
+#[track_caller]
 #[cold]
 fn report_invalid_encoding_db(mbstr: &[u8], mblen: i32, len: i32) -> Box<PgError> {
     report_invalid_encoding_int(database_encoding(), mbstr, mblen, len)
@@ -1216,11 +1218,13 @@ fn c_string_len(bytes: &[u8]) -> usize {
     bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())
 }
 
+#[track_caller]
 #[cold]
 fn internal_error(message: &str) -> Box<PgError> {
     Box::new(PgError::error(message.to_string()))
 }
 
+#[track_caller]
 #[cold]
 fn too_long_error(len: usize) -> Box<PgError> {
     Box::new(
@@ -1232,6 +1236,7 @@ fn too_long_error(len: usize) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn no_default_conversion_error(src_encoding: pg_enc, dest_encoding: pg_enc) -> Box<PgError> {
     Box::new(
@@ -1244,6 +1249,7 @@ fn no_default_conversion_error(src_encoding: pg_enc, dest_encoding: pg_enc) -> B
     )
 }
 
+#[track_caller]
 #[cold]
 fn conversion_not_supported_error(src_encoding: pg_enc, dest_encoding: pg_enc) -> Box<PgError> {
     Box::new(
@@ -1256,6 +1262,7 @@ fn conversion_not_supported_error(src_encoding: pg_enc, dest_encoding: pg_enc) -
     )
 }
 
+#[track_caller]
 #[cold]
 fn conversion_not_supported_fatal(pending: pg_enc) -> Box<PgError> {
     Box::new(
@@ -1271,6 +1278,7 @@ fn conversion_not_supported_fatal(pending: pg_enc) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn invalid_byte_value_error(b: u8) -> Box<PgError> {
     Box::new(
@@ -1282,6 +1290,7 @@ fn invalid_byte_value_error(b: u8) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn invalid_codepoint_error() -> Box<PgError> {
     Box::new(PgError::error("invalid Unicode code point").with_sqlstate(ERRCODE_SYNTAX_ERROR))

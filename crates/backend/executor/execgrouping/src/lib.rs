@@ -43,6 +43,7 @@ pub fn exec_tuples_hash_prepare<'mcx>(
     Ok((eqfuncoids, hashfunctions))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_hash_function(eq_opr: Oid) -> Box<PgError> {
@@ -1332,6 +1333,7 @@ fn hashint8_fold(key: Datum) -> u32 {
     lohalf ^ if val >= 0 { hihalf } else { !hihalf }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn oom_entries(mcx: Mcx<'_>, add: usize) -> Box<PgError> {

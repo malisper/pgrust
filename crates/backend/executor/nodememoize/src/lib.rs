@@ -291,6 +291,7 @@ pub fn exec_init_memoize<'mcx>(
     })
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_hash_function(hashop: Oid) -> Box<PgError> {

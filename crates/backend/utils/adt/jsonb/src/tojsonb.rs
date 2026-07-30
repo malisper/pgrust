@@ -43,6 +43,7 @@ pub struct ValCategory {
     pub outfunc: Option<FmgrInfo>,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_param(msg: &'static str) -> Box<PgError> {
@@ -392,6 +393,7 @@ pub fn add_jsonb<'mcx>(
     datum_to_jsonb_internal(mcx, ps, val, is_null, &mut cat, key_scalar)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn odd_argument_list() -> Box<PgError> {
@@ -405,6 +407,7 @@ fn odd_argument_list() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_key(argno: usize) -> Box<PgError> {

@@ -485,6 +485,7 @@ pub fn bytea_bit_count(v: &[u8]) -> i64 {
     ::pg_bitutils::pg_popcount(v) as i64
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn int_out_of_range(type_name: &str) -> Box<PgError> {

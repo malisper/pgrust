@@ -136,6 +136,7 @@ fn cnt_sml_sign_common(qtrg: &[Trgm], sign: &[u8], siglen: usize) -> i32 {
         .count() as i32
 }
 
+#[track_caller]
 #[cold]
 fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
     Box::new(PgError::error(format!("unrecognized strategy number: {strategy}")))

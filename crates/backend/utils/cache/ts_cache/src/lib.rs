@@ -174,6 +174,7 @@ fn InvalidateConfigCallBack(_arg: Datum, _cacheid: i32, _hash: u32) {
     });
 }
 
+#[track_caller]
 #[cold]
 fn cache_lookup_failed(kind: &str, oid: Oid) -> Box<PgError> {
     PgError::error(format!("cache lookup failed for text search {kind} {oid}")).into()

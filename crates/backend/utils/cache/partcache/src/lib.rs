@@ -346,6 +346,7 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
     Ok(key)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_support_function(

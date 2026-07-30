@@ -44,6 +44,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: tablecmds FK {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {

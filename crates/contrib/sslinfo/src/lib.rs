@@ -112,6 +112,7 @@ fn text_datum(mcx: Mcx<'_>, s: &[u8]) -> PgResult<Datum> {
     Ok(varlena_result(varlena::cstring_to_text(mcx, s)?))
 }
 
+#[track_caller]
 #[cold]
 fn bio_err() -> Box<PgError> {
     Box::new(

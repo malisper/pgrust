@@ -115,6 +115,7 @@ fn set_lsn(buffer: Buffer, lsn: u64) {
     unsafe { page_mut(buffer) }.set_lsn(lsn);
 }
 
+#[track_caller]
 #[cold]
 fn error_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))

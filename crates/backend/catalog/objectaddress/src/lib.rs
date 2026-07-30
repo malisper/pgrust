@@ -128,6 +128,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: objectaddress.c {what}")
 }
 
+#[track_caller]
 #[cold]
 fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
@@ -1432,6 +1433,7 @@ fn has_createrole_privilege(roleid: Oid) -> PgResult<bool> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn permission_denied(attr_detail: String) -> Box<PgError> {
     Box::new(

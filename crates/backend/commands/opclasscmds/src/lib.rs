@@ -64,6 +64,7 @@ fn OidIsValid(oid: Oid) -> bool {
     oid != InvalidOid
 }
 
+#[track_caller]
 #[cold]
 fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
@@ -99,6 +100,7 @@ fn get_am_by_name(amname: &str) -> PgResult<Option<(Oid, i8)>> {
     Ok(Some((oid, amtype)))
 }
 
+#[track_caller]
 #[cold]
 fn no_such_am(amname: &str) -> Box<PgError> {
     err(

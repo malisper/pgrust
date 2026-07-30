@@ -56,6 +56,7 @@ fn decode_lock_record(recdata: &[u8]) -> (LOCKTAG, LOCKMODE) {
     (locktag, rd_u32(16) as LOCKMODE)
 }
 
+#[track_caller]
 #[cold]
 fn session_and_xact_error() -> Box<PgError> {
     Box::new(

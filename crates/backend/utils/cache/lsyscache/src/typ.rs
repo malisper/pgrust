@@ -277,6 +277,7 @@ pub fn get_base_element_type(mut typid: Oid) -> PgResult<Oid> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn shell_type_error(typid: Oid) -> Box<PgError> {
     // C renders the type name via format_type_be; the format_type crate deps
@@ -287,6 +288,7 @@ fn shell_type_error(typid: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn no_io_function_error(kind: &str, typid: Oid) -> Box<PgError> {
     Box::new(

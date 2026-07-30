@@ -1465,6 +1465,7 @@ pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn reject_limit_exceeded(limit: i64) -> Box<PgError> {
@@ -1476,6 +1477,7 @@ fn reject_limit_exceeded(limit: i64) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_copy_to_relkind(rel: &Relation<'_>) -> Box<PgError> {

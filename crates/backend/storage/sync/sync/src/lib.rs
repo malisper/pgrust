@@ -50,6 +50,7 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("sync.c", 0, funcname)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn oom(what: &str) -> Box<PgError> {

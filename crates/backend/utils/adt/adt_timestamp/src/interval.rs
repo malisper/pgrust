@@ -797,6 +797,7 @@ pub fn timestamp_mi_interval(timestamp: Timestamp, span: &Interval) -> PgResult<
     timestamp_pl_interval(timestamp, &tspan)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_in_range_offset() -> Box<PgError> {
@@ -1068,6 +1069,7 @@ pub fn interval_send<'mcx>(
     Ok(::pqformat::pq_endtypsend(b))
 }
 
+#[track_caller]
 #[cold]
 fn invalid_interval_typmod() -> Box<PgError> {
     Box::new(
@@ -1076,6 +1078,7 @@ fn invalid_interval_typmod() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn invalid_interval_typmod_range(typmod: i32) -> Box<PgError> {
     Box::new(
@@ -1385,6 +1388,7 @@ pub fn timestamptz_mi_interval(timestamp: TimestampTz, span: &Interval) -> PgRes
     timestamptz_mi_interval_internal(timestamp, span, None)
 }
 
+#[track_caller]
 #[cold]
 fn izone_error(zone: &Interval, what: &str) -> Box<PgError> {
     let mut buf: TsBuf = [0; MAXDATELEN + 1];
@@ -1542,6 +1546,7 @@ pub fn timestamptz_age(dt1: TimestampTz, dt2: TimestampTz) -> PgResult<Interval>
     age_common(dt1, dt2, true)
 }
 
+#[track_caller]
 #[cold]
 fn interval_unit_not_supported(lowunits: &[u8]) -> Box<PgError> {
     Box::new(
@@ -1553,6 +1558,7 @@ fn interval_unit_not_supported(lowunits: &[u8]) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn interval_trunc_week_not_supported(lowunits: &[u8]) -> Box<PgError> {
     Box::new(
@@ -1565,6 +1571,7 @@ fn interval_trunc_week_not_supported(lowunits: &[u8]) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn interval_unit_not_recognized(lowunits: &[u8]) -> Box<PgError> {
     Box::new(

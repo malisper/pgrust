@@ -693,6 +693,7 @@ fn append_new_colnames<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn top_level_self_reference_required(ctename: &str) -> Box<PgError> {

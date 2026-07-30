@@ -380,6 +380,7 @@ fn bt_moveright_for_update<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn fell_off_the_end(rel: &Relation<'_>) -> Box<PgError> {
@@ -528,6 +529,7 @@ unsafe fn bt_swap_posting<'mcx>(
     Ok(nposting)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_insert_offset(
@@ -549,6 +551,7 @@ fn no_insert_offset(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn posting_split_failed(nhtids: i32, postingoff: i32) -> Box<PgError> {
@@ -557,6 +560,7 @@ fn posting_split_failed(nhtids: i32, postingoff: i32) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_duplicate_tuple(
@@ -803,6 +807,7 @@ unsafe fn bt_check_unique<'mcx>(
     Ok((InvalidTransactionId, 0))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn refind_failed<'mcx>(
@@ -825,6 +830,7 @@ fn refind_failed<'mcx>(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unique_violation<'mcx>(
@@ -1761,6 +1767,7 @@ fn zero_page(pin: &BufferPin) {
     let _ = &mut page;
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn split_failed(rel: &Relation<'_>, blkno: BlockNumber, what: &str, side: &str) -> Box<PgError> {

@@ -28,6 +28,7 @@ const Anum_pg_trigger_tgrelid: i32 = 2;
 const Anum_pg_trigger_tgparentid: i32 = 3;
 const Anum_pg_trigger_tgname: i32 = 4;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {

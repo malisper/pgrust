@@ -45,6 +45,7 @@ fn get_snapbuild_state_desc(state: i32) -> &'static str {
     }
 }
 
+#[track_caller]
 #[cold]
 fn invalid_filename_err(name: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("invalid snapshot file name \"{name}\"")))

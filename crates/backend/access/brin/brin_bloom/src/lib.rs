@@ -318,6 +318,7 @@ fn bloom_get_procinfo(bdesc: &BrinDesc<'_>, attno: u16) -> PgResult<FmgrInfo> {
     Ok(finfo)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_opclass(procnum: u16, attno: u16) -> Box<PgError> {

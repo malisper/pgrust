@@ -23,6 +23,7 @@ pub const JB_PATH_CREATE_OR_INSERT: u32 =
 pub const JB_PATH_FILL_GAPS: u32 = 0x0020;
 pub const JB_PATH_CONSISTENT_POSITION: u32 = 0x0040;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_param(msg: &'static str) -> Box<PgError> {
@@ -409,6 +410,7 @@ pub fn delete_idx<'mcx>(
     convert_to_jsonb(mcx, &ps.finish())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_path_elem(level: usize) -> Box<PgError> {
@@ -516,6 +518,7 @@ fn set_path_rec<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_replace_scalar() -> Box<PgError> {
@@ -526,6 +529,7 @@ fn cannot_replace_scalar() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_replace_existing_key() -> Box<PgError> {

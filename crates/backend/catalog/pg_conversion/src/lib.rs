@@ -61,6 +61,7 @@ pub fn FindDefaultConversion(
     Ok(proc)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn duplicate(msg: String) -> Box<PgError> {

@@ -49,6 +49,7 @@ pub const DATCONNLIMIT_INVALID_DB: i32 = -2;
 
 const DATABASEOID: i32 = 21;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_utf8(col: &'static str) -> Box<PgError> {

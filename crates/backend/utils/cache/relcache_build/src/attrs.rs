@@ -479,6 +479,7 @@ pub(crate) fn decode(
     Ok(a)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_attnum(attnum: i16, relid: Oid) -> Box<PgError> {
@@ -490,6 +491,7 @@ fn invalid_attnum(attnum: i16, relid: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_attributes(n: usize, relid: Oid) -> Box<PgError> {

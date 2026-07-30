@@ -260,11 +260,13 @@ pub fn default_locale_installed() -> bool {
     DEFAULT_LOCALE.with(Cell::get).is_some()
 }
 
+#[track_caller]
 #[cold]
 fn cache_lookup_failed(collid: Oid) -> Box<PgError> {
     PgError::error(format!("cache lookup failed for collation {collid}")).into()
 }
 
+#[track_caller]
 #[cold]
 fn support_error(funcname: &str, provider: u8) -> Box<PgError> {
     PgError::error(format!(
@@ -601,6 +603,7 @@ fn get_collation_actual_version_libc(collcollate: &str) -> Option<String> {
 
 const PG_UTF8: i32 = 6;
 
+#[track_caller]
 #[cold]
 fn invalid_builtin_locale(locale: &str) -> Box<PgError> {
     PgError::error(format!(

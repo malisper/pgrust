@@ -98,6 +98,7 @@ pub fn get_language_name<'mcx>(
     }
 }
 
+#[track_caller]
 #[cold]
 fn opclass_lookup_failed(opclass: Oid) -> Box<PgError> {
     cache_lookup_error(format!("cache lookup failed for opclass {opclass}"))

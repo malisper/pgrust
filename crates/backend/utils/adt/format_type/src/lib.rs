@@ -25,6 +25,7 @@ fn is_true_array_type(typelem: Oid, typsubscript: Oid) -> bool {
     typelem != InvalidOid && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_lookup_failed(typid: Oid) -> Box<PgError> {

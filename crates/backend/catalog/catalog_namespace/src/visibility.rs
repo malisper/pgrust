@@ -47,6 +47,7 @@ fn path_contains(nsp: Oid) -> bool {
     (0..base_path_len()).any(|i| base_path_nth(i) == nsp)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn lookup_failed(kind: &str, oid: Oid) -> Box<PgError> {

@@ -1209,6 +1209,7 @@ unsafe fn tabname_str(hashp: *const HTAB) -> std::borrow::Cow<'static, str> {
     std::borrow::Cow::Owned(cstr.to_string_lossy().into_owned())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn oom_error(shared: bool) -> Box<PgError> {
@@ -1216,6 +1217,7 @@ fn oom_error(shared: bool) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_OUT_OF_MEMORY))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn frozen_error(op: &str, hashp: *mut HTAB) -> Box<PgError> {

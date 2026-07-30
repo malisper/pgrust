@@ -589,6 +589,7 @@ impl Default for LaneFramedDrive {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn framed_fetch_tripwire() -> Box<PgError> {

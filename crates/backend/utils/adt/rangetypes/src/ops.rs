@@ -213,6 +213,7 @@ pub fn range_overright_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2:
     Ok(range_cmp_bounds(mcx, ri, &lower1, &lower2)? >= 0)
 }
 
+#[track_caller]
 #[cold]
 fn range_minus_not_contiguous() -> Box<PgError> {
     Box::new(
@@ -283,6 +284,7 @@ pub fn range_minus_internal<'m>(
     Err(Box::new(PgError::error("unexpected case in range_minus")))
 }
 
+#[track_caller]
 #[cold]
 fn range_union_not_contiguous() -> Box<PgError> {
     Box::new(
@@ -408,6 +410,7 @@ pub fn range_cmp_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]
     }
 }
 
+#[track_caller]
 #[cold]
 fn no_hash_function(elem_typid: Oid) -> Box<PgError> {
     let t = ::format_type::format_type_be(elem_typid)

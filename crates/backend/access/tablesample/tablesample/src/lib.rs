@@ -328,6 +328,7 @@ fn hash_u32s(words: &[u32]) -> u32 {
     hashfn::hash_bytes(&bytes[..words.len() * 4])
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bad_percent() -> Box<PgError> {
@@ -338,6 +339,7 @@ fn bad_percent() -> Box<PgError> {
 }
 
 // GetTsmRoutine's elog for a handler that yields no TsmRoutine.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_a_tsm_routine(tsmhandler: Oid) -> Box<PgError> {

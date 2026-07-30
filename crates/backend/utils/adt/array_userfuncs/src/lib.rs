@@ -32,6 +32,7 @@ pub struct ElemMeta {
     pub typalign: u8,
 }
 
+#[track_caller]
 #[cold]
 fn integer_out_of_range() -> Box<PgError> {
     Box::new(
@@ -39,6 +40,7 @@ fn integer_out_of_range() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn not_one_dimensional() -> Box<PgError> {
     Box::new(
@@ -47,6 +49,7 @@ fn not_one_dimensional() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn incompatible_cat(detail: String) -> Box<PgError> {
     Box::new(
@@ -56,6 +59,7 @@ fn incompatible_cat(detail: String) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn diff_dimensionality() -> Box<PgError> {
     Box::new(
@@ -64,6 +68,7 @@ fn diff_dimensionality() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn array_size_exceeded() -> Box<PgError> {
     Box::new(

@@ -214,6 +214,7 @@ pub fn fc_binary_upgrade_set_record_init_privs(
     Ok(Datum::from_usize(0))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn upgrade_unported(name: &str) -> Box<PgError> {

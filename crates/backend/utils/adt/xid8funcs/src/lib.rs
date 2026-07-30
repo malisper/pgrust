@@ -264,6 +264,7 @@ fn push_u64(out: &mut PgVec<'_, u8>, v: u64) {
     out.extend_from_slice(&buf[i..]);
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn recv_bad_format() -> Box<PgError> {
@@ -307,6 +308,7 @@ pub fn snapshot_recv<'mcx>(
     snapshot_image(mcx, xmin, xmax, &xips)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_execute_during_recovery(cmdname: &str) -> Box<PgError> {

@@ -162,6 +162,7 @@ pub struct JsonbBuildState<'mcx> {
     stack: PgVec<'mcx, Frame<'mcx>>,
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn limit_error(msg: alloc::string::String) -> Box<PgError> {
@@ -422,6 +423,7 @@ fn convert_value(
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn total_size_error(kind: &str) -> Box<PgError> {

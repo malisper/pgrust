@@ -27,6 +27,7 @@ use crate::deform::{slot_getallattrs, slot_getmissingattrs, TupleImage};
 
 // unported: EOH_flatten_into (the expandeddatum unit owns it); clean
 // feature error rather than a panic if an expanded datum ever lands here.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn expanded_datum_unported() -> Box<PgError> {

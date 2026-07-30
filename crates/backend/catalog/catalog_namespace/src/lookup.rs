@@ -20,6 +20,7 @@ const ACLCHECK_OK: i32 = 0;
 pub type RangeVarGetRelidCallback<'a> =
     Option<&'a mut dyn FnMut(&RangeVar<'_>, Oid, Oid) -> PgResult<()>>;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_schema(nspname: &str) -> Box<PgError> {
@@ -29,6 +30,7 @@ fn undefined_schema(nspname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_relation(relation: &RangeVar<'_>) -> Box<PgError> {
@@ -42,6 +44,7 @@ fn undefined_relation(relation: &RangeVar<'_>) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_UNDEFINED_TABLE))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cross_database_reference(relation: &RangeVar<'_>) -> Box<PgError> {
@@ -56,6 +59,7 @@ fn cross_database_reference(relation: &RangeVar<'_>) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn temp_table_schema_name() -> Box<PgError> {
@@ -175,12 +179,14 @@ pub fn RelnameGetRelid(relname: &str) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn improper_qualified_name(names: &[&str]) -> Box<PgError> {
     improper_qualified_name_joined(names.join("."))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn improper_qualified_name_joined(joined: String) -> Box<PgError> {
@@ -369,6 +375,7 @@ fn lookup_collation(collname: &str, collnamespace: Oid, encoding: i32) -> PgResu
     Ok(row.oid)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_collation(collname: &[&str]) -> Box<PgError> {
@@ -440,6 +447,7 @@ pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_ts_object(kind: &str, names: &[&str]) -> Box<PgError> {

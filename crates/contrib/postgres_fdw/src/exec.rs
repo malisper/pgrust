@@ -107,6 +107,7 @@ fn fsstate<'a>(node: &'a mut ForeignScanState<'_>) -> Option<&'a mut PgFdwScanSt
     node.fdw_state.as_mut().and_then(|s| s.downcast_mut::<PgFdwScanState>())
 }
 
+#[track_caller]
 #[cold]
 fn system_columns_unported() -> Box<PgError> {
     Box::new(
@@ -398,6 +399,7 @@ fn retain_datum(batch: mcx::Mcx<'_>, d: Datum, typlen: i16, typbyval: bool) -> P
 }
 
 // conversion_error_callback: C's errcontext line for a failed conversion.
+#[track_caller]
 #[cold]
 fn conversion_error(e: Box<PgError>, attin: &AttInMeta, attno: i32) -> Box<PgError> {
     let line = if attno >= 1 && attno as usize <= attin.natts {

@@ -90,6 +90,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: pg_proc {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
@@ -1104,6 +1105,7 @@ fn fc_fmgr_c_validator(
 const FMGR_C_VALIDATOR_OID: Oid = 2247;
 
 // C SysCacheGetAttrNotNull's elog text (syscache.c).
+#[track_caller]
 #[cold]
 fn null_proc_column_err(column: &str) -> Box<PgError> {
     PgError::error(format!(

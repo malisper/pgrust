@@ -144,6 +144,7 @@ fn stat_words(md: &std::fs::Metadata, path: &str) -> (i64, i64, i64, i64) {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_row_type() -> Box<PgError> {

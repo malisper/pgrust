@@ -379,6 +379,7 @@ pub fn compatible_oper_opid(
     })
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn coercion_error(
@@ -602,6 +603,7 @@ pub fn make_scalar_array_op<'mcx>(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn saop_error(pstate: &ParseState<'_, '_>, msg: &str, location: ParseLoc) -> Box<PgError> {
@@ -615,6 +617,7 @@ fn saop_error(pstate: &ParseState<'_, '_>, msg: &str, location: ParseLoc) -> Box
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_array_type_error(
@@ -676,6 +679,7 @@ pub fn get_sort_group_operators(
     Ok(ops)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn missing_op_error(argtype: Oid, ordering: bool) -> Box<PgError> {
@@ -710,6 +714,7 @@ pub fn op_signature_string(parts: &[&str], arg1: Oid, arg2: Oid) -> PgResult<Str
     })
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn op_error(
@@ -758,6 +763,7 @@ fn op_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn shell_error(
@@ -781,6 +787,7 @@ fn shell_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn postfix_error() -> Box<PgError> {

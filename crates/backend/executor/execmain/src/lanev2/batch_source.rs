@@ -896,6 +896,7 @@ impl<'mcx> BatchGranuleSource<'mcx> for HeapBatchSource<'_, 'mcx> {
     // --- end WS-AH wave-9 sub-region ----------------------------------------
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn seam_not_wired(what: &str) -> Box<PgError> {

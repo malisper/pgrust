@@ -35,6 +35,7 @@ fn lsn_fmt(lsn: XLogRecPtr) -> String {
     format!("{:X}/{:X}", (lsn >> 32) as u32, lsn as u32)
 }
 
+#[track_caller]
 #[cold]
 fn param_err(msg: impl Into<String>) -> Box<PgError> {
     Box::new(PgError::error(msg.into()).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))

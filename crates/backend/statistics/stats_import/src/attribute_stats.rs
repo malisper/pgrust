@@ -108,6 +108,7 @@ static CLEARARGINFO: [StatsArgInfo; C_NUM_ATTRIBUTE_STATS_ARGS] = [
     StatsArgInfo { argname: "inherited", argtype: BOOLOID },
 ];
 
+#[track_caller]
 #[cold]
 fn column_name_missing(attname: &str, relname: &str) -> Box<PgError> {
     Box::new(
@@ -118,6 +119,7 @@ fn column_name_missing(attname: &str, relname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn column_num_missing(attnum: AttrNumber, relname: &str) -> Box<PgError> {
     Box::new(

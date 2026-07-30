@@ -90,6 +90,7 @@ thread_local! {
     static CACHE: RefCell<Option<SmgrCache>> = const { RefCell::new(None) };
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn oom(what: &str) -> Box<PgError> {

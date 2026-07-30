@@ -160,6 +160,7 @@ fn invalid_option_error(mcx: Mcx<'_>, name: &str, catalog: Oid) -> PgResult<Box<
     Ok(Box::new(e))
 }
 
+#[track_caller]
 #[cold]
 fn conflicting_options(hint: Option<&str>) -> Box<PgError> {
     let mut e =
@@ -170,6 +171,7 @@ fn conflicting_options(hint: Option<&str>) -> Box<PgError> {
     Box::new(e)
 }
 
+#[track_caller]
 #[cold]
 fn option_permission_denied(option: &str, role: &str) -> Box<PgError> {
     Box::new(
@@ -658,6 +660,7 @@ fn file_begin_foreign_scan<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 fn reject_limit_exceeded(limit: i64) -> Box<PgError> {
     Box::new(

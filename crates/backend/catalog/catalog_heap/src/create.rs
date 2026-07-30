@@ -28,6 +28,7 @@ const Anum_pg_class_relpartbound: usize = 34;
 const Natts_pg_attribute: usize = 25;
 const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {

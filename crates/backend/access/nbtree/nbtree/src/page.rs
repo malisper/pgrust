@@ -57,6 +57,7 @@ pub fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_corrupted(msg: std::string::String) -> Box<PgError> {

@@ -3517,6 +3517,7 @@ pub(crate) fn ATExecDropIdentity<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn not_an_identity_column(col_name: &str, relname: &str) -> Box<PgError> {
@@ -6453,6 +6454,7 @@ fn str_arena<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(core::str::from_utf8(v.leak()).expect("was UTF-8"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_column(col_name: &str, relname: &str) -> Box<PgError> {

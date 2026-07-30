@@ -289,6 +289,7 @@ fn run_subplan<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn too_many_rows() -> Box<PgError> {

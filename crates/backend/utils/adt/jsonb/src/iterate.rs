@@ -26,6 +26,7 @@ pub const JTI_ALL: u32 = JTI_KEY | JTI_STRING | JTI_NUMERIC | JTI_BOOL;
 const FLAG_HINT: &str =
     "Possible values are: \"string\", \"numeric\", \"boolean\", \"key\", and \"all\".";
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn flag_error(msg: impl Into<alloc::string::String>, hint: bool) -> Box<PgError> {

@@ -21,6 +21,7 @@ fn name_str(name: &[u8; 64]) -> &str {
     core::str::from_utf8(&name[..n]).unwrap_or("")
 }
 
+#[track_caller]
 #[cold]
 fn invalid_encoding_name(which: &str, name: &str) -> Box<PgError> {
     Box::new(

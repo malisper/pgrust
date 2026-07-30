@@ -213,6 +213,7 @@ pub(crate) fn windows_t2b_set_for_tests(on: bool) {
 pub(crate) static WINDOWS_T2B_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn sticky_tripwire(what: &str) -> Box<PgError> {

@@ -47,6 +47,7 @@ pub fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
                 && rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn row_too_big(itemsz: usize, maxsz: usize, rel: &RelationData<'_>) -> Box<PgError> {
@@ -59,6 +60,7 @@ fn row_too_big(itemsz: usize, maxsz: usize, rel: &RelationData<'_>) -> Box<PgErr
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn corrupted_revmap() -> Box<PgError> {

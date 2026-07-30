@@ -52,6 +52,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: sequence {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
@@ -421,6 +422,7 @@ fn def_get_i64(defel: &DefElem<'_>) -> PgResult<i64> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn conflicting_def_elem() -> Box<PgError> {
     err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR)

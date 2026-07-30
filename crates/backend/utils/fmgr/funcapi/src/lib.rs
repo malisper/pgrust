@@ -332,6 +332,7 @@ pub fn get_fn_expr_variadic(flinfo: Option<&FmgrInfo>) -> bool {
     }
 }
 
+#[track_caller]
 #[cold]
 fn function_lookup_failed(funcid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(
@@ -339,6 +340,7 @@ fn function_lookup_failed(funcid: Oid) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 fn unresolved_polymorphic_rettype(funcid: Oid, rettype: Oid) -> Box<PgError> {
     let name = syscache_seams::pg_proc_proname::call(funcid)

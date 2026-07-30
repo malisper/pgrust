@@ -398,6 +398,7 @@ fn to_am_wait_policy(p: types_nodes::LockWaitPolicy) -> ::tableam_vocab::LockWai
     }
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn serialization_failure() -> Box<PgError> {
@@ -407,6 +408,7 @@ fn serialization_failure() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn internal(msg: &str) -> Box<PgError> {

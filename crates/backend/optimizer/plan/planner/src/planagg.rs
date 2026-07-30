@@ -328,6 +328,7 @@ fn fetch_agg_sort_op(aggfnoid: types_core::Oid) -> PgResult<types_core::Oid> {
 
 pub(crate) use types_pathnodes::run::subroot_path_base;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn could_not_find_eqop(aggsortop: types_core::Oid) -> Box<PgError> {

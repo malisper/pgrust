@@ -557,6 +557,7 @@ fn tlist_location(tlist: &NodeList<'_>) -> ParseLoc {
     -1
 }
 
+#[track_caller]
 #[cold]
 fn setop_column_count_mismatch(
     pstate: &ParseState<'_, '_>,
@@ -578,6 +579,7 @@ fn setop_column_count_mismatch(
     )
 }
 
+#[track_caller]
 #[cold]
 fn setop_refers_to_same_level(pstate: &ParseState<'_, '_>, location: i32) -> Box<PgError> {
     use types_error::{ErrorLocation, ERRCODE_INVALID_COLUMN_REFERENCE, ERROR};
@@ -595,6 +597,7 @@ fn setop_refers_to_same_level(pstate: &ParseState<'_, '_>, location: i32) -> Box
     )
 }
 
+#[track_caller]
 #[cold]
 fn invalid_setop_order_by(pstate: &ParseState<'_, '_>, extra_tle: Node<'_>) -> Box<PgError> {
     use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};

@@ -270,12 +270,14 @@ fn bad_owner(owner: ResourceOwner) -> ! {
     panic!("resowner: stale ResourceOwner {owner:?} (slot out of range)");
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn oom() -> Box<PgError> {
     Box::new(PgError::error("out of memory"))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_enlarge_after_release() -> Box<PgError> {
@@ -284,6 +286,7 @@ fn err_enlarge_after_release() -> Box<PgError> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_array_full() -> Box<PgError> {
@@ -292,6 +295,7 @@ fn err_array_full() -> Box<PgError> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_forget_after_release(kind: &'static ResourceOwnerDesc) -> Box<PgError> {
@@ -301,6 +305,7 @@ fn err_forget_after_release(kind: &'static ResourceOwnerDesc) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_not_owned(kind: &'static ResourceOwnerDesc, value: Datum, owner: &str) -> Box<PgError> {

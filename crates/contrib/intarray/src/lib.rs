@@ -555,6 +555,7 @@ fn int4_consistent(
     })
 }
 
+#[track_caller]
 #[cold]
 fn gin_symbol_via_fmgr(name: &str) -> Box<PgError> {
     Box::new(PgError::error(format!(
@@ -563,6 +564,7 @@ fn gin_symbol_via_fmgr(name: &str) -> Box<PgError> {
     )))
 }
 
+#[track_caller]
 #[cold]
 fn selfuncs_symbol_via_fmgr(name: &str) -> Box<PgError> {
     Box::new(PgError::error(format!(

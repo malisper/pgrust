@@ -4,6 +4,7 @@ use mcx::Mcx;
 use types_core::{Oid, UserContext, SECURITY_RESTRICTED_OPERATION, USER_CONTEXT_NO_NEST_LEVEL};
 use types_error::{PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE};
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_set_role(mcx: Mcx<'_>, save_userid: Oid, userid: Oid) -> Box<PgError> {

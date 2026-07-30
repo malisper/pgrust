@@ -505,6 +505,7 @@ pub(crate) fn executor_end_seam(h: QueryDescHandle) -> PgResult<()> {
     querydesc::with_qd(h, standard_executor_end)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn unrecognized_operation(operation: CmdType) -> Box<PgError> {
@@ -1661,6 +1662,7 @@ fn check_valid_row_mark_rel(
     Err(cannot_lock_rows_in(what, rel))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_lock_rows_in(what: &str, rel: &::types_rel::Relation<'_>) -> Box<PgError> {

@@ -11,6 +11,7 @@ use crate::{getattr, name_from, oid_key, req};
 const Anum_pg_class_oid: i32 = 1;
 const Anum_pg_class_reloptions: i32 = 33;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_database() -> Box<PgError> {

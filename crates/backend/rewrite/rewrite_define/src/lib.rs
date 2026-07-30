@@ -601,12 +601,14 @@ pub fn SetRelationRuleStatus<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_not_supported(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_object(msg: &str) -> Box<PgError> {

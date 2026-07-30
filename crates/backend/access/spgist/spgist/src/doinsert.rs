@@ -1450,6 +1450,7 @@ fn spgSplitNodeAction<'m>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_row_too_large(index: &Relation<'_>, leaf_size: usize) -> Box<PgError> {

@@ -26,12 +26,14 @@ fn MyDatabaseId() -> Oid {
     init_small::globals::MyDatabaseId()
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_invalid_cache_id(level: types_error::ErrorLevel, cacheid: i32) -> Box<PgError> {
     Box::new(PgError::new(level, format!("invalid cache ID: {cacheid}")))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_out_of_slots(list: &str) -> Box<PgError> {
@@ -220,6 +222,7 @@ pub fn CacheInvalidateRelcacheByRelid(relid: Oid) -> PgResult<()> {
     })
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err_cache_lookup_failed(relid: Oid) -> Box<PgError> {

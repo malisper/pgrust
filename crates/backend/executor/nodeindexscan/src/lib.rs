@@ -700,6 +700,7 @@ fn order_dir(dir: i32) -> ScanDirection {
 
 // unported: ExecIndexBuildScanKeys legs the planner can still reach raise a
 // clean ERRCODE_FEATURE_NOT_SUPPORTED error (plan-init time, safe unwind).
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn scankey_case_unported(what: &str) -> Box<PgError> {

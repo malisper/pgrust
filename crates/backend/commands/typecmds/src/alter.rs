@@ -1588,6 +1588,7 @@ fn rebuild_alter_type_dependencies<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_attribute_error(attr: &str, tail: &str) -> Box<PgError> {

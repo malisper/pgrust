@@ -65,6 +65,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: CreateTriggerFiringOn {what}")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
@@ -866,6 +867,7 @@ fn transform_when_clause<'mcx>(
     Ok((when_clause, qual, pstate.p_rtable))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn when_err(

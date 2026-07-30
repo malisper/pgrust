@@ -472,6 +472,7 @@ fn RewriteQuery<'mcx>(
     Ok(rewritten)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn wcte_rule_unsupported(kind: &str) -> Box<PgError> {
@@ -840,6 +841,7 @@ fn get_assignment_input<'mcx>(node: Node<'mcx>) -> Option<Node<'mcx>> {
     None
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn multiple_assignments_error(attr_name: &str) -> Box<PgError> {
@@ -1121,6 +1123,7 @@ pub fn build_generation_expression<'mcx>(
     Ok(defexpr)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn generated_always_insert_error(
@@ -1144,6 +1147,7 @@ fn generated_always_insert_error(
     Box::new(e)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn generated_always_update_error(
@@ -1165,6 +1169,7 @@ fn generated_always_update_error(
     Box::new(e)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn default_expression_not_found(attrno: usize, rel: &types_rel::Relation<'_>) -> Box<PgError> {
@@ -1174,6 +1179,7 @@ fn default_expression_not_found(attrno: usize, rel: &types_rel::Relation<'_>) ->
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn default_type_mismatch(attname: &[u8], atttypid: Oid, exprtype: Oid) -> Box<PgError> {
@@ -1577,6 +1583,7 @@ fn fireRIRrules<'mcx>(
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn infinite_recursion_policy(relname: &str) -> Box<PgError> {
@@ -2920,6 +2927,7 @@ fn range_table_entry_used(parsetree: &Query<'_>, rt_index: i32) -> PgResult<bool
     nodes_core::range_table_walker(&parsetree.rtable, &mut w, 0)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn infinite_recursion(relname: &str) -> Box<PgError> {
@@ -2931,6 +2939,7 @@ fn infinite_recursion(relname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn internal_error(msg: &str) -> Box<PgError> {

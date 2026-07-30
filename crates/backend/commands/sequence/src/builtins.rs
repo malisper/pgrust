@@ -52,6 +52,7 @@ fn composite_datum(
     Ok(d)
 }
 
+#[track_caller]
 #[cold]
 fn permission_denied(relid: Oid) -> Box<PgError> {
     let name = lsyscache::relation::get_rel_name(fc_mcx(), relid)

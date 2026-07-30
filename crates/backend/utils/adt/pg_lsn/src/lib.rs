@@ -124,6 +124,7 @@ pub fn pg_lsn_mi(lsn1: XLogRecPtr, lsn2: XLogRecPtr) -> PgResult<NumericImage> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn nan_arith(op: &str) -> Box<PgError> {
     Box::new(

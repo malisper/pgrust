@@ -279,6 +279,7 @@ pub(crate) fn compute_partition_key<'mcx>(
     Ok(info)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn generated_partition_column(colname: &str, query_string: &str, location: i32) -> Box<PgError> {
@@ -600,6 +601,7 @@ fn transformPartitionBoundValue<'mcx>(
     Ok(value)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn invalid_bound_spec(
@@ -620,6 +622,7 @@ fn invalid_bound_spec(
     Box::new(e)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn hash_default_partition() -> Box<PgError> {
@@ -632,6 +635,7 @@ fn hash_default_partition() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn hash_bound_error(msg: &'static str) -> Box<PgError> {
@@ -641,6 +645,7 @@ fn hash_bound_error(msg: &'static str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn bound_count_error(which: &'static str) -> Box<PgError> {
@@ -653,6 +658,7 @@ fn bound_count_error(which: &'static str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_range_bound() -> Box<PgError> {
@@ -662,6 +668,7 @@ fn null_range_bound() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn infinite_bounds_error(
@@ -687,6 +694,7 @@ fn infinite_bounds_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cannot_cast_bound(

@@ -247,6 +247,7 @@ fn object_aclmask_ext(
     Ok(result)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_type(type_oid: Oid) -> Box<PgError> {
@@ -446,6 +447,7 @@ pub fn pg_class_aclmask_ext(
     Ok(result)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_table(table_oid: Oid) -> Box<PgError> {
@@ -549,6 +551,7 @@ pub fn pg_attribute_aclcheck_ext(
     Ok((r, is_missing))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn undefined_column(attnum: i16, table_oid: Oid) -> Box<PgError> {

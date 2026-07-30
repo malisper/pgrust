@@ -559,6 +559,7 @@ fn contain_vars_of_level_query<'mcx>(q: &'mcx Query<'mcx>, levelsup: u32) -> PgR
     nodes_core::query_tree_walker(q, &mut w, 0)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn feature_not_supported(msg: &str) -> Box<PgError> {

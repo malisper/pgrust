@@ -205,6 +205,7 @@ fn multirange_union_range_equal(
         && range_cmp_bounds(mcx, ri, &upper1, &upper2)? == 0)
 }
 
+#[track_caller]
 #[cold]
 fn unrecognized_range_strategy(strategy: u16) -> Box<PgError> {
     Box::new(PgError::error(format!("unrecognized range strategy: {strategy}")))

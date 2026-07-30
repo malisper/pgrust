@@ -454,6 +454,7 @@ pub fn exec_rescan_limit<'mcx, C: LimitChild<'mcx>>(
     recompute_limits(node, child, estate)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn negative_offset() -> Box<PgError> {
@@ -463,6 +464,7 @@ fn negative_offset() -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn negative_limit() -> Box<PgError> {

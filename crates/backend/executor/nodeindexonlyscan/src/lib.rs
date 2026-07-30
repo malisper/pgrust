@@ -327,6 +327,7 @@ pub fn index_only_scan_batch_store<'mcx>(
     Ok(true)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn no_data_returned() -> Box<PgError> {
@@ -335,6 +336,7 @@ fn no_data_returned() -> Box<PgError> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn lossy_distance_error() -> Box<PgError> {

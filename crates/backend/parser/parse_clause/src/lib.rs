@@ -97,6 +97,7 @@ fn transform_agg_within_group<'mcx>(
     Ok(torder)
 }
 
+#[track_caller]
 #[cold]
 fn no_distinct_ordering_operator(pstate: &ParseState<'_, '_>, expr: Node<'_>) -> Box<PgError> {
     Box::new(
@@ -522,6 +523,7 @@ fn scanForUsingColumn(
     index.ok_or_else(|| using_column_missing(u_colname, side))
 }
 
+#[track_caller]
 #[cold]
 fn using_column_duplicate(name: &str) -> Box<PgError> {
     Box::new(
@@ -539,6 +541,7 @@ fn using_column_duplicate(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn using_column_ambiguous(name: &str, side: &'static str) -> Box<PgError> {
     Box::new(
@@ -556,6 +559,7 @@ fn using_column_ambiguous(name: &str, side: &'static str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn using_column_missing(name: &str, side: &'static str) -> Box<PgError> {
     Box::new(
@@ -948,6 +952,7 @@ fn name_list_to_string(parts: &[&str]) -> std::string::String {
     parts.join(".")
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablesample_wrong_relkind(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -969,6 +974,7 @@ fn tablesample_wrong_relkind(pstate: &ParseState<'_, '_>, location: ParseLoc) ->
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablesample_no_method(
@@ -994,6 +1000,7 @@ fn tablesample_no_method(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablesample_wrong_rettype(
@@ -1020,6 +1027,7 @@ fn tablesample_wrong_rettype(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablesample_wrong_arg_count(
@@ -1060,6 +1068,7 @@ fn tablesample_wrong_arg_count(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablesample_no_repeatable(
@@ -1328,6 +1337,7 @@ fn coerce_to_specific_type_typmod<'mcx>(
     Ok(node)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablefunc_syntax_error(
@@ -1350,6 +1360,7 @@ fn tablefunc_syntax_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn column_setof_error(
@@ -1372,6 +1383,7 @@ fn column_setof_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn tablefunc_type_mismatch(
@@ -1628,6 +1640,7 @@ fn check_srf_top_level<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn coldeflist_syntax_error(
@@ -1654,6 +1667,7 @@ fn coldeflist_syntax_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn srf_not_top_level(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -1830,6 +1844,7 @@ pub fn transformIndexStmt<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn index_expr_other_table() -> Box<PgError> {
@@ -1895,6 +1910,7 @@ pub fn transformStatsStmt<'mcx>(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn stats_expr_other_table() -> Box<PgError> {
@@ -2056,6 +2072,7 @@ fn resolve_unique_index_expr<'mcx>(
     Ok(result)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn on_conflict_requires_inference(
@@ -2077,6 +2094,7 @@ fn on_conflict_requires_inference(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn on_conflict_on_catalog(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -2094,6 +2112,7 @@ fn on_conflict_on_catalog(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Bo
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn on_conflict_bad_index_elem(
@@ -2116,6 +2135,7 @@ fn on_conflict_bad_index_elem(
 }
 
 // C: setup_parser_errposition_callback around LookupCollation's get_collation_oid.
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn resolve_arbiter_position(
@@ -2869,6 +2889,7 @@ fn transformGroupingSet<'mcx>(
     Node::mk_grouping_set(mcx, gset.kind, content, gset.location)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn cube_limit_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -3292,6 +3313,7 @@ fn copy_sort_group_list<'mcx>(
     Ok(out)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn window_error(
@@ -3314,6 +3336,7 @@ fn window_error(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn window_error_hint(
@@ -3486,6 +3509,7 @@ fn transformFrameOffset<'mcx>(
     Ok(Some(node))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn frame_offset_error(
@@ -3508,6 +3532,7 @@ fn frame_offset_error(
     )))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn window_in_group_by(
@@ -3536,6 +3561,7 @@ fn window_in_group_by(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn aggregate_in_group_by(
@@ -3564,6 +3590,7 @@ fn aggregate_in_group_by(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn ambiguous_column(
@@ -3586,6 +3613,7 @@ fn ambiguous_column(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn non_integer_constant(
@@ -3607,6 +3635,7 @@ fn non_integer_constant(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn position_not_in_select_list(
@@ -3632,6 +3661,7 @@ fn position_not_in_select_list(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn contains_variables(
@@ -3649,6 +3679,7 @@ fn contains_variables(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn distinct_orderby_mismatch(
@@ -3675,6 +3706,7 @@ fn distinct_orderby_mismatch(
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn distinct_on_orderby_mismatch(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
@@ -3695,6 +3727,7 @@ fn distinct_on_orderby_mismatch(pstate: &ParseState<'_, '_>, location: ParseLoc)
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn distinct_no_columns(is_agg: bool) -> Box<PgError> {
@@ -3716,6 +3749,7 @@ fn distinct_no_columns(is_agg: bool) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn null_row_count_with_ties() -> Box<PgError> {

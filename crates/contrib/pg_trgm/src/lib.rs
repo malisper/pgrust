@@ -383,6 +383,7 @@ fn trgm_triconsistent(
     })
 }
 
+#[track_caller]
 #[cold]
 fn gin_symbol_via_fmgr(name: &str) -> Box<PgError> {
     Box::new(PgError::error(format!(

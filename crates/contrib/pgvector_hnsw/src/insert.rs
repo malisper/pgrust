@@ -370,6 +370,7 @@ fn add_element_on_disk(
     Ok(())
 }
 
+#[track_caller]
 #[cold]
 fn add_item_failed(index: &Relation<'_>) -> Box<PgError> {
     PgError::error(format!(

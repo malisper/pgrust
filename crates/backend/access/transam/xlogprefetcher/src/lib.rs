@@ -629,6 +629,7 @@ impl<'mcx> XLogPrefetcher<'mcx> {
     }
 }
 
+#[track_caller]
 #[cold]
 fn short_main_data() -> Box<PgError> {
     Box::new(

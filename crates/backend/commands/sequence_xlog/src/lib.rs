@@ -38,6 +38,7 @@ pub fn seq_page_magic(page: &types_storage::bufpage::PageRef<'_>) -> u32 {
     unsafe { page.as_ptr().add(off).cast::<u32>().read_unaligned() }
 }
 
+#[track_caller]
 #[cold]
 fn panic_err(msg: String) -> Box<PgError> {
     Box::new(PgError::new(types_error::PANIC, msg))

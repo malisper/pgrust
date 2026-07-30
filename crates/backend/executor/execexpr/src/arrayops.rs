@@ -66,6 +66,7 @@ pub struct ArrayExprState {
     pub resmcx: ResMcx,
 }
 
+#[track_caller]
 #[cold]
 fn array_merge_error(want: Oid, got: Oid) -> Box<PgError> {
     let w = format_type::format_type_be(want).unwrap_or_else(|_| want.to_string());
@@ -80,6 +81,7 @@ fn array_merge_error(want: Oid, got: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 fn dims_mismatch_error() -> Box<PgError> {
     Box::new(
@@ -303,6 +305,7 @@ pub struct SbsRefState {
     pub resmcx: ResMcx,
 }
 
+#[track_caller]
 #[cold]
 fn null_subscript_error() -> Box<PgError> {
     Box::new(

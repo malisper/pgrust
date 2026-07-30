@@ -561,12 +561,14 @@ const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
 const CSTRINGARRAYOID: Oid = 1263;
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn objdef_err(msg: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn param_err(msg: String) -> Box<PgError> {
@@ -1410,6 +1412,7 @@ pub(crate) fn domainAddNotNullConstraint<'mcx>(
     pg_constraint::CreateConstraintEntry(mcx, &entry)
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn domain_err(
@@ -1422,6 +1425,7 @@ fn domain_err(
     Box::new(PgError::new(ERROR, msg.to_string()).with_sqlstate(sqlstate).with_cursor_position(pos))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn table_refs_in_domain_check() -> Box<PgError> {
@@ -1443,6 +1447,7 @@ fn permission_denied_schema(nsp: Oid) -> PgResult<Box<PgError>> {
     ))
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn permission_denied_type(typeoid: Oid) -> Box<PgError> {
@@ -1453,6 +1458,7 @@ fn permission_denied_type(typeoid: Oid) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn type_already_exists(name: &str) -> Box<PgError> {
@@ -1462,6 +1468,7 @@ fn type_already_exists(name: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
 #[cold]
 #[inline(never)]
 fn constraint_already_exists(conname: &str, domain_name: &str) -> Box<PgError> {
