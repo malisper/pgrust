@@ -1468,10 +1468,10 @@ oid	name	source_file	status	class	notes
 2493	cash_send	crates/backend/utils/adt/cash/src/builtins.rs	proved(full-i64 -> 12-byte bytea image incl varsize header; modulo pqformat model)	slow	104s release-gate; proofs/cash
 2494	macaddr_recv	crates/backend/utils/adt/mac/src/builtins.rs	excluded(blocked: pointer-datum round-trip)	-	mac/src/builtins.rs:88
 2495	macaddr_send	crates/backend/utils/adt/mac/src/builtins.rs	candidate	ladder	macaddr_send mac/src/lib.rs:297; 6 fixed pq_sendbytes. Host proofs/mac
-2496	inet_recv	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
-2497	inet_send	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
-2498	cidr_recv	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
-2499	cidr_send	crates/backend/utils/adt/network/src/builtins.rs	untriaged		
+2496	inet_recv	crates/backend/utils/adt/network/src/builtins.rs	proved(core; literal msg-len grid {2,8,10,20} x fully-symbolic content over real shipped StringInfo; Ok struct+cursor parity, Err verdict/level/sqlstate-class parity 08P01 vs 22P03; modulo static-buffer allocator model; msg text/Location out of proof; sym-len remainder wall(symex))	slow	125-263s/cell; unwind>=18 mandatory (16B memcmp); cover_recv_arms 6/6; proofs/network; network-2026-07-30
+2497	inet_send	crates/backend/utils/adt/network/src/builtins.rs	proved(core; v4/v6 split, is_cidr flag SYMBOLIC (covers 2499 too); full image eq incl 4B varlena header via shipped pq_begintypsend/endtypsend; modulo static-buffer allocator model)	slow	86.5s v4 (unwind 14) / 323.5s v6 (unwind 26, symex depth-bound; kissat worse 113s); control_send_flag_skew FAILED as required; proofs/network; network-2026-07-30
+2498	cidr_recv	crates/backend/utils/adt/network/src/builtins.rs	proved(core; same grid as inet_recv incl the cidr bits-right-of-mask arm; modulo static-buffer allocator model; sym-len remainder wall(symex))	slow	125-263s/cell; proofs/network; network-2026-07-30
+2499	cidr_send	crates/backend/utils/adt/network/src/builtins.rs	proved(core; same harness pair as inet_send — flag symbolic; full image eq; modulo static-buffer allocator model)	slow	see inet_send 2497; proofs/network; network-2026-07-30
 2502	anyarray_recv	crates/backend/utils/adt/pseudotypes/src/builtins.rs	proved(err-parity: verdict+sqlstate+level; all args ignored)	fast	~0.6s default solver; proofs/pseudotypes eq_anyarray_recv; wrapper-level via LocalFcinfo (call1, null Datum); C MAKE_SQLSTATE computed vs shipped with_sqlstate — 0A000 encoding in-theorem; message text/location out of proof; Err-arm cover! + shell_in must-fail control
 2504	pg_get_ruledef_ext	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery
 2505	pg_get_viewdef_name_ext	crates/backend/utils/adt/ruleutils/src/builtins.rs	excluded(state)	-	catalog deparse machinery

@@ -1271,3 +1271,331 @@ mod ntop_spot_proofs {
         assert_image_eq(clen, &cbuf, rlen, &rbuf);
     }
 }
+
+// ================= recv/send extension (2026-07-30) =================
+//
+// Binary I/O rows inet_recv 2496 / inet_send 2497 / cidr_recv 2498 /
+// cidr_send 2499, CORE-LEVEL (adt_network::network_recv / network_send vs
+// the verbatim C bodies). C side: csrc/net_recvsend.c (REL_18_STABLE
+// network.c network_recv/network_send/addressOK; see its header for the
+// StringInfo->msgbuf and ereport->sentinel shims).
+//
+// - recv: the Rust side consumes a REAL shipped StringInfo built over the
+//   same symbolic message bytes the C msgbuf model reads. LITERAL
+//   message-length grid len in {2, 8, 10, 20} per is_cidr flag (symbolic
+//   length walls symex — see the measured ladder at the recv_len! macro);
+//   message CONTENT is fully symbolic in every cell, so family, bits,
+//   flag byte, length byte and payload branch freely and ALL SIX C arms
+//   (Ok, -1 family, -2 bits, -3 length, -4 cidr-mask, -5 no-data) are
+//   exercised across the grid (cover_recv_arms witnesses each against
+//   the C oracle over the full symbolic domain). Ok arm: full value
+//   struct eq + final message-cursor parity. Err arm: verdict + level +
+//   sqlstate-CLASS parity (C sentinel -5 <-> 08P01 protocol_violation,
+//   any ereport arm <-> 22P03 invalid_binary_representation; the four
+//   22P03 arms are not distinguishable from the Rust PgError value, so
+//   arm-exactness inside the class is carried by cover_recv_arms +
+//   identical check ORDER in both bodies). Message text/Location out of
+//   proof (canonical stubs); allocation via the proof_support mcx stub
+//   set ("modulo static-buffer allocator model" — hex recipe).
+// - send: per-family harnesses (fixed image length 12 v4 / 24 v6 — the
+//   result-image CNF wall does not apply to fixed-length frames) with the
+//   is_cidr flag SYMBOLIC, so one harness pair covers both send oids.
+//   Asserts total image equality INCLUDING the 4-byte varlena header
+//   (C shim reproduces SET_VARSIZE's LE 4B-U word; Rust side is the
+//   shipped pq_begintypsend/pq_endtypsend path -> Bytea::from_image).
+// - cover_recv_arms: witnesses all 6 recv arms against the C oracle over
+//   the same symbolic (msg, len, is_cidr) domain — MANDATORY companion
+//   (the eq harnesses' Err class-parity would be vacuous on unreached
+//   arms). cover_send_family_cases: union witness for the send v4/v6
+//   split fence.
+// - Negative control: control_send_flag_skew (Rust sends is_cidr, C sends
+//   !is_cidr — images must differ at byte 6) — MUST FAIL; DEFAULT solver.
+#[cfg(kani)]
+mod recvsend_proofs {
+    use adt_network::{InetValue, PGSQL_AF_INET, PGSQL_AF_INET6};
+    use proof_support::{mcx_stubs, stubs};
+    use types_error::{
+        ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_PROTOCOL_VIOLATION, ERROR,
+    };
+
+    use std::os::raw::c_int;
+
+    /// C-side inet value model (csrc/net_recvsend.c pgc_inet).
+    #[repr(C)]
+    struct CInet {
+        family: u8,
+        bits: u8,
+        addr: [u8; 16],
+    }
+
+    extern "C" {
+        fn pg_network_recv(
+            data: *const u8,
+            len: c_int,
+            is_cidr: c_int,
+            dst: *mut CInet,
+            cursor_out: *mut c_int,
+        ) -> c_int;
+        fn pg_network_send(addr: *const CInet, is_cidr: c_int, out: *mut u8) -> c_int;
+    }
+
+    /// One full v6 external message: family + bits + flag + length + 16 addr.
+    const RECV_CAP: usize = 20;
+
+    fn any_inet_fam(family: u8) -> InetValue {
+        let v = InetValue {
+            family,
+            bits: kani::any(),
+            ipaddr: kani::any(),
+        };
+        kani::assume(v.bits <= v.maxbits());
+        v
+    }
+
+    /// CAP is the message-buffer capacity; `len` may be symbolic (assumed
+    /// <= CAP by the caller) or a folding literal — the length-regime split
+    /// is the measured symex-depth lever here.
+    fn recv_body<const CAP: usize>(is_cidr: bool, msg: [u8; CAP], len: usize) {
+
+        // Shipped StringInfo over the same symbolic bytes (mcx stub set).
+        let ctx = mcx::MemoryContext::new_bump("kani-net-recv");
+        let mut v = mcx::vec_with_capacity_in::<u8>(ctx.mcx(), CAP + 1).unwrap();
+        mcx::vec_append_bytes(&mut v, &msg[..len]).unwrap();
+        let mut si = stringinfo::StringInfo::from_vec(v).unwrap();
+
+        let mut cd = CInet {
+            family: 0,
+            bits: 0,
+            addr: [0u8; 16],
+        };
+        let mut ccur: c_int = 0;
+        let cerr = unsafe {
+            pg_network_recv(
+                msg.as_ptr(),
+                len as c_int,
+                is_cidr as c_int,
+                &mut cd,
+                &mut ccur,
+            )
+        };
+
+        match adt_network::network_recv(&mut si, is_cidr) {
+            Ok(r) => {
+                assert!(cerr == 0, "C errored where Rust succeeded");
+                assert!(r.family == cd.family, "family");
+                assert!(r.bits == cd.bits, "bits");
+                assert!(r.ipaddr == cd.addr, "addr");
+                assert!(si.cursor == ccur as usize, "message cursor");
+            }
+            Err(e) => {
+                let class_ok = if cerr == -5 {
+                    e.sqlstate == ERRCODE_PROTOCOL_VIOLATION
+                } else {
+                    cerr < 0 && e.sqlstate == ERRCODE_INVALID_BINARY_REPRESENTATION
+                };
+                let ok = class_ok && e.level == ERROR;
+                core::mem::forget(e);
+                assert!(ok, "error verdict/class parity");
+            }
+        }
+        core::mem::forget(si);
+        core::mem::forget(ctx);
+    }
+
+    // Length-regime split, LITERAL lengths only (measured ladder):
+    //  - one-symbolic-total (cap 20, sym len, unwind 22): symex wall >450s
+    //  - sym len <= 8 at unwind 10: symex wall >450s — the SYMBOLIC length
+    //    (symbolic-length PgVec append + StringInfo cursor plane) is the
+    //    cost driver, not unwind depth ("assume never constant-folds;
+    //    literals do")
+    //  - len == 20 literal at unwind 22: PROVED 194s
+    // Grid: len 2 (header truncation, -5 plane), 8 (complete v4 message:
+    // v4 Ok + -1/-2/-3 + v4 cidr -4), 10 (truncated v6 addr, loop -5
+    // plane), 20 (complete v6 message: v6 Ok + v6 cidr -4 + v4-with-slack).
+    // Message CONTENT stays fully symbolic in every cell. Remainder
+    // (other lengths) unproved: wall(symex, symbolic-length plane); every
+    // C arm is witnessed inside the proved cells (cover_recv_arms).
+    macro_rules! recv_len {
+        ($($name:ident: $is_cidr:expr, $len:expr, $unwind:expr;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($unwind)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(alloc::fmt::format, stubs::stub_format)]
+            fn $name() {
+                let msg: [u8; $len] = kani::any();
+                recv_body(($is_cidr), msg, $len);
+            }
+        )*};
+    }
+
+    // unwind floor is 18 in EVERY cell regardless of message length: the
+    // ipaddr struct compare is a memcmp over the full 16-byte arrays
+    // (CI-decode 2026-07-30 lesson — unwind(<18) truncates memcmp and
+    // FABRICATES counterexamples; reproduced here at len8/unwind10).
+    /// Wall-witness probe (NOT a suite gate): the one-symbolic-length
+    /// total harness the literal grid replaced. Kept to re-validate the
+    /// wall verdict on a clean disk (first measurement fell in a
+    /// disk-full window). info tier.
+    #[kani::proof]
+    #[kani::unwind(22)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(alloc::fmt::format, stubs::stub_format)]
+    fn probe_inet_recv_symlen() {
+        let msg: [u8; 20] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 20);
+        recv_body(false, msg, len);
+    }
+
+    recv_len! {
+        eq_inet_recv_len2: false, 2, 18;
+        eq_inet_recv_len8: false, 8, 18;
+        eq_inet_recv_len10: false, 10, 18;
+        eq_inet_recv_full20: false, 20, 22;
+        eq_cidr_recv_len2: true, 2, 18;
+        eq_cidr_recv_len8: true, 8, 18;
+        eq_cidr_recv_len10: true, 10, 18;
+        eq_cidr_recv_full20: true, 20, 22;
+    }
+
+    /// All six recv arms witnessed against the C oracle (no Rust side —
+    /// the eq harnesses carry parity; this witnesses the domain reaches
+    /// every arm, keeping their Err class-parity non-vacuous).
+    #[kani::proof]
+    #[kani::unwind(22)]
+    fn cover_recv_arms() {
+        let msg: [u8; RECV_CAP] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= RECV_CAP);
+        let is_cidr: bool = kani::any();
+        let mut cd = CInet {
+            family: 0,
+            bits: 0,
+            addr: [0u8; 16],
+        };
+        let mut ccur: c_int = 0;
+        let cerr = unsafe {
+            pg_network_recv(
+                msg.as_ptr(),
+                len as c_int,
+                is_cidr as c_int,
+                &mut cd,
+                &mut ccur,
+            )
+        };
+        kani::cover!(cerr == 0, "recv Ok arm reachable");
+        kani::cover!(cerr == -1, "invalid-family arm reachable");
+        kani::cover!(cerr == -2, "invalid-bits arm reachable");
+        kani::cover!(cerr == -3, "invalid-length arm reachable");
+        kani::cover!(cerr == -4, "cidr bits-right-of-mask arm reachable");
+        kani::cover!(cerr == -5, "no-data arm reachable");
+    }
+
+    fn send_body(a: InetValue, is_cidr: bool) {
+        let ctx = mcx::MemoryContext::new_bump("kani-net-send");
+        let ca = CInet {
+            family: a.family,
+            bits: a.bits,
+            addr: a.ipaddr,
+        };
+        let mut cbuf = [0u8; 24];
+        let clen = unsafe { pg_network_send(&ca, is_cidr as c_int, cbuf.as_mut_ptr()) };
+        match adt_network::network_send(ctx.mcx(), a.iref(), is_cidr) {
+            Ok(b) => {
+                let img = b.as_bytes();
+                assert!(img.len() == clen as usize, "image length");
+                for i in 0..img.len() {
+                    assert!(img[i] == cbuf[i], "image byte");
+                }
+                core::mem::forget(b);
+            }
+            Err(e) => {
+                core::mem::forget(e);
+                assert!(false, "Rust send errored (stub allocator is infallible)");
+            }
+        }
+        core::mem::forget(ctx);
+    }
+
+    #[kani::proof]
+    // v4 image = 12 bytes; largest loop is the image compare (12) — unwind
+    // kept tight (14): the mcx acct recursion unrolls to the harness bound,
+    // so slack unwind is the measured cost driver here.
+    #[kani::unwind(14)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(alloc::fmt::format, stubs::stub_format)]
+    fn eq_network_send_v4() {
+        let is_cidr: bool = kani::any();
+        send_body(any_inet_fam(PGSQL_AF_INET), is_cidr);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(26)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(alloc::fmt::format, stubs::stub_format)]
+    fn eq_network_send_v6() {
+        let is_cidr: bool = kani::any();
+        send_body(any_inet_fam(PGSQL_AF_INET6), is_cidr);
+    }
+
+    /// Union witness for the send v4/v6 family split fence.
+    #[kani::proof]
+    fn cover_send_family_cases() {
+        let family: u8 = kani::any();
+        kani::assume(family == PGSQL_AF_INET || family == PGSQL_AF_INET6);
+        let a = any_inet_fam(family);
+        assert!(a.family == PGSQL_AF_INET || a.family == PGSQL_AF_INET6);
+        kani::cover!(a.family == PGSQL_AF_INET, "v4 case reachable");
+        kani::cover!(a.family == PGSQL_AF_INET6, "v6 case reachable");
+    }
+
+    /// Deliberate skew: Rust sends is_cidr, C sends !is_cidr — the flag
+    /// byte (offset 6) must differ. MUST FAIL. DEFAULT solver.
+    #[kani::proof]
+    #[kani::unwind(26)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(alloc::fmt::format, stubs::stub_format)]
+    fn control_send_flag_skew() {
+        let is_cidr: bool = kani::any();
+        let a = any_inet_fam(PGSQL_AF_INET);
+        let ctx = mcx::MemoryContext::new_bump("kani-net-send-ctl");
+        let ca = CInet {
+            family: a.family,
+            bits: a.bits,
+            addr: a.ipaddr,
+        };
+        let mut cbuf = [0u8; 24];
+        // Skew: C emits the OPPOSITE flag byte.
+        let clen = unsafe { pg_network_send(&ca, (!is_cidr) as c_int, cbuf.as_mut_ptr()) };
+        match adt_network::network_send(ctx.mcx(), a.iref(), is_cidr) {
+            Ok(b) => {
+                let img = b.as_bytes();
+                assert!(img.len() == clen as usize, "image length");
+                for i in 0..img.len() {
+                    assert!(img[i] == cbuf[i], "flag-skew control");
+                }
+                core::mem::forget(b);
+            }
+            Err(e) => {
+                core::mem::forget(e);
+                assert!(false, "Rust send errored (stub allocator is infallible)");
+            }
+        }
+        core::mem::forget(ctx);
+    }
+}

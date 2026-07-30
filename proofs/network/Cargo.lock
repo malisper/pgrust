@@ -374,7 +374,9 @@ dependencies = [
 name = "proof_support"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "datum",
+ "mcx",
  "types_error",
  "types_fmgr",
 ]
@@ -478,7 +480,9 @@ dependencies = [
  "adt_network",
  "datum",
  "hashfn",
+ "mcx",
  "proof_support",
+ "stringinfo",
  "types_error",
  "types_fmgr",
 ]
