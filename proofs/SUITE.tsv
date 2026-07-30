@@ -2163,3 +2163,4 @@ datetime-b	proofs::eq_interval_avg_fc_pinf	-Z c-ffi -Z stubbing --c-lib c/pg_dat
 datetime-b	proofs::eq_interval_avg_fc_ninf	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.8	oid 1844; default solver; w2-timestamp 2026-07-30
 datetime-b	proofs::eq_interval_avg_fc_conflict	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	2.9	oid 1844; default solver; w2-timestamp 2026-07-30
 datetime-b	proofs::spot_interval_avg_fc_mean	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.9	oid 1844 concrete mean cell; w2-timestamp 2026-07-30
+oracle-compat	proofs::eq_anychar_typmodin	-Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --exact	green	per-commit	1.5	oids 2913+2915 check core; w2-timestamp 2026-07-30
