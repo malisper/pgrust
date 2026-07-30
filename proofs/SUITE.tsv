@@ -2166,3 +2166,10 @@ datetime-b	proofs::spot_interval_avg_fc_mean	-Z c-ffi -Z stubbing --c-lib c/pg_d
 oracle-compat	proofs::eq_anychar_typmodin	-Z c-ffi -Z stubbing --solver kissat --c-lib c/pg_varchar.c --exact	green	per-commit	1.5	oids 2913+2915 check core; w2-timestamp 2026-07-30
 datetime-b	rem::eq_tstypmodin_check	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	1.9	oid 2905; default solver; w2-timestamp 2026-07-30
 datetime-b	rem::eq_tstztypmodin_check	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --exact	green	per-commit	2.2	oid 2907; default solver; w2-timestamp 2026-07-30
+datetime-b	rem::eq_tstypmodout_neg	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	6.7	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstztypmodout_neg	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	5.9	oid 2908; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstypmodout_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	30.0	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstypmodout_d2	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	20.4	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstypmodout_d3	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	16.5	oid 2906; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::eq_tstztypmodout_d1	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.6	oid 2908; w2-timestamp 2026-07-30 (times under load 32-75)
+datetime-b	rem::spot_ts_typmodout	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c --solver kissat --exact	green	release-gate	15.8	oid 2906+2908; w2-timestamp 2026-07-30 (times under load 32-75)
