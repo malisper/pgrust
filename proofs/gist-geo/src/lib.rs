@@ -1178,6 +1178,67 @@ mod proofs {
         }
     }
 
+    // Per-arm split of the bbox-distance strips (2026-07-30 solve lane):
+    // the combined disjunctive-assume strips harnesses wall BOTH solvers at
+    // 450s under load (the point_distance per-arm siblings prove at
+    // 98-345s) — case-split law: one fenced harness per compute_distance
+    // arm.  The combined harnesses above stay for the CI cluster tier.
+    macro_rules! bbox_distance_arm {
+        ($($h:ident: $idx:ident, $oid:literal, $name:literal, $rech:literal, $arm:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let q = pt(any_f64(), any_f64());
+                let inx = q.x <= k.high.x && q.x >= k.low.x;
+                let iny = q.y <= k.high.y && q.y >= k.low.y;
+                match $arm {
+                    0 => kani::assume(inx && iny),   // in-box arm -> 0.0
+                    1 => kani::assume(inx && !iny),  // y-strip float8_mi arms
+                    _ => kani::assume(!inx && iny),  // x-strip float8_mi arms
+                }
+                let mut recheck = false;
+                let r = rust_bbox_distance($idx, $oid, $name, &k, &q, 15, &mut recheck);
+                let (mut crech, mut cdist): (c_int, f64) = (0, 0.0);
+                let cerr = unsafe {
+                    match $oid {
+                        3998u32 => pg_gist_box_distance(
+                            15, k.high.x, k.high.y, k.low.x, k.low.y, q.x, q.y, &mut cdist,
+                        ),
+                        3280u32 => pg_gist_circle_distance(
+                            15, k.high.x, k.high.y, k.low.x, k.low.y, q.x, q.y,
+                            &mut crech, &mut cdist,
+                        ),
+                        _ => pg_gist_poly_distance(
+                            15, k.high.x, k.high.y, k.low.x, k.low.y, q.x, q.y,
+                            &mut crech, &mut cdist,
+                        ),
+                    }
+                };
+                if let Some(d) = adjudicate(r, cerr) {
+                    if $rech {
+                        assert!(recheck as c_int == crech); // lossy claim
+                    }
+                    assert!(d.to_bits() == cdist.to_bits());
+                }
+            }
+        )*};
+    }
+
+    bbox_distance_arm! {
+        eq_gist_box_distance_inbox:  IDX_BOX_DISTANCE, 3998u32, "gist_box_distance", false, 0;
+        eq_gist_box_distance_ystrip: IDX_BOX_DISTANCE, 3998u32, "gist_box_distance", false, 1;
+        eq_gist_box_distance_xstrip: IDX_BOX_DISTANCE, 3998u32, "gist_box_distance", false, 2;
+        eq_gist_circle_distance_inbox:  IDX_CIRCLE_DISTANCE, 3280u32, "gist_circle_distance", true, 0;
+        eq_gist_circle_distance_ystrip: IDX_CIRCLE_DISTANCE, 3280u32, "gist_circle_distance", true, 1;
+        eq_gist_circle_distance_xstrip: IDX_CIRCLE_DISTANCE, 3280u32, "gist_circle_distance", true, 2;
+        eq_gist_poly_distance_inbox:  IDX_POLY_DISTANCE, 3288u32, "gist_poly_distance", true, 0;
+        eq_gist_poly_distance_ystrip: IDX_POLY_DISTANCE, 3288u32, "gist_poly_distance", true, 1;
+        eq_gist_poly_distance_xstrip: IDX_POLY_DISTANCE, 3288u32, "gist_poly_distance", true, 2;
+    }
+
     /// gist_box_distance, vertex arm on the concrete grid.
     #[kani::proof]
     #[kani::unwind(34)]

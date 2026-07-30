@@ -62,3 +62,32 @@ rc=0
 VERIFICATION:- SUCCESSFUL
 Verification Time: 15.339647s
 rc=0
+=== eq_gist_point_distance_inbox ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 98.71027s
+rc=0
+=== eq_gist_point_distance_ystrip ===
+rc=1
+=== eq_gist_point_distance_xstrip ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 214.10197s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 345.41763s
+=== grid_gist_point_distance_vertex ===
+rc=1
+=== eq_gist_point_distance_badstrategy ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 59.500008s
+rc=0
+=== eq_gist_box_distance_strips (kissat) ===
+=== eq_gist_circle_distance_strips (kissat) ===
+=== eq_gist_poly_distance_strips (kissat) ===
+=== eq_gist_box_distance_inbox (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 144.45197s
+=== eq_gist_circle_distance_inbox (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 63.972843s
+=== eq_gist_poly_distance_inbox (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 69.81773s

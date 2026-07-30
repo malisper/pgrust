@@ -1518,8 +1518,8 @@ oid	name	source_file	status	class	notes
 2580	jsonb_float8	crates/backend/utils/adt/jsonb/src/builtins.rs	candidate	ladder	fc builtins.rs:781 -> io::extract_scalar io.rs:401 + numeric_float8; FENCE: prove extraction+cast-error class + NaN/±Inf lattice; finite arm walls
 2581	gist_box_penalty	crates/backend/access/gist/gistproc/src/lib.rs	candidate	ladder	box_penalty :138 -> rt_box_size :119 (53-bit multiply); zero-plane + boundary grid + f64->f32 cast; NaN/inf legs cheap
 2582	gist_box_picksplit	crates/backend/access/gist/gistproc/src/lib.rs	blocked(alloc/sort: fixed-array split core needed)	-	:378 + fallback_split :254 Vec + qsort
-2583	gist_box_union	crates/backend/access/gist/gistproc/src/lib.rs	candidate	ladder	:203 adjust_box fold per-n (2/3) + fixed 32B image; sizep=32 claim
-2584	gist_box_same	crates/backend/access/gist/gistproc/src/lib.rs	candidate	fast	:233 raw f64 == on 4 coords + NULL-pair lattice (non-fuzzy C compare); cheapest row
+2583	gist_box_union	crates/backend/access/gist/gistproc/src/lib.rs	proved(n<=3 full-sym; modulo static-buffer allocator model)	fast	sizep=32 claim in-theorem; adjust_box NaN adoption fixed fa583f02f2, in-theorem; kissat n2 8.8s n3 15.3s; proofs/gist-geo
+2584	gist_box_same	crates/backend/access/gist/gistproc/src/lib.rs	proved(full plane incl NaN + null lattice)	fast	wrapper-level; out-param + returned-ptr parity; NaN plane green since fa583f02f2 (probe_gist_box_same_nan_plane = regression witness); kissat 2.5-5.4s; proofs/gist-geo
 2585	gist_poly_consistent	crates/backend/access/gist/gistproc/src/lib.rs	candidate	fast	:829 boundbox read + rtree_internal_consistent; varlena pre-detoast fence
 2586	gist_poly_compress	crates/backend/access/gist/gistproc/src/lib.rs	candidate	ladder	:814 boundbox extract + 32B mcx image
 2587	circle_overbelow	crates/backend/utils/adt/geo/src/builtins.rs	proved(full f64; verdict+errflag+22003 sqlstate parity, both arms covered)	slow	52-72s kissat (default solver walls — inversion); wrapper-level by-ref, full f64 domain incl NaN/Inf/±0/subnormals unless sliced; proofs/geo-cmp ext; NAN shim pinned canonical (CBMC NAN model defect, native-replayed)
@@ -2905,7 +2905,7 @@ oid	name	source_file	status	class	notes
 6344	pg_sync_replication_slots	crates/backend/replication/slotfuncs/src/builtins.rs	excluded(state)	-	replication slot shared state
 6345	range_contains_elem_support	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
 6346	elem_contained_by_range_support	crates/backend/utils/adt/rangetypes/src/builtins.rs	excluded(typcache)	-	range typcache + subtype fmgr
-6347	gist_translate_cmptype_common	crates/backend/access/gist/gistproc/src/lib.rs	candidate	fast	gist/src/lib.rs:116 8-arm i32->u16 table; <1s full-domain
+6347	gist_translate_cmptype_common	crates/backend/access/gist/gistproc/src/lib.rs	proved(full-i32)	fast	8-arm table via shipped dispatch; kissat 1.3s; proofs/gist-geo
 6348	has_largeobject_privilege_name_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
 6349	has_largeobject_privilege_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
 6350	has_largeobject_privilege_id_id	crates/backend/utils/adt/acl/src/builtins.rs	excluded(state)	-	ACL/catalog privilege check
