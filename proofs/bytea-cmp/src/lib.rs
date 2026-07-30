@@ -70,6 +70,15 @@
 //! Extra negative control for the wave: control_get_byte_short_c_len
 //! (C sees len-1 — verdict mismatch at n == len-1; MUST FAIL, DEFAULT
 //! solver).
+//!
+//! ------------------------------------------------------------------
+//! BYTEA <-> INT CASTS (ledger 6368/6369/6371/6372, varbit W10
+//! continuation 2026-07-30) — see the casts section of the proofs
+//! module.  bytea_int4/bytea_int8: scalar value + 22003 parity, both
+//! arms covered (int8 cap 9 so its error arm is reachable).
+//! int4_bytea/int8_bytea (alias intNsend): fixed-width big-endian
+//! payload image + varsize parity over fully symbolic arguments,
+//! modulo static-buffer allocator model.
 
 #[cfg(kani)]
 mod proofs {
@@ -498,6 +507,111 @@ mod proofs {
         kani::cover!(cerr == 2);
         core::mem::forget(ctx);
     }
+
+    // ================================================================
+    // bytea <-> int casts (ledger 6368/6369/6371/6372) — varbit W10
+    // continuation 2026-07-30. C: REL_18_STABLE varlena.c bytea_int4/
+    // bytea_int8 (BE fold + length check) and int4_bytea/int8_bytea
+    // (alias intNsend: the 4/8-byte big-endian payload image).
+    //
+    // Claims:
+    //  - bytea_intN: scalar value parity over fully symbolic content and
+    //    symbolic len <= 8, both arms (Ok value / 22003 sqlstate+level),
+    //    arm covers. Value-space only (message text/location stubbed).
+    //  - intN_bytea: full payload image parity (LITERAL length 4/8) over
+    //    a fully symbolic argument + varsize check; modulo static-buffer
+    //    allocator model (mcx-stubs recipe).
+    // ================================================================
+
+    use types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
+
+    extern "C" {
+        // err-flag convention: 0 ok / 1 = 22003
+        fn pg_bytea_int4(d: *const u8, len: c_int, err: *mut c_int) -> i32;
+        fn pg_bytea_int8(d: *const u8, len: c_int, err: *mut c_int) -> i64;
+        fn pg_int4_bytea(a: i32, out4: *mut u8) -> c_int;
+        fn pg_int8_bytea(a: i64, out8: *mut u8) -> c_int;
+    }
+
+    macro_rules! bytea_int_harness {
+        // $cap must exceed the C sizeof(result) so the 22003 arm is
+        // REACHABLE (the int8 arm needs len 9 — a plain sym_bytea cap of
+        // 8 made that cover vacuous, caught by the cover witness).
+        ($harness:ident, $cfn:ident, $rfn:ident, $rty:ty, $cap:expr) => {
+            #[kani::proof]
+            #[kani::unwind(12)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let buf: [u8; $cap] = kani::any();
+                let len: usize = kani::any();
+                kani::assume(len <= $cap);
+                let mut cerr: c_int = 0;
+                let c = unsafe { $cfn(buf.as_ptr(), len as c_int, &mut cerr) };
+                match varlena::bytea::$rfn(&buf[..len]) {
+                    Ok(r) => {
+                        assert!(cerr == 0);
+                        assert!(r == c as $rty);
+                    }
+                    Err(e) => {
+                        assert!(cerr == 1);
+                        assert!(e.sqlstate == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+                kani::cover!(cerr == 0);
+                kani::cover!(cerr == 1);
+            }
+        };
+    }
+
+    bytea_int_harness!(eq_bytea_int4, pg_bytea_int4, bytea_int4, i32, 8);
+    bytea_int_harness!(eq_bytea_int8, pg_bytea_int8, bytea_int8, i64, 9);
+
+    macro_rules! int_bytea_harness {
+        ($harness:ident, $cfn:ident, $aty:ty, $w:expr) => {
+            #[kani::proof]
+            #[kani::unwind(14)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $harness() {
+                let a: $aty = kani::any(); // fully symbolic argument
+                let mut cimg = [0u8; $w];
+                unsafe { $cfn(a, cimg.as_mut_ptr()) };
+                let ctx = mcx::MemoryContext::new_bump("kani-int-bytea");
+                match varlena::bytea::int_bytea(ctx.mcx(), &a.to_be_bytes()) {
+                    Ok(v) => {
+                        // fixed-width image: varsize + full payload parity
+                        assert!(v.varsize() == varlena::VARHDRSZ + $w);
+                        let d = v.data();
+                        assert!(d.len() == $w);
+                        let mut i = 0;
+                        while i < $w {
+                            assert!(d[i] == cimg[i]);
+                            i += 1;
+                        }
+                        core::mem::forget(v);
+                    }
+                    Err(e) => {
+                        // alloc failure is outside the static-buffer model
+                        core::mem::forget(e);
+                        // unreachable under the mcx-stub allocator
+                        assert!(false);
+                    }
+                }
+                core::mem::forget(ctx);
+            }
+        };
+    }
+
+    int_bytea_harness!(eq_int4_bytea, pg_int4_bytea, i32, 4);
+    int_bytea_harness!(eq_int8_bytea, pg_int8_bytea, i64, 8);
 
     // ---- wave negative control: rig is non-vacuous ----
     // C sees a one-shorter payload length: at n == len-1 C raises 2202E

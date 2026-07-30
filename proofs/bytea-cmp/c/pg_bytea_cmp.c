@@ -337,3 +337,110 @@ pg_byteaSetBit(unsigned char *res, int len, int64 n, int32 newBit, int *err)
 
 	return 0;					/* shim: PG_RETURN_BYTEA_P(res) */
 }
+
+/* ====================================================================
+ * bytea <-> int casts (varbit W10 continuation, 2026-07-30)
+ *
+ * Provenance: fetched 2026-07-30 from postgres/postgres REL_18_STABLE
+ * src/backend/utils/adt/varlena.c — bytea_int4 (~line 4163), bytea_int8
+ * (~4188), int4_bytea (~4219), int8_bytea (~4226).
+ *
+ * SHIMS (bodies otherwise verbatim):
+ *  - family (data,len) convention replaces PG_GETARG_BYTEA_PP +
+ *    VARDATA_ANY/VARSIZE_ANY_EXHDR (detoasting out of scope, as above);
+ *  - ereport(ERROR, errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE), ...)
+ *    -> *err = 1 + return 0 sentinel (PROOF_EREPORT_FLAG convention);
+ *  - BITS_PER_BYTE defined (c.h);
+ *  - int4_bytea/int8_bytea are literally `return int4send(fcinfo)` /
+ *    int8send: pq_begintypsend + pq_sendint32/64 + pq_endtypsend build a
+ *    bytea whose payload is the 4/8-byte BIG-ENDIAN image of the value.
+ *    The shim writes that payload into a caller buffer (StringInfo ->
+ *    fixed caller buffer per the allowed-shim list); the varlena header
+ *    is the same one integer both sides and is asserted at the harness
+ *    level (varsize == VARHDRSZ + 4/8), matching the family image
+ *    convention. pq_sendintN big-endian stores spelled as the explicit
+ *    shift/mask bytes (pg_hton32/64 on little-endian hosts).
+ */
+#define BITS_PER_BYTE 8
+
+int
+pg_bytea_int4(const unsigned char *d, int len, int *err)
+{
+	unsigned int result;		/* uint32 */
+
+	/* Check that the byte array is not too long */
+	if (len > (int) sizeof(result))
+	{
+		/* shim: ereport(ERROR, errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+		 * errmsg("integer out of range")) */
+		*err = 1;
+		return 0;
+	}
+
+	/* Convert it to an integer; most significant bytes come first */
+	result = 0;
+	for (int i = 0; i < len; i++)
+	{
+		result <<= BITS_PER_BYTE;
+		result |= d[i];			/* shim: ((unsigned char *) VARDATA_ANY(v))[i] */
+	}
+
+	return (int) result;		/* shim: PG_RETURN_INT32(result) */
+}
+
+long long
+pg_bytea_int8(const unsigned char *d, int len, int *err)
+{
+	unsigned long long result;	/* uint64 */
+
+	/* Check that the byte array is not too long */
+	if (len > (int) sizeof(result))
+	{
+		/* shim: ereport(ERROR, errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+		 * errmsg("bigint out of range")) */
+		*err = 1;
+		return 0;
+	}
+
+	/* Convert it to an integer; most significant bytes come first */
+	result = 0;
+	for (int i = 0; i < len; i++)
+	{
+		result <<= BITS_PER_BYTE;
+		result |= d[i];			/* shim: ((unsigned char *) VARDATA_ANY(v))[i] */
+	}
+
+	return (long long) result;	/* shim: PG_RETURN_INT64(result) */
+}
+
+/* int4_bytea = int4send: pq_sendint32(&buf, arg) payload image */
+int
+pg_int4_bytea(int a, unsigned char *out4)
+{
+	unsigned int u = (unsigned int) a;
+
+	/* pq_sendint32: network (big-endian) byte order */
+	out4[0] = (unsigned char) ((u >> 24) & 0xFF);
+	out4[1] = (unsigned char) ((u >> 16) & 0xFF);
+	out4[2] = (unsigned char) ((u >> 8) & 0xFF);
+	out4[3] = (unsigned char) (u & 0xFF);
+	return 0;
+}
+
+/* int8_bytea = int8send: pq_sendint64(&buf, arg) payload image */
+int
+pg_int8_bytea(long long a, unsigned char *out8)
+{
+	unsigned long long u = (unsigned long long) a;
+
+	/* pq_sendint64: network (big-endian) byte order */
+	out8[0] = (unsigned char) ((u >> 56) & 0xFF);
+	out8[1] = (unsigned char) ((u >> 48) & 0xFF);
+	out8[2] = (unsigned char) ((u >> 40) & 0xFF);
+	out8[3] = (unsigned char) ((u >> 32) & 0xFF);
+	out8[4] = (unsigned char) ((u >> 24) & 0xFF);
+	out8[5] = (unsigned char) ((u >> 16) & 0xFF);
+	out8[6] = (unsigned char) ((u >> 8) & 0xFF);
+	out8[7] = (unsigned char) (u & 0xFF);
+	return 0;
+}

@@ -1899,6 +1899,10 @@ bytea-cmp	proofs::eq_bytea_set_byte	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.
 bytea-cmp	proofs::probe_set_byte_len4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	104.9	ledger 722 proving cell: len=4 literal, full-i32 n/new_byte; DEFAULT solver; mcx-stubs recipe
 bytea-cmp	proofs::eq_bytea_set_bit	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	wall-recorded	calibration	?	ledger 724: wall(CNF width-bound at symbolic len<=8, both solvers; same circuit as 722 — per-length split expected identical)
 bytea-cmp	proofs::probe_set_bit_len4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	99.9	ledger 724 proving cell: len=4 literal, full-i64 n + full-i32 new_bit, 3 arms + covers; DEFAULT solver; 99.9s 2026-07-30
+bytea-cmp	proofs::eq_bytea_int4	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	1.2	ledger 6371: value + 22003 parity, both arms covered; 2026-07-30
+bytea-cmp	proofs::eq_bytea_int8	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --solver kissat --exact	green	per-commit	1.3	ledger 6372: cap 9 so the 22003 arm is reachable; 2026-07-30
+bytea-cmp	proofs::eq_int4_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	75.8	ledger 6368: BE payload image, full-symbolic i32; DEFAULT solver; mcx-stubs; 2026-07-30
+bytea-cmp	proofs::eq_int8_bytea	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	green	calibration	78.1	ledger 6369: BE payload image, full-symbolic i64; DEFAULT solver; mcx-stubs; 2026-07-30
 bytea-cmp	proofs::control_get_byte_short_c_len	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_cmp.c --exact	must-fail	defect-witness	?	DEFAULT solver mandatory; negative control (get/set wave)
 datetime-cmp	wave7_proofs::eq_timestamp_finite	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	0.16	
 datetime-cmp	wave7_proofs::eq_timestamp_hash	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_cmp.c --solver kissat --exact	green	per-commit	3.6	

@@ -2920,11 +2920,11 @@ oid	name	source_file	status	class	notes
 6364	crc32_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	fc_crc32_bytea cryptohashfuncs/src/lib.rs:55 -> traditional_crc32 table loop; cap len<=8 + fixed-len spots; VARLENA fence. Host proofs/hash or new proofs/crc
 6365	crc32c_bytea	crates/backend/utils/adt/cryptohashfuncs/src/lib.rs	candidate	ladder	lib.rs:61 -> pg_comp_crc32c; SCREEN aarch64 CRC intrinsics arm (unsupported_construct) — prove sb8 table path
 6367	int2_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	bytea::int_bytea bytea.rs:522 FIXED 4-byte BE image; mcx-stubs sweet spot; pins "aliases int4send"
-6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	ladder	same core 8 bytes; free sibling
+6368	int4_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(fully symbolic i32; 4-byte big-endian payload image + varsize parity; modulo static-buffer allocator model)	ladder	75.8s default; eq_int4_bytea; pins the "aliases int4send" contract; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
+6369	int8_bytea	crates/backend/utils/adt/varlena/src/builtins.rs	proved(fully symbolic i64; 8-byte big-endian payload image + varsize parity; modulo static-buffer allocator model)	ladder	78.1s default; eq_int8_bytea; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6370	bytea_int2	crates/backend/utils/adt/varlena/src/builtins.rs	untriaged		
-6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea_uint_be bytea.rs:513; SCALAR verdict: length-check error class + BE assembly (shift/or); symbolic len<=8; VARLENA fence
-6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	candidate	fast	bytea.rs:517 same rig 8-byte
+6371	bytea_int4	crates/backend/utils/adt/varlena/src/builtins.rs	proved(symbolic content len<=8; Ok value + 22003 sqlstate/level parity, both arms covered; value-space only)	fast	1.2s kissat; eq_bytea_int4; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
+6372	bytea_int8	crates/backend/utils/adt/varlena/src/builtins.rs	proved(symbolic content len<=9 — 22003 arm reachable at len 9; Ok value + 22003 sqlstate/level parity, both arms covered; value-space only)	fast	1.3s kissat; eq_bytea_int8; proofs/bytea-cmp (varbit W10 continuation 2026-07-30)
 6375	record_larger	crates/backend/utils/adt/rowtypes/src/lib.rs	excluded(typcache)	-	generic record ops need typcache
 6376	record_smaller	crates/backend/utils/adt/rowtypes/src/lib.rs	excluded(typcache)	-	generic record ops need typcache
 6378	array_append_support	crates/backend/utils/adt/array_userfuncs/src/builtins.rs	excluded(typcache)	-	element typcache/fmgr dispatch
