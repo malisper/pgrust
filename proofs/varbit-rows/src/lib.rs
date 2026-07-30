@@ -64,6 +64,17 @@
 //! Negative control: control_bitnot_bitlen_off_by_one gives C a one-smaller
 //! bitlen (different pad mask) and must FAIL. Verified failing 1.1s,
 //! 2026-07-28; re-verified failing 1.05s, 2026-07-29 (relaunch).
+//!
+//! WAVE-10 (mod proofs_w10, below): the remaining varbit rows — I/O
+//! (bit_in/bit_out/varbit_in/varbit_out), recv/send, the bit/varbit length
+//! coercions, catenate/substring/overlay, get/set bit, position, bit_count,
+//! and anybit_typmodin — 82 harnesses incl. three regime covers and two
+//! negative controls. Claims, fences, the per-cell literal-scalar
+//! structural law, and the five cap-relative memory walls (CI cluster 40GB
+//! retry tier) are documented at the module header. All 102 harnesses in
+//! both modules are registered in proofs/SUITE.tsv (2026-07-30);
+//! representative re-verification at the v0.2 lineage: 10 greens
+//! (0.2-193s) + both W10 controls failing on the intended parity checks.
 
 #[cfg(kani)]
 mod proofs {
