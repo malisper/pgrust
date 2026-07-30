@@ -163,18 +163,14 @@ pub fn get_element<'mcx>(
         let v = if have_object {
             get_key_value(container, subscr)
         } else if have_array {
-            let Ok(text) = core::str::from_utf8(subscr) else {
+            // C: strtoint(indextext, &endptr, 10) with the
+            // `endptr == indextext || *endptr != '\0' || errno != 0` reject.
+            // Leading C-locale whitespace (which includes VT, unlike Rust's
+            // trim_ascii) and one sign are allowed; trailing junk, trailing
+            // whitespace and out-of-int-range are not.
+            let Some(lindex) = pg_string::strtoint10_strict(subscr) else {
                 return Ok(PathResult::Null);
             };
-            // C: strtoint — leading whitespace allowed, trailing junk is not.
-            let Ok(lindex) = text.trim_ascii_start().parse::<i64>() else {
-                return Ok(PathResult::Null);
-            };
-            // C: strtoint + ERANGE check — out-of-int-range indexes are null.
-            if lindex > i32::MAX as i64 || lindex < i32::MIN as i64 {
-                return Ok(PathResult::Null);
-            }
-            let lindex = lindex as i32;
             let index = if lindex >= 0 {
                 lindex as u32
             } else {
