@@ -634,6 +634,41 @@ fn recv_send_diff(wire: &[u8]) {
     // The canonical text is also reachable from a recv'd image: exercise the
     // out plane on it too (same image, second consumer).
     out_planes(m, &rimg, wire);
+
+    // SHORT-VARLENA PLANE: arg_jsonpath (builtins.rs) mirrors
+    // PG_GETARG_JSONPATH_P's expansion of a 1-byte-header short varlena into
+    // a 4-aligned 4B-header image. Inside the harness every image we build is
+    // 4B-headed, so exercise the expansion deliberately: re-frame the agreed
+    // image's payload as a short varlena (when it fits) and require the fc
+    // wrappers to produce identical out/send results through both framings.
+    let payload = &rimg[4..];
+    if payload.len() + 1 <= 0x7F {
+        let mut short = Vec::with_capacity(payload.len() + 1);
+        short.push((((payload.len() + 1) as u8) << 1) | 1);
+        short.extend_from_slice(payload);
+        let simg = mcx::slice_in(m, &short).expect("short image copy");
+        let din_s = NullableDatum::value(Datum::from_usize(simg.as_ptr() as usize));
+        let din_l = NullableDatum::value(Datum::from_usize(img.as_ptr() as usize));
+        let (rs, _) = fc_call::<1>(adt_jsonpath::builtins::fc_jsonpath_out, m, [din_s]);
+        let (rl, _) = fc_call::<1>(adt_jsonpath::builtins::fc_jsonpath_out, m, [din_l]);
+        match (&rs, &rl) {
+            (Ok(ds), Ok(dl)) => assert!(
+                datum_cstring(*ds) == datum_cstring(*dl),
+                "fc_jsonpath_out SHORT-VS-LONG VARLENA DIVERGENCE wire={wire:02x?}"
+            ),
+            (a, b) => assert!(
+                a.is_err() == b.is_err(),
+                "fc_jsonpath_out SHORT-VS-LONG VERDICT DIVERGENCE wire={wire:02x?}"
+            ),
+        }
+        let (ss, _) = fc_call::<1>(adt_jsonpath::builtins::fc_jsonpath_send, m, [din_s]);
+        if let (Ok(ds), Verdict::Ok) = (&ss, rsv) {
+            assert!(
+                datum_bytea_payload(*ds) == rpayload.as_slice(),
+                "fc_jsonpath_send SHORT-VARLENA PAYLOAD DIVERGENCE wire={wire:02x?}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
