@@ -1,0 +1,4 @@
+::int[], 3);
+
+CREATE TEMP TABLE foo (serial_num int, name text, type text);
+INSERT INTO foo VALUES (847001,

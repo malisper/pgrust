@@ -1,0 +1,2 @@
+]::text[]); -- error, key cannot be NULL
+SELECT json_build_object(VARIADIC 

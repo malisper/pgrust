@@ -22,6 +22,7 @@ xlogreader_seams = { path = "../../crates/backend/access/transam/xlogreader_seam
 pqformat = { path = "../../crates/backend/libpq/pqformat" }
 stringinfo = { path = "../../crates/_support/types/stringinfo" }
 mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
+detoast = { path = "../../crates/backend/access/common/detoast" }
 wchar = { path = "../../crates/common/wchar" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
@@ -74,6 +75,7 @@ unicode_category = { path = "../../crates/common/unicode_category" }
 # enc_tables_diff (p1-laneg encoding+tables batch):
 adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+adt_json = { path = "../../crates/backend/utils/adt/json" }  # json_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"

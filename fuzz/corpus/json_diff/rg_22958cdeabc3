@@ -1,0 +1,16 @@
+::int[][]); -- ok
+
+-- empty objects/arrays
+SELECT json_build_array();
+
+SELECT json_build_object();
+
+-- make sure keys are quoted
+SELECT json_build_object(1,2);
+
+-- keys must be scalar and not null
+SELECT json_build_object(null,2);
+
+SELECT json_build_object(r,2) FROM (SELECT 1 AS a, 2 AS b) r;
+
+SELECT json_build_object(json 

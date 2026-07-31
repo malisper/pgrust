@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // COMPILE GATE (json_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_json_io.c is filled
+        // with verbatim vendored C (README-TODO-json_diff.md step 1).
+        // .file("csrc/pg_json_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).
@@ -180,6 +184,25 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .compile("pg_difffuzz_tablesfam");
+
+    // json_diff oracle (p1-laneab): whole-TU verbatim 18.3 common/jsonapi.c +
+    // common/stringinfo.c plus the json.c/jsonfuncs.c extraction in
+    // pg_json_io.c, compiled against its OWN shim include tree
+    // (csrc/jsonfam/include; NOT csrc/shim — the two postgres.h shims must
+    // never cross). Exported symbols are pg_jsonfam_-prefixed inside the
+    // sources (see jsonfam/include/postgres.h), so no cross-lane collisions.
+    let mut jsonfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        jsonfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    jsonfam
+        .file("csrc/pg_json_io.c")
+        .file("csrc/jsonfam/jsonapi.c")
+        .file("csrc/jsonfam/stringinfo.c")
+        .include("csrc/jsonfam/include")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .compile("pg_difffuzz_jsonfam");
 
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");

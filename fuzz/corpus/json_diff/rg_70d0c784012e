@@ -1,0 +1,5 @@
+::json)
+    as t(a int, b json, c text, x int, ca char(5)[], ia int[][], r jpop);
+
+select *, c is null as c_is_null
+from json_to_recordset(

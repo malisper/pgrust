@@ -1,0 +1,6 @@
+||n,n::text])as g
+           from generate_series(1,300) as n) x ) y;
+
+-- nulls
+
+select (test_json->
