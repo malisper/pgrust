@@ -232,6 +232,7 @@ dependencies = [
  "adt_float",
  "datum",
  "mcx",
+ "pg_string",
  "postgres_seams",
  "pqformat",
  "stack_depth",
@@ -292,6 +293,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -324,6 +326,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -967,6 +970,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "numutils",
+ "pg_string",
  "pqformat",
  "stringinfo",
  "typcache",
@@ -1588,16 +1592,21 @@ dependencies = [
 name = "decoder_fuzz"
 version = "0.0.0"
 dependencies = [
+ "adt_ascii",
  "adt_float",
  "adt_geo",
  "cc",
  "crc32c",
+ "datum",
+ "keywords",
  "mbutils",
  "mcx",
+ "pg_b64",
  "pqformat",
  "stringinfo",
  "types_core",
  "types_error",
+ "types_fmgr",
  "wchar",
  "xlogreader",
  "xlogreader_seams",
@@ -3201,6 +3210,10 @@ dependencies = [
  "types_tuple",
  "wchar",
 ]
+
+[[package]]
+name = "pg_b64"
+version = "0.1.0"
 
 [[package]]
 name = "pg_bitutils"
