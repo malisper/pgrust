@@ -345,6 +345,26 @@ fn fc_text<const N: usize>(name: &str, f: PGFunction, args: [Datum; N], expect: 
 // Comparators.
 // ---------------------------------------------------------------------------
 
+/// Is `input`'s trailing /masklen digit string in the C int-wraparound zone
+/// (true numeric value > i32::MAX)? See the DIVERGENCE(candidate) carve in
+/// `check_inet`. All-digit suffix required — anything else never reaches C's
+/// accumulation loop as a pure masklen.
+fn masklen_wrap_zone(input: &str) -> bool {
+    // The text arms pass the input debug-quoted ({s:?}) for printability;
+    // strip the surrounding quotes before inspecting the masklen tail.
+    let input = input.strip_suffix('"').unwrap_or(input);
+    let Some((_, tail)) = input.rsplit_once('/') else {
+        return false;
+    };
+    if tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match tail.parse::<u64>() {
+        Ok(v) => v > i32::MAX as u64,
+        Err(_) => true, // > u64::MAX worth of digits: deep in the wrap zone
+    }
+}
+
 /// Full-struct comparison of a C (status, triple) against a Rust PgResult.
 fn check_inet(
     name: &str,
@@ -365,12 +385,33 @@ fn check_inet(
             v.bits,
             v.ipaddr
         ),
-        Err(e) => assert!(
-            cst == err_class(e),
-            "{name} DIVERGENCE input={input}: C st {cst} vs Rust err class {} ({})",
-            err_class(e),
-            e.message
-        ),
+        Err(e) => {
+            // DIVERGENCE(candidate) 2026-07-31, p1-lanen — masklen WRAP-ZONE
+            // CARVE pending ratification (row-436 macaddr precedent): C's
+            // inet_net_pton_ipv4 accumulates the /masklen digit string into a
+            // signed int with NO overflow check (UB wraparound), so any digit
+            // string whose true value exceeds i32::MAX can wrap back into
+            // [0,32] and be silently ACCEPTED — ground-truthed on docker
+            // postgres:18.3 (Debian glibc): '0.0.0.1/<50 zeros>2^64-1'::cidr
+            // -> 0.0.0.1/32; '1.2.3.4/...4294967328'::inet -> 1.2.3.4.
+            // pgrust saturates and rejects 22P02 (pton.rs:157). Ledger rows
+            // 910/1267 annotated; repro banked seed-cidrin-wrap-e128bffa.
+            // Carve = the wrap zone ONLY (masklen value > i32::MAX); inside
+            // it Rust must still reject with 22P02-class.
+            if cst == 0 && masklen_wrap_zone(input) {
+                assert!(
+                    err_class(e) != 0,
+                    "{name}: wrap-zone carve expected a Rust rejection, got err class 0"
+                );
+                return;
+            }
+            assert!(
+                cst == err_class(e),
+                "{name} DIVERGENCE input={input}: C st {cst} vs Rust err class {} ({})",
+                err_class(e),
+                e.message
+            )
+        }
     }
 }
 
