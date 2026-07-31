@@ -6,7 +6,7 @@
 //! (family, bits, all 16 address bytes), error-verdict, and
 //! errcode/sqlstate class. Message text is out of scope.
 //!
-//! Input layout: [selector][payload]; selector % 25 picks the arm.
+//! Input layout: [selector][payload]; selector % 32 picks the arm.
 //! TEXT arms (payload = raw bytes, truncated at the first NUL — C input is
 //! a cstring — then read through String::from_utf8_lossy, exactly what the
 //! shipped fc_inet_in wrapper does with wire bytes; C parses the raw bytes.
@@ -33,6 +33,16 @@
 //!   23 inetmi (2633)
 //!   24 network_abbrev_convert (sortsupport key kernel, abbrev.rs — no oid;
 //!      compared against the verbatim network.c key computation)
+//! ROUND-2 arms (SECTION 6 of the oracle):
+//!   25 inet_recv (2496, payload = raw wire bytes)  26 cidr_recv (2498)
+//!   27 inet_send/cidr_send (2497/2499; flag = payload bit 1 of byte 0)
+//!   28 network_lt/le/eq/ge/gt/ne + smaller/larger (921/922/920/924/923/925,
+//!      3563/3562)
+//!   29 network_sub/subeq/sup/supeq/overlap (927/928/929/930/3551)
+//!   30 network_family/masklen (711/697) + convert_network_to_scalar (no
+//!      oid) + hashinet/hashinetextended WRAPPER-FOLDS (422/779 — kernel
+//!      differential owned by proofs/hash; lane-0a pg_lsn precedent)
+//!   31 network_scan_first/last (selfuncs support, no oids)
 //!
 //! FC-WRAPPER PLANE: each arm additionally routes its (already core-vs-C
 //! checked) input through the crate's builtins.rs fc_* wrapper via a native
@@ -43,12 +53,10 @@
 //! execute every iteration with an in-harness oracle.
 //!
 //! SKIPPED rows (crate functions NOT in this target, with reasons):
-//!   - network_eq/lt/le/gt/ge/ne, network_sub/subeq/sup/supeq/overlap,
-//!     network_larger/smaller, network_masklen, network_family,
-//!     hashinet(+extended), inet/cidr_recv, inet/cidr_send: proved
-//!     full-domain at the shipped entry points (proofs/network ledger
-//!     rows); the cmp arm here exercises the shared network_cmp_internal
-//!     kernel the comparison family wraps.
+//!   - (round 2 moved the comparison family, recv/send, masklen/family and
+//!     the hash wrapper-folds IN — arms 25-31 above. All of these are also
+//!     proved at the shipped entry points per the ledger; the fuzz arms add
+//!     the measured-coverage axis.)
 //!   - network_subset_support (1173): blocked — planner support node, the
 //!     IndexCondition arm is unported (ledger row).
 //!   - inet_client/server_addr/port (2196-2199): blocked — libc
@@ -221,6 +229,58 @@ extern "C" {
         ores: *mut i64,
     ) -> i32;
     fn pg_diff_network_abbrev_convert(fam: u8, abits: u8, addr: *const u8) -> u64;
+    // SECTION 6 entries (round 2): recv/send + comparison family + selfuncs.
+    fn pg_diff_network_recv(
+        msg: *const u8,
+        msglen: i32,
+        is_cidr: i32,
+        consumed: *mut i32,
+        ofam: *mut u8,
+        obits: *mut u8,
+        oaddr: *mut u8,
+    ) -> i32;
+    fn pg_diff_network_send(fam: u8, bits: u8, addr: *const u8, is_cidr: i32, out: *mut u8)
+        -> i32;
+    fn pg_diff_network_relop(
+        f1: u8,
+        b1: u8,
+        a1: *const u8,
+        f2: u8,
+        b2: u8,
+        a2: *const u8,
+        op: i32,
+    ) -> i32;
+    fn pg_diff_network_smaller(f1: u8, b1: u8, a1: *const u8, f2: u8, b2: u8, a2: *const u8)
+        -> i32;
+    fn pg_diff_network_larger(f1: u8, b1: u8, a1: *const u8, f2: u8, b2: u8, a2: *const u8)
+        -> i32;
+    fn pg_diff_network_sub(f1: u8, b1: u8, a1: *const u8, f2: u8, b2: u8, a2: *const u8) -> i32;
+    fn pg_diff_network_subeq(f1: u8, b1: u8, a1: *const u8, f2: u8, b2: u8, a2: *const u8)
+        -> i32;
+    fn pg_diff_network_sup(f1: u8, b1: u8, a1: *const u8, f2: u8, b2: u8, a2: *const u8) -> i32;
+    fn pg_diff_network_supeq(f1: u8, b1: u8, a1: *const u8, f2: u8, b2: u8, a2: *const u8)
+        -> i32;
+    fn pg_diff_network_overlap(f1: u8, b1: u8, a1: *const u8, f2: u8, b2: u8, a2: *const u8)
+        -> i32;
+    fn pg_diff_network_family(fam: u8, bits: u8, addr: *const u8) -> i32;
+    fn pg_diff_network_masklen(fam: u8, bits: u8, addr: *const u8) -> i32;
+    fn pg_diff_convert_network_to_scalar(fam: u8, bits: u8, addr: *const u8) -> f64;
+    fn pg_diff_network_scan_first(
+        fam: u8,
+        bits: u8,
+        addr: *const u8,
+        ofam: *mut u8,
+        obits: *mut u8,
+        oaddr: *mut u8,
+    ) -> i32;
+    fn pg_diff_network_scan_last(
+        fam: u8,
+        bits: u8,
+        addr: *const u8,
+        ofam: *mut u8,
+        obits: *mut u8,
+        oaddr: *mut u8,
+    ) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,8 +292,12 @@ const CERR_INVALID_PARAM: i32 = 2; /* 22023 */
 const CERR_OUT_OF_RANGE: i32 = 3; /* 22003 */
 const CERR_INVALID_BINARY: i32 = 4; /* 22P03 */
 const CERR_INTERNAL: i32 = 5; /* XX000 (elog) */
+const CERR_PROTOCOL: i32 = 6; /* 08P01 (pq_getmsgbyte past end) */
 
 fn err_class(e: &PgError) -> i32 {
+    if e.sqlstate == types_error::ERRCODE_PROTOCOL_VIOLATION {
+        return CERR_PROTOCOL;
+    }
     if e.sqlstate == ERRCODE_INVALID_TEXT_REPRESENTATION {
         CERR_INVALID_TEXT
     } else if e.sqlstate == ERRCODE_INVALID_PARAMETER_VALUE {
@@ -844,7 +908,12 @@ fn abbrev_convert_diff(p: &[u8]) {
     let v = fenced_inet(p);
     let (f, b, a) = flat(&v);
     let c = unsafe { pg_diff_network_abbrev_convert(f, b, a) };
-    let mut st = adt_network::abbrev::NetworkAbbrevState::new();
+    // Alternate the two constructors (Default is a distinct shipped line).
+    let mut st = if p[1] & 1 == 0 {
+        adt_network::abbrev::NetworkAbbrevState::new()
+    } else {
+        adt_network::abbrev::NetworkAbbrevState::default()
+    };
     let r = st.convert(v.iref());
     assert!(
         c == r,
@@ -875,6 +944,323 @@ fn to_cidr_diff(p: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
+// Round-2 arms: recv/send, comparison family, selfuncs helpers.
+// ---------------------------------------------------------------------------
+
+/// inet_recv (2496) / cidr_recv (2498): raw message bytes through both recv
+/// paths. Planes: Ok struct + consumed byte count, err verdict + class
+/// (22P03 binary, 08P01 protocol-violation past-end), fc-wrapper image.
+fn recv_diff(p: &[u8], is_cidr: bool) {
+    let name = if is_cidr { "cidr_recv" } else { "inet_recv" };
+    if p.len() > 64 {
+        return; /* C shim buffer bound; wire messages are <= 22 bytes */
+    }
+    let (mut of, mut ob, mut oa) = (0u8, 0u8, [0u8; 16]);
+    let mut consumed: i32 = 0;
+    let cst = unsafe {
+        pg_diff_network_recv(
+            p.as_ptr(),
+            p.len() as i32,
+            is_cidr as i32,
+            &mut consumed,
+            &mut of,
+            &mut ob,
+            oa.as_mut_ptr(),
+        )
+    };
+
+    let cx = mcx::MemoryContext::new("network_recv");
+    let mcx = cx.mcx();
+    let Ok(mut vec) = mcx::vec_with_capacity_in::<u8>(mcx, p.len().max(1)) else {
+        return;
+    };
+    if mcx::vec_append_bytes(&mut vec, p).is_err() {
+        return;
+    }
+    let Ok(mut si) = stringinfo::StringInfo::from_vec(vec) else {
+        return;
+    };
+    let r = adt_network::network_recv(&mut si, is_cidr);
+    let input = format!("msg {} is_cidr {is_cidr}", hex(p));
+    match &r {
+        Ok(v) => {
+            assert!(
+                cst == 0 && (of, ob, oa) == (v.family, v.bits, v.ipaddr),
+                "{name} DIVERGENCE {input}: C=(st {cst}, fam {of} bits {ob} {}) \
+                 Rust=Ok(fam {} bits {} {})",
+                hex(&oa),
+                v.family,
+                v.bits,
+                hex(&v.ipaddr)
+            );
+            assert!(
+                consumed as usize == si.cursor,
+                "{name} consumed-length DIVERGENCE {input}: C={consumed} Rust={}",
+                si.cursor
+            );
+        }
+        Err(e) => assert!(
+            cst == err_class(e),
+            "{name} DIVERGENCE {input}: C st {cst} vs Rust err class {} ({})",
+            err_class(e),
+            e.message
+        ),
+    }
+
+    // fc plane over a fresh StringInfo (the core call above consumed cursor).
+    let Ok(mut vec2) = mcx::vec_with_capacity_in::<u8>(mcx, p.len().max(1)) else {
+        return;
+    };
+    if mcx::vec_append_bytes(&mut vec2, p).is_err() {
+        return;
+    }
+    let Ok(mut si2) = stringinfo::StringInfo::from_vec(vec2) else {
+        return;
+    };
+    let fcw = if is_cidr { fcb::fc_cidr_recv } else { fcb::fc_inet_recv };
+    let arg = Datum::from_usize(&mut si2 as *mut stringinfo::StringInfo as usize);
+    let cx2 = mcx::MemoryContext::new("network_fc");
+    match fc_call::<1>(fcw, cx2.mcx(), [arg]) {
+        Ok(d) => {
+            let v = r.as_ref().expect("fc {name} Ok implies core Ok");
+            let (img, len) = v.image();
+            assert_eq!(datum_bytes(d, len), &img[..len], "fc_{name} vs core DIVERGENCE {input}");
+        }
+        Err(e) => {
+            let ec = r.as_ref().expect_err("fc {name} Err implies core Err");
+            assert_eq!(
+                err_class(&e),
+                err_class(ec),
+                "fc_{name} error-class DIVERGENCE {input}"
+            );
+        }
+    }
+}
+
+/// inet_send (2497) / cidr_send (2499): fenced inet -> wire image, byte for
+/// byte, both flag values; fc wrapper checks the full 4B-header varlena.
+fn send_diff(p: &[u8]) {
+    let v = fenced_inet(p);
+    let is_cidr = p[0] & 2 != 0;
+    let (f, b, a) = flat(&v);
+    let mut cout = [0u8; 64];
+    let clen = unsafe { pg_diff_network_send(f, b, a, is_cidr as i32, cout.as_mut_ptr()) };
+    assert!(clen > 0, "network_send C oracle cannot fail");
+    let input = format!("fam {} bits {} addr {} is_cidr {is_cidr}", f, b, hex(&v.ipaddr));
+
+    let cx = mcx::MemoryContext::new("network_send");
+    let by = adt_network::network_send(cx.mcx(), v.iref(), is_cidr)
+        .expect("network_send infallible on fenced input");
+    assert!(
+        by.data() == &cout[..clen as usize],
+        "network_send DIVERGENCE {input}: C={:02x?} Rust={:02x?}",
+        &cout[..clen as usize],
+        by.data()
+    );
+
+    // fc plane: full varlena image (bytea 4B header + payload).
+    let (img, len) = v.image();
+    let fcw = if is_cidr { fcb::fc_cidr_send } else { fcb::fc_inet_send };
+    let total = datum::VARHDRSZ + clen as usize;
+    let cx2 = mcx::MemoryContext::new("network_fc");
+    let d = fc_call::<1>(fcw, cx2.mcx(), [dptr(&img[..len])])
+        .expect("send wrapper cannot fail on fenced input");
+    let got = datum_bytes(d, total);
+    let hdr = datum::varlena::set_varsize_4b(total);
+    assert!(
+        got[..datum::VARHDRSZ] == hdr && &got[datum::VARHDRSZ..] == &cout[..clen as usize],
+        "fc_{} vs C DIVERGENCE {input}: image={got:02x?}",
+        if is_cidr { "cidr_send" } else { "inet_send" }
+    );
+}
+
+/// network_lt/le/eq/ge/gt/ne (921/922/920/924/923/925) + smaller/larger
+/// (3563/3562): verbatim C relational bodies vs the shipped cmp kernel, and
+/// the fc bool wrappers + winning-input-datum identity. Sign-only semantics
+/// throughout — the cmp MAGNITUDE carve (row 926) does not reach here.
+fn relops_diff(p: &[u8]) {
+    let v1 = fenced_inet(p);
+    let v2 = fenced_inet(&p[INET_WIRE..]);
+    let (f1, b1, a1) = flat(&v1);
+    let (f2, b2, a2) = flat(&v2);
+    let rc = adt_network::network_cmp_internal(v1.iref(), v2.iref());
+    let input = format!(
+        "a=(fam {} bits {} {}) b=(fam {} bits {} {})",
+        v1.family,
+        v1.bits,
+        hex(&v1.ipaddr),
+        v2.family,
+        v2.bits,
+        hex(&v2.ipaddr)
+    );
+
+    let (img1, len1) = v1.image();
+    let (img2, len2) = v2.image();
+    let args = [dptr(&img1[..len1]), dptr(&img2[..len2])];
+
+    type RelOp = (i32, &'static str, fn(i32) -> bool, PGFunction);
+    let ops: [RelOp; 6] = [
+        (0, "network_lt", |c| c < 0, fcb::fc_network_lt as PGFunction),
+        (1, "network_le", |c| c <= 0, fcb::fc_network_le),
+        (2, "network_eq", |c| c == 0, fcb::fc_network_eq),
+        (3, "network_ge", |c| c >= 0, fcb::fc_network_ge),
+        (4, "network_gt", |c| c > 0, fcb::fc_network_gt),
+        (5, "network_ne", |c| c != 0, fcb::fc_network_ne),
+    ];
+    for (op, name, rel, fcw) in ops {
+        let c = unsafe { pg_diff_network_relop(f1, b1, a1, f2, b2, a2, op) };
+        let r = rel(rc);
+        assert!((c != 0) == r, "{name} DIVERGENCE {input}: C={c} Rust={r}");
+        let cx = mcx::MemoryContext::new("network_fc");
+        let d = fc_call::<2>(fcw, cx.mcx(), args).expect("relop wrapper cannot fail");
+        assert_eq!(d.as_bool(), r, "fc_{name} vs core DIVERGENCE {input}");
+    }
+
+    // smaller/larger: C returns the winning input INDEX; the wrapper must
+    // return the corresponding input datum ITSELF (pointer identity).
+    let cs = unsafe { pg_diff_network_smaller(f1, b1, a1, f2, b2, a2) };
+    let cl = unsafe { pg_diff_network_larger(f1, b1, a1, f2, b2, a2) };
+    for (name, fcw, cidx) in [
+        ("network_smaller", fcb::fc_network_smaller as PGFunction, cs),
+        ("network_larger", fcb::fc_network_larger, cl),
+    ] {
+        let cx = mcx::MemoryContext::new("network_fc");
+        let d = fc_call::<2>(fcw, cx.mcx(), args).expect("min/max wrapper cannot fail");
+        assert_eq!(
+            d.as_usize(),
+            args[cidx as usize].as_usize(),
+            "fc_{name} winning-datum DIVERGENCE {input}: C picked arg{cidx}"
+        );
+    }
+}
+
+/// network_sub/subeq/sup/supeq/overlap (927/928/929/930/3551): verbatim C
+/// bodies vs shipped cores + fc bool wrappers.
+fn subsup_diff(p: &[u8]) {
+    let v1 = fenced_inet(p);
+    let v2 = fenced_inet(&p[INET_WIRE..]);
+    let (f1, b1, a1) = flat(&v1);
+    let (f2, b2, a2) = flat(&v2);
+    let input = format!(
+        "a=(fam {} bits {} {}) b=(fam {} bits {} {})",
+        v1.family,
+        v1.bits,
+        hex(&v1.ipaddr),
+        v2.family,
+        v2.bits,
+        hex(&v2.ipaddr)
+    );
+    let (img1, len1) = v1.image();
+    let (img2, len2) = v2.image();
+    let args = [dptr(&img1[..len1]), dptr(&img2[..len2])];
+
+    type CEntry = unsafe extern "C" fn(u8, u8, *const u8, u8, u8, *const u8) -> i32;
+    type BoolCore = fn(InetRef<'_>, InetRef<'_>) -> bool;
+    let fam: [(&str, CEntry, BoolCore, PGFunction); 5] = [
+        (
+            "network_sub",
+            pg_diff_network_sub,
+            adt_network::network_sub,
+            fcb::fc_network_sub as PGFunction,
+        ),
+        ("network_subeq", pg_diff_network_subeq, adt_network::network_subeq, fcb::fc_network_subeq),
+        ("network_sup", pg_diff_network_sup, adt_network::network_sup, fcb::fc_network_sup),
+        ("network_supeq", pg_diff_network_supeq, adt_network::network_supeq, fcb::fc_network_supeq),
+        (
+            "network_overlap",
+            pg_diff_network_overlap,
+            adt_network::network_overlap,
+            fcb::fc_network_overlap,
+        ),
+    ];
+    for (name, centry, core, fcw) in fam {
+        let c = unsafe { centry(f1, b1, a1, f2, b2, a2) };
+        let r = core(v1.iref(), v2.iref());
+        assert!((c != 0) == r, "{name} DIVERGENCE {input}: C={c} Rust={r}");
+        let cx = mcx::MemoryContext::new("network_fc");
+        let d = fc_call::<2>(fcw, cx.mcx(), args).expect("subsup wrapper cannot fail");
+        assert_eq!(d.as_bool(), r, "fc_{name} vs core DIVERGENCE {input}");
+    }
+}
+
+/// Scalar helpers over one fenced inet: network_family (711) /
+/// network_masklen (697) vs verbatim C + fc planes;
+/// convert_network_to_scalar (selfuncs kernel, no oid) bit-exact f64;
+/// hashinet (422) / hashinetextended (779) WRAPPER-FOLD parity only — the
+/// hash kernel differential is owned by proofs/hash and the composed proofs
+/// on the ledger rows (the lane-0a pg_lsn hash wrapper-fold precedent).
+fn scalar_diff(p: &[u8]) {
+    let v = fenced_inet(p);
+    let (f, b, a) = flat(&v);
+    let input = format!("fam {} bits {} addr {}", f, b, hex(&v.ipaddr));
+    let (img, len) = v.image();
+    let arg = dptr(&img[..len]);
+
+    let cfam = unsafe { pg_diff_network_family(f, b, a) };
+    let rfam = adt_network::network_family(v.iref());
+    assert_eq!(cfam, rfam, "network_family DIVERGENCE {input}");
+    let cx = mcx::MemoryContext::new("network_fc");
+    let d = fc_call::<1>(fcb::fc_network_family, cx.mcx(), [arg])
+        .expect("family wrapper cannot fail");
+    assert_eq!(d.as_i32(), rfam, "fc_network_family vs core DIVERGENCE {input}");
+
+    let cml = unsafe { pg_diff_network_masklen(f, b, a) };
+    assert_eq!(cml, v.bits as i32, "network_masklen DIVERGENCE {input}");
+    let d = fc_call::<1>(fcb::fc_network_masklen, cx.mcx(), [arg])
+        .expect("masklen wrapper cannot fail");
+    assert_eq!(d.as_i32(), cml, "fc_network_masklen vs C DIVERGENCE {input}");
+
+    let csc = unsafe { pg_diff_convert_network_to_scalar(f, b, a) };
+    let rsc = adt_network::convert_network_to_scalar(v.iref());
+    assert_eq!(
+        csc.to_bits(),
+        rsc.to_bits(),
+        "convert_network_to_scalar DIVERGENCE {input}: C={csc} Rust={rsc}"
+    );
+
+    // Hash wrapper folds (see doc comment).
+    let seed = u64::from_le_bytes(p[INET_WIRE..INET_WIRE + 8].try_into().unwrap());
+    let d = fc_call::<1>(fcb::fc_hashinet, cx.mcx(), [arg]).expect("hashinet cannot fail");
+    assert_eq!(
+        d.as_u32(),
+        adt_network::hashinet_bytes(v.iref()),
+        "fc_hashinet wrapper-fold DIVERGENCE {input}"
+    );
+    let d = fc_call::<2>(fcb::fc_hashinetextended, cx.mcx(), [arg, Datum::from_u64(seed)])
+        .expect("hashinetextended cannot fail");
+    assert_eq!(
+        d.as_u64(),
+        adt_network::hashinet_bytes_extended(v.iref(), seed),
+        "fc_hashinetextended wrapper-fold DIVERGENCE {input} seed={seed}"
+    );
+}
+
+/// network_scan_first/network_scan_last (selfuncs support, no oids): the C
+/// DirectFunctionCall compositions vs the shipped cores.
+fn scan_diff(p: &[u8]) {
+    let v = fenced_inet(p);
+    let (f, b, a) = flat(&v);
+    let input = format!("fam {} bits {} addr {}", f, b, hex(&v.ipaddr));
+
+    let (mut of, mut ob, mut oa) = (0u8, 0u8, [0u8; 16]);
+    let cst = unsafe { pg_diff_network_scan_first(f, b, a, &mut of, &mut ob, oa.as_mut_ptr()) };
+    let r = adt_network::network_scan_first(v.iref());
+    assert!(
+        cst == 0 && (of, ob, oa) == (r.family, r.bits, r.ipaddr),
+        "network_scan_first DIVERGENCE {input}"
+    );
+
+    let (mut of, mut ob, mut oa) = (0u8, 0u8, [0u8; 16]);
+    let cst = unsafe { pg_diff_network_scan_last(f, b, a, &mut of, &mut ob, oa.as_mut_ptr()) };
+    let r = adt_network::network_scan_last(v.iref())
+        .expect("network_scan_last infallible on fenced input (set_masklen -1)");
+    assert!(
+        cst == 0 && (of, ob, oa) == (r.family, r.bits, r.ipaddr),
+        "network_scan_last DIVERGENCE {input}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -886,7 +1272,7 @@ pub fn network_diff(data: &[u8]) {
     };
     let one = p.len() >= INET_WIRE;
     let two = p.len() >= 2 * INET_WIRE;
-    match sel % 25 {
+    match sel % 32 {
         0 => in_diff(p, false),
         1 => in_diff(p, true),
         2 if one => text_diff(p, TextArm::InetOut),
@@ -948,6 +1334,13 @@ pub fn network_diff(data: &[u8]) {
         22 if p.len() >= INET_WIRE + 8 => pl_diff(p, true),
         23 if two => inetmi_diff(p),
         24 if one => abbrev_convert_diff(p),
+        25 => recv_diff(p, false),
+        26 => recv_diff(p, true),
+        27 if one => send_diff(p),
+        28 if two => relops_diff(p),
+        29 if two => subsup_diff(p),
+        30 if p.len() >= INET_WIRE + 8 => scalar_diff(p),
+        31 if one => scan_diff(p),
         _ => {}
     }
 }
@@ -1105,10 +1498,46 @@ mod tests {
             }
         }
         for pair in wire_pairs() {
-            for sel in [8u8, 16, 17, 18, 19, 23] {
+            for sel in [8u8, 16, 17, 18, 19, 23, 28, 29] {
                 drive(sel, &pair);
             }
         }
+        // round-2 single-inet arms (send/scalar/scan; scalar wants +8B seed)
+        for s in &singles {
+            for sel in [27u8, 31] {
+                drive(sel, s);
+            }
+            let mut p = s.clone();
+            p.extend_from_slice(&0x9e3779b97f4a7c15u64.to_le_bytes());
+            drive(30, &p);
+        }
+    }
+
+    /// recv arms: valid wire messages both families + every error arm
+    /// (bad family, bad bits, bad length, truncation at each byte,
+    /// cidr bits-right-of-mask).
+    #[test]
+    fn recv_arms_corpus() {
+        let v4 = [2u8, 24, 1, 192, 4, 10, 1, 2, 3];
+        let v6: Vec<u8> = {
+            let mut m = vec![3u8, 64, 0, 16];
+            m.extend_from_slice(&[0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
+            m
+        };
+        for sel in [25u8, 26] {
+            drive(sel, &v4);
+            drive(sel, &v6);
+            drive(sel, &[]); /* empty: protocol violation on byte 0 */
+            drive(sel, &[9, 24, 1, 4, 10, 1, 2, 3]); /* bad family */
+            drive(sel, &[2, 33, 1, 4, 10, 1, 2, 3]); /* bits > maxbits */
+            drive(sel, &[2, 24, 1, 16, 10, 1, 2, 3]); /* nb != addrsize */
+            for cut in 1..v4.len() {
+                drive(sel, &v4[..cut]); /* truncations: 08P01 parity */
+            }
+        }
+        // cidr bits-right-of-mask: 10.1.2.3/24 valid as inet, invalid as cidr
+        drive(25, &v4);
+        drive(26, &v4);
     }
 
     /// Replay every checked-in seed (catches shim/link errors before the

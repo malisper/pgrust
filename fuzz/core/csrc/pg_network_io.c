@@ -2311,3 +2311,464 @@ pg_diff_network_abbrev_convert(unsigned char fam, unsigned char abits,
 
 	return res;
 }
+
+/* ====== SECTION 6: network.c recv/send + comparison family + selfuncs ======
+ * (p1-lanen round 2, same provenance: src/backend/utils/adt/network.c @
+ * 62d6c7d3df6287f1bd83199c1a746e50d31571a0. Bodies VERBATIM except the
+ * documented shims below.)
+ *
+ * SHIMS (plumbing only):
+ *   - StringInfoData/pq_getmsgbyte/pq_begintypsend/pq_sendbyte/pq_endtypsend:
+ *     fixed 64-byte in-struct buffer + cursor. pq_getmsgbyte past the end
+ *     raises errcode class 6 (ERRCODE_PROTOCOL_VIOLATION 08P01, matching the
+ *     shipped pqformat behavior asserted by ledger row 2496).
+ *   - bytea return of network_send = the StringInfoData itself; the driver
+ *     entry copies payload bytes out (the shipped Rust side carries the 4B
+ *     varlena header; the fc plane checks that header against the spec).
+ *   - PG_FUNCTION_ARGS wrappers unwrapped to plain C signatures as in
+ *     SECTION 5; PG_RETURN_BOOL/INT32 -> return int.
+ *   - convert_network_to_scalar: only the INETOID/CIDROID arm is vendored
+ *     (the switch's MACADDR arms belong to adt/mac, a different crate; the
+ *     inet arm body is verbatim). No Datum header: the value arrives as the
+ *     flat triple like every other entry.
+ *   - network_scan_first/network_scan_last are DirectFunctionCall
+ *     compositions in C; composed here from the SECTION 5 entries
+ *     (network_network, network_broadcast, inet_set_masklen(-1)) exactly as
+ *     the C calls chain them.
+ */
+
+#define PG_DIFF_ERR_PROTOCOL 6
+
+typedef struct StringInfoData
+{
+	unsigned char data[64];
+	int			len;
+	int			cursor;
+} StringInfoData;
+typedef StringInfoData *StringInfo;
+
+static int
+pq_getmsgbyte(StringInfo buf)
+{
+	if (buf->cursor >= buf->len)
+	{
+		pg_diff_errcode = PG_DIFF_ERR_PROTOCOL;
+		longjmp(pg_network_jmp, 1);
+	}
+	return buf->data[buf->cursor++];
+}
+
+static void
+pq_begintypsend(StringInfo buf)
+{
+	buf->len = 0;
+	buf->cursor = 0;
+}
+
+static void
+pq_sendbyte(StringInfo buf, unsigned char b)
+{
+	assert(buf->len < (int) sizeof(buf->data));
+	buf->data[buf->len++] = b;
+}
+
+typedef StringInfoData bytea;	/* shim: see header */
+
+/* C's pq_endtypsend returns the palloc'd data buffer, which outlives the
+ * caller's stack frame; the verbatim network_send body builds its
+ * StringInfoData as a LOCAL and returns pq_endtypsend(&buf), so this shim
+ * must copy out to TLS storage to keep the same lifetime contract. */
+static _Thread_local StringInfoData pg_send_out;
+
+static bytea *
+pq_endtypsend(StringInfo buf)
+{
+	pg_send_out = *buf;
+	return &pg_send_out;
+}
+
+/* --- network.c network_recv (VERBATIM body; StringInfo shim above) ------- */
+
+static inet *
+network_recv(StringInfo buf, bool is_cidr)
+{
+	inet	   *addr;
+	char	   *addrptr;
+	int			bits;
+	int			nb,
+				i;
+
+	/* make sure any unused bits in a CIDR value are zeroed */
+	addr = (inet *) palloc0(sizeof(inet));
+
+	ip_family(addr) = pq_getmsgbyte(buf);
+	if (ip_family(addr) != PGSQL_AF_INET &&
+		ip_family(addr) != PGSQL_AF_INET6)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+		/* translator: %s is inet or cidr */
+				 errmsg("invalid address family in external \"%s\" value",
+						is_cidr ? "cidr" : "inet")));
+	bits = pq_getmsgbyte(buf);
+	if (bits < 0 || bits > ip_maxbits(addr))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+		/* translator: %s is inet or cidr */
+				 errmsg("invalid bits in external \"%s\" value",
+						is_cidr ? "cidr" : "inet")));
+	ip_bits(addr) = bits;
+	i = pq_getmsgbyte(buf);		/* ignore is_cidr */
+	nb = pq_getmsgbyte(buf);
+	if (nb != ip_addrsize(addr))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+		/* translator: %s is inet or cidr */
+				 errmsg("invalid length in external \"%s\" value",
+						is_cidr ? "cidr" : "inet")));
+
+	addrptr = (char *) ip_addr(addr);
+	for (i = 0; i < nb; i++)
+		addrptr[i] = pq_getmsgbyte(buf);
+
+	/*
+	 * Error check: CIDR values must not have any bits set beyond the masklen.
+	 */
+	if (is_cidr)
+	{
+		if (!addressOK(ip_addr(addr), bits, ip_family(addr)))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+					 errmsg("invalid external \"cidr\" value"),
+					 errdetail("Value has bits set to right of mask.")));
+	}
+
+	SET_INET_VARSIZE(addr);
+
+	return addr;
+}
+
+/* --- network.c network_send (VERBATIM body; pq shims above) -------------- */
+
+static bytea *
+network_send(inet *addr, bool is_cidr)
+{
+	StringInfoData buf;
+	char	   *addrptr;
+	int			nb,
+				i;
+
+	pq_begintypsend(&buf);
+	pq_sendbyte(&buf, ip_family(addr));
+	pq_sendbyte(&buf, ip_bits(addr));
+	pq_sendbyte(&buf, is_cidr);
+	nb = ip_addrsize(addr);
+	pq_sendbyte(&buf, nb);
+	addrptr = (char *) ip_addr(addr);
+	for (i = 0; i < nb; i++)
+		pq_sendbyte(&buf, addrptr[i]);
+	return pq_endtypsend(&buf);
+}
+
+/* --- driver entries ------------------------------------------------------ */
+
+int
+pg_diff_network_recv(const unsigned char *msg, int msglen, int is_cidr,
+					 int *consumed, unsigned char *ofam,
+					 unsigned char *obits, unsigned char *oaddr)
+{
+	StringInfoData buf;
+	inet	   *r;
+
+	assert(msglen <= (int) sizeof(buf.data));
+	memcpy(buf.data, msg, msglen);
+	buf.len = msglen;
+	buf.cursor = 0;
+	*consumed = 0;
+	PG_NETWORK_ENTRY_GUARD();
+	r = network_recv(&buf, is_cidr != 0);
+	*consumed = buf.cursor;
+	pgc_inet_store(r, ofam, obits, oaddr);
+	return 0;
+}
+
+int
+pg_diff_network_send(unsigned char fam, unsigned char bits,
+					 const unsigned char *addr, int is_cidr,
+					 unsigned char *out)
+{
+	inet		s;
+	bytea	   *r;
+
+	pgc_inet_load(&s, fam, bits, addr);
+	PG_NETWORK_ENTRY_GUARD();
+	r = network_send(&s, is_cidr != 0);
+	memcpy(out, r->data, r->len);
+	return r->len;
+}
+
+/* network.c network_lt/le/eq/ge/gt/ne bodies, fmgr-unwrapped */
+int
+pg_diff_network_relop(unsigned char fam1, unsigned char bits1,
+					  const unsigned char *addr1,
+					  unsigned char fam2, unsigned char bits2,
+					  const unsigned char *addr2, int op)
+{
+	inet		a1s,
+				a2s;
+	inet	   *a1 = &a1s;
+	inet	   *a2 = &a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	switch (op)
+	{
+		case 0:
+			return network_cmp_internal(a1, a2) < 0;
+		case 1:
+			return network_cmp_internal(a1, a2) <= 0;
+		case 2:
+			return network_cmp_internal(a1, a2) == 0;
+		case 3:
+			return network_cmp_internal(a1, a2) >= 0;
+		case 4:
+			return network_cmp_internal(a1, a2) > 0;
+		default:
+			return network_cmp_internal(a1, a2) != 0;
+	}
+}
+
+/* network.c network_smaller/network_larger bodies, fmgr-unwrapped: returns
+ * 0 if a1 is the winning input datum, 1 if a2 (pointer identity in C). */
+int
+pg_diff_network_smaller(unsigned char fam1, unsigned char bits1,
+						const unsigned char *addr1,
+						unsigned char fam2, unsigned char bits2,
+						const unsigned char *addr2)
+{
+	inet		a1s,
+				a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	if (network_cmp_internal(&a1s, &a2s) < 0)
+		return 0;
+	else
+		return 1;
+}
+
+int
+pg_diff_network_larger(unsigned char fam1, unsigned char bits1,
+					   const unsigned char *addr1,
+					   unsigned char fam2, unsigned char bits2,
+					   const unsigned char *addr2)
+{
+	inet		a1s,
+				a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	if (network_cmp_internal(&a1s, &a2s) > 0)
+		return 0;
+	else
+		return 1;
+}
+
+/* network.c network_sub/subeq/sup/supeq/overlap bodies, fmgr-unwrapped */
+int
+pg_diff_network_sub(unsigned char fam1, unsigned char bits1,
+					const unsigned char *addr1,
+					unsigned char fam2, unsigned char bits2,
+					const unsigned char *addr2)
+{
+	inet		a1s,
+				a2s;
+	inet	   *a1 = &a1s;
+	inet	   *a2 = &a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	if (ip_family(a1) == ip_family(a2))
+	{
+		return ip_bits(a1) > ip_bits(a2) &&
+			bitncmp(ip_addr(a1), ip_addr(a2), ip_bits(a2)) == 0;
+	}
+
+	return false;
+}
+
+int
+pg_diff_network_subeq(unsigned char fam1, unsigned char bits1,
+					  const unsigned char *addr1,
+					  unsigned char fam2, unsigned char bits2,
+					  const unsigned char *addr2)
+{
+	inet		a1s,
+				a2s;
+	inet	   *a1 = &a1s;
+	inet	   *a2 = &a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	if (ip_family(a1) == ip_family(a2))
+	{
+		return ip_bits(a1) >= ip_bits(a2) &&
+			bitncmp(ip_addr(a1), ip_addr(a2), ip_bits(a2)) == 0;
+	}
+
+	return false;
+}
+
+int
+pg_diff_network_sup(unsigned char fam1, unsigned char bits1,
+					const unsigned char *addr1,
+					unsigned char fam2, unsigned char bits2,
+					const unsigned char *addr2)
+{
+	inet		a1s,
+				a2s;
+	inet	   *a1 = &a1s;
+	inet	   *a2 = &a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	if (ip_family(a1) == ip_family(a2))
+	{
+		return ip_bits(a1) < ip_bits(a2) &&
+			bitncmp(ip_addr(a1), ip_addr(a2), ip_bits(a1)) == 0;
+	}
+
+	return false;
+}
+
+int
+pg_diff_network_supeq(unsigned char fam1, unsigned char bits1,
+					  const unsigned char *addr1,
+					  unsigned char fam2, unsigned char bits2,
+					  const unsigned char *addr2)
+{
+	inet		a1s,
+				a2s;
+	inet	   *a1 = &a1s;
+	inet	   *a2 = &a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	if (ip_family(a1) == ip_family(a2))
+	{
+		return ip_bits(a1) <= ip_bits(a2) &&
+			bitncmp(ip_addr(a1), ip_addr(a2), ip_bits(a1)) == 0;
+	}
+
+	return false;
+}
+
+int
+pg_diff_network_overlap(unsigned char fam1, unsigned char bits1,
+						const unsigned char *addr1,
+						unsigned char fam2, unsigned char bits2,
+						const unsigned char *addr2)
+{
+	inet		a1s,
+				a2s;
+	inet	   *a1 = &a1s;
+	inet	   *a2 = &a2s;
+
+	pgc_inet_load(&a1s, fam1, bits1, addr1);
+	pgc_inet_load(&a2s, fam2, bits2, addr2);
+	if (ip_family(a1) == ip_family(a2))
+	{
+		return bitncmp(ip_addr(a1), ip_addr(a2),
+					   Min(ip_bits(a1), ip_bits(a2))) == 0;
+	}
+
+	return false;
+}
+
+/* network.c network_family body, fmgr-unwrapped */
+int
+pg_diff_network_family(unsigned char fam, unsigned char bits,
+					   const unsigned char *addr)
+{
+	inet		ips;
+	inet	   *ip = &ips;
+
+	pgc_inet_load(&ips, fam, bits, addr);
+	switch (ip_family(ip))
+	{
+		case PGSQL_AF_INET:
+			return 4;
+		case PGSQL_AF_INET6:
+			return 6;
+		default:
+			return 0;
+	}
+}
+
+/* network.c network_masklen body, fmgr-unwrapped */
+int
+pg_diff_network_masklen(unsigned char fam, unsigned char bits,
+						const unsigned char *addr)
+{
+	inet		ips;
+
+	pgc_inet_load(&ips, fam, bits, addr);
+	return ip_bits(&ips);
+}
+
+/* network.c convert_network_to_scalar, INETOID/CIDROID arm (VERBATIM body;
+ * see the section header for the mac-arm carve). */
+double
+pg_diff_convert_network_to_scalar(unsigned char fam, unsigned char bits,
+								  const unsigned char *addr)
+{
+	inet		ips;
+	inet	   *ip = &ips;
+	int			len;
+	double		res;
+	int			i;
+
+	pgc_inet_load(&ips, fam, bits, addr);
+
+	/*
+	 * Note that we don't use the full address for IPv6.
+	 */
+	if (ip_family(ip) == PGSQL_AF_INET)
+		len = 4;
+	else
+		len = 5;
+
+	res = ip_family(ip);
+	for (i = 0; i < len; i++)
+	{
+		res *= 256;
+		res += ip_addr(ip)[i];
+	}
+	return res;
+}
+
+/* network.c network_scan_first/network_scan_last: DirectFunctionCall
+ * compositions, composed from the SECTION 5 entries exactly as C chains
+ * them (network_network; inet_set_masklen(network_broadcast(in), -1)). */
+int
+pg_diff_network_scan_first(unsigned char fam, unsigned char bits,
+						   const unsigned char *addr, unsigned char *ofam,
+						   unsigned char *obits, unsigned char *oaddr)
+{
+	return pg_diff_network_network(fam, bits, addr, ofam, obits, oaddr);
+}
+
+int
+pg_diff_network_scan_last(unsigned char fam, unsigned char bits,
+						  const unsigned char *addr, unsigned char *ofam,
+						  unsigned char *obits, unsigned char *oaddr)
+{
+	unsigned char bfam,
+				bbits,
+				baddr[16];
+	int			st;
+
+	st = pg_diff_network_broadcast(fam, bits, addr, &bfam, &bbits, baddr);
+	if (st != 0)
+		return st;
+	return pg_diff_inet_set_masklen(bfam, bbits, baddr, -1, ofam, obits, oaddr);
+}
