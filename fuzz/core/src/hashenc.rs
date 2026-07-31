@@ -38,11 +38,11 @@ extern "C" {
     fn pg_hashenc_digest(ty: i32, data: *const u8, len: usize, dest: *mut u8, destlen: usize) -> i32;
     fn pg_hashenc_digest_split(ty: i32, data: *const u8, len: usize, split: usize, dest: *mut u8, destlen: usize) -> i32;
     fn pg_hashenc_hmac(ty: i32, key: *const u8, keylen: usize, data: *const u8, datalen: usize, dest: *mut u8, destlen: usize) -> i32;
-    fn pg_hashenc_scram_salted_password(password: *const i8, salt: *const u8, saltlen: i32, iterations: i32, out32: *mut u8) -> i32;
+    fn pg_hashenc_scram_salted_password(password: *const core::ffi::c_char, salt: *const u8, saltlen: i32, iterations: i32, out32: *mut u8) -> i32;
     fn pg_hashenc_scram_h(input: *const u8, out32: *mut u8) -> i32;
     fn pg_hashenc_scram_client_key(salted: *const u8, out32: *mut u8) -> i32;
     fn pg_hashenc_scram_server_key(salted: *const u8, out32: *mut u8) -> i32;
-    fn pg_hashenc_scram_build_secret(salt: *const u8, saltlen: i32, iterations: i32, password: *const i8) -> *mut i8;
+    fn pg_hashenc_scram_build_secret(salt: *const u8, saltlen: i32, iterations: i32, password: *const core::ffi::c_char) -> *mut core::ffi::c_char;
     fn pg_hashenc_free(p: *mut core::ffi::c_void);
     fn pg_hashenc_to_ascii(src: *const u8, len: usize, dest: *mut u8, enc: i32) -> i32;
     fn pg_hashenc_valid_encoding(enc: i32) -> i32;
@@ -329,7 +329,7 @@ fn scram_family(payload: &[u8]) {
         .expect("no interrupts in-harness");
     let mut c_salted = [0u8; 32];
     let rc = unsafe {
-        pg_hashenc_scram_salted_password(pz.as_ptr() as *const i8, salt.as_ptr(), salt.len() as i32, iterations, c_salted.as_mut_ptr())
+        pg_hashenc_scram_salted_password(pz.as_ptr().cast(), salt.as_ptr(), salt.len() as i32, iterations, c_salted.as_mut_ptr())
     };
     assert!(rc == 0 && r_salted == c_salted, "scram_salted_password DIVERGENCE iter={iterations}");
 
@@ -346,12 +346,12 @@ fn scram_family(payload: &[u8]) {
     let ctx = MemoryContext::new("hashenc");
     let r_secret = scram_common::scram_build_secret(ctx.mcx(), salt, iterations, passwd)
         .expect("no interrupts in-harness");
-    let c_secret = unsafe { pg_hashenc_scram_build_secret(salt.as_ptr(), salt.len() as i32, iterations, pz.as_ptr() as *const i8) };
+    let c_secret = unsafe { pg_hashenc_scram_build_secret(salt.as_ptr(), salt.len() as i32, iterations, pz.as_ptr().cast()) };
     assert!(!c_secret.is_null(), "C scram_build_secret failed (OOM-only arm)");
     // SAFETY: C returns a NUL-terminated malloc'd string.
-    let c_str = unsafe { core::ffi::CStr::from_ptr(c_secret) };
+    let c_str = unsafe { core::ffi::CStr::from_ptr(c_secret.cast()) };
     assert_eq!(r_secret.as_bytes(), c_str.to_bytes(), "scram_build_secret DIVERGENCE iter={iterations}");
-    unsafe { pg_hashenc_free(c_secret as *mut core::ffi::c_void) };
+    unsafe { pg_hashenc_free(c_secret.cast()) };
 }
 
 fn to_ascii_family(payload: &[u8]) {
