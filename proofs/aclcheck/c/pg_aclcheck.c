@@ -2029,7 +2029,11 @@ pg_aclitemin(const char *s, AclItem *out, int *err)
 	return 1;
 }
 
-/* sprintf(p, "%u", oid) model for the role-not-found arm (see file header) */
+/* sprintf(p, "%u", oid) model for the role-not-found arm (see file header).
+ * Exported wrapper below (pg_oid_decimal) lets the kernel-extract harness
+ * eq_oid_decimal prove the Rust adt_acl::io::push_oid_decimal kernel against
+ * this model over the full u32 domain (spot_aclitemout_numeric reduction,
+ * 2026-07-31). */
 static void
 pgq_sprintf_u32(char *p, uint32 v)
 {
@@ -2045,6 +2049,19 @@ pgq_sprintf_u32(char *p, uint32 v)
 	for (i = 0; i < n; i++)
 		p[i] = tmp[n - 1 - i];
 	p[n] = '\0';
+}
+
+/* harness plumbing: exported entry for the eq_oid_decimal kernel harness;
+ * returns the rendered length so the Rust side can byte-compare. */
+int
+pg_oid_decimal(uint32 v, char *p)
+{
+	int			n = 0;
+
+	pgq_sprintf_u32(p, v);
+	while (p[n])
+		++n;
+	return n;
 }
 
 /* SearchSysCache1(AUTHOID, oid) against seam 7 */
