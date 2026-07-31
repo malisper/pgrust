@@ -321,6 +321,9 @@ pg_diff_rt_throw(void)
 #define ERRCODE_SYNTAX_ERROR                    9	/* 42601 */
 #define ERRCODE_DATATYPE_MISMATCH              10	/* 42804 */
 #define ERRCODE_INVALID_PARAMETER_VALUE        11	/* 22023 */
+/* 12 is defined below (PROGRAM_LIMIT_EXCEEDED); 13/14 belong to the multirange
+ * half of this translation unit. Next range-side addition starts at 15. */
+#define ERRCODE_DATA_CORRUPTED                 15	/* XX001 */
 
 #define errcode(c) (pg_diff_errcode = (c))
 
@@ -565,9 +568,201 @@ store_att_byval(void *T, Datum newdatum, int attlen)
  * occur; SHORT (1B-header) values DO (range_serialize packs typstorage!='p'
  * bounds), and PG_DETOAST_DATUM expands them to the 4B-header form exactly
  * as heap_tuple_untoast_attr's short arm does. */
+/* varatt.h: inline-compressed (4B_C) layout. va_tcinfo carries the external
+ * (decompressed, header-less) size in its low 30 bits; the top 2 bits are the
+ * compression method, and 00 = TOAST_PGLZ_COMPRESSION_ID — the only method
+ * this oracle accepts (the driver mints pglz only; lz4 stays out of scope). */
+#define VARHDRSZ_COMPRESSED			8
+#define VARLENA_EXTSIZE_BITS		30
+#define VARLENA_EXTSIZE_MASK		((1U << VARLENA_EXTSIZE_BITS) - 1)
+#define VARDATA_COMPRESSED_GET_EXTSIZE(PTR) \
+	(((const uint32 *) (PTR))[1] & VARLENA_EXTSIZE_MASK)
+#define VARDATA_COMPRESSED_GET_COMPRESS_METHOD(PTR) \
+	(((const uint32 *) (PTR))[1] >> VARLENA_EXTSIZE_BITS)
+
+#define unlikely(x) __builtin_expect((x) != 0, 0)
+
+/*
+ * VERBATIM src/common/pg_lzcompress.c pglz_decompress (18.3, sha 62d6c7d3df).
+ * Vendored so the oracle can accept INLINE-COMPRESSED bound datums —
+ * range_serialize's PG_DETOAST_DATUM_PACKED decompresses them in real C, and
+ * numeric_cmp's full detoast sees them even earlier (range_serialize compares
+ * the bounds BEFORE the count-space section that detoasts them).
+ */
+static int32
+pglz_decompress(const char *source, int32 slen, char *dest,
+				int32 rawsize, bool check_complete)
+{
+	const unsigned char *sp;
+	const unsigned char *srcend;
+	unsigned char *dp;
+	unsigned char *destend;
+
+	sp = (const unsigned char *) source;
+	srcend = ((const unsigned char *) source) + slen;
+	dp = (unsigned char *) dest;
+	destend = dp + rawsize;
+
+	while (sp < srcend && dp < destend)
+	{
+		/*
+		 * Read one control byte and process the next 8 items (or as many as
+		 * remain in the compressed input).
+		 */
+		unsigned char ctrl = *sp++;
+		int			ctrlc;
+
+		for (ctrlc = 0; ctrlc < 8 && sp < srcend && dp < destend; ctrlc++)
+		{
+			if (ctrl & 1)
+			{
+				/*
+				 * Set control bit means we must read a match tag. The match
+				 * is coded with two bytes. First byte uses lower nibble to
+				 * code length - 3. Higher nibble contains upper 4 bits of the
+				 * offset. The next following byte contains the lower 8 bits
+				 * of the offset. If the length is coded as 18, another
+				 * extension tag byte tells how much longer the match really
+				 * was (0-255).
+				 */
+				int32		len;
+				int32		off;
+
+				len = (sp[0] & 0x0f) + 3;
+				off = ((sp[0] & 0xf0) << 4) | sp[1];
+				sp += 2;
+				if (len == 18)
+					len += *sp++;
+
+				/*
+				 * Check for corrupt data: if we fell off the end of the
+				 * source, or if we obtained off = 0, or if off is more than
+				 * the distance back to the buffer start, we have problems.
+				 * (We must check for off = 0, else we risk an infinite loop
+				 * below in the face of corrupt data.  Likewise, the upper
+				 * limit on off prevents accessing outside the buffer
+				 * boundaries.)
+				 */
+				if (unlikely(sp > srcend || off == 0 ||
+							 off > (dp - (unsigned char *) dest)))
+					return -1;
+
+				/*
+				 * Don't emit more data than requested.
+				 */
+				len = Min(len, destend - dp);
+
+				/*
+				 * Now we copy the bytes specified by the tag from OUTPUT to
+				 * OUTPUT (copy len bytes from dp - off to dp).  The copied
+				 * areas could overlap, so to avoid undefined behavior in
+				 * memcpy(), be careful to copy only non-overlapping regions.
+				 *
+				 * Note that we cannot use memmove() instead, since while its
+				 * behavior is well-defined, it's also not what we want.
+				 */
+				while (off < len)
+				{
+					/*
+					 * We can safely copy "off" bytes since that clearly
+					 * results in non-overlapping source and destination.
+					 */
+					memcpy(dp, dp - off, off);
+					len -= off;
+					dp += off;
+
+					/*----------
+					 * This bit is less obvious: we can double "off" after
+					 * each such step.  Consider this raw input:
+					 *		112341234123412341234
+					 * This will be encoded as 5 literal bytes "11234" and
+					 * then a match tag with length 16 and offset 4.  After
+					 * memcpy'ing the first 4 bytes, we will have emitted
+					 *		112341234
+					 * so we can double "off" to 8, then after the next step
+					 * we have emitted
+					 *		11234123412341234
+					 * Then we can double "off" again, after which it is more
+					 * than the remaining "len" so we fall out of this loop
+					 * and finish with a non-overlapping copy of the
+					 * remainder.  In general, a match tag with off < len
+					 * implies that the decoded data has a repeat length of
+					 * "off".  We can handle 1, 2, 4, etc repetitions of the
+					 * repeated string per memcpy until we get to a situation
+					 * where the final copy step is non-overlapping.
+					 *
+					 * (Another way to understand this is that we are keeping
+					 * the copy source point dp - off the same throughout.)
+					 *----------
+					 */
+					off += off;
+				}
+				memcpy(dp, dp - off, len);
+				dp += len;
+			}
+			else
+			{
+				/*
+				 * An unset control bit means LITERAL BYTE. So we just copy
+				 * one from INPUT to OUTPUT.
+				 */
+				*dp++ = *sp++;
+			}
+
+			/*
+			 * Advance the control bit
+			 */
+			ctrl >>= 1;
+		}
+	}
+
+	/*
+	 * If requested, check we decompressed the right amount.
+	 */
+	if (check_complete && (dp != destend || sp != srcend))
+		return -1;
+
+	/*
+	 * That's it.
+	 */
+	return (char *) dp - dest;
+}
+
+
+/* toast_compression.c pglz_decompress_datum (mechanical transform: ereport ->
+ * the shim's errcode table; struct varlena via this file's typedefs) */
+static varlena *
+pg_rt_decompress_datum(const varlena *value)
+{
+	varlena    *result;
+	int32		rawsize;
+
+	if (VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) != 0)
+		elog(ERROR, "oracle: non-pglz compression method");
+
+	result = (varlena *) palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
+	rawsize = pglz_decompress((char *) value + VARHDRSZ_COMPRESSED,
+							  VARSIZE(value) - VARHDRSZ_COMPRESSED,
+							  VARDATA(result),
+							  VARDATA_COMPRESSED_GET_EXTSIZE(value), true);
+	if (rawsize < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("compressed pglz data is corrupt")));
+
+	SET_VARSIZE(result, rawsize + VARHDRSZ);
+
+	return result;
+}
+
+/* fmgr.c pg_detoast_datum: expands BOTH short headers and inline-compressed
+ * values to the flat 4B form (no external fetch: this oracle has no toast
+ * relation, and every entry that could see an external pointer fences it). */
 static void *
 pg_rt_detoast(void *p)
 {
+	if (VARATT_IS_COMPRESSED(p))
+		return pg_rt_decompress_datum((varlena *) p);
 	if (VARATT_IS_SHORT(p))
 	{
 		Size		data_size = VARSIZE_SHORT(p) - VARHDRSZ_SHORT;
@@ -581,8 +776,18 @@ pg_rt_detoast(void *p)
 	return p;
 }
 
+/* fmgr.c pg_detoast_datum_packed: decompresses, but leaves short headers
+ * AS-IS — the packed law range_serialize depends on. */
+static void *
+pg_rt_detoast_packed(void *p)
+{
+	if (VARATT_IS_COMPRESSED(p))
+		return pg_rt_decompress_datum((varlena *) p);
+	return p;
+}
+
 #define PG_DETOAST_DATUM(d) ((varlena *) pg_rt_detoast(DatumGetPointer(d)))
-#define PG_DETOAST_DATUM_PACKED(d) ((varlena *) DatumGetPointer(d))
+#define PG_DETOAST_DATUM_PACKED(d) ((varlena *) pg_rt_detoast_packed(DatumGetPointer(d)))
 
 /* ---------------- minimal fmgr (shim 3) ---------------- */
 
@@ -9380,6 +9585,54 @@ pg_diff_range_canonical(int typ, const unsigned char *img,
  * runs with a soft context whenever a soft range_in canonicalizes. Contract as
  * pg_diff_range_in_soft.
  */
+/*
+ * INTERNAL-API arm: make_range itself, hard or soft (typ as pg_rt_typ_oid:
+ * 0=int4range 1=int8range 3=daterange; byval bounds only). This is the ONLY
+ * route to canonicalize's per-type dispatch under a soft context — the fmgr
+ * constructors hardcode a NULL escontext (range_constructor2/3 pass NULL to
+ * make_range in verbatim C and in the shipped Rust alike), and range_in cannot
+ * carry daterange here because date_in is not vendored. make_range is the
+ * exact function real range_in calls, so this models a REAL caller shape (the
+ * mr oracle's internal-API section is the precedent).
+ *
+ * flags: RANGE_*_INF/INC of the bounds + RANGE_EMPTY; soft-mode contract as
+ * pg_diff_range_in_soft.
+ */
+int
+pg_diff_make_range(int typ, int64 v1, int64 v2, int flags, int soft,
+				   unsigned char *out, int *outlen, int outcap,
+				   int *soft_class)
+{
+	TypeCacheEntry *tc;
+	RangeBound	lower;
+	RangeBound	upper;
+	RangeType  *r;
+	int			n;
+
+	*soft_class = 0;
+	PG_DIFF_ENTER();
+	tc = range_get_typcache(NULL, pg_rt_typ_oid(typ));
+	lower.val = pg_rt_bound_datum(typ == 3 ? 0 : typ, v1, NULL);
+	lower.infinite = (flags & RANGE_LB_INF) != 0;
+	lower.inclusive = (flags & RANGE_LB_INC) != 0;
+	lower.lower = true;
+	upper.val = pg_rt_bound_datum(typ == 3 ? 0 : typ, v2, NULL);
+	upper.infinite = (flags & RANGE_UB_INF) != 0;
+	upper.inclusive = (flags & RANGE_UB_INC) != 0;
+	upper.lower = false;
+	r = make_range(tc, &lower, &upper, (flags & RANGE_EMPTY) != 0,
+				   soft ? PG_DIFF_SOFT_ESC : NULL);
+	*soft_class = pg_diff_errcode;
+	if (*soft_class != 0)
+		return 0;				/* soft failure captured */
+	n = (int) VARSIZE(r);
+	if (n > outcap)
+		return -1;
+	memcpy(out, r, n);
+	*outlen = n;
+	return 0;
+}
+
 int
 pg_diff_range_canonical_soft(int typ, const unsigned char *img,
 							 unsigned char *out, int *outlen, int outcap,

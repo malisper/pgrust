@@ -87,6 +87,10 @@ adt_multirangetypes = { path = "../../crates/backend/utils/adt/multirangetypes" 
 # seam; multirangetypes_diff installs the SHIPPED impl (never a mock: the
 # seam is environment, the detoast logic is computation).
 detoast = { path = "../../crates/backend/access/common/detoast" }
+# rangetypes_diff mints inline-compressed (4B_C) bound images with the SHIPPED
+# compressor; both sides then decompress the identical bytes (C: verbatim
+# vendored pglz_decompress; Rust: the shipped detoast path).
+pglz = { path = "../../crates/common/pglz" }
 detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
 
 [build-dependencies]

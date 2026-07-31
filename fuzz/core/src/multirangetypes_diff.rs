@@ -294,6 +294,9 @@ pub(crate) fn err_class(e: &PgError) -> i32 {
         // — otherwise every elog arm the crate has (wrong constructor type,
         // not-a-multirange) reads as a false divergence.
         99
+    } else if e.sqlstate == te::ERRCODE_DATA_CORRUPTED {
+        // XX001: corrupt inline-compressed (pglz) bound — shared class 15
+        15
     } else {
         98
     }

@@ -32,7 +32,7 @@
 //! errcode/sqlstate CLASS (err_class below = the oracle's table). Message
 //! text out of scope.
 //!
-//! Input layout: [sel][typ][payload]; sel % 11 picks the arm, typ % 3 the
+//! Input layout: [sel][typ][payload]; sel % 12 picks the arm, typ % 3 the
 //! instantiation (arms 9/10 repurpose typ as their own selector):
 //!   0 text io:    range_in(payload-as-literal) image + errclass;
 //!                 on Ok, range_out roundtrip text          (3834/3835/3833)
@@ -52,6 +52,9 @@
 //!   8 hash:       hash_range + hash_range_extended(seed)   (3902/3417)
 //!   9 canonical:  int4range/int8range/daterange canonical  (3914/3928/3915)
 //!  10 subdiff:    int4/int8/num/date/ts/tstz subdiffs      (3922-3930)
+//!  11 make_range:  internal-API arm, hard+soft escontext (the real range_in
+//!                  caller shape; the only soft route to canonicalize's
+//!                  per-type dispatch — constructors hardcode NULL escontext)
 //!
 //! fc-wrapper plane: every arm drives the crate's builtins.rs fc_* wrapper
 //! on a native LocalFcinfo (cash_diff pattern) — the wrapper IS the shipped
@@ -105,6 +108,17 @@ extern "C" {
         outcap: i32,
         soft_class: *mut i32,
         isnull_out: *mut i32,
+    ) -> i32;
+    fn pg_diff_make_range(
+        typ: i32,
+        v1: i64,
+        v2: i64,
+        flags: i32,
+        soft: i32,
+        out: *mut u8,
+        outlen: *mut i32,
+        outcap: i32,
+        soft_class: *mut i32,
     ) -> i32;
     fn pg_diff_range_out(
         img: *const u8,
@@ -248,6 +262,9 @@ pub(crate) fn err_class(e: &PgError) -> i32 {
         // StringInfo's MaxAllocSize ceiling: reachable from numrange text io,
         // where a bound with a huge exponent prints past 1 GiB.
         12
+    } else if e.sqlstate == te::ERRCODE_DATA_CORRUPTED {
+        // XX001: corrupt inline-compressed (pglz) bound — shared class 15
+        15
     } else {
         98
     }
@@ -820,6 +837,34 @@ fn to_short_header(img: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Wrap a 4-byte-header varlena into the INLINE-COMPRESSED (4B_C) form, minted
+/// with the SHIPPED pglz compressor. This is the second on-disk shape a stored
+/// byref bound can take (typstorage 'm'): header (total<<2)|0b10, then
+/// va_tcinfo = decompressed data size (method bits 00 = pglz), then the
+/// compressed stream. Both sides consume the IDENTICAL bytes; decompression is
+/// the compared computation (C: verbatim vendored pglz_decompress; Rust: the
+/// shipped detoast). `None` = pglz declines (incompressible/too small), which
+/// mirrors real storage: such values are kept uncompressed.
+fn to_compressed(img: &[u8]) -> Option<Vec<u8>> {
+    use core::mem::MaybeUninit;
+    let payload = &img[4..];
+    let mut dst: Vec<MaybeUninit<u8>> =
+        vec![MaybeUninit::uninit(); pglz::pglz_max_output(payload.len())];
+    // STRATEGY_ALWAYS, not DEFAULT: numeric bound images are mostly under the
+    // 32-byte default minimum and DEFAULT would decline nearly every one. The
+    // compressed FORM is what is under test (decompress + bound handling), not
+    // the storage policy that decides when to compress; a 4B_C image is legal
+    // input to the detoast path regardless of how small its payload is.
+    let clen = pglz::pglz_compress_into(payload, &mut dst, &pglz::PGLZ_STRATEGY_ALWAYS)?;
+    let total = 8 + clen;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&(((total as u32) << 2) | 0x02).to_ne_bytes());
+    out.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+    // SAFETY: pglz_compress_into initialized the first clen bytes.
+    out.extend_from_slice(unsafe { core::slice::from_raw_parts(dst.as_ptr().cast::<u8>(), clen) });
+    Some(out)
+}
+
 /// One image for an arm, in one of the two layouts. `None` = skip this exec.
 fn image_for(
     t: usize,
@@ -946,7 +991,7 @@ pub fn rangetypes_diff(data: &[u8]) {
     let ctx = MemoryContext::new("rangetypes_fuzz");
     let mcx = ctx.mcx();
 
-    match sel % 11 {
+    match sel % 12 {
         0 => arm_text_io(t, payload, mcx, typb & 0x80 != 0),
         1 => arm_binary_io(t, payload, mcx),
         2 => arm_ctor(t, payload, mcx, false),
@@ -958,6 +1003,7 @@ pub fn rangetypes_diff(data: &[u8]) {
         8 => arm_hash(t, payload, mcx),
         9 => arm_canonical(typb, payload, mcx),
         10 => arm_subdiff(typb, payload, mcx),
+        11 => arm_make_range(typb, payload, mcx),
         _ => unreachable!(),
     }
 }
@@ -1271,6 +1317,25 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
     // really reaches the body and both sides must raise 22000 there.
     let null3 = three && nullbits & 4 != 0;
     let flags_txt = [f1, f2, b')'];
+    // INLINE-COMPRESSED bound (numrange only: the byval pins have no varlena
+    // bound to compress). Reaches detoast_bound_packed's compressed arm
+    // (lib.rs:415-419) AND numeric_cmp's full-detoast of a compressed argument,
+    // because range_serialize compares the bounds before it detoasts them.
+    let (lo, up) = if t == 2 && nullbits & 0x80 != 0 {
+        let squeeze = |b: Bound| match b {
+            Bound::Num(img) => match to_compressed(&img) {
+                Some(c) => {
+                    bump(|st| st.toast_built[1] += 1);
+                    Bound::Num(c)
+                }
+                None => Bound::Num(img),
+            },
+            byval => byval,
+        };
+        (squeeze(lo), squeeze(up))
+    } else {
+        (lo, up)
+    };
     let (v1, n1) = lo.c_args();
     let (v2, n2) = up.c_args();
     if t == NPINS - 1 {
@@ -1874,6 +1939,102 @@ fn arm_canonical(typb: u8, payload: &[u8], mcx: mcx::Mcx<'_>) {
     }
 }
 
+/// INTERNAL-API arm: make_range directly, hard AND soft, over the three
+/// discrete byval-bound instantiations (int4range / int8range / daterange).
+/// make_range is the exact function real range_in calls, so this models a real
+/// caller shape rather than inventing one; it is the ONLY route to
+/// canonicalize's per-type dispatch under a soft context, because the fmgr
+/// constructors hardcode a NULL escontext in verbatim C and shipped Rust alike,
+/// and range_in cannot carry daterange here (date_in is not vendored). In
+/// particular this reaches canonicalize's F_DATERANGE_CANONICAL soft edge
+/// (lib.rs:535), whose int4/int8 siblings ride soft range_in.
+fn arm_make_range(typb: u8, payload: &[u8], mcx: mcx::Mcx<'_>) {
+    let ct = (typb % 3) as usize; // 0=int4range, 1=int8range, 2=daterange
+    let mut rd = Rd(payload, 0);
+    let flags = wf_flags(rd.u8()) & 0x1f; // EMPTY|LB_INC|UB_INC|LB_INF|UB_INF
+    let soft = rd.u8() & 1 == 1;
+    let (v1, v2) = if ct == 1 {
+        (rd.i64(), rd.i64())
+    } else {
+        (rd.i32() as i64, rd.i32() as i64)
+    };
+    let (ctyp, t) = match ct {
+        0 => (0, 0),
+        1 => (1, 1),
+        _ => (3, NPINS - 1),
+    };
+    if soft {
+        bump(|st| st.soft_mode += 1);
+    }
+    let mut cbuf = vec![0u8; OUTCAP];
+    let mut clen = 0i32;
+    let mut csoft = 0i32;
+    let cret = unsafe {
+        pg_diff_make_range(
+            ctyp,
+            v1,
+            v2,
+            flags as i32,
+            soft as i32,
+            cbuf.as_mut_ptr(),
+            &mut clen,
+            OUTCAP as i32,
+            &mut csoft,
+        )
+    };
+    let mut ri = range_info(t);
+    let mk_bound = |v: i64, lower: bool| rt::RangeBound {
+        val: if ct == 1 { Datum::from_i64(v) } else { Datum::from_i32(v as i32) },
+        infinite: flags & (if lower { rt::RANGE_LB_INF } else { rt::RANGE_UB_INF }) != 0,
+        inclusive: flags & (if lower { rt::RANGE_LB_INC } else { rt::RANGE_UB_INC }) != 0,
+        lower,
+    };
+    let mut lower = mk_bound(v1, true);
+    let mut upper = mk_bound(v2, false);
+    let mut esc = types_error::SoftErrorContext::new(true);
+    let ctx = if soft { Some(&mut esc) } else { None };
+    let rres = rt::make_range(mcx, &mut ri, &mut lower, &mut upper, flags & 0x01 != 0, ctx);
+    let dbg = format!("ct={ct} flags={flags:02x} soft={soft} v1={v1} v2={v2}");
+    match &rres {
+        Err(e) => {
+            let rc = err_class(e);
+            assert!(
+                csoft == 0 && cret == rc,
+                "make_range HARD-ERROR DIVERGENCE {dbg}: C=(ret {cret}, soft {csoft}) \
+                 Rust=hard {rc} ({})",
+                e.message
+            );
+        }
+        Ok(None) => {
+            // soft failure captured on the Rust side
+            assert!(soft, "make_range returned Ok(None) without a soft context {dbg}");
+            bump(|st| st.soft_captured += 1);
+            assert!(
+                csoft != 0,
+                "make_range OCCURRED DIVERGENCE {dbg}: Rust captured, C did not"
+            );
+            let rc = esc.error().map(err_class).unwrap_or(98);
+            assert!(rc == csoft, "make_range CLASS DIVERGENCE {dbg}: C={csoft} Rust={rc}");
+        }
+        Ok(Some(img)) => {
+            assert!(
+                csoft == 0 && cret == 0,
+                "make_range DIVERGENCE {dbg}: C=(ret {cret}, soft {csoft}) vs Rust Ok"
+            );
+            assert!(
+                !esc.error_occurred(),
+                "make_range {dbg}: Rust succeeded but marked its soft context"
+            );
+            assert!(
+                img[..] == cbuf[..clen as usize],
+                "make_range IMAGE DIVERGENCE {dbg}: C={:02x?} Rust={:02x?}",
+                &cbuf[..clen as usize],
+                &img[..]
+            );
+        }
+    }
+}
+
 fn arm_subdiff(typb: u8, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let which = (typb % 6) as usize;
     let mut rd = Rd(payload, 0);
@@ -2088,6 +2249,7 @@ mod vacuity {
                 st.flags_len_off,
                 st.daterange_built,
                 st.toast_built[2],
+                st.toast_built[1],
             )
         });
 
@@ -2115,6 +2277,23 @@ mod vacuity {
         }
         // canonical arm in soft mode (trailing byte odd)
         rangetypes_diff(&[9, 0, 0x06, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f, 1]);
+        // compressed numrange bound (ctor arm, nullbits 0x80, t=2).
+        // Bound::decode length byte is (b % 20) + 1, so 17 => an 18-byte
+        // literal. REPETITIVE digits on purpose: pglz declines when it cannot
+        // shrink the input (the mint falls back to the uncompressed bound),
+        // and a short random literal never compresses — the first version of
+        // this test used "1234" and this very gate caught the arm not firing.
+        let mut v = vec![2u8, 2, 0x80, b'[', b')'];
+        v.push(17);
+        v.extend_from_slice(b"111111111111111111");
+        v.push(17);
+        v.extend_from_slice(b"999999999999999999");
+        rangetypes_diff(&v);
+        // make_range internal-API arm, soft, daterange overflow
+        let mut v = vec![11u8, 2, 0x06, 1];
+        v.extend_from_slice(&0i32.to_le_bytes());
+        v.extend_from_slice(&2145031948i32.to_le_bytes());
+        rangetypes_diff(&v);
 
         let after = STATS.with(|s| {
             let st = s.borrow();
@@ -2125,6 +2304,7 @@ mod vacuity {
                 st.flags_len_off,
                 st.daterange_built,
                 st.toast_built[2],
+                st.toast_built[1],
             )
         });
         assert!(after.0 > before.0, "soft-mode arm never fired");
@@ -2133,6 +2313,7 @@ mod vacuity {
         assert!(after.3 > before.3, "off-length flags-text arm never fired");
         assert!(after.4 > before.4, "daterange instantiation never built");
         assert!(after.5 > before.5, "short-header image arm never fired");
+        assert!(after.6 > before.6, "compressed (pglz) bound arm never fired");
     }
 
     /// ANTI-VACUITY GATE. A clean fuzz run proves nothing if the builders quietly
@@ -2328,6 +2509,7 @@ mod shared_errclass_table {
             ("DATATYPE_MISMATCH", te::ERRCODE_DATATYPE_MISMATCH),
             ("INVALID_PARAMETER_VALUE", te::ERRCODE_INVALID_PARAMETER_VALUE),
             ("PROGRAM_LIMIT_EXCEEDED", te::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ("DATA_CORRUPTED", te::ERRCODE_DATA_CORRUPTED),
         ];
         for (name, sqlstate) in shared {
             let e = te::PgError::error("x").with_sqlstate(sqlstate);

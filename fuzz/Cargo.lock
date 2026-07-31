@@ -1643,6 +1643,7 @@ dependencies = [
  "pg_sha1",
  "pg_sha2",
  "pg_string",
+ "pglz",
  "postgres_seams",
  "pqformat",
  "relpath",
