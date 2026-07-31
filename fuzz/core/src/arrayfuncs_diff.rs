@@ -318,6 +318,23 @@ fn elem_width(elemsel: i32, r: &mut Rdr<'_>) -> usize {
     }
 }
 
+/// Read `w` element bytes, normalised so BOTH sides receive identical
+/// content. cstring (typlen -2) is NUL-terminated: an embedded NUL would make
+/// C see a shorter string than the driver handed it — a driver-ENCODING
+/// artifact, not a behavior difference — so NULs are mapped to '.' here,
+/// before either side sees the bytes.
+fn read_elem_bytes(elemsel: i32, w: usize, r: &mut Rdr<'_>) -> std::vec::Vec<u8> {
+    let mut b = r.bytes(w);
+    if METATAB[elemsel as usize].1 == -2 {
+        for x in b.iter_mut() {
+            if *x == 0 {
+                *x = b'.';
+            }
+        }
+    }
+    b
+}
+
 /// Build one element Datum for `elemsel` from `bytes` (already elem_width
 /// long for fixed types). byval goes through the crate's own fetch_att so the
 /// word shape is the crate's, never the driver's.
@@ -331,11 +348,10 @@ fn make_elem<'mcx>(mcx: Mcx<'mcx>, elemsel: i32, bytes: &[u8]) -> Datum {
     match typlen {
         -1 => build_varlena(mcx, bytes),
         -2 => {
-            // cstring: NUL-terminated, and never an embedded NUL (the C side
-            // would truncate at it, which is a driver-encoding artifact, not
-            // a behavior difference).
-            let mut v: std::vec::Vec<u8> =
-                bytes.iter().copied().map(|b| if b == 0 { b'.' } else { b }).collect();
+            // cstring: NUL-terminated. Bytes arrive already NUL-free from
+            // read_elem_bytes, so both sides hold the same string.
+            let mut v: std::vec::Vec<u8> = bytes.to_vec();
+            debug_assert!(!v.contains(&0));
             v.push(0);
             let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, v.len()).expect("alloc");
             buf.extend_from_slice(&v);
@@ -564,7 +580,7 @@ fn build_image_full<'mcx>(
             continue;
         }
         let w = elem_width(elemsel, r);
-        let b = r.bytes(w);
+        let b = read_elem_bytes(elemsel, w, r);
         elems.push(make_elem(mcx, elemsel, &b));
         c_lens.push(b.len() as i32);
         c_data.extend_from_slice(&b);
@@ -1104,7 +1120,7 @@ fn set_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     }
     let isnull = r.u8() & 1 == 1;
     let w = elem_width(esel, r);
-    let elem_bytes = r.bytes(w);
+    let elem_bytes = read_elem_bytes(esel, w, r);
     let rdatum = make_elem(mcx, esel, &elem_bytes);
     if mode.fixed && img.len() < arraytyplen as usize {
         return;
@@ -1487,7 +1503,7 @@ fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
             continue;
         }
         let w = elem_width(esel, r);
-        let b = r.bytes(w);
+        let b = read_elem_bytes(esel, w, r);
         elems.push(make_elem(mcx, esel, &b));
         c_elem_lens.push(b.len() as i32);
         c_elem_data.extend_from_slice(&b);

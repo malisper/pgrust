@@ -325,7 +325,7 @@ pg_afx_raise(void)
  * *_builtin tables' default: arms are the live example. */
 #define ERRCODE_INTERNAL_ERROR 9
 #define elog(level, ...) \
-	do { pg_diff_errcode = ERRCODE_INTERNAL_ERROR; pg_afx_raise(); } while (0)
+	do { if (getenv("PG_AFX_DEBUG")) fprintf(stderr, "elog fired at pg_arrayfuncs_io.c:%d\n", __LINE__); pg_diff_errcode = ERRCODE_INTERNAL_ERROR; pg_afx_raise(); } while (0)
 
 /* ---- palloc arena (growable; see header) ---- */
 static _Thread_local void **pg_afx_arena;
