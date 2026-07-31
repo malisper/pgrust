@@ -219,8 +219,12 @@ thread_local! {
     static IMG_BUF: core::cell::RefCell<Vec<u8>> =
         core::cell::RefCell::new(vec![0u8; BIGCAP]);
     /// output-text scratch for the text arm
-    static TEXT_BUF: core::cell::RefCell<Vec<i8>> =
-        core::cell::RefCell::new(vec![0i8; BIGCAP]);
+    /// Element type is c_char, NOT a fixed signedness: c_char is i8 on macOS
+    /// aarch64 but u8 on aarch64-unknown-linux-gnu, and this buffer is handed
+    /// straight to the oracle's `char *` out-parameters. Hard-coding i8 built
+    /// on the laptop and failed the first Linux compile on the CI cluster.
+    static TEXT_BUF: core::cell::RefCell<Vec<core::ffi::c_char>> =
+        core::cell::RefCell::new(vec![0 as core::ffi::c_char; BIGCAP]);
 }
 /// Max ranges fed into one multirange (keeps every image inside OUTCAP).
 const MAX_RANGES: usize = 6;
