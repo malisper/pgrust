@@ -9,6 +9,11 @@ edition = "2021"
 adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
 adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }
 adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }
+# TLS pool stub seam for the timetz_part tz cells (CI cluster 33d7d09d31
+# status-6 repair): adt_numeric's DIGIT_POOL/WORD_POOL thread_locals are
+# the only Drop-carrying TLS in these harnesses' call graph; their
+# registration crashes CBMC on the Linux toolchain. numeric-probe recipe.
+adt_numeric = { path = "../../crates/backend/utils/adt/numeric" }
 types_fmgr = { path = "../../crates/_support/types/fmgr" }
 datum = { path = "../../crates/_support/types/datum" }
 types_error = { path = "../../crates/_support/types/types_error" }

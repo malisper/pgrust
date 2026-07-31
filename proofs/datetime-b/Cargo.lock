@@ -2075,6 +2075,7 @@ version = "0.1.0"
 dependencies = [
  "adt_date",
  "adt_datetime",
+ "adt_numeric",
  "adt_timestamp",
  "cc",
  "datum",
