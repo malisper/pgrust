@@ -85,7 +85,12 @@ Two separate corrections are stacked there: the harness set was
 incomplete (the prior capture ran 45 of float's 97 own-family per-commit
 harnesses), and the instrument mis-attributed macro-generated wrappers.
 Both are measured, not extrapolated: `proofs/coverage/SMOKE-RESULT.md`
-and `proofs/coverage/INSTRUMENT-FIX.md`.
+and `proofs/coverage/INSTRUMENT-FIX.md`. The preserved closed-census
+verification of the fix is the own-family PoC (97 harnesses: 245 raw ->
+299 attributed, delta confined to `fc*!` invocation lines; artifacts in
+`proofs/coverage/instrument-fix/`); the 140-harness 338 row above was
+measured before a scratchpad sweep destroyed its census files and is
+re-derived for free in the eventual full-tree run.
 
 **The 6.0% scope-wide figure is NOT mostly a sampling artifact.** Four of
 the six crates with a per-commit tier — network, numeric, geo, varbit —
