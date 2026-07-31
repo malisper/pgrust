@@ -42,6 +42,7 @@ mod proofs {
         ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR,
     };
     use types_fmgr::LocalFcinfo;
+    use ::allocator_api2::vec::Vec as A2Vec;
 
     extern "C" {
         fn pg_oidvectorin(s: *const u8, values: *mut u32, cap: c_int, n_out: *mut c_int) -> c_int;
@@ -53,6 +54,39 @@ mod proofs {
 
     const OIDOID: u32 = 26;
     const INT2OID: u32 = 21;
+
+    /// Loop-free model of `allocator_api2::vec::Vec::resize` for the
+    /// byte-sized instantiations the ovin rig reaches (fc_oidvectorin's
+    /// 24-byte header fill, `img.resize(OIDVECTOR_HDRSZ, 0)`). The shipped
+    /// body extends via `extend_with`, a per-element loop that unrolls 24
+    /// deep and walled/failed every ovin cell at the token-sized unwind
+    /// bounds (2026-07-30 measure-sweep FAILED cluster — the ONLY failing
+    /// check suite-wide was that loop's unwinding assertion). `write_bytes`
+    /// lowers to memset, which CBMC models natively without unrolling;
+    /// byte-for-byte identical to the shipped semantics for grow-from-len-0
+    /// with a Copy byte element (the only shape in this family). Plumbing
+    /// only, never logic — same contract class as the mcx-stubs recipe.
+    pub fn stub_vec_resize<T: Clone, A: ::allocator_api2::alloc::Allocator>(
+        v: &mut A2Vec<T, A>,
+        new_len: usize,
+        value: T,
+    ) {
+        let old = v.len();
+        if new_len > old {
+            v.reserve(new_len - old);
+            // SAFETY: capacity reserved above; T is a no-drop byte type in
+            // every instantiation this family reaches (const-asserted).
+            unsafe {
+                let p = v.as_mut_ptr().add(old);
+                assert!(core::mem::size_of::<T>() == 1 && !core::mem::needs_drop::<T>());
+                let b = *(&value as *const T as *const u8);
+                core::ptr::write_bytes(p.cast::<u8>(), b, new_len - old);
+                v.set_len(new_len);
+            }
+        } else {
+            v.truncate(new_len);
+        }
+    }
 
     // =================== in-direction shared rig =======================
 
@@ -89,6 +123,7 @@ mod proofs {
         ($($h:ident: $len:literal, unwind=$uw:literal;)*) => {$(
             #[kani::proof]
             #[kani::unwind($uw)]
+            #[kani::stub(A2Vec::resize, stub_vec_resize)]
             #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
             #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
             #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
@@ -145,6 +180,10 @@ mod proofs {
         core::mem::forget(ctx);
     }
 
+    // token-count-sized bounds are sound again now that the header fill
+    // (img.resize(24, 0) -> extend_with, the 24-deep loop that FAILED the
+    // whole ovin family in the 2026-07-30 measure sweep) rides the
+    // loop-free stub_vec_resize model.
     ovin_cell! {
         eq_ovin_len0: 0, unwind=4;
         eq_ovin_len1: 1, unwind=5;
@@ -158,6 +197,7 @@ mod proofs {
     /// base-0 hex/octal arms, u32 boundary, range rejects, trailing junk.
     #[kani::proof]
     #[kani::unwind(24)]
+    #[kani::stub(A2Vec::resize, stub_vec_resize)]
     #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
     #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
     #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
@@ -221,6 +261,7 @@ mod proofs {
     /// cover harness per the kissat property-batch lesson).
     #[kani::proof]
     #[kani::unwind(6)]
+    #[kani::stub(A2Vec::resize, stub_vec_resize)]
     #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
     #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
     #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
@@ -253,8 +294,11 @@ mod proofs {
     }
 
     /// MUST FAIL (in-rig control): C parses from str+1. DEFAULT solver.
+    /// (Rides stub_vec_resize like the eq cells so the expected failure is
+    /// the VALUE skew, not the header-fill unwinding assertion.)
     #[kani::proof]
     #[kani::unwind(6)]
+    #[kani::stub(A2Vec::resize, stub_vec_resize)]
     #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
     #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
     #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
@@ -534,8 +578,11 @@ mod proofs {
 
     /// Concrete spots past the <1e4 band: 10-digit values incl u32::MAX,
     /// dim 3.
+    /// unwind 26: the full-image compare loop runs clen+1 = 24 iterations
+    /// for "0 4294967295 1000000000" (the old 14 tripped the unwinding
+    /// assertion — 2026-07-30 sweep FAILED cluster, harness defect).
     #[kani::proof]
-    #[kani::unwind(14)]
+    #[kani::unwind(26)]
     #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
     #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
     #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
