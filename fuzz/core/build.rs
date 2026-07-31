@@ -16,10 +16,14 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
-        // COMPILE GATE (rangetypes_diff, scaffold.py): uncomment ONLY after every
-        // SCAFFOLD-TODO #error paste site in csrc/pg_rangetypes_io.c is filled
-        // with verbatim vendored C (README-TODO-rangetypes_diff.md step 1).
-        .file("csrc/pg_rangetypes_io.c")
+        // range + multirange oracles, ONE translation unit: this file
+        // #includes csrc/pg_rangetypes_io.c (which is therefore NOT listed
+        // here — listing both would define every pg_diff_* entry twice).
+        // multirangetypes.c calls fourteen rangetypes.c statics plus the
+        // shared typcache mock / arena / ereport shim; see the structure
+        // section of pg_multirangetypes_io.c's header for why including beats
+        // re-vendoring or extern-promoting them.
+        .file("csrc/pg_multirangetypes_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).

@@ -245,3 +245,11 @@ path = "fuzz_targets/rangetypes_diff.rs"
 test = false
 doc = false
 bench = false
+
+# multirangetypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-multirangetypes_diff.md.
+[[bin]]
+name = "multirangetypes_diff"
+path = "fuzz_targets/multirangetypes_diff.rs"
+test = false
+doc = false
+bench = false
