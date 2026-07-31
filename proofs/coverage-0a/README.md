@@ -58,3 +58,26 @@ survivors triaged:
   (reused-scratch vs fresh-allocation — no semantic surface, output bytes
   identical; perf-only) and pstrdup capacity-hint `+ -> *` (PgVec grows;
   same bytes).
+
+## SLOC re-baseline residue closure (2026-07-31, fix/sloc-residue)
+
+The 2026-07-31 structural test-scope fix (proofs/coverage/test_scope.py)
+revealed that the superseded scanner had walked from `#[cfg(test)] mod tests;`
+into the next braced item in pg_lsn/src/lib.rs, silently dropping the ENTIRE
+body of `pg_lsn_in_internal` (the LSN parser, lines 25-28,30-33,35-37 = 11
+lines) from the denominator. The "158/158 = 100%" above was measured over that
+short denominator.
+
+Resolution — MEASURED, not assumed: fresh local full-corpus coverage export
+(`fuzz/cov-export.sh pg_lsn_diff`, 1773 committed corpus inputs) at the
+re-baselined scope (branch tools/sloc-denominator-fix, e25331c7e9; pg_lsn
+sources bit-identical to this capture's head_sha e339e7ce8133). All 11 lines
+are fuzz-covered with DA counts 45-1230 (evidence:
+fuzz-pg_lsn_diff-residue-20260731.lcov.gz; agrees line-for-line with the
+archived CI cluster lcov fuzz-pg_lsn_diff.lcov.gz). No driver or corpus change was
+needed, so no new CI cluster CONFIRM is owed.
+
+Amended accounting (this capture's summary.json/files/tsv updated in place;
+provenance field `residue_amendment` in summary.json):
+pg_lsn 169 sloc = 166 measured (kani 40, fuzz 160, lib.rs 93/93) + 3 exception
+rows (builtins.rs 148/149/153, unchanged). TOTAL 676 = 623 any + 53 exceptions.
