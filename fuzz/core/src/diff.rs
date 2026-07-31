@@ -534,6 +534,39 @@ mod tests {
         }
     }
 
+    /// Lane-0B ryu `*_buf` wrapper arm (selector bit1): stable-build smoke
+    /// over the same corpora as float_out_corpus, plus the trailing-zero /
+    /// round-even shapes the shortest-repr edge arms need.
+    #[test]
+    fn ryu_buf_corpus() {
+        for &bits in F64_BITS_CORPUS {
+            let mut d = vec![2u8];
+            d.extend_from_slice(&bits.to_le_bytes());
+            float_out_diff(&d);
+            let mut d4 = vec![3u8];
+            d4.extend_from_slice(&((bits >> 32) as u32).to_le_bytes());
+            float_out_diff(&d4);
+        }
+        for e in 0..=255u32 {
+            for m in [0u32, 1, 0x7fffff] {
+                let bits = (e << 23) | m;
+                let mut d = vec![3u8];
+                d.extend_from_slice(&bits.to_le_bytes());
+                float_out_diff(&d);
+            }
+        }
+        // exact powers of ten / trailing-zero mantissas (vm trailing-zeros
+        // loop + round-even arms), both widths
+        for v in [1e2f64, 5e2, 1.25e3, 1e15, 1e16, 2.5, 0.5, 123.0, 500.0] {
+            let mut d = vec![2u8];
+            d.extend_from_slice(&v.to_le_bytes());
+            float_out_diff(&d);
+            let mut d4 = vec![3u8];
+            d4.extend_from_slice(&(v as f32).to_le_bytes());
+            float_out_diff(&d4);
+        }
+    }
+
     /// DIVERGENCE-CANDIDATE WITNESS (found by float_in_diff fuzzing,
     /// minimized artifact crash-2fea..: input "nan(1\x18)").
     /// ADJUDICATION: platform artifact of the macOS-libc ORACLE, not a
