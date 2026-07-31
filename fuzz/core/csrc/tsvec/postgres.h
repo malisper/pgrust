@@ -95,6 +95,10 @@ typedef uintptr_t Datum;
 
 #define Min(x, y) ((x) < (y) ? (x) : (y))
 #define Max(x, y) ((x) > (y) ? (x) : (y))
+
+/* c.h MemSet is a word-wise memset optimization with identical semantics;
+ * plain memset is the same computation (plumbing shim) */
+#define MemSet(start, val, len) memset((start), (val), (len))
 #define lengthof(array) (sizeof(array) / sizeof((array)[0]))
 
 #define SHORTALIGN(LEN) (((uintptr_t) (LEN) + 1) & ~((uintptr_t) 1))
@@ -177,6 +181,7 @@ typedef struct ErrorContextCallback
 #define ERRCODE_INVALID_PARAMETER_VALUE 5
 #define ERRCODE_PROTOCOL_VIOLATION 6
 #define ERRCODE_CHARACTER_NOT_IN_REPERTOIRE 7
+#define ERRCODE_ARRAY_SUBSCRIPT_ERROR 8	/* tsrank getWeights (2202E) */
 #define PG_DIFF_ERR_INTERNAL 99	/* elog(ERROR) class */
 
 extern int	errcode(int sqlerrcode);

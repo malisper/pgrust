@@ -52,6 +52,36 @@ typedef FunctionCallInfoBaseData *FunctionCallInfo;
 #define PG_RETURN_BOOL(x) return BoolGetDatum(x)
 #define PG_RETURN_INT32(x) return Int32GetDatum(x)
 #define PG_RETURN_BYTEA_P(x) return PointerGetDatum(x)
+
+/* float4-by-value datum pun, per upstream src/include/postgres.h
+ * Float4GetDatum/DatumGetFloat4 (USE_FLOAT4_BYVAL, the only modern config) */
+static inline Datum
+Float4GetDatum(float4 X)
+{
+	union
+	{
+		float4		f;
+		int32		i;
+	}			myunion;
+
+	myunion.f = X;
+	return Int32GetDatum(myunion.i);
+}
+
+static inline float4
+DatumGetFloat4(Datum X)
+{
+	union
+	{
+		int32		i;
+		float4		f;
+	}			myunion;
+
+	myunion.i = DatumGetInt32(X);
+	return myunion.f;
+}
+
+#define PG_RETURN_FLOAT4(x) return Float4GetDatum(x)
 #define PG_RETURN_NULL() \
 	do { fcinfo->isnull = true; return (Datum) 0; } while (0)
 

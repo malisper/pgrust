@@ -1,363 +1,458 @@
-//! tsrank_diff: differential fuzz driver — shipped Rust `adt_tsrank` vs vendored
-//! PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df) C
-//! (csrc/pg_tsrank_io.c). Crate under test: crates/backend/utils/adt/tsrank.
+//! tsrank_diff: differential fuzz driver — shipped Rust `adt_tsrank` vs
+//! vendored PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df) C
+//! (csrc/pg_tsrank_io.c + verbatim csrc/tsvec/tsrank.c). Crate under test:
+//! crates/backend/utils/adt/tsrank.
 //!
-//! GENERATED SKELETON (fuzz/scaffold.py) — every TODO(scaffold) below is
-//! hand-work; see fuzz/README-TODO-tsrank_diff.md for the ordered checklist.
+//! Comparison planes: f32 result compared BIT-EXACTLY (both sides do the
+//! identical mixed float/double expression trees; `exp`/`ln` go to the same
+//! host libm — any ULP difference IS a divergence and gets recorded first,
+//! never pre-carved as "platform"), error verdict, errcode/sqlstate CLASS,
+//! and the fc-wrapper plane (adt_tsrank::builtins::fc_* with a real float4[]
+//! varlena arg) against the same C wrapper output. The rank core is also
+//! called directly for the non-weights variants (core == wrapper pin).
 //!
-//! Comparison planes (float_in_diff conventions): value bytes/bits,
-//! error-verdict, and errcode/sqlstate class. Message text is out of scope.
+//! Inputs: tsvector text parsed by the SHIPPED Rust parser only (parser
+//! equivalence is tsvector_core_diff's job); the resulting IMAGE is handed
+//! to both sides byte-identically. tsquery images come from tsq_gen (valcrc
+//! = 0; unused by the rank kernels). The float4[] weights argument is a
+//! REAL 1-D array varlena image built here and handed to both sides
+//! byte-identically (C getWeights vs Rust arg_weights read the same bytes);
+//! array-shape error arms (ndim != 1, too-short, null bitmap) are generated
+//! deliberately.
 //!
-//! Input layout: [selector][payload]; selector % 8 picks the arm:
-//!   0 ts_rank_wttf  (oid 3703, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   1 ts_rank_wtt  (oid 3704, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   2 ts_rank_ttf  (oid 3705, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   3 ts_rank_tt  (oid 3706, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   4 ts_rankcd_wttf  (oid 3707, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   5 ts_rankcd_wtt  (oid 3708, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   6 ts_rankcd_ttf  (oid 3709, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   7 ts_rankcd_tt  (oid 3710, C: tsrank.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
+//! Input layout: [sel][wmode][wbytes 16][shape][method 4][u16 vlen][vtext][qbytes]
+//!   sel % 8    variant: 0..3 ts_rank_{wttf,wtt,ttf,tt}, 4..7 ts_rankcd_{..}
+//!   wmode      weight regimes: 0 = raw f32 bits, 1 = quantized table
+//!              (negatives -> defaults, >1.0 error, 0.0 -> rank_cd 1/0 = inf,
+//!              NaN -> default, subnormals), 2 = exact defaults, else mixed
+//!   shape      array-shape arm (w* variants): bits 0..1: 0 = well-formed
+//!              [4], 1 = ndim=2 error, 2 = nitems=3 too-short error,
+//!              3 = null bitmap error; bit 2: extra 5th element (legal)
+//!   method     i32; & 0x80 on byte 0 -> masked to 0..0x3f flag space
 //!
-//! FC-WRAPPER PLANE: each arm additionally routes its (already core-vs-C
-//! checked) input through the crate's builtins.rs fc_* wrapper via a native
-//! types_fmgr::LocalFcinfo frame and asserts wrapper == core (Datum value /
-//! returned bytes / error verdict + sqlstate). C-parity keeps being carried
-//! by the core comparison; the plane makes the wrapper lines execute every
-//! iteration with an in-harness oracle.
-//!
-//! SKIPPED: TODO(scaffold) — record here every excluded row (stateful /
-//! PRNG / clock / locale carve-outs) and WHY, per the fuzzuproof-crate
-//! skill's exception rules.
-
-// Scaffold state: helpers below are exercised only once the arms are
-// implemented. Remove this allow together with the last todo!().
-#![allow(dead_code)]
+//! SKIPPED rows: none — all 8 ledger functions (oids 3703-3710) are arms.
 
 use datum::{Datum, NullableDatum};
-use stringinfo::StringInfo;
-use types_error::PgResult;
+use mcx::MemoryContext;
+use types_error::{
+    PgError, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
+};
 use types_fmgr::{LocalFcinfo, PGFunction};
 
+use adt_tsrank::builtins as fcb;
+use adt_tsrank::rank::{calc_rank, DEFAULT_WEIGHTS, DEF_NORM_METHOD};
+use adt_tsrank::rank_cd::calc_rank_cd;
+use adt_tsvector_core::io::tsvector_in_core;
+use adt_tsvector_core::layout::TsVec;
+use adt_tsvector_core::query::TsQueryRef;
+
+use crate::tsq_gen::gen_tsquery_payload;
+
 extern "C" {
-    // Shared TLS errcode accessor (defined in csrc/pg_float_io.c).
+    fn pg_diff_ts_rank(
+        variant: i32,
+        wpayload: *const u8,
+        wplen: i32,
+        vimg: *const u8,
+        vlen: i32,
+        qimg: *const u8,
+        qlen: i32,
+        method: i32,
+        res_bits: *mut u32,
+    ) -> i32;
     fn pg_diff_errcode_get() -> i32;
-    // TODO(scaffold): declare the pg_diff_* oracle entries as you write them
-    // in csrc/pg_tsrank_io.c (declarations are link-inert until called, so
-    // `cargo check` and `cargo test` stay green while sites are unfilled):
-    // TODO(scaffold): fn pg_diff_ts_rank_wttf(...) -> i32;   [oid 3703, tsrank.c]
-    // TODO(scaffold): fn pg_diff_ts_rank_wtt(...) -> i32;   [oid 3704, tsrank.c]
-    // TODO(scaffold): fn pg_diff_ts_rank_ttf(...) -> i32;   [oid 3705, tsrank.c]
-    // TODO(scaffold): fn pg_diff_ts_rank_tt(...) -> i32;   [oid 3706, tsrank.c]
-    // TODO(scaffold): fn pg_diff_ts_rankcd_wttf(...) -> i32;   [oid 3707, tsrank.c]
-    // TODO(scaffold): fn pg_diff_ts_rankcd_wtt(...) -> i32;   [oid 3708, tsrank.c]
-    // TODO(scaffold): fn pg_diff_ts_rankcd_ttf(...) -> i32;   [oid 3709, tsrank.c]
-    // TODO(scaffold): fn pg_diff_ts_rankcd_tt(...) -> i32;   [oid 3710, tsrank.c]
 }
 
-// ---------------------------------------------------------------------------
-// fc-wrapper plane plumbing (native LocalFcinfo, real mcx — the proofs
-// wrapper-level pattern run without kani; verbatim from uuid_diff.rs).
-// ---------------------------------------------------------------------------
+const MAX_TEXT: usize = 2048;
+const FLOAT4OID: u32 = 700;
 
-/// Invoke an fc_* wrapper over non-null args; returns (result, isnull flag).
+/// C-side errcode class constants (csrc/tsvec/postgres.h).
+fn err_class(e: &PgError) -> i32 {
+    if e.sqlstate == ERRCODE_SYNTAX_ERROR {
+        1
+    } else if e.sqlstate == ERRCODE_PROGRAM_LIMIT_EXCEEDED {
+        2
+    } else if e.sqlstate == ERRCODE_NULL_VALUE_NOT_ALLOWED {
+        3
+    } else if e.sqlstate == ERRCODE_INVALID_PARAMETER_VALUE {
+        5
+    } else if e.sqlstate == ERRCODE_ARRAY_SUBSCRIPT_ERROR {
+        8
+    } else {
+        99
+    }
+}
+
+/// fc-wrapper invocation (tsvector_core_diff.rs pattern).
 fn fc_call<const N: usize>(
     f: PGFunction,
     m: mcx::Mcx<'_>,
-    args: [Datum; N],
-) -> (PgResult<Datum>, bool) {
+    args: [NullableDatum; N],
+) -> types_error::PgResult<Datum> {
     let mut fcinfo = LocalFcinfo::<N>::new(0);
     // SAFETY: the context owning `m` outlives this single call (caller scope).
     unsafe { fcinfo.set_result_mcx(m) };
-    for (i, a) in args.into_iter().enumerate() {
-        fcinfo.args[i] = NullableDatum::value(a);
+    fcinfo.args = args;
+    f(None, &mut fcinfo)
+}
+
+/// Inline varlena image (4B uncompressed header + payload) for fc args.
+fn varlena_image(payload: &[u8]) -> Vec<u8> {
+    let len = (payload.len() + 4) as u32;
+    #[cfg(target_endian = "little")]
+    let word = len << 2;
+    #[cfg(target_endian = "big")]
+    let word = len & 0x3FFF_FFFF;
+    let mut img = Vec::with_capacity(payload.len() + 4);
+    img.extend_from_slice(&word.to_ne_bytes());
+    img.extend_from_slice(payload);
+    img
+}
+
+fn varlena_datum(img: &[u8]) -> NullableDatum {
+    NullableDatum::value(Datum::from_usize(img.as_ptr() as usize))
+}
+
+/// Weight-regime table for wmode 1: the shapes getWeights branches on.
+const WTABLE: &[f32] = &[
+    -1.0,
+    -0.0, // negative zero: (v >= 0) is TRUE for -0.0 -> kept, not default
+    0.0,  // rank_cd invws 1/0 = inf
+    0.1,
+    0.2,
+    0.4,
+    0.5,
+    1.0,
+    1.0000001, // > 1.0 -> "weight out of range"
+    2.0,
+    f32::NAN,      // NaN >= 0 false -> default
+    f32::INFINITY, // > 1.0 -> error
+    f32::NEG_INFINITY,
+    1e-40, // subnormal
+    0.999_999_9,
+    -0.5,
+];
+
+fn gen_weights(wmode: u8, wbytes: &[u8; 16]) -> [f32; 4] {
+    let mut ws = [0f32; 4];
+    for (i, w) in ws.iter_mut().enumerate() {
+        let raw: [u8; 4] = wbytes[i * 4..i * 4 + 4].try_into().unwrap();
+        *w = match wmode % 4 {
+            0 => f32::from_ne_bytes(raw),
+            1 => WTABLE[raw[0] as usize % WTABLE.len()],
+            2 => DEFAULT_WEIGHTS[i],
+            _ => {
+                if raw[0] & 1 == 0 {
+                    WTABLE[raw[1] as usize % WTABLE.len()]
+                } else {
+                    f32::from_ne_bytes(raw)
+                }
+            }
+        };
     }
-    let r = f(None, &mut fcinfo);
-    (r, fcinfo.isnull)
+    ws
 }
 
-/// First `n` bytes behind a by-ref result Datum. Caller contract: `d` came
-/// from a wrapper that returned an `n`-byte-or-longer allocation still live
-/// in the arming context (or thread-local out scratch).
-fn datum_bytes<'a>(d: Datum, n: usize) -> &'a [u8] {
-    // SAFETY: caller contract above.
-    unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, n) }
+/// Build a float4[] varlena PAYLOAD (bytes after vl_len_) per the `shape`
+/// arm (module header): 0 = well-formed, 1 = ndim=2, 2 = too-short,
+/// 3 = null bitmap; +4 = five elements.
+fn build_weights_payload(shape: u8, ws: &[f32; 4], extra: f32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(64);
+    let arm = shape & 3;
+    let n_extra = shape & 4 != 0;
+    let nitems: i32 = match arm {
+        2 => 3,
+        _ => {
+            if n_extra {
+                5
+            } else {
+                4
+            }
+        }
+    };
+    let ndim: i32 = if arm == 1 { 2 } else { 1 };
+    let hasnull = arm == 3;
+
+    // header after vl_len_: ndim, dataoffset, elemtype
+    p.extend_from_slice(&ndim.to_ne_bytes());
+    let dataoffset: i32 = if hasnull {
+        // ARR_OVERHEAD_WITHNULLS(1, nitems) = MAXALIGN(24 + (n+7)/8)
+        (24 + (nitems + 7) / 8 + 7) & !7
+    } else {
+        0
+    };
+    p.extend_from_slice(&dataoffset.to_ne_bytes());
+    p.extend_from_slice(&FLOAT4OID.to_ne_bytes());
+    // dims + lbounds (ndim of each)
+    if ndim == 2 {
+        // 2 x 2 grid so nitems stays 4; still an ndim error on both sides
+        p.extend_from_slice(&2i32.to_ne_bytes());
+        p.extend_from_slice(&2i32.to_ne_bytes());
+        p.extend_from_slice(&1i32.to_ne_bytes());
+        p.extend_from_slice(&1i32.to_ne_bytes());
+    } else {
+        p.extend_from_slice(&nitems.to_ne_bytes());
+        p.extend_from_slice(&1i32.to_ne_bytes());
+    }
+    if hasnull {
+        // one null bit cleared (element 2 null) -> "must not contain nulls"
+        let mut bitmap = vec![0xFFu8; ((nitems as usize) + 7) / 8];
+        bitmap[0] &= !(1 << 2);
+        p.extend_from_slice(&bitmap);
+    }
+    // pad to the data offset (payload offsets = image offsets minus vl_len_)
+    let data_at = if dataoffset != 0 {
+        dataoffset as usize - 4
+    } else {
+        // ARR_OVERHEAD_NONULLS(ndim) - 4
+        (16 + 8 * ndim as usize + 7) & !7
+    };
+    while p.len() < data_at {
+        p.push(0);
+    }
+    for i in 0..nitems as usize {
+        let v = if i < 4 { ws[i] } else { extra };
+        p.extend_from_slice(&v.to_ne_bytes());
+    }
+    p
 }
 
-/// A StringInfo image over `bytes` in `m` (None = alloc failure: skip plane).
-fn make_si<'a>(m: mcx::Mcx<'a>, bytes: &[u8]) -> Option<StringInfo<'a>> {
-    let mut vec = mcx::vec_with_capacity_in::<u8>(m, bytes.len()).ok()?;
-    mcx::vec_append_bytes(&mut vec, bytes).ok()?;
-    StringInfo::from_vec(vec).ok()
+/// UTF-8 + NUL-free gate, then parse with the shipped Rust parser.
+fn parse_tsvector(m: mcx::Mcx<'_>, text: &[u8]) -> Option<Vec<u8>> {
+    if text.len() > MAX_TEXT || text.contains(&0) {
+        return None;
+    }
+    std::str::from_utf8(text).ok()?;
+    match tsvector_in_core(m, text, None) {
+        Ok(Some(img)) => Some(img[4..].to_vec()),
+        _ => None,
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
+fn is_w_variant(variant: u8) -> bool {
+    variant % 4 <= 1
+}
+
+fn is_f_variant(variant: u8) -> bool {
+    variant % 4 == 0 || variant % 4 == 2
+}
 
 pub fn tsrank_diff(data: &[u8]) {
-    let Some((&sel, payload)) = data.split_first() else {
+    if data.len() < 23 {
         return;
+    }
+    let variant = data[0] % 8;
+    let wmode = data[1];
+    let wbytes: [u8; 16] = data[2..18].try_into().unwrap();
+    let shape = data[18];
+    let method = {
+        let raw: [u8; 4] = data[19..23].try_into().unwrap();
+        if raw[0] & 0x80 != 0 {
+            (raw[1] & 0x3f) as i32
+        } else {
+            i32::from_ne_bytes(raw)
+        }
     };
-    match sel % 8 {
-        0 => ts_rank_wttf_diff(payload),
-        1 => ts_rank_wtt_diff(payload),
-        2 => ts_rank_ttf_diff(payload),
-        3 => ts_rank_tt_diff(payload),
-        4 => ts_rankcd_wttf_diff(payload),
-        5 => ts_rankcd_wtt_diff(payload),
-        6 => ts_rankcd_ttf_diff(payload),
-        _ => ts_rankcd_tt_diff(payload),
+    let rest = &data[23..];
+    if rest.len() < 2 {
+        return;
+    }
+    let vlen = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+    let rest = &rest[2..];
+    if vlen > rest.len() {
+        return;
+    }
+    let (vtext, qbytes) = rest.split_at(vlen);
+
+    let cx = MemoryContext::new("tsrank_fuzz");
+    let m = cx.mcx();
+    let Some(vpayload) = parse_tsvector(m, vtext) else { return };
+    let qpayload = gen_tsquery_payload(qbytes);
+
+    let ws = gen_weights(wmode, &wbytes);
+    let wpayload = build_weights_payload(shape, &ws, 0.3);
+
+    // C side.
+    let mut cbits = 0u32;
+    let crc = unsafe {
+        pg_diff_ts_rank(
+            variant as i32,
+            wpayload.as_ptr(),
+            wpayload.len() as i32,
+            vpayload.as_ptr(),
+            vpayload.len() as i32,
+            qpayload.as_ptr(),
+            qpayload.len() as i32,
+            method,
+            &mut cbits,
+        )
+    };
+    let cclass = unsafe { pg_diff_errcode_get() };
+
+    // Rust fc-wrapper side (primary plane).
+    let wimg = varlena_image(&wpayload);
+    let vimg = varlena_image(&vpayload);
+    let qimg = varlena_image(&qpayload);
+    let f: PGFunction = match variant {
+        0 => fcb::fc_ts_rank_wttf,
+        1 => fcb::fc_ts_rank_wtt,
+        2 => fcb::fc_ts_rank_ttf,
+        3 => fcb::fc_ts_rank_tt,
+        4 => fcb::fc_ts_rankcd_wttf,
+        5 => fcb::fc_ts_rankcd_wtt,
+        6 => fcb::fc_ts_rankcd_ttf,
+        _ => fcb::fc_ts_rankcd_tt,
+    };
+    let rres = match variant {
+        0 | 4 => fc_call::<4>(
+            f,
+            m,
+            [
+                varlena_datum(&wimg),
+                varlena_datum(&vimg),
+                varlena_datum(&qimg),
+                NullableDatum::value(Datum::from_i32(method)),
+            ],
+        ),
+        1 | 5 => fc_call::<3>(
+            f,
+            m,
+            [varlena_datum(&wimg), varlena_datum(&vimg), varlena_datum(&qimg)],
+        ),
+        2 | 6 => fc_call::<3>(
+            f,
+            m,
+            [
+                varlena_datum(&vimg),
+                varlena_datum(&qimg),
+                NullableDatum::value(Datum::from_i32(method)),
+            ],
+        ),
+        _ => fc_call::<2>(f, m, [varlena_datum(&vimg), varlena_datum(&qimg)]),
+    };
+
+    match (&rres, crc) {
+        (Ok(d), 0) => {
+            let rbits = d.as_usize() as u32;
+            assert_eq!(
+                rbits,
+                cbits,
+                "ts_rank variant {variant} f32 divergence: rust {:e} ({rbits:#010x}) vs C {:e} \
+                 ({cbits:#010x}) on v={:?} method={method} w={ws:?} shape={shape} q={qpayload:02x?}",
+                f32::from_bits(rbits),
+                f32::from_bits(cbits),
+                String::from_utf8_lossy(vtext),
+            );
+
+            // Core == wrapper pin for the non-weights variants.
+            let eff_method = if is_f_variant(variant) { method } else { DEF_NORM_METHOD };
+            if !is_w_variant(variant) {
+                let core = if variant < 4 {
+                    calc_rank(
+                        m,
+                        &DEFAULT_WEIGHTS,
+                        TsVec { payload: &vpayload },
+                        TsQueryRef { payload: &qpayload },
+                        eff_method,
+                    )
+                } else {
+                    calc_rank_cd(
+                        m,
+                        &DEFAULT_WEIGHTS,
+                        TsVec { payload: &vpayload },
+                        TsQueryRef { payload: &qpayload },
+                        eff_method,
+                    )
+                };
+                let core = core.expect("rank core errored where fc wrapper succeeded");
+                assert_eq!(core.to_bits(), rbits, "rank core != fc wrapper (variant {variant})");
+            }
+        }
+        (Err(e), 1) => {
+            assert_eq!(
+                err_class(e),
+                cclass,
+                "ts_rank variant {variant} errcode class divergence: rust {:?} vs C {cclass} \
+                 (shape={shape} w={ws:?})",
+                e.sqlstate,
+            );
+        }
+        _ => panic!(
+            "ts_rank variant {variant} VERDICT divergence: rust {:?} vs C rc {crc} class {cclass} \
+             (shape={shape} w={ws:?} method={method} v={:?} q={qpayload:02x?})",
+            rres.as_ref().map(|_| "ok").map_err(|e| e.sqlstate),
+            String::from_utf8_lossy(vtext),
+        ),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rank_wttf (oid 3703; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rank_wttf_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rank_wttf(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rank_wttf(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rank_wttf via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rank_wttf arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rank_wtt (oid 3704; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rank_wtt_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rank_wtt(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rank_wtt(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rank_wtt via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rank_wtt arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rank_ttf (oid 3705; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rank_ttf_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rank_ttf(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rank_ttf(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rank_ttf via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rank_ttf arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rank_tt (oid 3706; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rank_tt_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rank_tt(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rank_tt(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rank_tt via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rank_tt arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rankcd_wttf (oid 3707; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rankcd_wttf_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rankcd_wttf(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rankcd_wttf(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rankcd_wttf via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rankcd_wttf arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rankcd_wtt (oid 3708; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rankcd_wtt_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rankcd_wtt(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rankcd_wtt(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rankcd_wtt via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rankcd_wtt arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rankcd_ttf (oid 3709; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rankcd_ttf_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rankcd_ttf(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rankcd_ttf(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rankcd_ttf via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rankcd_ttf arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ts_rankcd_tt (oid 3710; C source: tsrank.c).
-// ---------------------------------------------------------------------------
-
-fn ts_rankcd_tt_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (tsrank_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_tsrank_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ts_rankcd_tt(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_tsrank::ts_rankcd_tt(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_tsrank::builtins::fc_ts_rankcd_tt via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(tsrank_diff): ts_rankcd_tt arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Replay every checked-in seed (catches shim/link errors before the
-    /// nightly fuzz campaign). TODO(scaffold): un-ignore once the arms are
-    /// implemented and ../corpus/tsrank_diff/ is seeded (>=30 seeds; corpora
-    /// are COMMITTED — plain `git add`, no -f needed).
-    #[test]
-    #[ignore = "scaffold(tsrank_diff): arms not implemented yet"]
-    fn seed_corpus_replays_clean() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/tsrank_diff");
-        let mut n = 0;
-        for e in std::fs::read_dir(dir).expect("corpus/tsrank_diff missing") {
-            let p = e.unwrap().path();
-            if p.is_file() {
-                tsrank_diff(&std::fs::read(&p).unwrap());
-                n += 1;
-            }
-        }
-        assert!(n >= 30, "expected >=30 seeds, found {n}");
+    fn run(variant: u8, wmode: u8, shape: u8, method: i32, vtext: &[u8], qseed: &[u8]) {
+        let mut v = vec![variant, wmode];
+        v.extend_from_slice(&[0x20u8; 16]);
+        v.push(shape);
+        v.extend_from_slice(&method.to_ne_bytes());
+        v.extend_from_slice(&(vtext.len() as u16).to_le_bytes());
+        v.extend_from_slice(vtext);
+        v.extend_from_slice(qseed);
+        tsrank_diff(&v);
     }
 
-    /// TODO(scaffold): per-arm smoke tests on stable (ok + error shapes per
-    /// arm, fc-plane smoke driving every wrapper at least once — see
-    /// uuid_diff.rs tests for the expected shape). Start by un-ignoring:
+    const V: &[u8] = b"cat:1A dog:2,5B fish:3 abc:16383";
+
     #[test]
-    #[ignore = "scaffold(tsrank_diff): arms not implemented yet"]
-    fn arms_smoke() {
-        // Arm 0 example: selector byte 0, then a payload for ts_rank_wttf.
-        tsrank_diff(&[0u8]);
+    fn smoke_all_variants() {
+        for variant in 0..8 {
+            for qseed in 0..24u8 {
+                run(variant, 2, 0, 0, V, &[qseed, qseed ^ 0x5a, 7, 3, qseed]);
+            }
+        }
+    }
+
+    #[test]
+    fn smoke_methods() {
+        for method in 0..64 {
+            run(2, 2, 0, method, V, &[0x81, 3, 9, 1]);
+            run(6, 2, 0, method, V, &[0x81, 3, 9, 1]);
+        }
+    }
+
+    #[test]
+    fn smoke_weight_regimes() {
+        for wmode in 0..4 {
+            for b in [0u8, 1, 2, 8, 10, 11, 0xff] {
+                let mut v = vec![0u8, wmode];
+                v.extend_from_slice(&[b; 16]);
+                v.push(0);
+                v.extend_from_slice(&0i32.to_ne_bytes());
+                v.extend_from_slice(&(V.len() as u16).to_le_bytes());
+                v.extend_from_slice(V);
+                v.extend_from_slice(&[0x81, 3]);
+                tsrank_diff(&v);
+                v[0] = 4; // rankcd too
+                tsrank_diff(&v);
+            }
+        }
+    }
+
+    #[test]
+    fn smoke_array_shape_errors() {
+        for shape in 0..8 {
+            run(0, 2, shape, 0, V, &[0x81, 3]);
+            run(5, 2, shape, 0, V, &[0x81, 3]);
+        }
+    }
+
+    #[test]
+    fn smoke_empty_and_posnull() {
+        run(3, 2, 0, 0, b"a b c", &[0x81, 3]); // no positions anywhere
+        run(7, 2, 0, 0, b"a b c", &[0x81, 3]); // rankcd: get_docrep -> None
+        run(3, 2, 0, 0, b"a:1 b c:2", &[0x81, 3]); // POSNULL mixed
+        run(3, 2, 0, 0, V, &[31]); // empty tsquery
+        run(7, 2, 0, 0, V, &[31]);
     }
 }

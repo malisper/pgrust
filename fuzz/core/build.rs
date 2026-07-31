@@ -213,10 +213,12 @@ fn main() {
                 "-fno-strict-aliasing" // harmless repeat when not fuzzing
             },
         )
-        // COMPILE GATE (tsrank_diff, scaffold.py): uncomment ONLY after every
-        // SCAFFOLD-TODO #error paste site in csrc/pg_tsrank_io.c is filled
-        // with verbatim vendored C (README-TODO-tsrank_diff.md step 1).
-        // .file("csrc/pg_tsrank_io.c")
+        // tsrank_diff oracle (p1-laneae): VERBATIM 18.3 tsrank.c under
+        // csrc/tsvec/ (same shim web as tsvector_core_diff); driver entry +
+        // verbatim array helpers (ArrayGetNItems/array_contains_nulls) in
+        // pg_tsrank_io.c.
+        .file("csrc/pg_tsrank_io.c")
+        .file("csrc/tsvec/tsrank.c")
         // tsvector_core_diff oracle (p1-laneae): runtime shims + driver
         // entries in pg_tsvector_core_io.c; VERBATIM 18.3 C under
         // csrc/tsvec/ (tsvector.c, tsvector_parser.c, tsvector_op.c with

@@ -187,7 +187,9 @@ pg_tsvec_pfree(void *p)
 
 /* ==================== error machinery ==================================== */
 
-static _Thread_local jmp_buf pg_tsvec_jmp;
+/* non-static: pg_tsrank_io.c driver entries longjmp-guard through the same
+ * buffer (one error machinery for the whole tsvec oracle web) */
+_Thread_local jmp_buf pg_tsvec_jmp;
 
 int
 errcode(int sqlerrcode)
@@ -635,8 +637,9 @@ pg_tsvec_copyout(const void *src, int n, unsigned char *out, int outcap,
 	return 0;
 }
 
-/* rebuild a full varlena TSVector/TSQuery from payload bytes, aligned */
-static struct varlena *
+/* rebuild a full varlena TSVector/TSQuery from payload bytes, aligned
+ * (non-static: shared with pg_tsrank_io.c) */
+struct varlena *
 pg_tsvec_mkvarlena(const unsigned char *payload, int len)
 {
 	struct varlena *v = pg_tsvec_palloc(VARHDRSZ + len);
@@ -644,6 +647,20 @@ pg_tsvec_mkvarlena(const unsigned char *payload, int len)
 	SET_VARSIZE(v, VARHDRSZ + len);
 	memcpy(VARDATA(v), payload, len);
 	return v;
+}
+
+/* per-entry state reset, shared with pg_tsrank_io.c (which pairs it with its
+ * own setjmp on pg_tsvec_jmp — setjmp must live in the entry's frame) */
+void
+pg_tsvec_prep(void)
+{
+	pg_tsvec_arena_reset();
+	pg_diff_errcode = 0;
+	pg_tsvec_arr_elems = NULL;
+	pg_tsvec_arr_nulls = NULL;
+	pg_tsvec_arr_n = 0;
+	pg_tsvec_outarr_elems = NULL;
+	pg_tsvec_outarr_n = 0;
 }
 
 /* per-entry prologue; returns nonzero from the enclosing function on throw */

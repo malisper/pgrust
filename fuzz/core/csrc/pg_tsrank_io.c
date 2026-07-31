@@ -1,202 +1,227 @@
 /*
- * pg_tsrank_io.c: vendored PostgreSQL C oracle for the tsrank_diff differential
- * fuzz target (100%-coverage campaign; crate crates/backend/utils/adt/tsrank).
+ * pg_tsrank_io.c: driver entries + array-helper vendoring for the tsrank_diff
+ * differential fuzz target (100%-coverage campaign; crate
+ * crates/backend/utils/adt/tsrank).
  *
- * GENERATED SKELETON (fuzz/scaffold.py) — NOT yet a valid oracle. Every
- * TODO(scaffold) paste site below must be filled with VERBATIM upstream C,
- * and every #error compile gate removed WITH its paste, before the
- * .file("csrc/pg_tsrank_io.c") line in core/build.rs is uncommented. A
- * half-filled shim can therefore never silently build or link.
+ * THE VENDORED ORACLE IS NOT IN THIS FILE: upstream tsrank.c lives
+ * byte-identical (shasum 194490cc2f66e899814c7d2c70ed04cd9271b0b8, verified
+ * against ../pgrust-reference/vendor/postgres-src @
+ * 62d6c7d3df6287f1bd83199c1a746e50d31571a0, PostgreSQL 18.3 Stamp-18.3) in
+ * csrc/tsvec/tsrank.c, compiled against the same shim web as the
+ * tsvector_core_diff oracle (csrc/tsvec/postgres.h — palloc arena,
+ * ereport/longjmp, pg_qsort; see pg_tsvector_core_io.c header). No carves:
+ * tsrank.c is pure math over TSVector/TSQuery images + TS_execute
+ * (tsvector_op.c, already vendored).
  *
- * Provenance (fill in as you paste; follow csrc/pg_uuid_io.c):
- *   - Vendor sections 1..N byte-for-byte from src/backend/utils/adt/tsrank.c
- *     @ postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0
- *     (PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df); re-verify against the repo's vendored ground-truth
- *     checkout ../pgrust-reference/vendor/postgres-src before pasting).
- *   - Functions to vendor: ts_rank_wttf, ts_rank_wtt, ts_rank_ttf, ts_rank_tt, ts_rankcd_wttf, ts_rankcd_wtt, ts_rankcd_ttf, ts_rankcd_tt.
- *   - Bodies VERBATIM except documented shims; shims are PLUMBING ONLY
- *     (isxdigit/strtoul C-locale shims, ereturn -> int sentinel, fmgr
- *     PG_FUNCTION_ARGS unwrapped to plain C signatures, palloc'd results ->
- *     caller buffers, wire triples for recv/send), NEVER logic. List every
- *     shim in this header when you paste.
- *   - palloc/palloc0/repalloc/pfree -> the TLS pointer arena below (NOT
- *     bare malloc/free): models PG's memory-context reset; error paths
- *     strand allocations otherwise. Do NOT free() arena pointers by hand.
+ * THIS FILE contains:
+ *   - SECTION 1 (VERBATIM): ArrayGetNItems + ArrayGetNItemsSafe
+ *     (src/backend/utils/adt/arrayutils.c) and array_contains_nulls
+ *     (src/backend/utils/adt/arrayfuncs.c), the three array helpers
+ *     tsrank.c's getWeights calls. ArrayType layout + ARR_* macros are
+ *     verbatim in include/utils/array.h. The float4[] weights argument is a
+ *     REAL array varlena image built by the Rust driver and handed to BOTH
+ *     sides byte-identically (the Rust counterpart arg_weights reads the
+ *     same image), so array handling here is the genuine upstream layout
+ *     code, not the element-list plumbing shim the tsvector ops use.
+ *   - SECTION 2: the pg_diff_ts_rank fuzz-facing driver entry, reusing the
+ *     tsvec oracle's shared error/arena machinery (pg_tsvec_jmp,
+ *     pg_tsvec_prep, pg_tsvec_mkvarlena — pg_tsvector_core_io.c).
  *
- * Errcode capture follows csrc/pg_float_io.c: the shared _Thread_local
- * pg_diff_errcode (defined there) records the errcode class; map each
- * errcode this crate's C raises to a small class constant below.
+ * Errcode classes: csrc/tsvec/postgres.h (8 = 2202E array_subscript_error,
+ * raised by getWeights; 3 = 22004; 5 = 22023; 2 = 54000).
  */
 
+#include "tsvec/postgres.h"
+
 #include <assert.h>
-#include <stdlib.h>
+#include <setjmp.h>
 #include <string.h>
-#include <stdint.h>
+
+#include "utils/array.h"
+#include "utils/fmgrprotos.h"
+#include "tsearch/ts_type.h"
+#include "varatt.h"
 
 /* Shared TLS errcode channel (defined in csrc/pg_float_io.c). */
 extern _Thread_local int pg_diff_errcode;
 
-/* TODO(scaffold): one class constant per distinct errcode the vendored C
- * raises, e.g.:
- *   #define PG_DIFF_ERR_INVALID_TEXT 1   (22P02)
+/* shared tsvec oracle machinery (pg_tsvector_core_io.c) */
+extern _Thread_local jmp_buf pg_tsvec_jmp;
+extern void pg_tsvec_prep(void);
+extern struct varlena *pg_tsvec_mkvarlena(const unsigned char *payload, int len);
+
+/* the vendored SQL-callable wrappers (csrc/tsvec/tsrank.c) */
+extern Datum ts_rank_wttf(FunctionCallInfo fcinfo);
+extern Datum ts_rank_wtt(FunctionCallInfo fcinfo);
+extern Datum ts_rank_ttf(FunctionCallInfo fcinfo);
+extern Datum ts_rank_tt(FunctionCallInfo fcinfo);
+extern Datum ts_rankcd_wttf(FunctionCallInfo fcinfo);
+extern Datum ts_rankcd_wtt(FunctionCallInfo fcinfo);
+extern Datum ts_rankcd_ttf(FunctionCallInfo fcinfo);
+extern Datum ts_rankcd_tt(FunctionCallInfo fcinfo);
+
+/* ==================== SECTION 1: array helpers (VERBATIM) ================ */
+
+/*
+ * VERBATIM from src/backend/utils/adt/arrayutils.c @ 62d6c7d3df (lines
+ * 56-102), including comments.
  */
-
-/* palloc arena shim: PostgreSQL frees these via memory-context reset; the
- * oracle mirrors that with a TLS pointer arena reset at every pg_diff_*
- * dispatcher entry, so error-path longjmp/ereturn/goto exits cannot leak.
- * (Three LSan incidents of the naive palloc->malloc mapping on 2026-07-31;
- * pattern proven on proofs/p1-lanej @ 7306d300196 — copied, not re-derived.
- * Final-exec allocations stay rooted in the arena, so LSan's exit scan is
- * quiet without any manual free().) */
-#define PG_DIFF_ARENA_MAX 64
-static _Thread_local void *pg_diff_arena[PG_DIFF_ARENA_MAX];
-static _Thread_local int pg_diff_arena_n;
-
-static void
-pg_diff_arena_reset(void)
+int
+ArrayGetNItems(int ndim, const int *dims)
 {
+	return ArrayGetNItemsSafe(ndim, dims, NULL);
+}
+
+/*
+ * This entry point can return the error into an ErrorSaveContext
+ * instead of throwing an exception.  -1 is returned after an error.
+ */
+int
+ArrayGetNItemsSafe(int ndim, const int *dims, struct Node *escontext)
+{
+	int32		ret;
 	int			i;
 
-	for (i = 0; i < pg_diff_arena_n; i++)
-		free(pg_diff_arena[i]);
-	pg_diff_arena_n = 0;
-}
-
-static void *
-pg_diff_palloc_impl(size_t n)
-{
-	void	   *p = malloc(n);
-
-	assert(pg_diff_arena_n < PG_DIFF_ARENA_MAX);
-	pg_diff_arena[pg_diff_arena_n++] = p;
-	return p;
-}
-
-static void *
-pg_diff_palloc0_impl(size_t n)
-{
-	void	   *p = calloc(1, n);
-
-	assert(pg_diff_arena_n < PG_DIFF_ARENA_MAX);
-	pg_diff_arena[pg_diff_arena_n++] = p;
-	return p;
-}
-
-static void *
-pg_diff_repalloc_impl(void *old, size_t n)
-{
-	void	   *p = realloc(old, n);
-	int			i;
-
-	for (i = 0; i < pg_diff_arena_n; i++)
+	if (ndim <= 0)
+		return 0;
+	ret = 1;
+	for (i = 0; i < ndim; i++)
 	{
-		if (pg_diff_arena[i] == old)
-		{
-			pg_diff_arena[i] = p;
-			return p;
-		}
+		int64		prod;
+
+		/* A negative dimension implies that UB-LB overflowed ... */
+		if (dims[i] < 0)
+			ereturn(escontext, -1,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("array size exceeds the maximum allowed (%d)",
+							(int) MaxArraySize)));
+
+		prod = (int64) ret * (int64) dims[i];
+
+		ret = (int32) prod;
+		if ((int64) ret != prod)
+			ereturn(escontext, -1,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("array size exceeds the maximum allowed (%d)",
+							(int) MaxArraySize)));
 	}
-	assert(!"repalloc of a pointer the arena never issued");
-	return p;
+	Assert(ret >= 0);
+	if ((Size) ret > MaxArraySize)
+		ereturn(escontext, -1,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("array size exceeds the maximum allowed (%d)",
+						(int) MaxArraySize)));
+	return (int) ret;
 }
 
-static void
-pg_diff_pfree_impl(void *p)
+/*
+ * VERBATIM from src/backend/utils/adt/arrayfuncs.c @ 62d6c7d3df
+ * (array_contains_nulls, lines 3772-3807), including comments.
+ */
+bool
+array_contains_nulls(ArrayType *array)
 {
-	int			i;
+	int			nelems;
+	bits8	   *bitmap;
+	int			bitmask;
 
-	for (i = 0; i < pg_diff_arena_n; i++)
+	/* Easy answer if there's no null bitmap */
+	if (!ARR_HASNULL(array))
+		return false;
+
+	nelems = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
+
+	bitmap = ARR_NULLBITMAP(array);
+
+	/* check whole bytes of the bitmap byte-at-a-time */
+	while (nelems >= 8)
 	{
-		if (pg_diff_arena[i] == p)
-		{
-			free(p);
-			pg_diff_arena[i] = pg_diff_arena[--pg_diff_arena_n];
-			return;
-		}
+		if (*bitmap != 0xFF)
+			return true;
+		bitmap++;
+		nelems -= 8;
 	}
-	/* abort-loud: freeing a pointer the arena never issued is a shim bug
-	 * (double-free after reset, or a bare malloc that bypassed palloc). */
-	assert(!"pfree of a pointer the arena never issued");
-	abort();
+
+	/* check last partial byte */
+	bitmask = 1;
+	while (nelems > 0)
+	{
+		if ((*bitmap & bitmask) == 0)
+			return true;
+		bitmask <<= 1;
+		nelems--;
+	}
+
+	return false;
 }
 
-#define palloc(n) pg_diff_palloc_impl(n)
-#define palloc0(n) pg_diff_palloc0_impl(n)
-#define repalloc(p, n) pg_diff_repalloc_impl((p), (n))
-#define pfree(p) pg_diff_pfree_impl(p)
-
-/* ==================== SECTION 1: tsrank.c (VERBATIM) ==================== */
+/* ========== SECTION 2: fuzz-facing driver entry (NOT Postgres code) ====== */
 
 /*
- * TODO(scaffold): paste here, byte-for-byte from
- * src/backend/utils/adt/tsrank.c @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0,
- * the bodies backing: ts_rank_wttf, ts_rank_wtt, ts_rank_ttf, ts_rank_tt, ts_rankcd_wttf, ts_rankcd_wtt, ts_rankcd_ttf, ts_rankcd_tt
- * (rename with a pg_ prefix; unwrap fmgr wrappers; document every shim in
- * the file header above). Remove the #error line together with the paste.
+ * pg_diff_ts_rank: dispatch one of the eight SQL wrappers.
+ *   variant 0..3 = ts_rank_{wttf,wtt,ttf,tt}; 4..7 = ts_rankcd_{...}.
+ *   wpayload/wplen: float4[] array varlena PAYLOAD (after vl_len_) for the
+ *     w* variants (ignored otherwise).
+ *   vimg/vlen, qimg/qlen: tsvector / tsquery varlena payloads.
+ *   method: int32 4th arg for the *ttf variants (ignored otherwise).
+ * Returns 0 = ok (*res_bits = IEEE bits of the float4 result), 1 = the C
+ * side threw (class in pg_diff_errcode).
  */
-#error "SCAFFOLD-TODO(tsrank_diff): verbatim C from tsrank.c not pasted yet"
+int
+pg_diff_ts_rank(int variant,
+				const unsigned char *wpayload, int wplen,
+				const unsigned char *vimg, int vlen,
+				const unsigned char *qimg, int qlen,
+				int32 method, uint32 *res_bits)
+{
+	FunctionCallInfoBaseData fcinfo;
+	Datum		d;
+	float4		f;
+	int			a = 0;
 
-/* ========== SECTION 2: fuzz-facing driver entries (NOT Postgres code) ===== */
+	pg_tsvec_prep();
+	if (setjmp(pg_tsvec_jmp) != 0)
+		return 1;
 
-/*
- * One thin pg_diff_* wrapper per fuzz arm: FIRST pg_diff_arena_reset()
- * (models PG's memory-context reset; error paths strand allocations
- * otherwise), then reset pg_diff_errcode = 0, call the vendored function,
- * return an int status (0 = ok, nonzero = error class) and write results
- * through caller-provided buffers. Shape them after csrc/pg_uuid_io.c
- * section 4, e.g.:
- *
- *   int pg_diff_uuid_in(const char *source, unsigned char *out)
- *   {
- *       pg_uuid_t u;
- *       pg_diff_arena_reset();
- *       pg_diff_errcode = 0;
- *       if (pg_string_to_uuid(source, &u) != 0)
- *       {
- *           pg_diff_errcode = PG_DIFF_ERR_INVALID_TEXT;
- *           return 1;
- *       }
- *       memcpy(out, u.data, UUID_LEN);
- *       return 0;
- *   }
- */
-/*
- * TODO(scaffold): int pg_diff_ts_rank_wttf(...)   [oid 3703, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rank_wttf driver entry not written yet"
-/*
- * TODO(scaffold): int pg_diff_ts_rank_wtt(...)   [oid 3704, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rank_wtt driver entry not written yet"
-/*
- * TODO(scaffold): int pg_diff_ts_rank_ttf(...)   [oid 3705, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rank_ttf driver entry not written yet"
-/*
- * TODO(scaffold): int pg_diff_ts_rank_tt(...)   [oid 3706, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rank_tt driver entry not written yet"
-/*
- * TODO(scaffold): int pg_diff_ts_rankcd_wttf(...)   [oid 3707, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rankcd_wttf driver entry not written yet"
-/*
- * TODO(scaffold): int pg_diff_ts_rankcd_wtt(...)   [oid 3708, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rankcd_wtt driver entry not written yet"
-/*
- * TODO(scaffold): int pg_diff_ts_rankcd_ttf(...)   [oid 3709, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rankcd_ttf driver entry not written yet"
-/*
- * TODO(scaffold): int pg_diff_ts_rankcd_tt(...)   [oid 3710, tsrank.c]
- * (first line of the body: pg_diff_arena_reset(); — see the arena header)
- */
-#error "SCAFFOLD-TODO(tsrank_diff): pg_diff_ts_rankcd_tt driver entry not written yet"
+	memset(&fcinfo, 0, sizeof(fcinfo));
+	if (variant % 4 <= 1)		/* w* forms: weights array first */
+		fcinfo.args[a++].value =
+			PointerGetDatum(pg_tsvec_mkvarlena(wpayload, wplen));
+	fcinfo.args[a++].value = PointerGetDatum(pg_tsvec_mkvarlena(vimg, vlen));
+	fcinfo.args[a++].value = PointerGetDatum(pg_tsvec_mkvarlena(qimg, qlen));
+	if (variant % 4 == 0 || variant % 4 == 2)	/* *ttf forms: method */
+		fcinfo.args[a++].value = Int32GetDatum(method);
+	fcinfo.nargs = (short) a;
+
+	switch (variant & 7)
+	{
+		case 0:
+			d = ts_rank_wttf(&fcinfo);
+			break;
+		case 1:
+			d = ts_rank_wtt(&fcinfo);
+			break;
+		case 2:
+			d = ts_rank_ttf(&fcinfo);
+			break;
+		case 3:
+			d = ts_rank_tt(&fcinfo);
+			break;
+		case 4:
+			d = ts_rankcd_wttf(&fcinfo);
+			break;
+		case 5:
+			d = ts_rankcd_wtt(&fcinfo);
+			break;
+		case 6:
+			d = ts_rankcd_ttf(&fcinfo);
+			break;
+		default:
+			d = ts_rankcd_tt(&fcinfo);
+			break;
+	}
+
+	f = DatumGetFloat4(d);
+	memcpy(res_bits, &f, sizeof(uint32));
+	return 0;
+}
