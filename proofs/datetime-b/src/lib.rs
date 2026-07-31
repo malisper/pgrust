@@ -3195,6 +3195,12 @@ mod hlp {
         CheckDateTokenTables, DecodeSpecial, DecodeUnits,
     };
     use adt_datetime::tables::{DATETKTBL, DELTATKTBL};
+    use adt_datetime::Interval;
+    use proof_support::stubs;
+    use adt_date::{
+        interval_time, time_mi_interval, time_pl_interval, timetz_mi_interval, timetz_pl_interval,
+        TimeTzADT,
+    };
     use std::os::raw::{c_char, c_int};
 
     extern "C" {
@@ -3226,6 +3232,44 @@ mod hlp {
         fn pg_hlp_check_date_token_tables() -> c_int;
         fn pg_hlp_check_date_token_table_one(which: c_int) -> c_int;
         fn pg_hlp_float_time_overflows(hour: c_int, min: c_int, sec: f64) -> c_int;
+        fn pg_hlp_interval_time(
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out: *mut i64,
+        ) -> c_int;
+        fn pg_hlp_time_pl_interval(
+            time: i64,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out: *mut i64,
+        ) -> c_int;
+        fn pg_hlp_time_mi_interval(
+            time: i64,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out: *mut i64,
+        ) -> c_int;
+        fn pg_hlp_timetz_pl_interval(
+            time: i64,
+            zone: i32,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out_time: *mut i64,
+            out_zone: *mut i32,
+        ) -> c_int;
+        fn pg_hlp_timetz_mi_interval(
+            time: i64,
+            zone: i32,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out_time: *mut i64,
+            out_zone: *mut i32,
+        ) -> c_int;
     }
 
     /// Full valid shift domain (see module header) + the composite masks.
@@ -3831,4 +3875,160 @@ mod hlp {
                 == (unsafe { pg_hlp_float_time_overflows(24, 0, 0.0) } != 0)
         );
     }
+
+    // ---- time/timetz +- interval kernels (routes: kernel+spots+fuzz) ----
+    //
+    // These five share one divider chain: `result -= result / USECS_PER_DAY *
+    // USECS_PER_DAY` followed by the `< 0` wrap. The full-domain ladders over
+    // that expression are RECORDED WALLS for this family (601s, CBMC
+    // per-property refinement, both solvers), so the proof obligation the
+    // routes rows ask for is discharged as SPOT cells here and the
+    // remaining domain by the datetime_convert_diff CGF target.
+    //
+    // Every cell is a LITERAL, never a `G[symbolic_idx]` draw: literal pins
+    // constant-fold and the divider disappears, assume-pins do not — the
+    // 6+-confirmation law in proofs/TRIAGE.md, and precisely the rebuild that
+    // turned this family's 600s timeouts into seconds elsewhere.
+
+    /// One cell of the time+-interval planes: value + ereport-verdict parity.
+    macro_rules! eq_time_pm_iv_cell {
+        ($(#[$attr:meta])* $name:ident, $time:expr, $sp_time:expr, $sp_day:expr, $sp_month:expr) => {
+            #[kani::proof]
+            $(#[$attr])*
+            fn $name() {
+                const TIME: i64 = $time;
+                const SP_TIME: i64 = $sp_time;
+                const SP_DAY: i32 = $sp_day;
+                const SP_MONTH: i32 = $sp_month;
+                let span = Interval { time: SP_TIME, day: SP_DAY, month: SP_MONTH };
+
+                // pl
+                let mut c: i64 = 0;
+                let crc = unsafe { pg_hlp_time_pl_interval(TIME, SP_TIME, SP_DAY, SP_MONTH, &mut c) };
+                match time_pl_interval(TIME, &span) {
+                    Ok(r) => {
+                        assert!(crc == 0);
+                        assert!(r == c);
+                    }
+                    Err(_) => assert!(crc != 0),
+                }
+
+                // mi
+                let mut c2: i64 = 0;
+                let crc2 = unsafe { pg_hlp_time_mi_interval(TIME, SP_TIME, SP_DAY, SP_MONTH, &mut c2) };
+                match time_mi_interval(TIME, &span) {
+                    Ok(r) => {
+                        assert!(crc2 == 0);
+                        assert!(r == c2);
+                    }
+                    Err(_) => assert!(crc2 != 0),
+                }
+
+                // interval_time shares the family's `%`/wrap face
+                let mut c3: i64 = 0;
+                let crc3 = unsafe { pg_hlp_interval_time(SP_TIME, SP_DAY, SP_MONTH, &mut c3) };
+                match interval_time(&span) {
+                    Ok(r) => {
+                        assert!(crc3 == 0);
+                        assert!(r == c3);
+                    }
+                    Err(_) => assert!(crc3 != 0),
+                }
+            }
+        };
+    }
+
+    /// One cell of the timetz+-interval planes (adds the zone-passthrough).
+    macro_rules! eq_timetz_pm_iv_cell {
+        ($(#[$attr:meta])* $name:ident, $time:expr, $zone:expr, $sp_time:expr, $sp_day:expr, $sp_month:expr) => {
+            #[kani::proof]
+            $(#[$attr])*
+            fn $name() {
+                const TIME: i64 = $time;
+                const ZONE: i32 = $zone;
+                const SP_TIME: i64 = $sp_time;
+                const SP_DAY: i32 = $sp_day;
+                const SP_MONTH: i32 = $sp_month;
+                let span = Interval { time: SP_TIME, day: SP_DAY, month: SP_MONTH };
+                let arg = TimeTzADT { time: TIME, zone: ZONE };
+
+                let (mut ct, mut cz) = (0i64, 0i32);
+                let crc = unsafe {
+                    pg_hlp_timetz_pl_interval(TIME, ZONE, SP_TIME, SP_DAY, SP_MONTH, &mut ct, &mut cz)
+                };
+                match timetz_pl_interval(&arg, &span) {
+                    Ok(r) => {
+                        assert!(crc == 0);
+                        assert!(r.time == ct && r.zone == cz);
+                    }
+                    Err(_) => assert!(crc != 0),
+                }
+
+                let (mut ct2, mut cz2) = (0i64, 0i32);
+                let crc2 = unsafe {
+                    pg_hlp_timetz_mi_interval(TIME, ZONE, SP_TIME, SP_DAY, SP_MONTH, &mut ct2, &mut cz2)
+                };
+                match timetz_mi_interval(&arg, &span) {
+                    Ok(r) => {
+                        assert!(crc2 == 0);
+                        assert!(r.time == ct2 && r.zone == cz2);
+                    }
+                    Err(_) => assert!(crc2 != 0),
+                }
+            }
+        };
+    }
+
+    // Boundary grid the routes rows name: the 24h wrap (exact USECS_PER_DAY
+    // multiples, both signs), the fold-back sign flip, negative intervals, the
+    // i64 usec extremes where C relies on -fwrapv, and the two
+    // INTERVAL_NOT_FINITE sentinels that select the ereport arm.
+    eq_time_pm_iv_cell!(eq_time_pm_iv_zero, 0, 0, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_one, 0, 1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_negone, 0, -1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_day, 0, 86_400_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_negday, 0, -86_400_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_daym1, 0, 86_399_999_999, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_twoday, 0, 172_800_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_noon_day, 43_200_000_000, 86_400_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_eod_one, 86_400_000_000, 1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_eod_negone, 86_400_000_000, -1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_i64max, 0, i64::MAX, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_i64max_eod, 86_400_000_000, i64::MAX, 0, 0);
+    // The not-finite arms construct adt_date's #[track_caller] #[cold] error
+    // helper, and Kani cannot codegen caller_location (kani#374 — observed as
+    // "caller_location is not currently supported"). Stubbing the PgError
+    // constructor it calls is the crate-wide precedent (see the
+    // intervaltypmodout rows above): only the message TEXT leaves the theorem,
+    // while the verdict plane (Err vs Ok) and the arm's single sqlstate stay
+    // in — and the verdict is exactly what these cells assert.
+    eq_time_pm_iv_cell!(#[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)] eq_time_pm_iv_notfinite_max, 0, i64::MAX, i32::MAX, i32::MAX);
+    eq_time_pm_iv_cell!(#[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)] eq_time_pm_iv_notfinite_min, 0, i64::MIN, i32::MIN, i32::MIN);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_days_only, 43_200_000_000, 0, 3, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_months_only, 43_200_000_000, 0, 0, 5);
+
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_zero, 0, 0, 0, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_one, 0, 3600, 1, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_negone, 0, -3600, -1, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_day, 43_200_000_000, 57_599, 86_400_000_000, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_negday, 43_200_000_000, -57_599, -86_400_000_000, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_eod, 86_400_000_000, 0, 1, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_i64max, 0, 3600, i64::MAX, 0, 0);
+    eq_timetz_pm_iv_cell!(#[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)] eq_timetz_pm_iv_notfinite, 0, 3600, i64::MIN, i32::MIN, i32::MIN);
+
+    /// MUST-FAIL CONTROL for the +-interval family: asserts the WRONG wrap
+    /// (C's `< 0` arm removed), so a vacuous plane cannot pass. Expected
+    /// verdict FAILED on `assert!(r == wrong)`.
+    #[kani::proof]
+    fn control_time_pl_interval_no_wrap() {
+        const TIME: i64 = 0;
+        const SP_TIME: i64 = -1;
+        let span = Interval { time: SP_TIME, day: 0, month: 0 };
+        let r = time_pl_interval(TIME, &span).expect("finite span");
+        // the un-wrapped value: what the kernel would return without C's
+        // `if (result < 0) result += USECS_PER_DAY`
+        let wrong: i64 = -1;
+        assert!(r == wrong);
+    }
+
 }

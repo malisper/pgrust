@@ -3848,3 +3848,135 @@ pg_hlp_check_date_token_table_one(int which)
 		return CheckDateTokenTable("datetktbl", datetktbl, szdatetktbl) ? 1 : 0;
 	return CheckDateTokenTable("deltatktbl", deltatktbl, szdeltatktbl) ? 1 : 0;
 }
+
+/*
+ * ---- time/timetz +- interval kernels (date.c) ----
+ *
+ * VERBATIM bodies of interval_time / time_pl_interval / time_mi_interval /
+ * timetz_pl_interval / timetz_mi_interval, with only the listed shims: fmgr
+ * unwrapping -> plain args, PG_RETURN_* -> out-params, and the single
+ * INTERVAL_NOT_FINITE ereport -> PROOF_EREPORT_FLAG + early return at the
+ * exact program point. The arithmetic — including the `result / USECS_PER_DAY
+ * * USECS_PER_DAY` fold-back and the `< 0` wrap, which is the divider chain
+ * this family's full-domain ladders wall on — is untouched.
+ *
+ * Return: 0 ok, nonzero = ereport fired (sqlstate 22008 on every arm).
+ */
+int
+pg_hlp_interval_time(int64 sp_time, int32 sp_day, int32 sp_month, int64 *out)
+{
+	Interval	span;
+	TimeADT		result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result = span.time % USECS_PER_DAY;
+	if (result < 0)
+		result += USECS_PER_DAY;
+
+	*out = result;
+	return 0;
+}
+
+int
+pg_hlp_time_pl_interval(int64 time, int64 sp_time, int32 sp_day,
+						int32 sp_month, int64 *out)
+{
+	Interval	span;
+	TimeADT		result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result = time + span.time;
+	result -= result / USECS_PER_DAY * USECS_PER_DAY;
+	if (result < INT64CONST(0))
+		result += USECS_PER_DAY;
+
+	*out = result;
+	return 0;
+}
+
+int
+pg_hlp_time_mi_interval(int64 time, int64 sp_time, int32 sp_day,
+						int32 sp_month, int64 *out)
+{
+	Interval	span;
+	TimeADT		result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result = time - span.time;
+	result -= result / USECS_PER_DAY * USECS_PER_DAY;
+	if (result < INT64CONST(0))
+		result += USECS_PER_DAY;
+
+	*out = result;
+	return 0;
+}
+
+int
+pg_hlp_timetz_pl_interval(int64 time, int32 zone, int64 sp_time, int32 sp_day,
+						  int32 sp_month, int64 *out_time, int32 *out_zone)
+{
+	Interval	span;
+	TimeTzADT	result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result.time = time + span.time;
+	result.time -= result.time / USECS_PER_DAY * USECS_PER_DAY;
+	if (result.time < INT64CONST(0))
+		result.time += USECS_PER_DAY;
+
+	result.zone = zone;
+
+	*out_time = result.time;
+	*out_zone = result.zone;
+	return 0;
+}
+
+int
+pg_hlp_timetz_mi_interval(int64 time, int32 zone, int64 sp_time, int32 sp_day,
+						  int32 sp_month, int64 *out_time, int32 *out_zone)
+{
+	Interval	span;
+	TimeTzADT	result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result.time = time - span.time;
+	result.time -= result.time / USECS_PER_DAY * USECS_PER_DAY;
+	if (result.time < INT64CONST(0))
+		result.time += USECS_PER_DAY;
+
+	result.zone = zone;
+
+	*out_time = result.time;
+	*out_zone = result.zone;
+	return 0;
+}
