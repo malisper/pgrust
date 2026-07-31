@@ -1278,107 +1278,22 @@ pub(crate) fn alloc_nullable_datum(mcx: Mcx<'_>) -> PgResult<NonNull<::datum::Nu
     Ok(p)
 }
 
-/// C `exprType` over the ported primnode families.
+// exprType (nodeFuncs.c). Delegates to the single canonical port in
+// backend-nodes-core rather than carrying a third, narrower copy: C has ONE
+// exprType, total over the expression vocabulary, and every caller reaches
+// the same arms.
+//
+// Regression: this function used to be a closed ~44-tag subset whose default
+// arm panicked ("execexpr exprType: node family {tag:?} not ported") — the
+// same defect class the sqldiff-trio lane retired in funcapi. Before
+// deleting, every shared arm was checked value-identical against both the
+// canonical port and C's exprType (vendored Stamp-18.3 nodeFuncs.c); the
+// arms only the canonical port carries (NamedArgExpr, CollateExpr,
+// SetToDefault, CurrentOfExpr, PlaceHolderVar, JsonBehavior,
+// AlternativeSubPlan) replace panics, so no shape that already worked can
+// change.
 pub fn expr_type(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Var => node.as_var().unwrap().vartype,
-        NodeTag::T_Const => node.as_const().unwrap().consttype,
-        NodeTag::T_Param => node.as_param().unwrap().paramtype,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
-        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
-        NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().opresulttype,
-        NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
-        NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
-        NodeTag::T_GroupingFunc => 23,
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
-        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
-        NodeTag::T_MergeSupportFunc => node.as_merge_support_func().unwrap().msftype,
-        NodeTag::T_XmlExpr => {
-            use ::types_nodes::primnodes::XmlExprOp;
-            let x = node.as_xml_expr().unwrap();
-            match x.op {
-                XmlExprOp::IS_DOCUMENT => 16,
-                XmlExprOp::IS_XMLSERIALIZE => 25,
-                _ => ::types_core::catalog::XMLOID,
-            }
-        }
-        NodeTag::T_BoolExpr
-        | NodeTag::T_NullTest
-        | NodeTag::T_ScalarArrayOpExpr
-        | NodeTag::T_BooleanTest
-        | NodeTag::T_DistinctExpr => 16,
-        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
-        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
-        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
-        NodeTag::T_RowCompareExpr => 16,
-        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
-        NodeTag::T_FieldStore => node.as_field_store().unwrap().resulttype,
-        NodeTag::T_NextValueExpr => {
-            node.as_variant::<::types_nodes::primnodes::NextValueExpr>().unwrap().typeId
-        }
-        NodeTag::T_SubPlan => {
-            use ::types_nodes::primnodes::SubLinkType;
-            let sp = node.as_sub_plan().unwrap();
-            match sp.subLinkType {
-                SubLinkType::EXPR_SUBLINK => sp.firstColType,
-                SubLinkType::ARRAY_SUBLINK => ::lsyscache::get_promoted_array_type(sp.firstColType)
-                    .expect("array type resolved at plan time"),
-                // C: a MULTIEXPR SubPlan returns a dummy NULL::record.
-                SubLinkType::MULTIEXPR_SUBLINK => ::types_core::RECORDOID,
-                _ => 16,
-            }
-        }
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
-        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
-        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
-        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
-        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
-        NodeTag::T_JsonValueExpr => {
-            expr_type(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
-        }
-        NodeTag::T_JsonConstructorExpr => {
-            node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
-        }
-        NodeTag::T_JsonIsPredicate => ::types_core::catalog::BOOLOID,
-        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
-        NodeTag::T_ReturningExpr => expr_type(node.as_returning_expr().unwrap().retexpr),
-        NodeTag::T_SubLink => {
-            use ::types_nodes::primnodes::SubLinkType;
-            let sl = node.as_sub_link().unwrap();
-            match sl.subLinkType {
-                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
-                    let tent = sl
-                        .subselect
-                        .as_query()
-                        .unwrap_or_else(|| panic!("cannot get type for untransformed sublink"))
-                        .targetList
-                        .first()
-                        .expect("sublink target list")
-                        .as_target_entry()
-                        .expect("tlist entry");
-                    let ty = expr_type(tent.expr);
-                    if sl.subLinkType == SubLinkType::ARRAY_SUBLINK {
-                        let arraytype = ::lsyscache::get_promoted_array_type(ty)
-                            .unwrap_or_else(|e| panic!("get_promoted_array_type({ty}): {e}"));
-                        assert!(
-                            arraytype != ::types_core::InvalidOid,
-                            "could not find array type for data type {ty}"
-                        );
-                        arraytype
-                    } else {
-                        ty
-                    }
-                }
-                SubLinkType::MULTIEXPR_SUBLINK => ::types_core::catalog::RECORDOID,
-                _ => 16,
-            }
-        }
-        tag => panic!("execexpr exprType: node family {tag:?} not ported"),
-    }
+    ::nodes_core::expr_type(node)
 }
 
 // C ExecInitSubPlanExpr (execExpr.c): compile the parParam arg expressions
