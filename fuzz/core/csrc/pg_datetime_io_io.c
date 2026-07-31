@@ -60,6 +60,11 @@
  *   - zoneabbrevtbl = NULL (timezone_abbreviations never installed): only
  *     numeric zone offsets and the session zone's own "GMT" abbrev resolve;
  *     DYNTZ paths are unreachable (FetchDynamicTimeZone stub aborts).
+ *   - DOMAIN CARVE, mechanical: inputs whose parse consults pg_tzset with
+ *     any name but GMT (tzdata names, POSIX "UTC+10" strings) are OUTSIDE
+ *     the compared domain — pg_tzset flags the exec and the driver skips
+ *     every plane comparison for it (Rust still executes for panic-safety).
+ *     Those code paths are the tz-database state carve in the routes rows.
  *
  * Shims (plumbing only, never logic):
  *   - ereport/ereturn/errsave -> record the errcode class in the shared
@@ -307,6 +312,14 @@ pg_interpret_timezone_abbrev(const char *abbrev,
  * GMT (any case) and nothing else. The Rust side gets the identical answer
  * set by pointing PGRUST_TZDIR at a nonexistent directory, so its tzload
  * fails for every name while pg_tzset's GMT special case still works. */
+_Thread_local int pg_dt_tzset_nongmt;
+
+int
+pg_diff_datetime_tzset_nongmt(void)
+{
+	return pg_dt_tzset_nongmt;
+}
+
 pg_tz *
 pg_tzset(const char *name)
 {
@@ -315,6 +328,13 @@ pg_tzset(const char *name)
 		pg_toupper((unsigned char) name[1]) == 'M' &&
 		pg_toupper((unsigned char) name[2]) == 'T')
 		return &pg_dt_gmt_tz;
+
+	/* DOMAIN CARVE (see header): the real pg_tzset also accepts tzdata
+	 * names and POSIX zone strings ("UTC+10") via tzparse, an engine this
+	 * oracle does not vendor. Any input that reaches this point leaves the
+	 * compared domain: flag it so the driver SKIPS all plane comparisons
+	 * for this exec (the Rust side still runs for panic-safety). */
+	pg_dt_tzset_nongmt = 1;
 	return NULL;
 }
 
@@ -482,6 +502,7 @@ pg_dt_reset(int style, int order)
 {
 	pg_diff_errcode = 0;
 	pg_dt_pending = 0;
+	pg_dt_tzset_nongmt = 0;
 	DateStyle = style;
 	DateOrder = order;
 }

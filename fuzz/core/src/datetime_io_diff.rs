@@ -51,9 +51,12 @@
 //!     recorded as a routes-row note, not silently skipped.
 //!
 //! SKIPPED (state-seam carves, per the phase-1 filter and the routes rows):
-//! named-timezone resolution beyond GMT (tz database pinned), dynamic
-//! abbreviations (zoneabbrevtbl never installed), and the retnumeric
-//! (extract_*) plane — numeric result images belong to the extract_* rows.
+//! named-timezone resolution beyond GMT (tz database pinned; execs that
+//! consult pg_tzset with a non-GMT name — tzdata or POSIX "UTC+10" forms —
+//! are flagged by the oracle and their plane comparisons skipped, the Rust
+//! side still executing for panic-safety), dynamic abbreviations
+//! (zoneabbrevtbl never installed), and the retnumeric (extract_*) plane —
+//! numeric result images belong to the extract_* rows.
 
 use std::ffi::CString;
 use std::sync::Once;
@@ -88,6 +91,10 @@ extern "C" {
     fn pg_diff_time_part(units: *const u8, units_len: i32, time: i64, out: *mut f64) -> i32;
     fn pg_diff_make_time(hour: i32, min: i32, sec: f64, out: *mut i64) -> i32;
     fn pg_diff_make_date(year: i32, month: i32, day: i32, out: *mut i32) -> i32;
+    /// Nonzero when the exec consulted pg_tzset with a non-GMT name: the
+    /// input left the compared domain (tz-database carve) — skip all plane
+    /// comparisons (see the C oracle header).
+    fn pg_diff_datetime_tzset_nongmt() -> i32;
 }
 
 /// Pinned "current" instant: 2026-06-15 12:30:45.123456 GMT as a PG
@@ -309,6 +316,9 @@ fn date_in_diff(payload: &[u8]) {
     let mut cval: i32 = 0;
     let cerr = unsafe { pg_diff_date_in(cs.as_ptr(), style, order, &mut cval) };
     let r = adt_date::date_in(s, None);
+    if unsafe { pg_diff_datetime_tzset_nongmt() } != 0 {
+        return; /* tz-database domain carve (see module header) */
+    }
     match &r {
         Ok(v) => assert!(
             cerr == 0 && *v == cval,
@@ -386,6 +396,9 @@ fn time_in_diff(payload: &[u8]) {
     let mut cval: i64 = 0;
     let cerr = unsafe { pg_diff_time_in(cs.as_ptr(), typmod, style, order, &mut cval) };
     let r = adt_date::time_in(s, typmod, None);
+    if unsafe { pg_diff_datetime_tzset_nongmt() } != 0 {
+        return; /* tz-database domain carve (see module header) */
+    }
     match &r {
         Ok(v) => assert!(
             cerr == 0 && *v == cval,
@@ -457,6 +470,9 @@ fn timetz_in_diff(payload: &[u8]) {
     let mut cz: i32 = 0;
     let cerr = unsafe { pg_diff_timetz_in(cs.as_ptr(), typmod, style, order, &mut ct, &mut cz) };
     let r = adt_date::timetz_in(s, typmod, None);
+    if unsafe { pg_diff_datetime_tzset_nongmt() } != 0 {
+        return; /* tz-database domain carve (see module header) */
+    }
     match &r {
         Ok(v) => assert!(
             cerr == 0 && v.time == ct && v.zone == cz,
