@@ -10,15 +10,16 @@ use crate::bitmapset::Bitmapset;
 use crate::list::{IntList, NodeList, OidList, XidList};
 use crate::node_tree::{BitString, Boolean, Float, Integer, Node, String};
 use crate::parsenodes::{
-    CommonTableExpr, DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt,
-    GroupingSet, Query, RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
-    WithCheckOption, WithClause,
+    CommonTableExpr, CTECycleClause, CTESearchClause, DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt,
+    GroupingSet, Query, RTEPermissionInfo, RangeTblEntry, RangeTblFunction, RowMarkClause, SetOperationStmt, TransactionStmt, VariableSetStmt, VariableShowStmt,
+    WindowClause, WithCheckOption, WithClause,
 };
 use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr, CaseTestExpr,
     CaseWhen, CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
-    CollateExpr, Const, ConvertRowtypeExpr, MinMaxExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
+    AlternativeSubPlan, CollateExpr, Const, ConvertRowtypeExpr, InferenceElem, JoinExpr, MergeAction, MinMaxExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, NextValueExpr, OnConflictExpr, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
+    SetToDefault,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubLink, SubPlan, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     MergeSupportFunc, WindowFuncRunCondition, XmlExpr,
@@ -90,6 +91,22 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_CaseTestExpr => cmp!(as_case_test_expr),
         NodeTag::T_CoalesceExpr => cmp!(as_coalesce_expr),
         NodeTag::T_MinMaxExpr => cmp!(as_min_max_expr),
+        NodeTag::T_JoinExpr => cmp!(as_join_expr),
+        NodeTag::T_MergeAction => cmp!(as_merge_action),
+        NodeTag::T_OnConflictExpr => cmp!(as_on_conflict_expr),
+        NodeTag::T_InferenceElem => cmp!(as_inference_elem),
+        NodeTag::T_AlternativeSubPlan => cmp!(as_alternative_sub_plan),
+        NodeTag::T_SetToDefault => cmp!(as_set_to_default),
+        NodeTag::T_NextValueExpr => a
+            .as_variant::<NextValueExpr>()
+            .unwrap()
+            .node_equal(b.as_variant::<NextValueExpr>().unwrap()),
+        NodeTag::T_SetOperationStmt => cmp!(as_set_operation_stmt),
+        NodeTag::T_WindowClause => cmp!(as_window_clause),
+        NodeTag::T_RowMarkClause => cmp!(as_row_mark_clause),
+        NodeTag::T_RangeTblFunction => cmp!(as_range_tbl_function),
+        NodeTag::T_CTESearchClause => cmp!(as_cte_search_clause),
+        NodeTag::T_CTECycleClause => cmp!(as_cte_cycle_clause),
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
         NodeTag::T_DistinctExpr => cmp!(as_distinct_expr),
@@ -623,6 +640,166 @@ impl NodeEqual for MinMaxExpr<'_> {
             && self.inputcollid == b.inputcollid
             && self.op == b.op
             && self.args.node_equal(&b.args)
+    }
+}
+
+// The 13 impls below are the sqldiff-trio lane's recorded residue: node types
+// C's generated equalfuncs compares that were absent from this dispatch, so
+// equal() panicked on them. Field rules are verbatim from Stamp-18.3
+// equalfuncs.funcs.c (generated from the node definitions): every field is a
+// COMPARE_*_FIELD except location fields (COMPARE_LOCATION_FIELD, never
+// compared).
+
+// _equalJoinExpr.
+impl NodeEqual for JoinExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.jointype == b.jointype
+            && self.isNatural == b.isNatural
+            && equal(self.larg, b.larg)
+            && equal(self.rarg, b.rarg)
+            && self.usingClause.node_equal(&b.usingClause)
+            && eq_ref(self.join_using_alias, b.join_using_alias)
+            && equal_opt(self.quals, b.quals)
+            && eq_ref(self.alias, b.alias)
+            && self.rtindex == b.rtindex
+    }
+}
+
+// _equalMergeAction.
+impl NodeEqual for MergeAction<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.matchKind == b.matchKind
+            && self.commandType == b.commandType
+            && self.r#override == b.r#override
+            && equal_opt(self.qual, b.qual)
+            && self.targetList.node_equal(&b.targetList)
+            && self.updateColnos.node_equal(&b.updateColnos)
+    }
+}
+
+// _equalOnConflictExpr.
+impl NodeEqual for OnConflictExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.action == b.action
+            && self.arbiterElems.node_equal(&b.arbiterElems)
+            && equal_opt(self.arbiterWhere, b.arbiterWhere)
+            && self.constraint == b.constraint
+            && self.onConflictSet.node_equal(&b.onConflictSet)
+            && equal_opt(self.onConflictWhere, b.onConflictWhere)
+            && self.exclRelIndex == b.exclRelIndex
+            && self.exclRelTlist.node_equal(&b.exclRelTlist)
+    }
+}
+
+// _equalInferenceElem.
+impl NodeEqual for InferenceElem<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.expr, b.expr)
+            && self.infercollid == b.infercollid
+            && self.inferopclass == b.inferopclass
+    }
+}
+
+// _equalAlternativeSubPlan.
+impl NodeEqual for AlternativeSubPlan<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.subplans.node_equal(&b.subplans)
+    }
+}
+
+// _equalSetToDefault: location is a COMPARE_LOCATION_FIELD.
+impl NodeEqual for SetToDefault {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.typeId == b.typeId && self.typeMod == b.typeMod && self.collation == b.collation
+    }
+}
+
+// _equalNextValueExpr.
+impl NodeEqual for NextValueExpr {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.seqid == b.seqid && self.typeId == b.typeId
+    }
+}
+
+// _equalSetOperationStmt.
+impl NodeEqual for SetOperationStmt<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.op == b.op
+            && self.all == b.all
+            && equal_opt(self.larg, b.larg)
+            && equal_opt(self.rarg, b.rarg)
+            && self.colTypes.node_equal(&b.colTypes)
+            && self.colTypmods.node_equal(&b.colTypmods)
+            && self.colCollations.node_equal(&b.colCollations)
+            && self.groupClauses.node_equal(&b.groupClauses)
+    }
+}
+
+// _equalWindowClause: name/refname are COMPARE_STRING_FIELDs (equalstr:
+// both-NULL compares equal), which Option<&str> equality matches.
+impl NodeEqual for WindowClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.name == b.name
+            && self.refname == b.refname
+            && self.partitionClause.node_equal(&b.partitionClause)
+            && self.orderClause.node_equal(&b.orderClause)
+            && self.frameOptions == b.frameOptions
+            && equal_opt(self.startOffset, b.startOffset)
+            && equal_opt(self.endOffset, b.endOffset)
+            && self.startInRangeFunc == b.startInRangeFunc
+            && self.endInRangeFunc == b.endInRangeFunc
+            && self.inRangeColl == b.inRangeColl
+            && self.inRangeAsc == b.inRangeAsc
+            && self.inRangeNullsFirst == b.inRangeNullsFirst
+            && self.winref == b.winref
+            && self.copiedOrder == b.copiedOrder
+    }
+}
+
+// _equalRowMarkClause.
+impl NodeEqual for RowMarkClause {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.rti == b.rti
+            && self.strength == b.strength
+            && self.waitPolicy == b.waitPolicy
+            && self.pushedDown == b.pushedDown
+    }
+}
+
+// _equalRangeTblFunction: funcparams is a COMPARE_BITMAPSET_FIELD (bms_equal).
+impl NodeEqual for RangeTblFunction<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.funcexpr, b.funcexpr)
+            && self.funccolcount == b.funccolcount
+            && self.funccolnames.node_equal(&b.funccolnames)
+            && self.funccoltypes.node_equal(&b.funccoltypes)
+            && self.funccoltypmods.node_equal(&b.funccoltypmods)
+            && self.funccolcollations.node_equal(&b.funccolcollations)
+            && self.funcparams.equal(&b.funcparams)
+    }
+}
+
+// _equalCTESearchClause: location is a COMPARE_LOCATION_FIELD.
+impl NodeEqual for CTESearchClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.search_col_list.node_equal(&b.search_col_list)
+            && self.search_breadth_first == b.search_breadth_first
+            && self.search_seq_column == b.search_seq_column
+    }
+}
+
+// _equalCTECycleClause: location is a COMPARE_LOCATION_FIELD.
+impl NodeEqual for CTECycleClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.cycle_col_list.node_equal(&b.cycle_col_list)
+            && self.cycle_mark_column == b.cycle_mark_column
+            && equal_opt(self.cycle_mark_value, b.cycle_mark_value)
+            && equal_opt(self.cycle_mark_default, b.cycle_mark_default)
+            && self.cycle_path_column == b.cycle_path_column
+            && self.cycle_mark_type == b.cycle_mark_type
+            && self.cycle_mark_typmod == b.cycle_mark_typmod
+            && self.cycle_mark_collation == b.cycle_mark_collation
+            && self.cycle_mark_neop == b.cycle_mark_neop
     }
 }
 

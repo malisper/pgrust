@@ -4309,3 +4309,52 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
         }
     }
 }
+
+// exprType (nodeFuncs.c) is total over the expression vocabulary. The
+// compile-time copy this crate carried used to be a closed ~44-tag subset
+// whose default arm panicked ("execexpr exprType: node family {tag:?} not
+// ported") — the same defect class the sqldiff-trio lane fixed in funcapi.
+// This pins the delegation to the canonical backend-nodes-core port on tags
+// only the canonical port carries.
+#[test]
+fn expr_type_resolves_delegated_node_families() {
+    let ctx = MemoryContext::new_bump("execexpr-exprtype");
+    let mcx = ctx.mcx();
+
+    let int_const =
+        Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+
+    // T_NamedArgExpr: C recurses into the arg.
+    let named = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::NamedArgExpr {
+            arg: Some(int_const),
+            name: Some("x"),
+            argnumber: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(crate::compile::expr_type(named), INT4OID);
+
+    // T_CollateExpr: C recurses into the arg.
+    let collate = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::CollateExpr { arg: int_const, collOid: 100, location: -1 },
+    )
+    .unwrap();
+    assert_eq!(crate::compile::expr_type(collate), INT4OID);
+
+    // T_SetToDefault: C reads typeId.
+    let std_node = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::SetToDefault {
+            typeId: INT8OID,
+            typeMod: -1,
+            collation: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(crate::compile::expr_type(std_node), INT8OID);
+}
