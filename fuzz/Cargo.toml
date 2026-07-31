@@ -237,3 +237,15 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "numeric_io_diff"
+path = "fuzz_targets/numeric_io_diff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "numeric_ops_diff"
+path = "fuzz_targets/numeric_ops_diff.rs"
+test = false
+doc = false

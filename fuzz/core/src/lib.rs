@@ -344,3 +344,8 @@ pub use quote_diff::quote_diff;
 // geo_io_diff: geo text-I/O family (p1-laner) — see core/src/geo_io_diff.rs.
 pub mod geo_io_diff;
 pub use geo_io_diff::geo_io_diff;
+
+// numericfam (p1-laneu adt/numeric campaign): whole-numeric.c oracle,
+// two targets (io + ops) over one pg_diff_num_call ABI.
+pub mod numericfam;
+pub use numericfam::{numeric_io_diff, numeric_ops_diff};
