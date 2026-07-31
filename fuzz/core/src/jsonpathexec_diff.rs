@@ -907,3 +907,19 @@ pub const _EXEC_BUILTINS: &[FmgrBuiltin] = adt_jsonpath_exec::builtins::JSONPATH
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod slow_unit_probe {
+    /// TRIAGE PROBE (p1-laneaa): time the two sides separately on the CI cluster
+    /// slow-unit artifact so the 37.9 s libFuzzer report is attributed to an
+    /// engine rather than assumed. Driven by PGRUST_SLOW_UNIT=<file>.
+    #[test]
+    #[ignore = "triage probe: run explicitly with PGRUST_SLOW_UNIT set"]
+    fn slow_unit_timing_probe() {
+        let Ok(f) = std::env::var("PGRUST_SLOW_UNIT") else { return };
+        let data = std::fs::read(f).expect("slow unit file");
+        let t = std::time::Instant::now();
+        super::jsonpathexec_diff(&data);
+        eprintln!("whole-iteration: {:?}", t.elapsed());
+    }
+}
