@@ -117,22 +117,17 @@ adt_jsonpath_exec = { path = "../../crates/backend/utils/adt/jsonpath_exec" }  #
 pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }  # jsonpath_diff: pinned C-ctype default collation (both sides)
 adt_rangetypes = { path = "../../crates/backend/utils/adt/rangetypes" }  # rangetypes_diff (scaffold.py)
 # rangetypes_diff pinned-instantiation element crates + seams
-adt_int = { path = "../../crates/backend/utils/adt/int" }
 adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
-adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
 nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
 lsyscache = { path = "../../crates/backend/utils/cache/lsyscache" }
-types_tuple = { path = "../../crates/_support/types/types_tuple" }
 adt_multirangetypes = { path = "../../crates/backend/utils/adt/multirangetypes" }  # multirangetypes_diff (scaffold.py)
 # multirange_constructor2 detoasts its variadic array through the detoast
 # seam; multirangetypes_diff installs the SHIPPED impl (never a mock: the
 # seam is environment, the detoast logic is computation).
-detoast = { path = "../../crates/backend/access/common/detoast" }
 # rangetypes_diff mints inline-compressed (4B_C) bound images with the SHIPPED
 # compressor; both sides then decompress the identical bytes (C: verbatim
 # vendored pglz_decompress; Rust: the shipped detoast path).
 pglz = { path = "../../crates/common/pglz" }
-detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
 
 [build-dependencies]
 cc = "1"
