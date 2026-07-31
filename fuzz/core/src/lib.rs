@@ -344,3 +344,11 @@ pub use quote_diff::quote_diff;
 // geo_io_diff: geo text-I/O family (p1-laner) — see core/src/geo_io_diff.rs.
 pub mod geo_io_diff;
 pub use geo_io_diff::geo_io_diff;
+
+// rowtypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-rowtypes_diff.md.
+pub mod rowtypes_diff;
+pub use rowtypes_diff::rowtypes_diff;
+
+// array_userfuncs_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-array_userfuncs_diff.md.
+pub mod array_userfuncs_diff;
+pub use array_userfuncs_diff::array_userfuncs_diff;

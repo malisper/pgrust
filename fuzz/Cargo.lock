@@ -659,6 +659,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_rowtypes"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "detoast_seams",
+ "fmgr_seams",
+ "format_type",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "pg_string",
+ "pqformat",
+ "stack_depth",
+ "stringinfo",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
 name = "adt_scalar"
 version = "0.1.0"
 dependencies = [
@@ -1613,8 +1635,10 @@ dependencies = [
  "adt_pg_lsn",
  "adt_pseudotypes",
  "adt_quote",
+ "adt_rowtypes",
  "adt_uuid",
  "archive",
+ "array_userfuncs",
  "cc",
  "crc32c",
  "cryptohashfuncs",

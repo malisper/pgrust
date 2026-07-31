@@ -16,6 +16,14 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // COMPILE GATE (array_userfuncs_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_array_userfuncs_io.c is filled
+        // with verbatim vendored C (README-TODO-array_userfuncs_diff.md step 1).
+        // .file("csrc/pg_array_userfuncs_io.c")
+        // COMPILE GATE (rowtypes_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_rowtypes_io.c is filled
+        // with verbatim vendored C (README-TODO-rowtypes_diff.md step 1).
+        // .file("csrc/pg_rowtypes_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).
