@@ -75,6 +75,13 @@ unicode_category = { path = "../../crates/common/unicode_category" }
 adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
 adt_rangetypes = { path = "../../crates/backend/utils/adt/rangetypes" }  # rangetypes_diff (scaffold.py)
+# rangetypes_diff pinned-instantiation element crates + seams
+adt_int = { path = "../../crates/backend/utils/adt/int" }
+adt_int8 = { path = "../../crates/backend/utils/adt/int8" }
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
+nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
+lsyscache = { path = "../../crates/backend/utils/cache/lsyscache" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
 
 [build-dependencies]
 cc = "1"
