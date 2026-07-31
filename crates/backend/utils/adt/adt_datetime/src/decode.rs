@@ -90,8 +90,16 @@ fn strtoint(s: &[u8]) -> Strto<i32> {
 }
 
 /// C `atoi` on an all-digit prefix (DecodeNumberField segments).
+///
+/// `atoi` is `(int) strtol(s, NULL, 10)`: the parse is 64-bit and SATURATES at
+/// LONG_MAX/LONG_MIN, then the result is TRUNCATED to int — it does not clamp
+/// to INT_MAX. Routing this through `strtoint` (which clamps) makes a long
+/// digit run decode as INT_MAX instead of the truncated value, which flips the
+/// downstream verdict: 62 '1' digits give tm_year = -1 in C (LONG_MAX
+/// truncated) and so ValidateDate reports 22008, where a clamp gives
+/// tm_year = INT_MAX and a 22007 instead.
 fn atoi(s: &[u8]) -> i32 {
-    strtoint(s).val
+    strtoi64(s).val as i32
 }
 
 /// C `strncmp(key, token, TOKMAXLEN)` where both are NUL-terminated.
