@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // COMPILE GATE (multirangetypes_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_multirangetypes_io.c is filled
+        // with verbatim vendored C (README-TODO-multirangetypes_diff.md step 1).
+        // .file("csrc/pg_multirangetypes_io.c")
         // COMPILE GATE (rangetypes_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_rangetypes_io.c is filled
         // with verbatim vendored C (README-TODO-rangetypes_diff.md step 1).

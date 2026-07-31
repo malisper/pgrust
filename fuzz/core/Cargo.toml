@@ -82,6 +82,7 @@ adt_date = { path = "../../crates/backend/utils/adt/adt_date" }
 nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
 lsyscache = { path = "../../crates/backend/utils/cache/lsyscache" }
 types_tuple = { path = "../../crates/_support/types/types_tuple" }
+adt_multirangetypes = { path = "../../crates/backend/utils/adt/multirangetypes" }  # multirangetypes_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"

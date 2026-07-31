@@ -348,3 +348,7 @@ pub use geo_io_diff::geo_io_diff;
 // rangetypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-rangetypes_diff.md.
 pub mod rangetypes_diff;
 pub use rangetypes_diff::rangetypes_diff;
+
+// multirangetypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-multirangetypes_diff.md.
+pub mod multirangetypes_diff;
+pub use multirangetypes_diff::multirangetypes_diff;

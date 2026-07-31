@@ -1612,6 +1612,7 @@ dependencies = [
  "adt_int8",
  "adt_mac",
  "adt_mac8",
+ "adt_multirangetypes",
  "adt_numeric",
  "adt_pg_lsn",
  "adt_pseudotypes",
