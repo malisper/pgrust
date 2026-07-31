@@ -149,9 +149,9 @@ const CAP: usize = 512;
 
 /// C sqlstate capture as the same i32 encoding types_error::SqlState uses.
 fn c_sqlstate() -> i32 {
-    let mut buf = [0i8; 6];
-    unsafe { wfam_x_sqlstate(buf.as_mut_ptr()) };
-    let b: [u8; 5] = core::array::from_fn(|i| buf[i] as u8);
+    let mut buf = [0u8; 6];
+    unsafe { wfam_x_sqlstate(buf.as_mut_ptr().cast()) };
+    let b: [u8; 5] = core::array::from_fn(|i| buf[i]);
     let mut v = 0i32;
     for (i, ch) in b.iter().enumerate() {
         v += (((*ch as i32) - ('0' as i32)) & 0x3f) << (6 * i);
@@ -758,11 +758,10 @@ fn stream_case(payload: &[u8]) {
 }
 
 pub fn cmp_set_invalid(enc: i32) {
-    let mut c_buf = [0x5ai8; 2];
-    unsafe { wfam_x_encoding_set_invalid(enc, c_buf.as_mut_ptr()) };
+    let mut c_buf = [0x5au8; 2];
+    unsafe { wfam_x_encoding_set_invalid(enc, c_buf.as_mut_ptr().cast()) };
     let mut r_buf = [0x5au8; 2];
     wchar::pg_encoding_set_invalid(enc, &mut r_buf);
-    let c_buf = [c_buf[0] as u8, c_buf[1] as u8];
     assert!(
         c_buf == r_buf,
         "pg_encoding_set_invalid DIVERGENCE enc={enc}: C={c_buf:02x?} Rust={r_buf:02x?}"
