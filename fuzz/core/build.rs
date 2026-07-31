@@ -28,6 +28,15 @@ fn main() {
         // varlena.c text family + formatting.c asc_* kernels + the mbutils/
         // wchar multibyte walkers behind them (see pg_oraclefam_io.c header).
         .file("csrc/pg_oraclefam_io.c")
+        // COMPILE GATE (array_userfuncs_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_array_userfuncs_io.c is filled
+        // with verbatim vendored C (README-TODO-array_userfuncs_diff.md step 1).
+        .file("csrc/pg_array_userfuncs_io.c")
+        // rowtypes_diff oracle (p1-laneai): verbatim 18.3 rowtypes.c bodies +
+        // heaptuple.c/tupdesc.c/datum.c/stringinfo.c/pqformat.c machinery,
+        // assembled per the pg_rowtypes_io.c header; hashfn extern'd from
+        // pg_mac_io.c.
+        .file("csrc/pg_rowtypes_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).

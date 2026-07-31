@@ -23,8 +23,10 @@ use ::types_tuple::{
 };
 
 #[cfg(test)]
+#[path = "tests_c_cases.rs"] // tests_* name = SLOC-v2 test-file rule (cfg(test) file-modules)
 mod c_cases;
 #[cfg(test)]
+#[path = "tests_ws.rs"]
 mod ws_tests;
 
 struct ColumnIOData {

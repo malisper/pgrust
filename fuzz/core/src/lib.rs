@@ -369,3 +369,10 @@ pub use oraclefam_diff::oraclefam_diff;
 // (oracle csrc/pg_wcharfam.c + csrc/wcharfam/, verbatim 18.3)
 pub mod wcharfam;
 pub use wcharfam::wcharfam_diff;
+// rowtypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-rowtypes_diff.md.
+pub mod rowtypes_diff;
+pub use rowtypes_diff::rowtypes_diff;
+
+// array_userfuncs_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-array_userfuncs_diff.md.
+pub mod array_userfuncs_diff;
+pub use array_userfuncs_diff::array_userfuncs_diff;

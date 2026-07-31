@@ -233,6 +233,17 @@ fn position_basics() {
         array_position_internal(mcx, &lb, &s(Some(6), None), &meta, &mut eq).unwrap(),
         Some(-2)
     );
+
+    // DIV-1 regression (p1-laneai): lbs[0] == i32::MIN is a valid stored
+    // array; C computes `lb - 1` under -fwrapv. Checked builds must not
+    // panic, and the found position is the (wrapped-back) real subscript.
+    // Ground truth postgres:18.3: array_position('[-2147483648:-2147483647]
+    // ={5,6}'::int[], 6) = -2147483647.
+    let minlb = int4_arr(mcx, &[Some(5), Some(6)], i32::MIN);
+    assert_eq!(
+        array_position_internal(mcx, &minlb, &s(Some(6), None), &meta, &mut eq).unwrap(),
+        Some(i32::MIN + 1)
+    );
 }
 
 #[test]

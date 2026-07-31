@@ -276,6 +276,18 @@ path = "fuzz_targets/oraclefam_diff.rs"
 [[bin]]
 name = "wcharfam_diff"
 path = "fuzz_targets/wcharfam_diff.rs"
+# rowtypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-rowtypes_diff.md.
+[[bin]]
+name = "rowtypes_diff"
+path = "fuzz_targets/rowtypes_diff.rs"
+test = false
+doc = false
+bench = false
+
+# array_userfuncs_diff: scaffolded by fuzz/scaffold.py — see README-TODO-array_userfuncs_diff.md.
+[[bin]]
+name = "array_userfuncs_diff"
+path = "fuzz_targets/array_userfuncs_diff.rs"
 test = false
 doc = false
 bench = false

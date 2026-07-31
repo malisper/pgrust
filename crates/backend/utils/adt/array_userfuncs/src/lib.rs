@@ -278,11 +278,14 @@ pub fn array_position_internal(
     eqproc: &mut FmgrInfo,
 ) -> PgResult<Option<i32>> {
     let (_nd, _dims, lbs) = read_dims_lbounds(array);
-    let mut position = lbs[0] - 1;
+    // C array_position_common computes `position = (ARR_LBOUND(array))[0] - 1`
+    // bare under -fwrapv; lbs[0] == i32::MIN is a valid SQL-reachable array
+    // lower bound, so the subtraction must wrap (DIV-1, p1-laneai).
+    let mut position = lbs[0].wrapping_sub(1);
     let position_min = s.position_min.unwrap_or(lbs[0]);
     let (elems, nulls) = deconstruct_array(mcx, array, meta.typlen, meta.typbyval, meta.typalign, true)?;
     for (i, &value) in elems.iter().enumerate() {
-        position += 1;
+        position = position.wrapping_add(1);
         if position < position_min {
             continue;
         }
@@ -316,10 +319,11 @@ pub fn array_positions_internal<'m>(
     astate.typalign = b'i';
 
     let (_nd, _dims, lbs) = read_dims_lbounds(array);
-    let mut position = lbs[0] - 1;
+    // Wrapping: C -fwrapv parity for lbs[0] == i32::MIN (DIV-1, p1-laneai).
+    let mut position = lbs[0].wrapping_sub(1);
     let (elems, nulls) = deconstruct_array(mcx, array, meta.typlen, meta.typbyval, meta.typalign, true)?;
     for (i, &value) in elems.iter().enumerate() {
-        position += 1;
+        position = position.wrapping_add(1);
         let isnull = nulls[i];
         let hit = if isnull || s.null_search {
             isnull && s.null_search
@@ -500,7 +504,8 @@ pub fn make_array_result_arr<'m>(
 }
 
 // pg_bitutils.h pg_nextpower2_32; valid for num in [1, 2^31].
-fn pg_nextpower2_32(num: u32) -> u32 {
+// pub for proofs/arrayuser (Kani full-domain equivalence vs vendored C).
+pub fn pg_nextpower2_32(num: u32) -> u32 {
     debug_assert!(num > 0 && num <= 0x8000_0000);
     if num.is_power_of_two() {
         num
@@ -690,7 +695,12 @@ pub fn trim_array_internal<'m>(
     let lower_provided = [false; MAXDIM];
     let mut upper_provided = [false; MAXDIM];
     if ndim > 0 {
-        upper[0] = lbs[0] + array_length - n - 1;
+        // C trim_array computes `ARR_LBOUND(v)[0] + array_length - n - 1`
+        // bare under -fwrapv; lbs[0] == i32::MIN with n == array_length wraps
+        // to i32::MAX in C (DIV-3, p1-laneai — CI cluster find, same class as
+        // DIV-1). ArrayCheckBounds guarantees lbs[0] + array_length itself
+        // fits.
+        upper[0] = (lbs[0] + array_length).wrapping_sub(n).wrapping_sub(1);
         upper_provided[0] = true;
     }
     ::arrayfuncs::element::array_get_slice(
