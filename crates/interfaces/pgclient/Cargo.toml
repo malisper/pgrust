@@ -14,6 +14,7 @@ latch = { path = "../../backend/storage/ipc/latch" }
 libc = "0.2"
 mcx = { path = "../../_support/mcx" }
 pg_b64 = { path = "../../common/base64" }
+pg_string = { path = "../../common/string" }
 pg_hmac = { path = "../../common/hmac" }
 pg_md5 = { path = "../../common/md5" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }

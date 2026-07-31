@@ -2,6 +2,8 @@
 // file > environment > compiled default). Error strings are user-visible
 // through dblink and must match libpq byte-for-byte.
 
+use pg_string::isspace_c_locale;
+
 pub struct ConnOption {
     pub keyword: &'static str,
     pub envvar: Option<&'static str>,
@@ -80,19 +82,21 @@ pub fn parse_conninfo(s: &str) -> Result<Vec<(String, String)>, String> {
     let b = s.as_bytes();
     let mut i = 0;
     let mut opts: Vec<(String, String)> = Vec::new();
+    // fe-connect.c conninfo_parse skips blanks with C-locale isspace(),
+    // which includes VT (0x0b) -- not the is_ascii_whitespace set.
     loop {
-        while i < b.len() && (b[i] as char).is_ascii_whitespace() {
+        while i < b.len() && isspace_c_locale(b[i]) {
             i += 1;
         }
         if i >= b.len() {
             return Ok(opts);
         }
         let kstart = i;
-        while i < b.len() && b[i] != b'=' && !(b[i] as char).is_ascii_whitespace() {
+        while i < b.len() && b[i] != b'=' && !isspace_c_locale(b[i]) {
             i += 1;
         }
         let key = s[kstart..i].to_string();
-        while i < b.len() && (b[i] as char).is_ascii_whitespace() {
+        while i < b.len() && isspace_c_locale(b[i]) {
             i += 1;
         }
         if i >= b.len() || b[i] != b'=' {
@@ -101,7 +105,7 @@ pub fn parse_conninfo(s: &str) -> Result<Vec<(String, String)>, String> {
             ));
         }
         i += 1;
-        while i < b.len() && (b[i] as char).is_ascii_whitespace() {
+        while i < b.len() && isspace_c_locale(b[i]) {
             i += 1;
         }
         let mut val = Vec::new();
@@ -127,7 +131,7 @@ pub fn parse_conninfo(s: &str) -> Result<Vec<(String, String)>, String> {
                 }
             }
         } else {
-            while i < b.len() && !(b[i] as char).is_ascii_whitespace() {
+            while i < b.len() && !isspace_c_locale(b[i]) {
                 if b[i] == b'\\' && i + 1 < b.len() {
                     val.push(b[i + 1]);
                     i += 2;
@@ -241,7 +245,10 @@ pub(crate) fn parse_service_file(
             ));
         }
         let line = String::from_utf8_lossy(raw);
-        let line = line.trim_matches(|c: char| c.is_ascii_whitespace());
+        // parseServiceFile trims leading/trailing C-locale isspace() (VT
+        // included), not the narrower is_ascii_whitespace set.
+        let line =
+            line.trim_matches(|c: char| c.is_ascii() && isspace_c_locale(c as u8));
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -273,4 +280,37 @@ pub(crate) fn parse_service_file(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ws_tests {
+    use super::parse_conninfo;
+
+    /// fe-connect.c conninfo_parse skips blanks with C-locale isspace()
+    /// (VT 0x0b included).  Ground truth (PostgreSQL 18.3 via dblink):
+    ///   dblink_connect(E'\x0bdbname=postgres user=postgres')     -> OK
+    ///   dblink_connect(E'dbname=postgres\x0buser=postgres')      -> OK
+    #[test]
+    fn vt_is_conninfo_whitespace() {
+        let o = parse_conninfo("\x0bdbname=x").unwrap();
+        assert_eq!(o, vec![("dbname".to_string(), "x".to_string())]);
+        // VT terminates a keyword and an unquoted value.
+        let o = parse_conninfo("host\x0b= y").unwrap();
+        assert_eq!(o, vec![("host".to_string(), "y".to_string())]);
+        let o = parse_conninfo("dbname=a\x0bhost=b").unwrap();
+        assert_eq!(
+            o,
+            vec![
+                ("dbname".to_string(), "a".to_string()),
+                ("host".to_string(), "b".to_string())
+            ]
+        );
+        // VT after '=' is skipped before the value.
+        let o = parse_conninfo("port=\x0b5432").unwrap();
+        assert_eq!(o, vec![("port".to_string(), "5432".to_string())]);
+        // Non-ASCII Unicode space is NOT conninfo whitespace: it becomes
+        // part of the keyword.
+        let o = parse_conninfo("\u{a0}dbname=x").unwrap();
+        assert_eq!(o[0].0, "\u{a0}dbname");
+    }
 }

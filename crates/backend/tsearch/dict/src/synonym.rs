@@ -20,7 +20,7 @@ pub struct DictSyn {
 // TSL_PREFIX (second-word calls only) and is excluded from the word.
 fn findwrd(line: &[u8], start: usize, flags: Option<&mut u16>) -> Option<(usize, usize)> {
     let mut i = start;
-    while i < line.len() && line[i].is_ascii_whitespace() {
+    while i < line.len() && pg_string::isspace_c_locale(line[i]) {
         i += ::mbutils::pg_mblen(&line[i..]) as usize;
     }
     if i >= line.len() {
@@ -28,7 +28,7 @@ fn findwrd(line: &[u8], start: usize, flags: Option<&mut u16>) -> Option<(usize,
     }
     let begin = i;
     let mut lastchar = i;
-    while i < line.len() && !line[i].is_ascii_whitespace() {
+    while i < line.len() && !pg_string::isspace_c_locale(line[i]) {
         lastchar = i;
         i += ::mbutils::pg_mblen(&line[i..]) as usize;
     }

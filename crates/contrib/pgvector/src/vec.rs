@@ -150,7 +150,8 @@ pub fn check_dims(a: &VecView<'_>, b: &VecView<'_>) -> PgResult<()> {
 }
 
 fn vector_isspace(ch: u8) -> bool {
-    matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+    // upstream vector.c vector_isspace includes '\v' (0x0b) and '\f' (0x0c).
+    matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 #[track_caller]
@@ -250,7 +251,8 @@ pub enum StrtofVal {
 // inf/nan literals; underflow keeps the (denormal or zero) value like strtof.
 pub fn strtof_prefix(s: &[u8]) -> Option<(StrtofVal, usize)> {
     let mut i = 0usize;
-    while i < s.len() && (s[i] as char).is_ascii_whitespace() {
+    // strtof skips C-locale isspace (VT included).
+    while i < s.len() && pg_string::isspace_c_locale(s[i]) {
         i += 1;
     }
     let rest = &s[i..];
@@ -586,5 +588,25 @@ mod tests {
         assert_eq!(inner_product(&va, &vb), 0.0);
         assert_eq!(l1_distance(&va, &vb), 7.0);
         assert_eq!(vector_norm(&vb), 5.0);
+    }
+}
+
+#[cfg(test)]
+mod ws_tests {
+    /// Upstream pgvector vector.c: vector_isspace includes '\v' (0x0b) and
+    /// elements are parsed with strtof, which skips C-locale isspace.
+    #[test]
+    fn vt_is_vector_whitespace() {
+        assert!(super::vector_isspace(0x0b));
+        assert!(super::vector_isspace(0x0c));
+        assert!(!super::vector_isspace(0xa0));
+        let (v, n) = super::strtof_prefix(b"\x0b1.5").unwrap();
+        assert_eq!(n, 4);
+        match v {
+            super::StrtofVal::Ok(f) => assert_eq!(f, 1.5),
+            _ => panic!("expected finite"),
+        }
+        // Non-ASCII Unicode space is not strtof whitespace.
+        assert!(super::strtof_prefix(b"\xc2\xa01.5").is_none());
     }
 }

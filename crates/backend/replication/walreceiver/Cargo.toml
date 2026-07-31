@@ -9,6 +9,7 @@ name = "walreceiver"
 path = "src/lib.rs"
 
 [dependencies]
+pg_string = { path = "../../../common/string" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 auxprocess = { path = "../../postmaster/auxprocess" }

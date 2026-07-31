@@ -159,7 +159,7 @@ pub fn GetTempNamespaceProcNumber(namespaceId: Oid) -> PgResult<ProcNumber> {
 // C atoi: optional whitespace/sign, then the leading digit run, else 0.
 fn atoi(s: &[u8]) -> i32 {
     let mut i = 0;
-    while i < s.len() && s[i].is_ascii_whitespace() {
+    while i < s.len() && pg_string::isspace_c_locale(s[i]) {
         i += 1;
     }
     let mut sign: i64 = 1;

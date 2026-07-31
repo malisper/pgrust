@@ -196,7 +196,7 @@ pub fn deserialize_deflist<'mcx>(
         let c = input[i];
         match state {
             S::WaitKey => {
-                if c.is_ascii_whitespace() || c == b',' {
+                if pg_string::isspace_c_locale(c) || c == b',' {
                 } else if c == b'"' {
                     key.clear();
                     state = S::InQKey;
@@ -207,7 +207,7 @@ pub fn deserialize_deflist<'mcx>(
                 }
             }
             S::InKey => {
-                if c.is_ascii_whitespace() {
+                if pg_string::isspace_c_locale(c) {
                     state = S::WaitEq;
                 } else if c == b'=' {
                     state = S::WaitValue;
@@ -230,7 +230,7 @@ pub fn deserialize_deflist<'mcx>(
             S::WaitEq => {
                 if c == b'=' {
                     state = S::WaitValue;
-                } else if !c.is_ascii_whitespace() {
+                } else if !pg_string::isspace_c_locale(c) {
                     return Err(invalid_list(input));
                 }
             }
@@ -245,7 +245,7 @@ pub fn deserialize_deflist<'mcx>(
                 } else if c == b'"' {
                     val.clear();
                     state = S::InDqValue;
-                } else if !c.is_ascii_whitespace() {
+                } else if !pg_string::isspace_c_locale(c) {
                     val.clear();
                     val.push(c);
                     state = S::InWValue;
@@ -285,7 +285,7 @@ pub fn deserialize_deflist<'mcx>(
                 }
             }
             S::InWValue => {
-                if c == b',' || c.is_ascii_whitespace() {
+                if c == b',' || pg_string::isspace_c_locale(c) {
                     result.push(build_def_item(mcx, &key, &val, false)?);
                     state = S::WaitKey;
                 } else {

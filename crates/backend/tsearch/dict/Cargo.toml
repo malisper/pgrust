@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+pg_string = { path = "../../../common/string" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }

@@ -279,7 +279,7 @@ pub(crate) fn fc_gist_page_items(
                         || ch == '('
                         || ch == ')'
                         || ch == ','
-                        || ch.is_ascii_whitespace()
+                        || (ch.is_ascii() && pg_string::isspace_c_locale(ch as u8))
                     {
                         nq = true;
                         break;

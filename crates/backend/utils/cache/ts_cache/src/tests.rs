@@ -68,3 +68,34 @@ fn def_get_boolean_matrix() {
     let err = def_get_boolean(b"casesensitive", b"2", Some(2)).unwrap_err();
     assert_eq!(err.message(), "casesensitive requires a Boolean value");
 }
+
+/// tsearchcmds.c deserialize_deflist treats C-locale isspace (VT 0x0b
+/// included) as item whitespace.  Ground truth (PostgreSQL 18.3):
+///   ts_headline('a b','a', E'MaxWords=10,\x0bMinWords=5')  -> ok
+///   ts_headline('a b','a', E'MaxWords\x0b=10')  -> "MinWords must be less
+///     than MaxWords" (i.e. the key parsed as MaxWords and applied)
+///   ts_headline('a b','a', E'MaxWords=10\x0bMinWords=5')   -> ok
+#[test]
+fn deflist_vt_is_whitespace() {
+    assert_eq!(
+        items(b"MaxWords=10,\x0bMinWords=5"),
+        vec![
+            ("MaxWords".to_string(), "10".to_string(), Some(10)),
+            ("MinWords".to_string(), "5".to_string(), Some(5)),
+        ]
+    );
+    // VT ends a key (-> WAITEQ), does not become part of it.
+    assert_eq!(items(b"MaxWords\x0b=10")[0].0, "MaxWords");
+    // VT while waiting for '=' keeps waiting instead of erroring.
+    assert_eq!(items(b"MaxWords \x0b= 10")[0].2, Some(10));
+    // VT terminates an unquoted value, starting the next item.
+    assert_eq!(
+        items(b"MaxWords=10\x0bMinWords=5"),
+        vec![
+            ("MaxWords".to_string(), "10".to_string(), Some(10)),
+            ("MinWords".to_string(), "5".to_string(), Some(5)),
+        ]
+    );
+    // A non-ASCII byte is NOT whitespace; it lands in the key.
+    assert_eq!(items(b"\xffk=1")[0].0, "\u{fffd}k");
+}

@@ -824,7 +824,8 @@ fn plpgsql_extra_checks(guc_name: &str) -> PgResult<u32> {
     let Some(v) = guc::GetConfigOption(guc_name, true, false)? else {
         return Ok(0);
     };
-    let v = v.trim();
+    // SplitIdentifierString trims scanner_isspace (C-locale set only).
+    let v = v.trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
     if v.eq_ignore_ascii_case("all") {
         return Ok(crate::comp::XCHECK_ALL);
     }
@@ -833,7 +834,7 @@ fn plpgsql_extra_checks(guc_name: &str) -> PgResult<u32> {
     }
     let mut checks = 0u32;
     for tok in v.split(',') {
-        let tok = tok.trim();
+        let tok = tok.trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
         if tok.eq_ignore_ascii_case("shadowed_variables") {
             checks |= crate::comp::XCHECK_SHADOWVAR;
         } else if tok.eq_ignore_ascii_case("too_many_rows") {
@@ -859,12 +860,32 @@ pub(crate) fn extra_checks_level(mask: u32) -> PgResult<Option<types_error::Erro
     Ok(None)
 }
 
+// bool.c parse_bool_with_len: case-insensitive non-empty prefix of
+// true/false/yes/no, "on"/"off" needing at least 2 bytes, exact "1"/"0".
+// No whitespace trimming of any kind.
+fn c_parse_bool(v: &str) -> Option<bool> {
+    let v = v.to_ascii_lowercase();
+    let prefix_of = |kw: &str| !v.is_empty() && v.len() <= kw.len() && kw.starts_with(&v);
+    match v.as_bytes().first() {
+        Some(b't') if prefix_of("true") => Some(true),
+        Some(b'f') if prefix_of("false") => Some(false),
+        Some(b'y') if prefix_of("yes") => Some(true),
+        Some(b'n') if prefix_of("no") => Some(false),
+        Some(b'o') if v.len() >= 2 && prefix_of("on") => Some(true),
+        Some(b'o') if v.len() >= 2 && prefix_of("off") => Some(false),
+        Some(b'1') if v.len() == 1 => Some(true),
+        Some(b'0') if v.len() == 1 => Some(false),
+        _ => None,
+    }
+}
+
 // plpgsql_print_strict_params: bool GUC via the placeholder lane
 // (check_asserts precedent); C's default is false.
 fn print_strict_params_uncached() -> PgResult<bool> {
-    Ok(guc::GetConfigOption("plpgsql.print_strict_params", true, false)?.is_some_and(|v| {
-        matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "true" | "yes" | "1" | "t" | "y")
-    }))
+    // bool.c parse_bool: NO whitespace trim; case-insensitive unique
+    // prefixes of true/false/yes/no/on/off plus exact "1"/"0".
+    Ok(guc::GetConfigOption("plpgsql.print_strict_params", true, false)?
+        .is_some_and(|v| c_parse_bool(&v) == Some(true)))
 }
 
 fn print_strict_params_guc() -> PgResult<bool> {
@@ -1847,3 +1868,33 @@ mod tests {
         CHECKED.with(|c| assert_eq!(*c.borrow(), vec![(0xbeef, false, 1234)]));
     }
 }
+
+#[cfg(test)]
+mod parse_bool_tests {
+    use super::c_parse_bool;
+
+    /// bool.c parse_bool_with_len: no trimming, case-insensitive unique
+    /// prefixes.  C rejects ' on' (leading space) where a Rust trim would
+    /// accept it, and accepts prefixes like "tr"/"ye" that parse::<bool>
+    /// style matching would reject.
+    #[test]
+    fn matches_c_parse_bool() {
+        assert_eq!(c_parse_bool("on"), Some(true));
+        assert_eq!(c_parse_bool("ON"), Some(true));
+        assert_eq!(c_parse_bool("off"), Some(false));
+        assert_eq!(c_parse_bool("of"), Some(false));
+        assert_eq!(c_parse_bool("o"), None); // not unique
+        assert_eq!(c_parse_bool("t"), Some(true));
+        assert_eq!(c_parse_bool("tr"), Some(true));
+        assert_eq!(c_parse_bool("true"), Some(true));
+        assert_eq!(c_parse_bool("truex"), None);
+        assert_eq!(c_parse_bool("f"), Some(false));
+        assert_eq!(c_parse_bool("ye"), Some(true));
+        assert_eq!(c_parse_bool("n"), Some(false));
+        assert_eq!(c_parse_bool("1"), Some(true));
+        assert_eq!(c_parse_bool("0"), Some(false));
+        assert_eq!(c_parse_bool("10"), None);
+        assert_eq!(c_parse_bool(""), None);
+        // NO whitespace trimming of any kind.
+        assert_eq!(c_parse_bool(" on"), None);
+        assert_eq!(c_parse_bool("on "), None);

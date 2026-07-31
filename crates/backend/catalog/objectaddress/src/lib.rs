@@ -1057,9 +1057,12 @@ fn get_object_address_defacl(
     Ok(ObjectAddress::set(DefaultAclRelationId, oid))
 }
 
-// atoi(3) shape: optional sign + leading digits, 0 on no parse.
+// atoi(3) shape: C-locale isspace skip + optional sign + leading digits,
+// 0 on no parse. str::trim_start would also strip Unicode spaces C rejects.
 fn c_atoi(s: &str) -> i32 {
-    let b = s.trim_start().as_bytes();
+    let b = s
+        .trim_start_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+        .as_bytes();
     let (sign, rest) = match b.first() {
         Some(b'-') => (-1i64, &b[1..]),
         Some(b'+') => (1i64, &b[1..]),

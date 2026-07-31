@@ -549,7 +549,12 @@ pub fn prsd_headline_impl<'mcx>(
 
     let int_val = |item: &DefListItem<'_>| -> PgResult<i32> {
         let s = core::str::from_utf8(&item.value).unwrap_or("");
-        s.trim().parse::<i32>().map_err(|_| {
+        // C reaches this via pg_strtoint32 (C-locale isspace trim). Residual
+        // recorded gap: pg_strtoint32 also accepts 0x/0o/0b prefixes and '_'
+        // digit separators, which parse::<i32> does not.
+        s.trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+            .parse::<i32>()
+            .map_err(|_| {
             Box::new(
                 PgError::error(format!("invalid input syntax for type integer: \"{s}\""))
                     .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),

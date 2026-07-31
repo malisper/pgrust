@@ -620,7 +620,7 @@ impl<'mcx> PlScanner<'mcx> {
         let end = self.scanbuf.len() as i32;
         let mut e = lloc;
         while (e as usize) < self.scanbuf.len()
-            && !self.scanbuf[e as usize].is_ascii_whitespace()
+            && !pg_string::isspace_c_locale(self.scanbuf[e as usize])
             && e < lloc + 32
         {
             e += 1;

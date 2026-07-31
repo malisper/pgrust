@@ -240,8 +240,12 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
         }
     };
 
-    // fscanf "%63s": first whitespace-delimited token, max 63 bytes.
-    let token = contents.split_whitespace().next().unwrap_or("");
+    // fscanf "%63s": first token delimited by C-locale isspace (NOT
+    // Unicode whitespace), max 63 bytes.
+    let token = contents
+        .split(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+        .find(|t| !t.is_empty())
+        .unwrap_or("");
     let file_version_string = token.get(..63).unwrap_or(token);
     let starts_numeric = file_version_string
         .bytes()
@@ -269,9 +273,11 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
     Ok(())
 }
 
-// strtol(s, NULL, 10).
+// strtol(s, NULL, 10): skips C-locale isspace only.
 pub(crate) fn leading_i64(s: &str) -> i64 {
-    let bytes = s.trim_start().as_bytes();
+    let bytes = s
+        .trim_start_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+        .as_bytes();
     let mut i = 0;
     let mut sign = 1i64;
     if bytes.first().is_some_and(|&b| b == b'+' || b == b'-') {

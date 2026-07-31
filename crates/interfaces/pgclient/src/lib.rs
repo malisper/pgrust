@@ -314,9 +314,12 @@ pub fn validate_port(opts: &[(String, String)]) -> Result<u16, String> {
         // unported: multi-host conninfo port list (recorded divergence).
         return Err("connecting to multiple hosts is not supported yet".to_string());
     }
-    // pqParseIntParam: strtol with surrounding whitespace allowed, no
-    // trailing garbage, overflow-checked into int.
-    match port_s.trim_matches(|c: char| c.is_ascii_whitespace()).parse::<i32>() {
+    // pqParseIntParam: strtol with surrounding whitespace allowed (C-locale
+    // isspace, VT included), no trailing garbage, overflow-checked into int.
+    match port_s
+        .trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+        .parse::<i32>()
+    {
         Err(_) => Err(format!(
             "invalid integer value \"{port_s}\" for connection option \"port\""
         )),

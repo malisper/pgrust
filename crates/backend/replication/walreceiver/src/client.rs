@@ -170,7 +170,12 @@ pub fn identify_system(conn: &mut PgConn) -> PgResult<(String, TimeLineID)> {
             .finish(loc("libpqrcv_identify_system")));
     }
     let sysid = text_col(&res, 0, 0);
-    let tli: TimeLineID = text_col(&res, 0, 1).trim().parse().map_err(|_| {
+    // pg_strtoint32 trims C-locale isspace only; str::trim would also
+    // strip non-ASCII Unicode spaces C rejects.
+    let tli: TimeLineID = text_col(&res, 0, 1)
+        .trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+        .parse()
+        .map_err(|_| {
         ereport(ERROR)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg("invalid response from primary server")
@@ -261,7 +266,12 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
                     .errmsg("unexpected result set after end-of-streaming")
                     .finish(loc("libpqrcv_endstreaming")));
             }
-            next_tli = text_col(r, 0, 0).trim().parse().unwrap_or(0);
+            // C-locale trim (see identify-system above). Residual recorded
+            // gap: C pg_strtoint32 ereports on garbage; unwrap_or(0) is lax.
+            next_tli = text_col(r, 0, 0)
+                .trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+                .parse()
+                .unwrap_or(0);
             res = conn.get_result()?;
         }
     }

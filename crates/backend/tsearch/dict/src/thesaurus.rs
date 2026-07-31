@@ -124,7 +124,7 @@ fn thesaurus_read(d: &mut DictThesaurus, filename: &[u8]) -> PgResult<()> {
         let mut useasis = false;
 
         let mut i = 0usize;
-        while i < line.len() && line[i].is_ascii_whitespace() && line[i] != b'\n' && line[i] != b'\r'
+        while i < line.len() && pg_string::isspace_c_locale(line[i]) && line[i] != b'\n' && line[i] != b'\r'
         {
             i += mblen(&line[i..]);
         }
@@ -141,7 +141,7 @@ fn thesaurus_read(d: &mut DictThesaurus, filename: &[u8]) -> PgResult<()> {
                         return Err(config_file_error("unexpected delimiter".into()));
                     }
                     state = TR_WAITSUBS;
-                } else if !c.is_ascii_whitespace() {
+                } else if !pg_string::isspace_c_locale(c) {
                     beginwrd = i;
                     state = TR_INLEX;
                 }
@@ -150,7 +150,7 @@ fn thesaurus_read(d: &mut DictThesaurus, filename: &[u8]) -> PgResult<()> {
                     new_lexeme(d, &line[beginwrd..i], idsubst, posinsubst as u16)?;
                     posinsubst += 1;
                     state = TR_WAITSUBS;
-                } else if c.is_ascii_whitespace() {
+                } else if pg_string::isspace_c_locale(c) {
                     new_lexeme(d, &line[beginwrd..i], idsubst, posinsubst as u16)?;
                     posinsubst += 1;
                     state = TR_WAITLEX;
@@ -164,12 +164,12 @@ fn thesaurus_read(d: &mut DictThesaurus, filename: &[u8]) -> PgResult<()> {
                     useasis = false;
                     state = TR_INSUBS;
                     beginwrd = i + mblen(&line[i..]);
-                } else if !c.is_ascii_whitespace() {
+                } else if !pg_string::isspace_c_locale(c) {
                     useasis = false;
                     beginwrd = i;
                     state = TR_INSUBS;
                 }
-            } else if state == TR_INSUBS && c.is_ascii_whitespace() {
+            } else if state == TR_INSUBS && pg_string::isspace_c_locale(c) {
                 if i == beginwrd {
                     return Err(config_file_error("unexpected end of line or lexeme".into()));
                 }

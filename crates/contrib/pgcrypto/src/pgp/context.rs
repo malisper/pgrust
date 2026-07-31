@@ -72,36 +72,114 @@ impl PgpContext {
         }
     }
 
+    /// pgp-pgsql.c parse_args + getword, ported byte-for-byte.
+    ///
+    /// getword's whitespace set is exactly {' ', '\t', '\n'} -- narrower
+    /// than C-locale isspace(): '\r', VT (0x0b), FF (0x0c), and any
+    /// non-ASCII bytes are WORD DATA.  Ground truth (PostgreSQL 18.3):
+    ///   pgp_sym_encrypt('x','k', E'cipher-algo=aes256\r') -> ERROR
+    ///     (Unsupported cipher algorithm: the '\r' stays in the value)
+    ///   pgp_sym_encrypt('x','k', 'debug=1=2')             -> ERROR
+    ///   pgp_sym_encrypt('x','k', 'convert-crlf=1,,debug=1') -> ERROR
+    ///     (both "Illegal argument to function")
+    ///   pgp_sym_decrypt(..., E'convert-crlf=1\x0c')       -> OK
+    ///     (FF is word data; atoi("1\x0c") == 1)
     pub fn parse_args(&mut self, args: &[u8]) -> Result<(), String> {
-        let lower: Vec<u8> = args
-            .iter()
-            .map(|&c| {
-                if c.is_ascii_uppercase() {
-                    c + 32
-                } else {
-                    c
+        const ARGUMENT_ERROR: &str = "Illegal argument to function"; // PXE_ARGUMENT_ERROR
+
+        fn is_ws(c: u8) -> bool {
+            c == b' ' || c == b'\t' || c == b'\n'
+        }
+        // getword: skip {sp,\t,\n}; '=' and ',' are one-byte words; other
+        // words run to the next {sp,\t,\n,'=',','}; skip trailing ws.
+        fn getword(b: &[u8], p: &mut usize) -> (usize, usize) {
+            while *p < b.len() && is_ws(b[*p]) {
+                *p += 1;
+            }
+            let start = *p;
+            if *p < b.len() && (b[*p] == b'=' || b[*p] == b',') {
+                *p += 1;
+            } else {
+                while *p < b.len()
+                    && !is_ws(b[*p])
+                    && b[*p] != b'='
+                    && b[*p] != b','
+                {
+                    *p += 1;
                 }
-            })
+            }
+            let end = *p;
+            while *p < b.len() && is_ws(b[*p]) {
+                *p += 1;
+            }
+            (start, end)
+        }
+
+        // downcase_convert; the C string ends at the first NUL.
+        let mut lower: Vec<u8> = args
+            .iter()
+            .map(|&c| if c.is_ascii_uppercase() { c + 32 } else { c })
             .collect();
-        let s = String::from_utf8_lossy(&lower);
-        for pair in s.split(',') {
-            let pair = pair.trim();
-            if pair.is_empty() {
-                continue;
+        if let Some(n) = lower.iter().position(|&c| c == 0) {
+            lower.truncate(n);
+        }
+        let b = &lower[..];
+
+        let mut i = 0usize;
+        while i < b.len() {
+            let (ks, ke) = getword(b, &mut i);
+            // C: if (*p++ != '=') break;   (PXE_ARGUMENT_ERROR)
+            if i >= b.len() || b[i] != b'=' {
+                return Err(ARGUMENT_ERROR.to_string());
             }
-            let (key, val) = pair.split_once('=').ok_or("pgp_decrypt error")?;
-            let key = key.trim();
-            let val = val.trim();
-            if key.is_empty() || val.is_empty() {
-                return Err("pgp error".to_string());
+            i += 1;
+            let (vs, ve) = getword(b, &mut i);
+            // C: *p must be NUL or ','.
+            if i < b.len() {
+                if b[i] != b',' {
+                    return Err(ARGUMENT_ERROR.to_string());
+                }
+                i += 1;
             }
-            self.set_arg(key, val)?;
+            // C: if (*key == 0 || *val == 0 || val_len == 0) break;
+            if ks == ke || vs == ve {
+                return Err(ARGUMENT_ERROR.to_string());
+            }
+            let key = String::from_utf8_lossy(&b[ks..ke]).into_owned();
+            let val = String::from_utf8_lossy(&b[vs..ve]).into_owned();
+            self.set_arg(&key, &val)?;
         }
         Ok(())
     }
 
     fn set_arg(&mut self, key: &str, val: &str) -> Result<(), String> {
-        let atoi = |v: &str| v.parse::<i32>().unwrap_or(0);
+        // C atoi: skip C-locale isspace, optional sign, leading digits;
+        // trailing junk ignored ("1\x0c" -> 1, where parse() would fail).
+        let atoi = |v: &str| {
+            let b = v.as_bytes();
+            let mut i = 0;
+            while i < b.len() && pg_string::isspace_c_locale(b[i]) {
+                i += 1;
+            }
+            let neg = match b.get(i) {
+                Some(b'-') => {
+                    i += 1;
+                    true
+                }
+                Some(b'+') => {
+                    i += 1;
+                    false
+                }
+                _ => false,
+            };
+            let mut acc: i64 = 0;
+            while i < b.len() && b[i].is_ascii_digit() {
+                acc = (acc * 10 + i64::from(b[i] - b'0')).min(i64::from(i32::MAX) + 1);
+                i += 1;
+            }
+            let v = if neg { -acc } else { acc };
+            v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        };
         match key {
             "cipher-algo" => {
                 self.cipher_algo = cipher_code(val).ok_or(UNSUPPORTED_CIPHER.to_string())?;
@@ -118,7 +196,7 @@ impl PgpContext {
             "s2k-count" => {
                 let c = atoi(val);
                 if !(1024..=65011712).contains(&c) {
-                    return Err("argument error".to_string());
+                    return Err("Illegal argument to function".to_string());
                 }
                 self.s2k_count = c;
             }
@@ -169,8 +247,66 @@ impl PgpContext {
                 self.expect = true;
                 self.exp_unicode_mode = atoi(val);
             }
-            _ => return Err("argument error".to_string()),
+            _ => return Err("Illegal argument to function".to_string()),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod parse_args_tests {
+    use super::PgpContext;
+
+    /// Ground truth (PostgreSQL 18.3, contrib/pgcrypto):
+    ///   pgp_sym_encrypt('x','k', E'cipher-algo=aes256\r')   -> ERROR
+    ///     "Unsupported cipher algorithm" ('\r' is word data in getword)
+    ///   pgp_sym_encrypt('x','k', E'\rcipher-algo=aes256')   -> ERROR
+    ///     "Illegal argument to function"
+    ///   pgp_sym_encrypt('x','k', 'debug=1=2')                -> ERROR
+    ///   pgp_sym_encrypt('x','k', 'convert-crlf=1,,debug=1')  -> ERROR
+    ///   pgp_sym_decrypt(..., E'convert-crlf=1\x0c')          -> OK
+    #[test]
+    fn getword_whitespace_is_sp_tab_nl_only() {
+        let mut c = PgpContext::default();
+        // CR is word data: value "aes256\r" is not a cipher name.
+        assert_eq!(
+            c.parse_args(b"cipher-algo=aes256\r").unwrap_err(),
+            "Unsupported cipher algorithm"
+        );
+        // CR in the key makes it unrecognized -> PXE_ARGUMENT_ERROR text.
+        assert_eq!(
+            c.parse_args(b"\rcipher-algo=aes256").unwrap_err(),
+            "Illegal argument to function"
+        );
+        // FF is word data but atoi("1\x0c") == 1, so this succeeds.
+        let mut c = PgpContext::default();
+        c.parse_args(b"convert-crlf=1\x0c").unwrap();
+        assert_eq!(c.convert_crlf, 1);
+        // sp/tab/nl ARE skipped.
+        let mut c = PgpContext::default();
+        c.parse_args(b" \t\nconvert-crlf \t= \n1 , debug=1").unwrap();
+        assert_eq!((c.convert_crlf, c.debug), (1, 1));
+    }
+
+    #[test]
+    fn parse_args_structure_matches_c() {
+        let mut c = PgpContext::default();
+        assert!(c.parse_args(b"debug=1=2").is_err());
+        assert!(c.parse_args(b"convert-crlf=1,,debug=1").is_err());
+        assert!(c.parse_args(b"cipheralgo").is_err());
+        assert!(c.parse_args(b"debug=").is_err());
+        assert!(c.parse_args(b"=1").is_err());
+        // Trailing comma at end of string is accepted (C loop exits on NUL).
+        let mut c = PgpContext::default();
+        c.parse_args(b"debug=1,").unwrap();
+        assert_eq!(c.debug, 1);
+        // But a trailing comma followed by whitespace is an error in C.
+        assert!(c.parse_args(b"debug=1, ").is_err());
+        // Empty option string is fine.
+        PgpContext::default().parse_args(b"").unwrap();
+        // Uppercase is downcased.
+        let mut c = PgpContext::default();
+        c.parse_args(b"DEBUG=1").unwrap();
+        assert_eq!(c.debug, 1);
     }
 }

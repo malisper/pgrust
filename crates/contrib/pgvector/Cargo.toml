@@ -9,6 +9,7 @@ name = "pgvector"
 path = "src/lib.rs"
 
 [dependencies]
+pg_string = { path = "../../common/string" }
 datum = { path = "../../_support/types/datum" }
 mcx = { path = "../../_support/mcx" }
 types_core = { path = "../../_support/types/types_core" }

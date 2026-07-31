@@ -404,3 +404,20 @@ fn hashchar_zero_extends_high_bit() {
     let expect = ::hashfn::hash_bytes_uint32(128u32); // unsigned, not -128
     assert_eq!(h, expect);
 }
+
+/// int.c int2vectorin skips leading C-locale isspace (VT/FF included) before
+/// each element.  Ground truth (PostgreSQL 18.3):
+///   SELECT E'\x0b1'::int2vector;    -> '1'
+///   SELECT E'1 \x0b2'::int2vector;  -> '1 2'
+///   (but only a literal space may FOLLOW a number: E'1\t2' errors)
+#[test]
+fn int2vectorin_skips_vt_ff_like_c_isspace() {
+    let ctx = mcx::MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let v = int2vectorin(mcx, "\x0b1", None).unwrap().unwrap();
+    assert_eq!(&v[24..], &[1u8, 0]);
+    let v = int2vectorin(mcx, "1 \x0c2", None).unwrap().unwrap();
+    assert_eq!(&v[24..], &[1u8, 0, 2, 0]);
+    // Non-ASCII Unicode space is not C isspace.
+    assert!(int2vectorin(mcx, "\u{a0}1", None).is_err());
+}

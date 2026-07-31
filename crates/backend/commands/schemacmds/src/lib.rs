@@ -128,7 +128,8 @@ pub fn CreateSchemaCommand<'mcx>(
     )
     .expect("identifier is UTF-8");
     let nsp = guc::GetConfigOption("search_path", false, false)?.unwrap_or_default();
-    let nsp = nsp.trim_start();
+    // schemacmds.c trims with scanner_isspace (C-locale set only).
+    let nsp = nsp.trim_start_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
     if !nsp.is_empty() {
         pathbuf.push_str(", ");
         pathbuf.push_str(nsp);

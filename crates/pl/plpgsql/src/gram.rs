@@ -448,7 +448,9 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             t = self.yylex()?;
         }
         let type_name = self.source_span(startlocation, endloc);
-        let type_name = type_name.trim_end();
+        // C passes the span verbatim; trailing C-locale whitespace is
+        // neutral to parse_datatype, but Unicode spaces are identifier bytes.
+        let type_name = type_name.trim_end_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
         if type_name.is_empty() {
             return Err(self.yyerror("missing data type declaration", t.2));
         }
@@ -2687,7 +2689,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         } else {
             self.source_span(location, end_loc)
         };
-        while text.ends_with(|c: char| c.is_ascii_whitespace()) {
+        while text.ends_with(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8)) {
             text.pop();
         }
 

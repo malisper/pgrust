@@ -1,5 +1,9 @@
 // libpq conninfo syntax (fe-connect.c conninfo_parse) — DDL validation only;
 // error strings keep libpq's trailing '\n' so psql output stays byte-exact.
+// Blank-skipping uses C-locale isspace() (VT 0x0b included), as in
+// fe-connect.c, NOT Rust's is_ascii_whitespace.
+
+use pg_string::isspace_c_locale;
 
 use mcx::{Mcx, PgString, PgVec};
 use types_error::{
@@ -378,7 +382,7 @@ pub(crate) fn conninfo_parse<'mcx>(
     let bytes = conninfo.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
-        if bytes[i].is_ascii_whitespace() {
+        if isspace_c_locale(bytes[i]) {
             i += 1;
             continue;
         }
@@ -389,10 +393,10 @@ pub(crate) fn conninfo_parse<'mcx>(
                 name_end = Some(i);
                 break;
             }
-            if bytes[i].is_ascii_whitespace() {
+            if isspace_c_locale(bytes[i]) {
                 name_end = Some(i);
                 i += 1;
-                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                while i < bytes.len() && isspace_c_locale(bytes[i]) {
                     i += 1;
                 }
                 break;
@@ -406,7 +410,7 @@ pub(crate) fn conninfo_parse<'mcx>(
             ));
         }
         i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        while i < bytes.len() && isspace_c_locale(bytes[i]) {
             i += 1;
         }
 
@@ -438,7 +442,7 @@ pub(crate) fn conninfo_parse<'mcx>(
         } else {
             while i < bytes.len() {
                 match bytes[i] {
-                    c if c.is_ascii_whitespace() => {
+                    c if isspace_c_locale(c) => {
                         i += 1;
                         break;
                     }

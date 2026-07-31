@@ -27,7 +27,8 @@ pub(crate) fn user_d_option() -> Option<String> {
 }
 
 fn c_atoi(s: &str) -> i32 {
-    let t = s.trim_start();
+    // atoi skips C-locale isspace only, not Unicode whitespace.
+    let t = s.trim_start_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
     let (sign, digits) = match t.as_bytes().first() {
         Some(b'-') => (-1i64, &t[1..]),
         Some(b'+') => (1, &t[1..]),

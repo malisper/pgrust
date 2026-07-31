@@ -26,6 +26,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_guc = { path = "../../../_support/types/types_guc" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 datum = { path = "../../../_support/types/datum" }
+pg_string = { path = "../../../common/string" }
 mcx = { path = "../../../_support/mcx" }
 elog = { path = "../../utils/error/elog" }
 xact = { path = "../../access/transam/xact" }
