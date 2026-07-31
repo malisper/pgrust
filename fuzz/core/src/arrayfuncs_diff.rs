@@ -643,18 +643,13 @@ const C_CONSTRUCT_BUILTIN_OIDS: [Oid; 12] = [
     TEXTOID, TIDOID, XIDOID,
 ];
 
-/// KNOWN-DIV-5 (fuzz/DIVERGENCE-NOTES-arrayfuncs.md): bool is in NEITHER C
-/// builtin table, and the crate's builtin_meta PANICS on an unlisted oid
-/// where C elog(ERROR)s (recoverable, class 9). A panic cannot be compared
-/// past, so the builtin routes skip metas outside the respective C table and
-/// the divergence is carried in the notes file instead of weakening either
-/// side.
-fn builtin_route_ok(oid: Oid, deconstruct: bool) -> bool {
-    if deconstruct {
-        C_DECONSTRUCT_BUILTIN_OIDS.contains(&oid) || C_CONSTRUCT_BUILTIN_OIDS.contains(&oid)
-    } else {
-        C_CONSTRUCT_BUILTIN_OIDS.contains(&oid)
-    }
+/// KNOWN-DIV-4/5 FIXED (RATIFIED Michael 2026-07-31): the crate now keeps
+/// C's two asymmetric builtin tables (construct 12+regtype rows /
+/// deconstruct 8 rows) and ERRORS XX000 (class 9) on unlisted oids exactly
+/// like C's elog default arms — so every meta, including bool (in neither
+/// table), dual-executes strict-parity through both builtin routes.
+fn builtin_route_ok(_oid: Oid, _deconstruct: bool) -> bool {
+    true
 }
 
 /// arraytyplen for the fixed-length container mode: elmlen * k, k in 1..=8.
@@ -1369,31 +1364,10 @@ fn deconstruct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     // BUILTIN-TABLE MODE: route both sides through the *_builtin entry so the
     // hardcoded (elmlen, elmbyval, elmalign) table is dual-executed
     // (construct.rs builtin_meta vs the pasted C switch).
+    // KNOWN-DIV-4 FIXED (RATIFIED Michael 2026-07-31): deconstruct's table
+    // is now C-exactly the 8-row subset, so the 5 construct-only types error
+    // class 9 on BOTH sides — strict parity in the main match below.
     let builtin = mode.alt && builtin_route_ok(METATAB[esel as usize].0, true);
-    let c_supports = C_DECONSTRUCT_BUILTIN_OIDS.contains(&METATAB[esel as usize].0);
-    if builtin && !c_supports {
-        // KNOWN-DIV-4 (fuzz/DIVERGENCE-NOTES-arrayfuncs.md): the crate's
-        // shared builtin_meta accepts 5 element types C's
-        // deconstruct_array_builtin rejects with elog(ERROR) (class 9).
-        // Pinned to exactly that shape: C errors class 9, Rust succeeds.
-        let mut cv2: *const u64 = core::ptr::null();
-        let mut cn2: *const u8 = core::ptr::null();
-        let mut cc2: i32 = 0;
-        let cst2 = unsafe {
-            pg_diff_deconstruct_array(
-                esel, img.as_ptr(), img.len(), 1, 1, &mut cv2, &mut cn2, &mut cc2,
-            )
-        };
-        let meta2 = meta_for(esel);
-        let rres2 =
-            arrayfuncs::deconstruct_array_builtin(mcx, &img, meta2.element_type, true);
-        assert!(
-            cst2 == 9 && rres2.is_ok(),
-            "KNOWN-DIV-4 shape changed esel={esel}: C st={cst2} Rust ok={}",
-            rres2.is_ok(),
-        );
-        return;
-    }
     let mut cvals: *const u64 = core::ptr::null();
     let mut cnulls: *const u8 = core::ptr::null();
     let mut cn: i32 = 0;
@@ -1603,9 +1577,10 @@ fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let rres = if wrapper == 2 {
         // The crate has NO construct_array_builtin; its equivalent is
         // construct_array over builtin_meta(elmtype). Composing them here
-        // dual-executes builtin_meta against C's 12-row construct table.
-        let (bl, bb, ba) = builtin_meta(elmtype);
-        arrayfuncs::construct_array(mcx, &elems, elmtype, bl, bb, ba)
+        // dual-executes builtin_meta against C's construct table, including
+        // the unlisted-oid XX000 arm (KNOWN-DIV-5 FIXED).
+        builtin_meta(elmtype)
+            .and_then(|(bl, bb, ba)| arrayfuncs::construct_array(mcx, &elems, elmtype, bl, bb, ba))
     } else if wrapper == 1 {
         arrayfuncs::construct_array(mcx, &elems, elmtype, elmlen, elmbyval, elmalign)
     } else {

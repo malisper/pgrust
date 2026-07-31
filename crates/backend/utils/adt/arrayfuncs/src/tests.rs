@@ -1996,3 +1996,49 @@ mod p1_lanex_regressions {
         assert_eq!(as_str(&array_out(mcx, &img, &m, &mut op).unwrap()), "[-2:0]={1,2,3}");
     }
 }
+
+// ---- p1-lanex round 2: builtin-table asymmetry (RATIFIED Michael 2026-07-31)
+mod p1_lanex_builtin_tables {
+    use super::*;
+    use crate::construct::{builtin_meta, deconstruct_builtin_meta, deconstruct_array_builtin};
+    use ::mcx::MemoryContext;
+    use ::types_core::{BOOLOID, FLOAT4OID, INT8OID, NAMEOID, REGTYPEOID, XIDOID, CSTRINGOID};
+
+    // KNOWN-DIV-5: an unlisted oid must ERROR (C elog XX000), never panic.
+    #[test]
+    fn unlisted_oid_errors_not_panics() {
+        let e = builtin_meta(BOOLOID).unwrap_err();
+        assert_eq!(e.message(), "type 16 not supported by construct_array_builtin()");
+        let e = deconstruct_builtin_meta(BOOLOID).unwrap_err();
+        assert_eq!(e.message(), "type 16 not supported by deconstruct_array_builtin()");
+    }
+
+    // KNOWN-DIV-4: C's deconstruct table is a strict subset of construct's.
+    // The 5 construct-only types must error through deconstruct_array_builtin
+    // exactly as C's default arm does.
+    #[test]
+    fn deconstruct_table_matches_c_asymmetry() {
+        for oid in [FLOAT4OID, INT8OID, NAMEOID, REGTYPEOID, XIDOID] {
+            assert!(builtin_meta(oid).is_ok(), "oid {oid} in construct table");
+            let e = deconstruct_builtin_meta(oid).unwrap_err();
+            assert_eq!(
+                e.message(),
+                format!("type {oid} not supported by deconstruct_array_builtin()"),
+            );
+        }
+        // ... and the 8 deconstruct types still work end-to-end.
+        for oid in [CSTRINGOID] {
+            assert!(deconstruct_builtin_meta(oid).is_ok());
+        }
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let m = meta_int4();
+        let mut ip = int4_in();
+        let img = array_in(mcx, "{1,2,3}", &m, &mut ip, -1, None).unwrap().unwrap();
+        let (vals, nulls) = deconstruct_array_builtin(mcx, &img, INT4OID, true).unwrap();
+        assert_eq!(vals.len(), 3);
+        assert!(nulls.iter().all(|n| !n));
+        let e = deconstruct_array_builtin(mcx, &img, INT8OID, true).unwrap_err();
+        assert_eq!(e.message(), "type 20 not supported by deconstruct_array_builtin()");
+    }
+}

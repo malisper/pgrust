@@ -262,3 +262,22 @@ io.rs — 8 zero-region (222, 235, 276-277, 458, 510-511, 518). REAL 121:
     demonstrably run thousands of times; llvm attributes their regions to
     the enclosing lines. Treat as ZERO-REGION-equivalent (region exists
     but is folded), i.e. a measurement artifact, not a gap.
+
+## RESOLUTIONS round 2 (p1-lanex, RATIFIED Michael 2026-07-31)
+
+- KNOWN-DIV-5 FIXED: builtin_meta's trailing panic! replaced with a
+  PgError XX000 ("type %u not supported by construct_array_builtin()"),
+  matching C's elog default arm — an unlisted oid (e.g. bool, in neither C
+  table) now errors the statement instead of aborting the backend.
+- KNOWN-DIV-4 FIXED: the shared table is split to mirror C's asymmetry
+  exactly — builtin_meta = construct_array_builtin's table (13 oids incl.
+  regtype), new deconstruct_builtin_meta = deconstruct_array_builtin's
+  8-row strict subset with its own XX000 default arm. The 5 construct-only
+  types now error through deconstruct_array_builtin on both sides.
+- Driver: builtin routes opened to ALL metas (bool included) with strict
+  class-9 parity; the KNOWN-DIV-4 pin and the builtin_route_ok table gate
+  are gone. Regression tests: tests::p1_lanex_builtin_tables (2 tests).
+- Also fixed in the driver this round: hollow-materialization defect in the
+  construct arm's wide mode (dims product in 4097..=MaxArraySize was
+  accepted by both sides but left unmaterialized, so C's size pass read
+  unmaterialized memory — replay SEGV, harness defect not a finding).
