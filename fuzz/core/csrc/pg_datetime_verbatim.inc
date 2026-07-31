@@ -3165,6 +3165,1097 @@ EncodeTimeOnly(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, int style, 
 	*str = '\0';
 }
 
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c ClearPgItmIn ==== */
+
+static inline void
+ClearPgItmIn(struct pg_itm_in *itm_in)
+{
+	itm_in->tm_usec = 0;
+	itm_in->tm_mday = 0;
+	itm_in->tm_mon = 0;
+	itm_in->tm_year = 0;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c int64_multiply_add ==== */
+
+static bool
+int64_multiply_add(int64 val, int64 multiplier, int64 *sum)
+{
+	int64		product;
+
+	if (pg_mul_s64_overflow(val, multiplier, &product) ||
+		pg_add_s64_overflow(*sum, product, sum))
+		return false;
+	return true;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AdjustFractMicroseconds ==== */
+
+static bool
+AdjustFractMicroseconds(double frac, int64 scale,
+						struct pg_itm_in *itm_in)
+{
+	int64		usec;
+
+	/* Fast path for common case */
+	if (frac == 0)
+		return true;
+
+	/*
+	 * We assume the input frac has abs value less than 1, so overflow of frac
+	 * or usec is not an issue for interesting values of scale.
+	 */
+	frac *= scale;
+	usec = (int64) frac;
+
+	/* Round off any fractional microsecond */
+	frac -= usec;
+	if (frac > 0.5)
+		usec++;
+	else if (frac < -0.5)
+		usec--;
+
+	return !pg_add_s64_overflow(itm_in->tm_usec, usec, &itm_in->tm_usec);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AdjustFractDays ==== */
+
+static bool
+AdjustFractDays(double frac, int scale,
+				struct pg_itm_in *itm_in)
+{
+	int			extra_days;
+
+	/* Fast path for common case */
+	if (frac == 0)
+		return true;
+
+	/*
+	 * We assume the input frac has abs value less than 1, so overflow of frac
+	 * or extra_days is not an issue.
+	 */
+	frac *= scale;
+	extra_days = (int) frac;
+
+	/* ... but this could overflow, if tm_mday is already nonzero */
+	if (pg_add_s32_overflow(itm_in->tm_mday, extra_days, &itm_in->tm_mday))
+		return false;
+
+	/* Handle any fractional day */
+	frac -= extra_days;
+	return AdjustFractMicroseconds(frac, USECS_PER_DAY, itm_in);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AdjustFractYears ==== */
+
+static bool
+AdjustFractYears(double frac, int scale,
+				 struct pg_itm_in *itm_in)
+{
+	/*
+	 * As above, we assume abs(frac) < 1, so this can't overflow for any
+	 * interesting value of scale.
+	 */
+	int			extra_months = (int) rint(frac * scale * MONTHS_PER_YEAR);
+
+	return !pg_add_s32_overflow(itm_in->tm_mon, extra_months, &itm_in->tm_mon);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AdjustMicroseconds ==== */
+
+static bool
+AdjustMicroseconds(int64 val, double fval, int64 scale,
+				   struct pg_itm_in *itm_in)
+{
+	/* Handle the integer part */
+	if (!int64_multiply_add(val, scale, &itm_in->tm_usec))
+		return false;
+	/* Handle the float part */
+	return AdjustFractMicroseconds(fval, scale, itm_in);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AdjustDays ==== */
+
+static bool
+AdjustDays(int64 val, int scale, struct pg_itm_in *itm_in)
+{
+	int			days;
+
+	if (val < INT_MIN || val > INT_MAX)
+		return false;
+	return !pg_mul_s32_overflow((int32) val, scale, &days) &&
+		!pg_add_s32_overflow(itm_in->tm_mday, days, &itm_in->tm_mday);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AdjustMonths ==== */
+
+static bool
+AdjustMonths(int64 val, struct pg_itm_in *itm_in)
+{
+	if (val < INT_MIN || val > INT_MAX)
+		return false;
+	return !pg_add_s32_overflow(itm_in->tm_mon, (int32) val, &itm_in->tm_mon);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AdjustYears ==== */
+
+static bool
+AdjustYears(int64 val, int scale,
+			struct pg_itm_in *itm_in)
+{
+	int			years;
+
+	if (val < INT_MIN || val > INT_MAX)
+		return false;
+	return !pg_mul_s32_overflow((int32) val, scale, &years) &&
+		!pg_add_s32_overflow(itm_in->tm_year, years, &itm_in->tm_year);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c DecodeTimeForInterval ==== */
+
+static int
+DecodeTimeForInterval(char *str, int fmask, int range,
+					  int *tmask, struct pg_itm_in *itm_in)
+{
+	struct pg_itm itm;
+	int			dterr;
+
+	dterr = DecodeTimeCommon(str, fmask, range,
+							 tmask, &itm);
+	if (dterr)
+		return dterr;
+
+	itm_in->tm_usec = itm.tm_usec;
+	if (!int64_multiply_add(itm.tm_hour, USECS_PER_HOUR, &itm_in->tm_usec) ||
+		!int64_multiply_add(itm.tm_min, USECS_PER_MINUTE, &itm_in->tm_usec) ||
+		!int64_multiply_add(itm.tm_sec, USECS_PER_SEC, &itm_in->tm_usec))
+		return DTERR_FIELD_OVERFLOW;
+
+	return 0;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c DecodeInterval ==== */
+
+int
+DecodeInterval(char **field, int *ftype, int nf, int range,
+			   int *dtype, struct pg_itm_in *itm_in)
+{
+	bool		force_negative = false;
+	bool		is_before = false;
+	bool		parsing_unit_val = false;
+	char	   *cp;
+	int			fmask = 0,
+				tmask,
+				type,
+				uval;
+	int			i;
+	int			dterr;
+	int64		val;
+	double		fval;
+
+	*dtype = DTK_DELTA;
+	type = IGNORE_DTF;
+	ClearPgItmIn(itm_in);
+
+	/*----------
+	 * The SQL standard defines the interval literal
+	 *	 '-1 1:00:00'
+	 * to mean "negative 1 days and negative 1 hours", while Postgres
+	 * traditionally treats this as meaning "negative 1 days and positive
+	 * 1 hours".  In SQL_STANDARD intervalstyle, we apply the leading sign
+	 * to all fields if there are no other explicit signs.
+	 *
+	 * We leave the signs alone if there are additional explicit signs.
+	 * This protects us against misinterpreting postgres-style dump output,
+	 * since the postgres-style output code has always put an explicit sign on
+	 * all fields following a negative field.  But note that SQL-spec output
+	 * is ambiguous and can be misinterpreted on load!	(So it's best practice
+	 * to dump in postgres style, not SQL style.)
+	 *----------
+	 */
+	if (IntervalStyle == INTSTYLE_SQL_STANDARD && nf > 0 && *field[0] == '-')
+	{
+		force_negative = true;
+		/* Check for additional explicit signs */
+		for (i = 1; i < nf; i++)
+		{
+			if (*field[i] == '-' || *field[i] == '+')
+			{
+				force_negative = false;
+				break;
+			}
+		}
+	}
+
+	/* read through list backwards to pick up units before values */
+	for (i = nf - 1; i >= 0; i--)
+	{
+		switch (ftype[i])
+		{
+			case DTK_TIME:
+				dterr = DecodeTimeForInterval(field[i], fmask, range,
+											  &tmask, itm_in);
+				if (dterr)
+					return dterr;
+				if (force_negative &&
+					itm_in->tm_usec > 0)
+					itm_in->tm_usec = -itm_in->tm_usec;
+				type = DTK_DAY;
+				parsing_unit_val = false;
+				break;
+
+			case DTK_TZ:
+
+				/*
+				 * Timezone means a token with a leading sign character and at
+				 * least one digit; there could be ':', '.', '-' embedded in
+				 * it as well.
+				 */
+				Assert(*field[i] == '-' || *field[i] == '+');
+
+				/*
+				 * Check for signed hh:mm or hh:mm:ss.  If so, process exactly
+				 * like DTK_TIME case above, plus handling the sign.
+				 */
+				if (strchr(field[i] + 1, ':') != NULL &&
+					DecodeTimeForInterval(field[i] + 1, fmask, range,
+										  &tmask, itm_in) == 0)
+				{
+					if (*field[i] == '-')
+					{
+						/* flip the sign on time field */
+						if (itm_in->tm_usec == PG_INT64_MIN)
+							return DTERR_FIELD_OVERFLOW;
+						itm_in->tm_usec = -itm_in->tm_usec;
+					}
+
+					if (force_negative &&
+						itm_in->tm_usec > 0)
+						itm_in->tm_usec = -itm_in->tm_usec;
+
+					/*
+					 * Set the next type to be a day, if units are not
+					 * specified. This handles the case of '1 +02:03' since we
+					 * are reading right to left.
+					 */
+					type = DTK_DAY;
+					parsing_unit_val = false;
+					break;
+				}
+
+				/*
+				 * Otherwise, fall through to DTK_NUMBER case, which can
+				 * handle signed float numbers and signed year-month values.
+				 */
+
+				/* FALLTHROUGH */
+
+			case DTK_DATE:
+			case DTK_NUMBER:
+				if (type == IGNORE_DTF)
+				{
+					/* use typmod to decide what rightmost field is */
+					switch (range)
+					{
+						case INTERVAL_MASK(YEAR):
+							type = DTK_YEAR;
+							break;
+						case INTERVAL_MASK(MONTH):
+						case INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH):
+							type = DTK_MONTH;
+							break;
+						case INTERVAL_MASK(DAY):
+							type = DTK_DAY;
+							break;
+						case INTERVAL_MASK(HOUR):
+						case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR):
+							type = DTK_HOUR;
+							break;
+						case INTERVAL_MASK(MINUTE):
+						case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):
+						case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):
+							type = DTK_MINUTE;
+							break;
+						case INTERVAL_MASK(SECOND):
+						case INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):
+						case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):
+						case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):
+							type = DTK_SECOND;
+							break;
+						default:
+							type = DTK_SECOND;
+							break;
+					}
+				}
+
+				errno = 0;
+				val = strtoi64(field[i], &cp, 10);
+				if (errno == ERANGE)
+					return DTERR_FIELD_OVERFLOW;
+
+				if (*cp == '-')
+				{
+					/* SQL "years-months" syntax */
+					int			val2;
+
+					val2 = strtoint(cp + 1, &cp, 10);
+					if (errno == ERANGE || val2 < 0 || val2 >= MONTHS_PER_YEAR)
+						return DTERR_FIELD_OVERFLOW;
+					if (*cp != '\0')
+						return DTERR_BAD_FORMAT;
+					type = DTK_MONTH;
+					if (*field[i] == '-')
+						val2 = -val2;
+					if (pg_mul_s64_overflow(val, MONTHS_PER_YEAR, &val))
+						return DTERR_FIELD_OVERFLOW;
+					if (pg_add_s64_overflow(val, val2, &val))
+						return DTERR_FIELD_OVERFLOW;
+					fval = 0;
+				}
+				else if (*cp == '.')
+				{
+					dterr = ParseFraction(cp, &fval);
+					if (dterr)
+						return dterr;
+					if (*field[i] == '-')
+						fval = -fval;
+				}
+				else if (*cp == '\0')
+					fval = 0;
+				else
+					return DTERR_BAD_FORMAT;
+
+				tmask = 0;		/* DTK_M(type); */
+
+				if (force_negative)
+				{
+					/* val and fval should be of same sign, but test anyway */
+					if (val > 0)
+						val = -val;
+					if (fval > 0)
+						fval = -fval;
+				}
+
+				switch (type)
+				{
+					case DTK_MICROSEC:
+						if (!AdjustMicroseconds(val, fval, 1, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(MICROSECOND);
+						break;
+
+					case DTK_MILLISEC:
+						if (!AdjustMicroseconds(val, fval, 1000, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(MILLISECOND);
+						break;
+
+					case DTK_SECOND:
+						if (!AdjustMicroseconds(val, fval, USECS_PER_SEC, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+
+						/*
+						 * If any subseconds were specified, consider this
+						 * microsecond and millisecond input as well.
+						 */
+						if (fval == 0)
+							tmask = DTK_M(SECOND);
+						else
+							tmask = DTK_ALL_SECS_M;
+						break;
+
+					case DTK_MINUTE:
+						if (!AdjustMicroseconds(val, fval, USECS_PER_MINUTE, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(MINUTE);
+						break;
+
+					case DTK_HOUR:
+						if (!AdjustMicroseconds(val, fval, USECS_PER_HOUR, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(HOUR);
+						type = DTK_DAY; /* set for next field */
+						break;
+
+					case DTK_DAY:
+						if (!AdjustDays(val, 1, itm_in) ||
+							!AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(DAY);
+						break;
+
+					case DTK_WEEK:
+						if (!AdjustDays(val, 7, itm_in) ||
+							!AdjustFractDays(fval, 7, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(WEEK);
+						break;
+
+					case DTK_MONTH:
+						if (!AdjustMonths(val, itm_in) ||
+							!AdjustFractDays(fval, DAYS_PER_MONTH, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(MONTH);
+						break;
+
+					case DTK_YEAR:
+						if (!AdjustYears(val, 1, itm_in) ||
+							!AdjustFractYears(fval, 1, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(YEAR);
+						break;
+
+					case DTK_DECADE:
+						if (!AdjustYears(val, 10, itm_in) ||
+							!AdjustFractYears(fval, 10, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(DECADE);
+						break;
+
+					case DTK_CENTURY:
+						if (!AdjustYears(val, 100, itm_in) ||
+							!AdjustFractYears(fval, 100, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(CENTURY);
+						break;
+
+					case DTK_MILLENNIUM:
+						if (!AdjustYears(val, 1000, itm_in) ||
+							!AdjustFractYears(fval, 1000, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						tmask = DTK_M(MILLENNIUM);
+						break;
+
+					default:
+						return DTERR_BAD_FORMAT;
+				}
+				parsing_unit_val = false;
+				break;
+
+			case DTK_STRING:
+			case DTK_SPECIAL:
+				/* reject consecutive unhandled units */
+				if (parsing_unit_val)
+					return DTERR_BAD_FORMAT;
+				type = DecodeUnits(i, field[i], &uval);
+				if (type == UNKNOWN_FIELD)
+					type = DecodeSpecial(i, field[i], &uval);
+				if (type == IGNORE_DTF)
+					continue;
+
+				tmask = 0;		/* DTK_M(type); */
+				switch (type)
+				{
+					case UNITS:
+						type = uval;
+						parsing_unit_val = true;
+						break;
+
+					case AGO:
+
+						/*
+						 * "ago" is only allowed to appear at the end of the
+						 * interval.
+						 */
+						if (i != nf - 1)
+							return DTERR_BAD_FORMAT;
+						is_before = true;
+						type = uval;
+						break;
+
+					case RESERV:
+						tmask = (DTK_DATE_M | DTK_TIME_M);
+
+						/*
+						 * Only reserved words corresponding to infinite
+						 * intervals are accepted.
+						 */
+						if (uval != DTK_LATE && uval != DTK_EARLY)
+							return DTERR_BAD_FORMAT;
+
+						/*
+						 * Infinity cannot be followed by anything else. We
+						 * could allow "ago" to reverse the sign of infinity
+						 * but using signed infinity is more intuitive.
+						 */
+						if (i != nf - 1)
+							return DTERR_BAD_FORMAT;
+
+						*dtype = uval;
+						break;
+
+					default:
+						return DTERR_BAD_FORMAT;
+				}
+				break;
+
+			default:
+				return DTERR_BAD_FORMAT;
+		}
+
+		if (tmask & fmask)
+			return DTERR_BAD_FORMAT;
+		fmask |= tmask;
+	}
+
+	/* ensure that at least one time field has been found */
+	if (fmask == 0)
+		return DTERR_BAD_FORMAT;
+
+	/* reject if unit appeared and was never handled */
+	if (parsing_unit_val)
+		return DTERR_BAD_FORMAT;
+
+	/* finally, AGO negates everything */
+	if (is_before)
+	{
+		if (itm_in->tm_usec == PG_INT64_MIN ||
+			itm_in->tm_mday == INT_MIN ||
+			itm_in->tm_mon == INT_MIN ||
+			itm_in->tm_year == INT_MIN)
+			return DTERR_FIELD_OVERFLOW;
+
+		itm_in->tm_usec = -itm_in->tm_usec;
+		itm_in->tm_mday = -itm_in->tm_mday;
+		itm_in->tm_mon = -itm_in->tm_mon;
+		itm_in->tm_year = -itm_in->tm_year;
+	}
+
+	return 0;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c ParseISO8601Number ==== */
+
+static int
+ParseISO8601Number(char *str, char **endptr, int64 *ipart, double *fpart)
+{
+	double		val;
+
+	/*
+	 * Historically this has accepted anything that strtod() would take,
+	 * notably including "e" notation, so continue doing that.  This is
+	 * slightly annoying because the precision of double is less than that of
+	 * int64, so we would lose accuracy for inputs larger than 2^53 or so.
+	 * However, historically we rejected inputs outside the int32 range,
+	 * making that concern moot.  What we do now is reject abs(val) above
+	 * 1.0e15 (a round number a bit less than 2^50), so that any accepted
+	 * value will have an exact integer part, and thereby a fraction part with
+	 * abs(*fpart) less than 1.  In the absence of field complaints it doesn't
+	 * seem worth working harder.
+	 */
+	if (!(isdigit((unsigned char) *str) || *str == '-' || *str == '.'))
+		return DTERR_BAD_FORMAT;
+	errno = 0;
+	val = strtod(str, endptr);
+	/* did we not see anything that looks like a double? */
+	if (*endptr == str || errno != 0)
+		return DTERR_BAD_FORMAT;
+	/* watch out for overflow, including infinities; reject NaN too */
+	if (isnan(val) || val < -1.0e15 || val > 1.0e15)
+		return DTERR_FIELD_OVERFLOW;
+	/* be very sure we truncate towards zero (cf dtrunc()) */
+	if (val >= 0)
+		*ipart = (int64) floor(val);
+	else
+		*ipart = (int64) -floor(-val);
+	*fpart = val - *ipart;
+	/* Callers expect this to hold */
+	Assert(*fpart > -1.0 && *fpart < 1.0);
+	return 0;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c ISO8601IntegerWidth ==== */
+
+static int
+ISO8601IntegerWidth(char *fieldstart)
+{
+	/* We might have had a leading '-' */
+	if (*fieldstart == '-')
+		fieldstart++;
+	return strspn(fieldstart, "0123456789");
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c DecodeISO8601Interval ==== */
+
+int
+DecodeISO8601Interval(char *str,
+					  int *dtype, struct pg_itm_in *itm_in)
+{
+	bool		datepart = true;
+	bool		havefield = false;
+
+	*dtype = DTK_DELTA;
+	ClearPgItmIn(itm_in);
+
+	if (strlen(str) < 2 || str[0] != 'P')
+		return DTERR_BAD_FORMAT;
+
+	str++;
+	while (*str)
+	{
+		char	   *fieldstart;
+		int64		val;
+		double		fval;
+		char		unit;
+		int			dterr;
+
+		if (*str == 'T')		/* T indicates the beginning of the time part */
+		{
+			datepart = false;
+			havefield = false;
+			str++;
+			continue;
+		}
+
+		fieldstart = str;
+		dterr = ParseISO8601Number(str, &str, &val, &fval);
+		if (dterr)
+			return dterr;
+
+		/*
+		 * Note: we could step off the end of the string here.  Code below
+		 * *must* exit the loop if unit == '\0'.
+		 */
+		unit = *str++;
+
+		if (datepart)
+		{
+			switch (unit)		/* before T: Y M W D */
+			{
+				case 'Y':
+					if (!AdjustYears(val, 1, itm_in) ||
+						!AdjustFractYears(fval, 1, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					break;
+				case 'M':
+					if (!AdjustMonths(val, itm_in) ||
+						!AdjustFractDays(fval, DAYS_PER_MONTH, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					break;
+				case 'W':
+					if (!AdjustDays(val, 7, itm_in) ||
+						!AdjustFractDays(fval, 7, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					break;
+				case 'D':
+					if (!AdjustDays(val, 1, itm_in) ||
+						!AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					break;
+				case 'T':		/* ISO 8601 4.4.3.3 Alternative Format / Basic */
+				case '\0':
+					if (ISO8601IntegerWidth(fieldstart) == 8 && !havefield)
+					{
+						if (!AdjustYears(val / 10000, 1, itm_in) ||
+							!AdjustMonths((val / 100) % 100, itm_in) ||
+							!AdjustDays(val % 100, 1, itm_in) ||
+							!AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						if (unit == '\0')
+							return 0;
+						datepart = false;
+						havefield = false;
+						continue;
+					}
+					/* Else fall through to extended alternative format */
+					/* FALLTHROUGH */
+				case '-':		/* ISO 8601 4.4.3.3 Alternative Format,
+								 * Extended */
+					if (havefield)
+						return DTERR_BAD_FORMAT;
+
+					if (!AdjustYears(val, 1, itm_in) ||
+						!AdjustFractYears(fval, 1, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					if (unit == '\0')
+						return 0;
+					if (unit == 'T')
+					{
+						datepart = false;
+						havefield = false;
+						continue;
+					}
+
+					dterr = ParseISO8601Number(str, &str, &val, &fval);
+					if (dterr)
+						return dterr;
+					if (!AdjustMonths(val, itm_in) ||
+						!AdjustFractDays(fval, DAYS_PER_MONTH, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					if (*str == '\0')
+						return 0;
+					if (*str == 'T')
+					{
+						datepart = false;
+						havefield = false;
+						continue;
+					}
+					if (*str != '-')
+						return DTERR_BAD_FORMAT;
+					str++;
+
+					dterr = ParseISO8601Number(str, &str, &val, &fval);
+					if (dterr)
+						return dterr;
+					if (!AdjustDays(val, 1, itm_in) ||
+						!AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					if (*str == '\0')
+						return 0;
+					if (*str == 'T')
+					{
+						datepart = false;
+						havefield = false;
+						continue;
+					}
+					return DTERR_BAD_FORMAT;
+				default:
+					/* not a valid date unit suffix */
+					return DTERR_BAD_FORMAT;
+			}
+		}
+		else
+		{
+			switch (unit)		/* after T: H M S */
+			{
+				case 'H':
+					if (!AdjustMicroseconds(val, fval, USECS_PER_HOUR, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					break;
+				case 'M':
+					if (!AdjustMicroseconds(val, fval, USECS_PER_MINUTE, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					break;
+				case 'S':
+					if (!AdjustMicroseconds(val, fval, USECS_PER_SEC, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					break;
+				case '\0':		/* ISO 8601 4.4.3.3 Alternative Format */
+					if (ISO8601IntegerWidth(fieldstart) == 6 && !havefield)
+					{
+						if (!AdjustMicroseconds(val / 10000, 0, USECS_PER_HOUR, itm_in) ||
+							!AdjustMicroseconds((val / 100) % 100, 0, USECS_PER_MINUTE, itm_in) ||
+							!AdjustMicroseconds(val % 100, 0, USECS_PER_SEC, itm_in) ||
+							!AdjustFractMicroseconds(fval, 1, itm_in))
+							return DTERR_FIELD_OVERFLOW;
+						return 0;
+					}
+					/* Else fall through to extended alternative format */
+					/* FALLTHROUGH */
+				case ':':		/* ISO 8601 4.4.3.3 Alternative Format,
+								 * Extended */
+					if (havefield)
+						return DTERR_BAD_FORMAT;
+
+					if (!AdjustMicroseconds(val, fval, USECS_PER_HOUR, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					if (unit == '\0')
+						return 0;
+
+					dterr = ParseISO8601Number(str, &str, &val, &fval);
+					if (dterr)
+						return dterr;
+					if (!AdjustMicroseconds(val, fval, USECS_PER_MINUTE, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					if (*str == '\0')
+						return 0;
+					if (*str != ':')
+						return DTERR_BAD_FORMAT;
+					str++;
+
+					dterr = ParseISO8601Number(str, &str, &val, &fval);
+					if (dterr)
+						return dterr;
+					if (!AdjustMicroseconds(val, fval, USECS_PER_SEC, itm_in))
+						return DTERR_FIELD_OVERFLOW;
+					if (*str == '\0')
+						return 0;
+					return DTERR_BAD_FORMAT;
+
+				default:
+					/* not a valid time unit suffix */
+					return DTERR_BAD_FORMAT;
+			}
+		}
+
+		havefield = true;
+	}
+
+	return 0;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AddISO8601IntPart ==== */
+
+static char *
+AddISO8601IntPart(char *cp, int64 value, char units)
+{
+	if (value == 0)
+		return cp;
+	sprintf(cp, "%" PRId64 "%c", value, units);
+	return cp + strlen(cp);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AddPostgresIntPart ==== */
+
+static char *
+AddPostgresIntPart(char *cp, int64 value, const char *units,
+				   bool *is_zero, bool *is_before)
+{
+	if (value == 0)
+		return cp;
+	sprintf(cp, "%s%s%" PRId64 " %s%s",
+			(!*is_zero) ? " " : "",
+			(*is_before && value > 0) ? "+" : "",
+			value,
+			units,
+			(value != 1) ? "s" : "");
+
+	/*
+	 * Each nonzero field sets is_before for (only) the next one.  This is a
+	 * tad bizarre but it's how it worked before...
+	 */
+	*is_before = (value < 0);
+	*is_zero = false;
+	return cp + strlen(cp);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AddVerboseIntPart ==== */
+
+static char *
+AddVerboseIntPart(char *cp, int64 value, const char *units,
+				  bool *is_zero, bool *is_before)
+{
+	if (value == 0)
+		return cp;
+	/* first nonzero value sets is_before */
+	if (*is_zero)
+	{
+		*is_before = (value < 0);
+		value = i64abs(value);
+	}
+	else if (*is_before)
+		value = -value;
+	sprintf(cp, " %" PRId64 " %s%s", value, units, (value == 1) ? "" : "s");
+	*is_zero = false;
+	return cp + strlen(cp);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c EncodeInterval ==== */
+
+void
+EncodeInterval(struct pg_itm *itm, int style, char *str)
+{
+	char	   *cp = str;
+	int			year = itm->tm_year;
+	int			mon = itm->tm_mon;
+	int64		mday = itm->tm_mday;	/* tm_mday could be INT_MIN */
+	int64		hour = itm->tm_hour;
+	int			min = itm->tm_min;
+	int			sec = itm->tm_sec;
+	int			fsec = itm->tm_usec;
+	bool		is_before = false;
+	bool		is_zero = true;
+
+	/*
+	 * The sign of year and month are guaranteed to match, since they are
+	 * stored internally as "month". But we'll need to check for is_before and
+	 * is_zero when determining the signs of day and hour/minute/seconds
+	 * fields.
+	 */
+	switch (style)
+	{
+			/* SQL Standard interval format */
+		case INTSTYLE_SQL_STANDARD:
+			{
+				bool		has_negative = year < 0 || mon < 0 ||
+					mday < 0 || hour < 0 ||
+					min < 0 || sec < 0 || fsec < 0;
+				bool		has_positive = year > 0 || mon > 0 ||
+					mday > 0 || hour > 0 ||
+					min > 0 || sec > 0 || fsec > 0;
+				bool		has_year_month = year != 0 || mon != 0;
+				bool		has_day_time = mday != 0 || hour != 0 ||
+					min != 0 || sec != 0 || fsec != 0;
+				bool		has_day = mday != 0;
+				bool		sql_standard_value = !(has_negative && has_positive) &&
+					!(has_year_month && has_day_time);
+
+				/*
+				 * SQL Standard wants only 1 "<sign>" preceding the whole
+				 * interval ... but can't do that if mixed signs.
+				 */
+				if (has_negative && sql_standard_value)
+				{
+					*cp++ = '-';
+					year = -year;
+					mon = -mon;
+					mday = -mday;
+					hour = -hour;
+					min = -min;
+					sec = -sec;
+					fsec = -fsec;
+				}
+
+				if (!has_negative && !has_positive)
+				{
+					sprintf(cp, "0");
+				}
+				else if (!sql_standard_value)
+				{
+					/*
+					 * For non sql-standard interval values, force outputting
+					 * the signs to avoid ambiguities with intervals with
+					 * mixed sign components.
+					 */
+					char		year_sign = (year < 0 || mon < 0) ? '-' : '+';
+					char		day_sign = (mday < 0) ? '-' : '+';
+					char		sec_sign = (hour < 0 || min < 0 ||
+											sec < 0 || fsec < 0) ? '-' : '+';
+
+					sprintf(cp, "%c%d-%d %c%" PRId64 " %c%" PRId64 ":%02d:",
+							year_sign, abs(year), abs(mon),
+							day_sign, i64abs(mday),
+							sec_sign, i64abs(hour), abs(min));
+					cp += strlen(cp);
+					cp = AppendSeconds(cp, sec, fsec, MAX_INTERVAL_PRECISION, true);
+					*cp = '\0';
+				}
+				else if (has_year_month)
+				{
+					sprintf(cp, "%d-%d", year, mon);
+				}
+				else if (has_day)
+				{
+					sprintf(cp, "%" PRId64 " %" PRId64 ":%02d:",
+							mday, hour, min);
+					cp += strlen(cp);
+					cp = AppendSeconds(cp, sec, fsec, MAX_INTERVAL_PRECISION, true);
+					*cp = '\0';
+				}
+				else
+				{
+					sprintf(cp, "%" PRId64 ":%02d:", hour, min);
+					cp += strlen(cp);
+					cp = AppendSeconds(cp, sec, fsec, MAX_INTERVAL_PRECISION, true);
+					*cp = '\0';
+				}
+			}
+			break;
+
+			/* ISO 8601 "time-intervals by duration only" */
+		case INTSTYLE_ISO_8601:
+			/* special-case zero to avoid printing nothing */
+			if (year == 0 && mon == 0 && mday == 0 &&
+				hour == 0 && min == 0 && sec == 0 && fsec == 0)
+			{
+				sprintf(cp, "PT0S");
+				break;
+			}
+			*cp++ = 'P';
+			cp = AddISO8601IntPart(cp, year, 'Y');
+			cp = AddISO8601IntPart(cp, mon, 'M');
+			cp = AddISO8601IntPart(cp, mday, 'D');
+			if (hour != 0 || min != 0 || sec != 0 || fsec != 0)
+				*cp++ = 'T';
+			cp = AddISO8601IntPart(cp, hour, 'H');
+			cp = AddISO8601IntPart(cp, min, 'M');
+			if (sec != 0 || fsec != 0)
+			{
+				if (sec < 0 || fsec < 0)
+					*cp++ = '-';
+				cp = AppendSeconds(cp, sec, fsec, MAX_INTERVAL_PRECISION, false);
+				*cp++ = 'S';
+				*cp++ = '\0';
+			}
+			break;
+
+			/* Compatible with postgresql < 8.4 when DateStyle = 'iso' */
+		case INTSTYLE_POSTGRES:
+			cp = AddPostgresIntPart(cp, year, "year", &is_zero, &is_before);
+
+			/*
+			 * Ideally we should spell out "month" like we do for "year" and
+			 * "day".  However, for backward compatibility, we can't easily
+			 * fix this.  bjm 2011-05-24
+			 */
+			cp = AddPostgresIntPart(cp, mon, "mon", &is_zero, &is_before);
+			cp = AddPostgresIntPart(cp, mday, "day", &is_zero, &is_before);
+			if (is_zero || hour != 0 || min != 0 || sec != 0 || fsec != 0)
+			{
+				bool		minus = (hour < 0 || min < 0 || sec < 0 || fsec < 0);
+
+				sprintf(cp, "%s%s%02" PRId64 ":%02d:",
+						is_zero ? "" : " ",
+						(minus ? "-" : (is_before ? "+" : "")),
+						i64abs(hour), abs(min));
+				cp += strlen(cp);
+				cp = AppendSeconds(cp, sec, fsec, MAX_INTERVAL_PRECISION, true);
+				*cp = '\0';
+			}
+			break;
+
+			/* Compatible with postgresql < 8.4 when DateStyle != 'iso' */
+		case INTSTYLE_POSTGRES_VERBOSE:
+		default:
+			strcpy(cp, "@");
+			cp++;
+			cp = AddVerboseIntPart(cp, year, "year", &is_zero, &is_before);
+			cp = AddVerboseIntPart(cp, mon, "mon", &is_zero, &is_before);
+			cp = AddVerboseIntPart(cp, mday, "day", &is_zero, &is_before);
+			cp = AddVerboseIntPart(cp, hour, "hour", &is_zero, &is_before);
+			cp = AddVerboseIntPart(cp, min, "min", &is_zero, &is_before);
+			if (sec != 0 || fsec != 0)
+			{
+				*cp++ = ' ';
+				if (sec < 0 || (sec == 0 && fsec < 0))
+				{
+					if (is_zero)
+						is_before = true;
+					else if (!is_before)
+						*cp++ = '-';
+				}
+				else if (is_before)
+					*cp++ = '-';
+				cp = AppendSeconds(cp, sec, fsec, MAX_INTERVAL_PRECISION, false);
+				/* We output "ago", not negatives, so use abs(). */
+				sprintf(cp, " sec%s",
+						(abs(sec) != 1 || fsec != 0) ? "s" : "");
+				is_zero = false;
+			}
+			/* identically zero? then put in a unitless zero... */
+			if (is_zero)
+				strcat(cp, " 0");
+			if (is_before)
+				strcat(cp, " ago");
+			break;
+	}
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c interval2itm ==== */
+
+void
+interval2itm(Interval span, struct pg_itm *itm)
+{
+	TimeOffset	time;
+	TimeOffset	tfrac;
+
+	itm->tm_year = span.month / MONTHS_PER_YEAR;
+	itm->tm_mon = span.month % MONTHS_PER_YEAR;
+	itm->tm_mday = span.day;
+	time = span.time;
+
+	tfrac = time / USECS_PER_HOUR;
+	time -= tfrac * USECS_PER_HOUR;
+	itm->tm_hour = tfrac;
+	tfrac = time / USECS_PER_MINUTE;
+	time -= tfrac * USECS_PER_MINUTE;
+	itm->tm_min = (int) tfrac;
+	tfrac = time / USECS_PER_SEC;
+	time -= tfrac * USECS_PER_SEC;
+	itm->tm_sec = (int) tfrac;
+	itm->tm_usec = (int) time;
+}
+
 /* ==== VERBATIM: src/backend/utils/adt/date.c anytime_typmod_check ==== */
 
 int32

@@ -114,6 +114,18 @@ def main(out):
               "EncodeDateOnly", "EncodeTimeOnly"]:
         sec(f"src/backend/utils/adt/datetime.c {f}", extract_fn(dt, f))
 
+    # datetime.c interval engine (interval_engine_diff target)
+    for f in ["ClearPgItmIn", "int64_multiply_add", "AdjustFractMicroseconds",
+              "AdjustFractDays", "AdjustFractYears", "AdjustMicroseconds",
+              "AdjustDays", "AdjustMonths", "AdjustYears",
+              "DecodeTimeForInterval", "DecodeInterval",
+              "ParseISO8601Number", "ISO8601IntegerWidth",
+              "DecodeISO8601Interval", "AddISO8601IntPart",
+              "AddPostgresIntPart", "AddVerboseIntPart", "EncodeInterval"]:
+        sec(f"src/backend/utils/adt/datetime.c {f}", extract_fn(dt, f))
+    # timestamp.c interval2itm (itm input preparation for EncodeInterval)
+    sec("src/backend/utils/adt/timestamp.c interval2itm", extract_fn(ts, "interval2itm"))
+
     # date.c functions (fmgr wrappers stay verbatim over the shim fmgr.h)
     for f in ["anytime_typmod_check", "date_in", "date_out", "EncodeSpecialDate",
               "make_date", "time_in", "tm2time", "time_overflows",

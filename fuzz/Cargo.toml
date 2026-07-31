@@ -115,3 +115,10 @@ path = "fuzz_targets/datetime_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "interval_engine_diff"
+path = "fuzz_targets/interval_engine_diff.rs"
+test = false
+doc = false
+bench = false

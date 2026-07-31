@@ -98,6 +98,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <inttypes.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
@@ -131,6 +132,9 @@
 #define HAVE__BUILTIN_OP_OVERFLOW 1
 #define PG_INT32_MIN	(-0x7FFFFFFF-1)
 #define PG_INT32_MAX	(0x7FFFFFFF)
+#define PG_INT64_MIN	(-INT64CONST(0x7FFFFFFFFFFFFFFF) - 1)
+#define PG_INT64_MAX	INT64CONST(0x7FFFFFFFFFFFFFFF)
+#define i64abs(i) llabs(i)
 #define strtoi64(str, endptr, base) ((int64) strtoll(str, endptr, base))
 
 /* mbutils.c shim: database encoding pinned to UTF-8 (max length 4) on both
@@ -155,6 +159,40 @@ pg_leftmost_one_pos32(uint32 word)
 	Assert(word != 0);
 
 	return 31 - __builtin_clz(word);
+}
+
+/* ---- miscadmin.h IntervalStyle constants (verbatim values) + the GUC
+ * global (globals.c), set per exec by the interval driver entries ---- */
+#define INTSTYLE_POSTGRES			0
+#define INTSTYLE_POSTGRES_VERBOSE	1
+#define INTSTYLE_SQL_STANDARD		2
+#define INTSTYLE_ISO_8601			3
+int			IntervalStyle = INTSTYLE_POSTGRES;
+
+/* ---- src/include/common/int.h overflow helpers — VERBATIM
+ * (HAVE__BUILTIN_OP_OVERFLOW arms) ---- */
+static inline bool
+pg_add_s32_overflow(int32 a, int32 b, int32 *result)
+{
+	return __builtin_add_overflow(a, b, result);
+}
+
+static inline bool
+pg_mul_s32_overflow(int32 a, int32 b, int32 *result)
+{
+	return __builtin_mul_overflow(a, b, result);
+}
+
+static inline bool
+pg_add_s64_overflow(int64 a, int64 b, int64 *result)
+{
+	return __builtin_add_overflow(a, b, result);
+}
+
+static inline bool
+pg_mul_s64_overflow(int64 a, int64 b, int64 *result)
+{
+	return __builtin_mul_overflow(a, b, result);
 }
 
 /* ---- src/include/common/int.h pg_neg_s32_overflow — VERBATIM ---- */
@@ -678,5 +716,102 @@ pg_diff_make_date(int32 year, int32 month, int32 day, int32 *out)
 	fcinfo->args[2].value = Int32GetDatum(day);
 	d = make_date(fcinfo);
 	*out = DatumGetInt32(d);
+	return 0;
+}
+
+/* ====== interval_engine_diff driver entries (NOT Postgres code) ======
+ * Engine-level differential over adt_datetime's interval parse/encode:
+ * DecodeInterval / DecodeISO8601Interval return raw dterr codes (compared
+ * directly, finer than errcode classes); EncodeInterval compared on the
+ * text image. interval2itm (timestamp.c, verbatim) only PREPARES the pg_itm
+ * input for both sides' encoders from a raw (time,day,month) triple — it is
+ * shared input construction, not a compared surface. */
+
+int
+pg_diff_decode_interval(const char *str, int32 range, int istyle,
+						int64 *usec, int32 *mday, int32 *mon, int32 *year,
+						int32 *dtype)
+{
+	char		workbuf[MAXDATELEN + 1];
+	char	   *field[MAXDATEFIELDS];
+	int			ftype[MAXDATEFIELDS];
+	int			nf;
+	int			dterr;
+	struct pg_itm_in itm_in;
+
+	pg_diff_errcode = 0;
+	pg_dt_pending = 0;
+	pg_dt_tzset_nongmt = 0;
+	IntervalStyle = istyle;
+	if (setjmp(pg_dt_jmp))
+		return 1000 + pg_diff_errcode;	/* ereport escape (deltatktbl abbrev
+										 * paths do not ereport; guard) */
+	dterr = ParseDateTime(str, workbuf, sizeof(workbuf),
+						  field, ftype, MAXDATEFIELDS, &nf);
+	if (dterr == 0)
+		dterr = DecodeInterval(field, ftype, nf, range, dtype, &itm_in);
+	if (dterr != 0)
+		return dterr;			/* raw negative DTERR code */
+	*usec = itm_in.tm_usec;
+	*mday = itm_in.tm_mday;
+	*mon = itm_in.tm_mon;
+	*year = itm_in.tm_year;
+	return 0;
+}
+
+int
+pg_diff_decode_iso8601_interval(const char *str,
+								int64 *usec, int32 *mday, int32 *mon,
+								int32 *year, int32 *dtype)
+{
+	struct pg_itm_in itm_in;
+	int			dterr;
+	char		buf[256];
+
+	pg_diff_errcode = 0;
+	pg_dt_pending = 0;
+	IntervalStyle = INTSTYLE_ISO_8601;
+	if (setjmp(pg_dt_jmp))
+		return 1000 + pg_diff_errcode;
+	/* DecodeISO8601Interval writes through its char* (strtod-style walk) */
+	strlcpy(buf, str, sizeof(buf));
+	dterr = DecodeISO8601Interval(buf, dtype, &itm_in);
+	if (dterr != 0)
+		return dterr;
+	*usec = itm_in.tm_usec;
+	*mday = itm_in.tm_mday;
+	*mon = itm_in.tm_mon;
+	*year = itm_in.tm_year;
+	return 0;
+}
+
+int
+pg_diff_encode_interval(int64 time, int32 day, int32 month, int istyle,
+						char *buf,
+						int64 *itm_usec, int64 *itm_hour, int32 *itm_sec,
+						int32 *itm_min, int32 *itm_mday, int32 *itm_mon,
+						int32 *itm_year)
+{
+	Interval	span;
+	struct pg_itm itm;
+
+	pg_diff_errcode = 0;
+	pg_dt_pending = 0;
+	IntervalStyle = istyle;
+	if (setjmp(pg_dt_jmp))
+		return 1000 + pg_diff_errcode;
+	span.time = time;
+	span.day = day;
+	span.month = month;
+	interval2itm(span, &itm);
+	/* hand the SAME itm to the Rust side */
+	*itm_usec = itm.tm_usec;
+	*itm_hour = itm.tm_hour;
+	*itm_sec = itm.tm_sec;
+	*itm_min = itm.tm_min;
+	*itm_mday = itm.tm_mday;
+	*itm_mon = itm.tm_mon;
+	*itm_year = itm.tm_year;
+	EncodeInterval(&itm, istyle, buf);
 	return 0;
 }
