@@ -3047,6 +3047,37 @@ pg_diff_mr_in(int typ, const char *str,
 	return pg_mr_copy(d, out, outlen, outcap);
 }
 
+/*
+ * multirange_in in SOFT-ERROR mode. Same contract as the range oracle's
+ * pg_diff_range_in_soft (see the long comment there): the escontext rides
+ * fcinfo->context, which is where C multirange_in reads it from, and the soft
+ * outcome comes back through out-parameters because in soft mode an invalid
+ * input is captured rather than thrown.
+ */
+int
+pg_diff_mr_in_soft(int typ, const char *str,
+				   unsigned char *out, int *outlen, int outcap,
+				   int *soft_class, int *isnull_out)
+{
+	Datum		args[3];
+	Datum		d;
+	bool		isnull;
+
+	*soft_class = 0;
+	*isnull_out = 0;
+	PG_DIFF_ENTER();
+	args[0] = CStringGetDatum(str);
+	args[1] = ObjectIdGetDatum(pg_mr_typ_oid(typ));
+	args[2] = Int32GetDatum(-1);
+	d = pg_rt_call_ctx(multirange_in, InvalidOid, 3, args, NULL, &isnull,
+					   PG_DIFF_SOFT_ESC);
+	*soft_class = pg_diff_errcode;
+	*isnull_out = isnull ? 1 : 0;
+	if (*soft_class != 0)
+		return 0;				/* soft failure: no image to compare */
+	return pg_mr_copy(d, out, outlen, outcap);
+}
+
 int
 pg_diff_mr_out(const unsigned char *img, char *out, int *outlen, int outcap)
 {

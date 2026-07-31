@@ -88,6 +88,15 @@ extern "C" {
         outlen: *mut i32,
         outcap: i32,
     ) -> i32;
+    fn pg_diff_range_in_soft(
+        typ: i32,
+        s: *const core::ffi::c_char,
+        out: *mut u8,
+        outlen: *mut i32,
+        outcap: i32,
+        soft_class: *mut i32,
+        isnull_out: *mut i32,
+    ) -> i32;
     fn pg_diff_range_out(
         img: *const u8,
         out: *mut core::ffi::c_char,
@@ -114,6 +123,7 @@ extern "C" {
         null2: i32,
         flags_txt: *const u8,
         flags_len: i32,
+        null3: i32,
         out: *mut u8,
         outlen: *mut i32,
         outcap: i32,
@@ -246,7 +256,15 @@ struct Pin {
     typstorage: u8,
 }
 
-const PINS: [Pin; 3] = [
+/// Instantiations driven by the arms that need an element I/O function
+/// (text/binary io). daterange is excluded there: its element I/O is date_in /
+/// date_out, which this oracle does not vendor.
+const NPINS_IO: usize = 3;
+/// Instantiations driven by the arms that only need bound DATUMS (constructors,
+/// images, operators) — daterange included.
+const NPINS: usize = 4;
+
+const PINS: [Pin; NPINS] = [
     Pin {
         rngtypid: INT4RANGEOID,
         elem_typid: INT4OID,
@@ -271,12 +289,28 @@ const PINS: [Pin; 3] = [
         typalign: b'i',
         typstorage: b'm',
     },
+    // daterange: a DISCRETE type with a canonicalize function, which is the
+    // whole point of driving it — canonicalize()'s F_DATERANGE_CANONICAL
+    // dispatch arm is unreachable from the three pins above (int4/int8 take
+    // their own arms, numrange is continuous and has no canonical function).
+    // date is int4-shaped (typlen 4, byval, 'i', 'p'), so the byval bound
+    // decode path serves it unchanged.
+    Pin {
+        rngtypid: DATERANGEOID,
+        elem_typid: DATEOID,
+        typlen: 4,
+        typbyval: true,
+        typalign: b'i',
+        typstorage: b'p',
+    },
 ];
+
 
 fn cmp_finfo(t: usize) -> FmgrInfo {
     match t {
         0 => FmgrInfo::new(nbt_compare::builtins::fc_btint4cmp, 351, 2, true, false),
         1 => FmgrInfo::new(nbt_compare::builtins::fc_btint8cmp, 842, 2, true, false),
+        3 => FmgrInfo::new(adt_date::builtins::fc_date_cmp, 1092, 2, true, false),
         _ => FmgrInfo::new(adt_numeric::builtins::fc_numeric_cmp, 1769, 2, true, false),
     }
 }
@@ -285,6 +319,7 @@ fn hash_finfo(t: usize) -> FmgrInfo {
     match t {
         0 => FmgrInfo::new(adt_int::builtins::fc_hashint4, 450, 1, true, false),
         1 => FmgrInfo::new(adt_int8::builtins::fc_hashint8, 949, 1, true, false),
+        3 => FmgrInfo::new(adt_int::builtins::fc_hashint4, 450, 1, true, false),
         _ => FmgrInfo::new(adt_numeric::builtins::fc_hash_numeric, 432, 1, true, false),
     }
 }
@@ -293,11 +328,13 @@ fn hash_ext_finfo(t: usize) -> FmgrInfo {
     match t {
         0 => FmgrInfo::new(adt_int::builtins::fc_hashint4extended, 425, 2, true, false),
         1 => FmgrInfo::new(adt_int8::builtins::fc_hashint8extended, 442, 2, true, false),
+        3 => FmgrInfo::new(adt_int::builtins::fc_hashint4extended, 425, 2, true, false),
         _ => FmgrInfo::new(adt_numeric::builtins::fc_hash_numeric_extended, 780, 2, true, false),
     }
 }
 
-const F_CANONICAL: [Oid; 3] = [3914, 3928, 0 /* numrange: continuous */];
+const F_CANONICAL: [Oid; NPINS] =
+    [3914, 3928, 0 /* numrange: continuous */, 3915 /* daterange_canonical */];
 
 /// fn_expr rettype carriers for the constructor arms. STATICS, not a per-call
 /// `Box::leak`: the leaked form cost 24 bytes per ops_flinfo() call and the
@@ -306,10 +343,11 @@ const F_CANONICAL: [Oid; 3] = [3914, 3928, 0 /* numrange: continuous */];
 /// PINS is const and there are exactly three instantiations, so nothing needs
 /// allocating at all. Name matches the sibling multirange target's
 /// `RNG_RETTYPE` so the two can be reconciled at merge.
-static RNG_RETTYPE: [AggFnArgTypes; 3] = [
+static RNG_RETTYPE: [AggFnArgTypes; NPINS] = [
     AggFnArgTypes { rettype: INT4RANGEOID, argtypes: &[] },
     AggFnArgTypes { rettype: INT8RANGEOID, argtypes: &[] },
     AggFnArgTypes { rettype: NUMRANGEOID, argtypes: &[] },
+    AggFnArgTypes { rettype: DATERANGEOID, argtypes: &[] },
 ];
 
 
@@ -719,6 +757,19 @@ pub struct BuildStats {
     pub ctor_declined: u64,
     /// numrange bounds that failed to mint from the payload literal
     pub mint_failed: u64,
+    /// range_in comparisons run in SOFT-error (escontext) mode
+    pub soft_mode: u64,
+    /// of those, ones where a soft error was actually captured (the edge that
+    /// the hard-mode plane can never reach)
+    pub soft_captured: u64,
+    /// constructor3 calls with a SQL-NULL flags argument (non-strict arm)
+    pub null_flags_arg: u64,
+    /// constructor3 calls with a flags text whose length is not 2
+    pub flags_len_off: u64,
+    /// images built at the daterange instantiation (canonicalize dispatch)
+    pub daterange_built: u64,
+    /// bound images fed through the toast seam, by kind: [ondisk, pglz, short]
+    pub toast_built: [u64; 3],
 }
 
 thread_local! {
@@ -732,6 +783,10 @@ fn note_hand(t: usize) {
 
 fn note_ctor(t: usize) {
     STATS.with(|s| s.borrow_mut().ctor[t] += 1);
+}
+
+fn bump(f: impl FnOnce(&mut BuildStats)) {
+    STATS.with(|s| f(&mut s.borrow_mut()));
 }
 
 /// One image for an arm, in one of the two layouts. `None` = skip this exec.
@@ -818,8 +873,18 @@ fn maybe_report_stats() {
         let st = s.borrow();
         eprintln!(
             "[rt-stats] execs={n} hand(int4/int8/num)={:?} ctor(int4/int8/num)={:?} \
-             ctor_declined={} mint_failed={}",
-            st.hand, st.ctor, st.ctor_declined, st.mint_failed
+             ctor_declined={} mint_failed={} soft_mode={} soft_captured={} \
+             null_flags_arg={} flags_len_off={} daterange={} toast(ondisk/pglz/short)={:?}",
+            st.hand,
+            st.ctor,
+            st.ctor_declined,
+            st.mint_failed,
+            st.soft_mode,
+            st.soft_captured,
+            st.null_flags_arg,
+            st.flags_len_off,
+            st.daterange_built,
+            st.toast_built
         );
     });
 }
@@ -832,12 +897,15 @@ pub fn rangetypes_diff(data: &[u8]) {
     let Some((&typb, payload)) = rest.split_first() else {
         return;
     };
-    let t = (typb % 3) as usize;
+    // NPINS_IO, not NPINS: the text/binary io arms need the ELEMENT's I/O
+    // functions, and daterange's (date_in/date_out) are not vendored in this
+    // oracle. The constructor arm opts daterange in for itself.
+    let t = (typb % NPINS_IO as u8) as usize;
     let ctx = MemoryContext::new("rangetypes_fuzz");
     let mcx = ctx.mcx();
 
     match sel % 11 {
-        0 => arm_text_io(t, payload, mcx),
+        0 => arm_text_io(t, payload, mcx, typb & 0x80 != 0),
         1 => arm_binary_io(t, payload, mcx),
         2 => arm_ctor(t, payload, mcx, false),
         3 => arm_ctor(t, payload, mcx, true),
@@ -852,11 +920,159 @@ pub fn rangetypes_diff(data: &[u8]) {
     }
 }
 
-fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
+/// SOFT-ERROR (escontext) PLANE — the fourth comparison plane.
+///
+/// The surface behind `pg_input_is_valid()` and `COPY ... ON_ERROR ignore`: with
+/// an ErrorSaveNode armed, an invalid literal is NOT thrown, it is CAPTURED, and
+/// range_in returns normally. Neither driver exercised this at all before, so
+/// every `Ok(None)` soft edge in io.rs/lib.rs was dead to the differential.
+///
+/// Compared here:
+///   (a) soft-error OCCURRED flag — C's SOFT_ERROR_OCCURRED(escontext) vs the
+///       Rust ErrorSaveNode's ctx.error_occurred();
+///   (b) the captured sqlstate CLASS (same table as the thrown plane);
+///   (c) the image bytes when the literal IS valid — soft mode must not perturb
+///       a successful parse;
+///   (d) VERDICT AGREEMENT between the two modes: a literal is valid in soft
+///       mode iff it is valid in hard mode. This is the property that actually
+///       matters to callers, and it cannot be checked from either mode alone.
+///
+/// NOT compared: fcinfo.isnull on the soft-failure edge. See the SOFT-ISNULL
+/// note in fuzz/divergences/rangetypes_diff/FINDINGS.md — C reaches
+/// PG_RETURN_NULL (isnull=true) on the parse and element-input edges but returns
+/// a NULL RangeType pointer with isnull=false on the make_range edge, so C is
+/// not self-consistent here either; every in-tree caller checks the context and
+/// never reads the result, so the flag is not an observable surface. The
+/// OCCURRED flag and the class ARE compared, which is what callers act on.
+fn arm_text_in_soft(t: usize, payload: &[u8], cs: &CString, mcx: mcx::Mcx<'_>) {
+    bump(|st| st.soft_mode += 1);
+
+    // ---- C side: escontext armed
+    let mut cbuf = vec![0u8; OUTCAP];
+    let mut clen = 0i32;
+    let mut csoft = 0i32;
+    let mut cisnull = 0i32;
+    let cret = unsafe {
+        pg_diff_range_in_soft(
+            t as i32,
+            cs.as_ptr(),
+            cbuf.as_mut_ptr(),
+            &mut clen,
+            OUTCAP as i32,
+            &mut csoft,
+            &mut cisnull,
+        )
+    };
+
+    // ---- Rust side: the shipped fc wrapper with an ErrorSaveNode in context
+    let mut esc = types_fmgr::ErrorSaveNode::new(true);
+    let mut fl = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_input);
+    let mut fcinfo = LocalFcinfo::<3>::fresh(0);
+    // SAFETY: mcx and the node both outlive this single call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.context = esc.fm_node_ptr();
+    fcinfo.set_arg(0, Datum::from_usize(cs.as_ptr() as usize));
+    fcinfo.set_arg(1, Datum::from_u32(PINS[t].rngtypid));
+    fcinfo.set_arg(2, Datum::from_i32(-1));
+    let rres = rb::fc_range_in(Some(&mut fl), &mut fcinfo);
+
+    let dbg = format!("t={t} soft lit={:?}", String::from_utf8_lossy(payload));
+    assert!(cret != C_BUFCAP, "range_in/soft: oracle buffer too small (harness bug) {dbg}");
+
+    let r_occurred = esc.ctx.error_occurred();
+    let c_occurred = csoft != 0;
+
+    // A HARD error in soft mode is still possible (arms that do not take an
+    // escontext); both sides must agree on that too.
+    match &rres {
+        Err(e) => {
+            let rc = err_class(e);
+            assert!(
+                !c_occurred && cret == rc,
+                "range_in/soft HARD-ERROR DIVERGENCE {dbg}: C=(ret {cret}, soft {csoft}) \
+                 Rust=hard err {rc} ({})",
+                e.message
+            );
+            return;
+        }
+        Ok(_) => assert!(
+            cret == 0 || cret == C_ISNULL,
+            "range_in/soft DIVERGENCE {dbg}: C hard err {cret} vs Rust Ok"
+        ),
+    }
+
+    // (a) OCCURRED flag
+    assert!(
+        r_occurred == c_occurred,
+        "range_in/soft OCCURRED DIVERGENCE {dbg}: C soft_class={csoft} (occurred={c_occurred}) \
+         Rust occurred={r_occurred}"
+    );
+
+    if r_occurred {
+        bump(|st| st.soft_captured += 1);
+        // (b) captured sqlstate class
+        let rc = esc.ctx.error().map(err_class).unwrap_or(98);
+        assert!(
+            rc == csoft,
+            "range_in/soft CLASS DIVERGENCE {dbg}: C={csoft} Rust={rc}"
+        );
+    } else {
+        // (c) a valid literal must produce the identical image under soft mode
+        let d = rres.expect("checked Ok above");
+        assert!(
+            !fcinfo.isnull && cret == 0,
+            "range_in/soft NULLNESS DIVERGENCE {dbg}: C ret {cret} vs Rust isnull={}",
+            fcinfo.isnull
+        );
+        let rbytes = datum_varlena_bytes(d);
+        assert!(
+            rbytes == &cbuf[..clen as usize],
+            "range_in/soft IMAGE DIVERGENCE {dbg}: C={:02x?} Rust={:02x?}",
+            &cbuf[..clen as usize],
+            rbytes
+        );
+    }
+
+    // (d) soft/hard verdict agreement, both sides independently.
+    let mut hbuf = vec![0u8; OUTCAP];
+    let mut hlen = 0i32;
+    let hret = unsafe {
+        pg_diff_range_in(t as i32, cs.as_ptr(), hbuf.as_mut_ptr(), &mut hlen, OUTCAP as i32)
+    };
+    let c_hard_bad = hret != 0 && hret != C_ISNULL;
+    assert!(
+        c_hard_bad == c_occurred,
+        "range_in SOFT/HARD DISAGREEMENT (C) {dbg}: hard ret {hret} vs soft class {csoft}"
+    );
+    let mut fl2 = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_input);
+    let rhard = fc_call(
+        rb::fc_range_in,
+        Some(&mut fl2),
+        mcx,
+        [
+            Some(Datum::from_usize(cs.as_ptr() as usize)),
+            Some(Datum::from_u32(PINS[t].rngtypid)),
+            Some(Datum::from_i32(-1)),
+        ],
+    );
+    assert!(
+        rhard.result.is_err() == r_occurred,
+        "range_in SOFT/HARD DISAGREEMENT (Rust) {dbg}: hard err={} vs soft occurred={r_occurred}",
+        rhard.result.is_err()
+    );
+}
+
+fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, soft: bool) {
     if payload.len() > 256 || payload.contains(&0) {
         return;
     }
     let Ok(cs) = CString::new(payload) else { return };
+    if soft {
+        arm_text_in_soft(t, payload, &cs, mcx);
+        // fall through: the SAME literal is then run in hard mode below, so the
+        // soft/hard verdict-agreement plane compares two real executions rather
+        // than a modelled one.
+    }
     let mut cbuf = vec![0u8; OUTCAP];
     let mut clen = 0i32;
     let cret = unsafe {
@@ -991,14 +1207,39 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
     let nullbits = rd.u8();
     let f1 = rd.u8();
     let f2 = rd.u8();
+    // The constructor arms need only bound DATUMS, so daterange rides here: a
+    // 4th instantiation whose canonical function is daterange_canonical, which
+    // is what reaches canonicalize()'s F_DATERANGE_CANONICAL dispatch.
+    let t = if nullbits & 0x40 != 0 { NPINS - 1 } else { t };
+    // FLAGS TEXT LENGTH is driven, not fixed at 2: range_parse_flags rejects on
+    // length before it ever looks at the characters, and a fixed-2 driver can
+    // only ever reach the character arms.
+    let flags_len = match nullbits >> 4 & 0x3 {
+        0 => 2,
+        1 => 0,
+        2 => 1,
+        _ => 3,
+    };
     let lo = Bound::decode(t, &mut rd, mcx);
     let up = Bound::decode(t, &mut rd, mcx);
     let (Some(lo), Some(up)) = (lo, up) else { return };
     let null1 = nullbits & 1 != 0;
     let null2 = nullbits & 2 != 0;
-    let flags_txt = [f1, f2];
+    // range_constructor3 is NON-STRICT (pg_proc), so a SQL-NULL flags argument
+    // really reaches the body and both sides must raise 22000 there.
+    let null3 = three && nullbits & 4 != 0;
+    let flags_txt = [f1, f2, b')'];
     let (v1, n1) = lo.c_args();
     let (v2, n2) = up.c_args();
+    if t == NPINS - 1 {
+        bump(|st| st.daterange_built += 1);
+    }
+    if null3 {
+        bump(|st| st.null_flags_arg += 1);
+    }
+    if three && flags_len != 2 {
+        bump(|st| st.flags_len_off += 1);
+    }
     let mut cbuf = vec![0u8; OUTCAP];
     let mut clen = 0i32;
     let cret = unsafe {
@@ -1012,7 +1253,8 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
             null1 as i32,
             null2 as i32,
             flags_txt.as_ptr(),
-            2,
+            flags_len as i32,
+            null3 as i32,
             cbuf.as_mut_ptr(),
             &mut clen,
             OUTCAP as i32,
@@ -1022,19 +1264,19 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
     let a0 = if null1 { None } else { Some(lo.rust_datum()) };
     let a1 = if null2 { None } else { Some(up.rust_datum()) };
     let r = if three {
-        let mut tv = vec![0u8; 6];
-        tv[0..4].copy_from_slice(&datum::set_varsize_4b(6));
-        tv[4..6].copy_from_slice(&flags_txt);
-        fc_call(
-            rb::fc_range_constructor3,
-            Some(&mut fl),
-            mcx,
-            [a0, a1, Some(Datum::from_usize(tv.as_ptr() as usize))],
-        )
+        let n = flags_len as usize;
+        let mut tv = vec![0u8; 4 + n];
+        tv[0..4].copy_from_slice(&datum::set_varsize_4b(4 + n));
+        tv[4..4 + n].copy_from_slice(&flags_txt[..n]);
+        let a2 = if null3 { None } else { Some(Datum::from_usize(tv.as_ptr() as usize)) };
+        fc_call(rb::fc_range_constructor3, Some(&mut fl), mcx, [a0, a1, a2])
     } else {
         fc_call(rb::fc_range_constructor2, Some(&mut fl), mcx, [a0, a1])
     };
-    let dbg = format!("t={t} three={three} nulls={nullbits:x} flags={flags_txt:?}");
+    let dbg = format!(
+        "t={t} three={three} nulls={nullbits:x} flags={:?} flags_len={flags_len} null3={null3}",
+        &flags_txt[..flags_len as usize]
+    );
     compare_range_result("range_ctor", cret, &cbuf[..clen as usize], &r, &dbg);
 }
 
@@ -1835,6 +2077,85 @@ mod shared_errclass_table {
                  — the shared oracle errcode table has drifted"
             );
             assert_ne!(rt, 98, "{name} must be classified, not fall through to 98");
+        }
+    }
+}
+
+#[cfg(test)]
+mod soft_isnull_contract {
+    use super::*;
+
+    /// PINS the soft-mode `fcinfo.isnull` deviation documented in
+    /// fuzz/divergences/rangetypes_diff/FINDINGS.md (SOFT-ISNULL). It is
+    /// deliberately EXCLUDED from the fuzz comparator, so it is pinned here
+    /// instead of going unwatched: if either side changes, this test fails and
+    /// the finding must be revisited rather than silently drifting.
+    ///
+    /// C range_in reaches `PG_RETURN_NULL()` (isnull=true) on the range_parse
+    /// and InputFunctionCallSafe soft edges, but returns a NULL RangeType
+    /// POINTER with isnull=false on the make_range soft edge — C is not
+    /// self-consistent. pgrust is uniformly isnull=false. Not observable: every
+    /// caller (InputFunctionCallSafe itself, pg_input_is_valid,
+    /// pg_input_error_info, COPY ON_ERROR ignore) tests SOFT_ERROR_OCCURRED
+    /// BEFORE looking at the result and never reads isnull — verified in the
+    /// vendored C and ground-truthed on postgres:18.3.
+    ///
+    /// The OCCURRED flag and the sqlstate class, which callers DO act on, are
+    /// compared at full strength by arm_text_in_soft and asserted here too.
+    #[test]
+    fn soft_isnull_is_the_only_deviation() {
+        // (literal, expect_soft, c_class, c_isnull_on_soft_edge)
+        let cases = [
+            ("garbage", true, 2, 1),   // range_parse edge      -> C isnull=1
+            ("[abc,2)", true, 2, 1),   // element-input edge    -> C isnull=1
+            ("[5,1)", true, 4, 0),     // make_range edge       -> C isnull=0
+            ("[1,2)", false, 0, 0),    // valid
+            ("empty", false, 0, 0),    // valid
+        ];
+        for (lit, want_soft, want_class, want_c_isnull) in cases {
+            let cs = std::ffi::CString::new(lit).unwrap();
+            let mut cbuf = vec![0u8; OUTCAP];
+            let mut clen = 0i32;
+            let mut csoft = 0i32;
+            let mut cisnull = 0i32;
+            let cret = unsafe {
+                pg_diff_range_in_soft(
+                    0,
+                    cs.as_ptr(),
+                    cbuf.as_mut_ptr(),
+                    &mut clen,
+                    OUTCAP as i32,
+                    &mut csoft,
+                    &mut cisnull,
+                )
+            };
+            assert_eq!(cret, 0, "{lit}: soft mode must not raise a hard error");
+            assert_eq!(csoft, want_class, "{lit}: C soft class");
+            assert_eq!(cisnull, want_c_isnull, "{lit}: C isnull on the soft edge");
+
+            let ctx = MemoryContext::new("soft-contract");
+            let mcx = ctx.mcx();
+            let mut esc = types_fmgr::ErrorSaveNode::new(true);
+            let mut fl = io_flinfo(0, lsyscache::IOFuncSelector::IOFunc_input);
+            let mut fcinfo = LocalFcinfo::<3>::fresh(0);
+            // SAFETY: mcx and the node outlive this call.
+            unsafe { fcinfo.set_result_mcx(mcx) };
+            fcinfo.context = esc.fm_node_ptr();
+            fcinfo.set_arg(0, Datum::from_usize(cs.as_ptr() as usize));
+            fcinfo.set_arg(1, Datum::from_u32(PINS[0].rngtypid));
+            fcinfo.set_arg(2, Datum::from_i32(-1));
+            let r = rb::fc_range_in(Some(&mut fl), &mut fcinfo);
+            assert!(r.is_ok(), "{lit}: soft mode must not throw on the Rust side");
+
+            // COMPARED planes agree.
+            assert_eq!(esc.ctx.error_occurred(), want_soft, "{lit}: occurred flag");
+            assert_eq!(csoft != 0, esc.ctx.error_occurred(), "{lit}: occurred parity");
+            if want_soft {
+                let rc = esc.ctx.error().map(err_class).unwrap_or(98);
+                assert_eq!(rc, csoft, "{lit}: captured sqlstate class parity");
+            }
+            // THE DEVIATION, pinned: pgrust is uniformly isnull=false.
+            assert!(!fcinfo.isnull, "{lit}: pgrust soft-mode isnull is always false");
         }
     }
 }

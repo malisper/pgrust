@@ -134,6 +134,15 @@ extern "C" {
         outlen: *mut i32,
         outcap: i32,
     ) -> i32;
+    fn pg_diff_mr_in_soft(
+        typ: i32,
+        s: *const core::ffi::c_char,
+        out: *mut u8,
+        outlen: *mut i32,
+        outcap: i32,
+        soft_class: *mut i32,
+        isnull_out: *mut i32,
+    ) -> i32;
     fn pg_diff_mr_out(
         img: *const u8,
         out: *mut core::ffi::c_char,
@@ -831,6 +840,37 @@ pub fn numeric_tie_fallback_count() -> u64 {
     NUMERIC_TIE_FALLBACKS.load(Ordering::Relaxed)
 }
 
+/// ANTI-VACUITY COUNTERS for the arms added when the coverage gaps were closed.
+/// A new arm that silently never fires would hand back a clean campaign that
+/// proved nothing (the gate-blindness class), so each is counted and the
+/// vacuity tests assert the counts advance.
+static SOFT_MODE: AtomicU64 = AtomicU64::new(0);
+static SOFT_CAPTURED: AtomicU64 = AtomicU64::new(0);
+
+pub fn soft_mode_count() -> u64 {
+    SOFT_MODE.load(Ordering::Relaxed)
+}
+
+pub fn soft_captured_count() -> u64 {
+    SOFT_CAPTURED.load(Ordering::Relaxed)
+}
+
+struct MrStats;
+
+fn bump(f: impl FnOnce(&MrStats)) {
+    f(&MrStats);
+}
+
+impl MrStats {
+    #[allow(non_snake_case)]
+    fn soft_mode_inc(&self) {
+        SOFT_MODE.fetch_add(1, Ordering::Relaxed);
+    }
+    fn soft_captured_inc(&self) {
+        SOFT_CAPTURED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Total driver iterations, for the fallback-rate line below.
 static ITERS: AtomicU64 = AtomicU64::new(0);
 
@@ -842,9 +882,12 @@ fn report_tie_fallbacks() {
     let n = ITERS.fetch_add(1, Ordering::Relaxed) + 1;
     if n & (n - 1) == 0 && n >= 1 << 16 {
         eprintln!(
-            "multirangetypes_diff: numeric-tie fallbacks {} / {} execs",
+            "multirangetypes_diff: numeric-tie fallbacks {} / {} execs; \
+             soft_mode={} soft_captured={}",
             NUMERIC_TIE_FALLBACKS.load(Ordering::Relaxed),
-            n
+            n,
+            SOFT_MODE.load(Ordering::Relaxed),
+            SOFT_CAPTURED.load(Ordering::Relaxed)
         );
     }
 }
@@ -1024,7 +1067,7 @@ pub fn multirangetypes_diff(data: &[u8]) {
     let mcx = ctx.mcx();
 
     match sel % 11 {
-        0 => arm_text_io(t, payload, mcx),
+        0 => arm_text_io(t, payload, mcx, typb & 0x80 != 0),
         1 => arm_binary_io(t, payload, mcx),
         2 => arm_ctors(t, payload, mcx),
         3 => arm_accessors(t, payload, mcx),
@@ -1039,12 +1082,126 @@ pub fn multirangetypes_diff(data: &[u8]) {
     }
 }
 
-fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
+/// SOFT-ERROR (escontext) PLANE for multirange_in — the surface behind
+/// `pg_input_is_valid()` and `COPY ... ON_ERROR ignore`. Mirrors the range
+/// target's arm_text_in_soft: compares the soft-error OCCURRED flag, the
+/// captured sqlstate class, the image when the literal is valid, and
+/// soft/hard verdict agreement on each side independently.
+///
+/// `fcinfo.isnull` on the soft edge is deliberately NOT compared — see the
+/// SOFT-ISNULL finding and the soft_isnull_contract test in rangetypes_diff.rs;
+/// C is not self-consistent about it and no caller reads it.
+fn arm_text_in_soft(t: usize, payload: &[u8], cs: &CString, mcx: mcx::Mcx<'_>) {
+    bump(|st| st.soft_mode_inc());
+    let dbg = format!("t={t} soft in={:?}", String::from_utf8_lossy(payload));
+
+    let (cret, cimg, csoft) = IMG_BUF.with(|b| {
+        let mut cbuf = b.borrow_mut();
+        let mut clen = 0i32;
+        let mut csoft = 0i32;
+        let mut cisnull = 0i32;
+        let cret = unsafe {
+            pg_diff_mr_in_soft(
+                t as i32,
+                cs.as_ptr(),
+                cbuf.as_mut_ptr(),
+                &mut clen,
+                BIGCAP as i32,
+                &mut csoft,
+                &mut cisnull,
+            )
+        };
+        (cret, cbuf[..clen.max(0) as usize].to_vec(), csoft)
+    });
+    assert!(cret >= 0, "multirange_in/soft: oracle buffer overflow {dbg}");
+
+    let mut esc = types_fmgr::ErrorSaveNode::new(true);
+    let mut fl = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_input);
+    let mut fcinfo = LocalFcinfo::<3>::fresh(0);
+    // SAFETY: mcx and the node both outlive this single call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.context = esc.fm_node_ptr();
+    fcinfo.set_arg(0, Datum::from_usize(cs.as_ptr() as usize));
+    fcinfo.set_arg(1, Datum::from_u32(PINS[t].mltrngtypid.into()));
+    fcinfo.set_arg(2, Datum::from_i32(-1));
+    let rres = mb::fc_multirange_in(Some(&mut fl), &mut fcinfo);
+
+    let c_occurred = csoft != 0;
+    match &rres {
+        Err(e) => {
+            let rc = err_class(e);
+            assert!(
+                !c_occurred && cret == rc,
+                "multirange_in/soft HARD-ERROR DIVERGENCE {dbg}: C=(ret {cret}, soft {csoft}) \
+                 Rust=hard err {rc} ({})",
+                e.message
+            );
+            return;
+        }
+        Ok(_) => assert!(
+            cret == 0,
+            "multirange_in/soft DIVERGENCE {dbg}: C hard err {cret} vs Rust Ok"
+        ),
+    }
+    let r_occurred = esc.ctx.error_occurred();
+    assert!(
+        r_occurred == c_occurred,
+        "multirange_in/soft OCCURRED DIVERGENCE {dbg}: C soft_class={csoft} Rust={r_occurred}"
+    );
+    if r_occurred {
+        bump(|st| st.soft_captured_inc());
+        let rc = esc.ctx.error().map(err_class).unwrap_or(98);
+        assert!(rc == csoft, "multirange_in/soft CLASS DIVERGENCE {dbg}: C={csoft} Rust={rc}");
+    } else {
+        // A valid literal must serialize identically under soft mode. Uses the
+        // tie-aware comparator: the D1 value-equal-representative carve applies
+        // here exactly as it does in hard mode.
+        let out = FcOut { result: rres, isnull: fcinfo.isnull };
+        compare_mr_image("multirange_in/soft", t, cret, &cimg, &out, mcx, &dbg);
+    }
+
+    // soft/hard verdict agreement, each side independently.
+    let (hret, _) = IMG_BUF.with(|b| {
+        let mut hbuf = b.borrow_mut();
+        let mut hlen = 0i32;
+        let hret = unsafe {
+            pg_diff_mr_in(t as i32, cs.as_ptr(), hbuf.as_mut_ptr(), &mut hlen, BIGCAP as i32)
+        };
+        (hret, hlen)
+    });
+    assert!(
+        (hret != 0) == c_occurred,
+        "multirange_in SOFT/HARD DISAGREEMENT (C) {dbg}: hard {hret} vs soft {csoft}"
+    );
+    let mut fl2 = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_input);
+    let rhard = fc_call(
+        mb::fc_multirange_in,
+        Some(&mut fl2),
+        mcx,
+        [
+            Some(Datum::from_usize(cs.as_ptr() as usize)),
+            Some(Datum::from_u32(PINS[t].mltrngtypid.into())),
+            Some(Datum::from_i32(-1)),
+        ],
+    );
+    assert!(
+        rhard.result.is_err() == r_occurred,
+        "multirange_in SOFT/HARD DISAGREEMENT (Rust) {dbg}: hard err={} vs soft {r_occurred}",
+        rhard.result.is_err()
+    );
+}
+
+fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, soft: bool) {
     if payload.len() > TEXT_LIT_CAP || payload.contains(&0) {
         return;
     }
     let Ok(cs) = CString::new(payload) else { return };
     let dbg = format!("t={t} in={:?}", String::from_utf8_lossy(payload));
+    if soft {
+        arm_text_in_soft(t, payload, &cs, mcx);
+        // then fall through and run the same literal in hard mode, so the
+        // soft/hard verdict-agreement plane compares two real executions.
+    }
 
     // multirange_in: image + errclass
     let img = IMG_BUF.with(|b| {

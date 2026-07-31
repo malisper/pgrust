@@ -8848,10 +8848,37 @@ pg_rt_typ_oid(int typ)
 	}
 }
 
+/*
+ * SOFT-ERROR (escontext) CARRIER.
+ *
+ * C range_in reads its soft-error context straight off the frame
+ * (`Node *escontext = fcinfo->context`), and this file's `ereturn` shim already
+ * returns the caller's dummy value instead of longjmp'ing whenever escontext is
+ * non-NULL, while SOFT_ERROR_OCCURRED reads the recorded class. `Node` is
+ * opaque here (typedef at the top: "only ever NULL / err-flag carrier"), so
+ * soft mode is exactly the hard-mode entry with ANY non-NULL address threaded
+ * into fcinfo->context. This static is that address.
+ */
+static char pg_diff_soft_marker;
+#define PG_DIFF_SOFT_ESC ((Node *) (void *) &pg_diff_soft_marker)
+
 /* one fmgr call on a fresh flinfo (fn_extra NULL, fn_rettype armed) */
+static Datum
+pg_rt_call_ctx(PGFunction fn, Oid rettype, int nargs,
+			   const Datum *args, const bool *nulls, bool *isnull_out,
+			   Node *escontext);
+
 static Datum
 pg_rt_call(PGFunction fn, Oid rettype, int nargs,
 		   const Datum *args, const bool *nulls, bool *isnull_out)
+{
+	return pg_rt_call_ctx(fn, rettype, nargs, args, nulls, isnull_out, NULL);
+}
+
+static Datum
+pg_rt_call_ctx(PGFunction fn, Oid rettype, int nargs,
+			   const Datum *args, const bool *nulls, bool *isnull_out,
+			   Node *escontext)
 {
 	FmgrInfo	flinfo;
 	LOCAL_FCINFO(fcinfo, 3);
@@ -8861,7 +8888,7 @@ pg_rt_call(PGFunction fn, Oid rettype, int nargs,
 	memset(&flinfo, 0, sizeof(flinfo));
 	flinfo.fn_addr = fn;
 	flinfo.fn_rettype = rettype;
-	InitFunctionCallInfoData(*fcinfo, &flinfo, nargs, InvalidOid, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, &flinfo, nargs, InvalidOid, escontext, NULL);
 	for (i = 0; i < nargs; i++)
 	{
 		fcinfo->args[i].value = args[i];
@@ -8914,6 +8941,47 @@ pg_diff_range_in(int typ, const char *str,
 	args[2] = Int32GetDatum(-1);
 	d = pg_rt_call(range_in, InvalidOid, 3, args, NULL, &isnull);
 	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
+}
+
+/*
+ * range_in in SOFT-ERROR mode: the same call with an escontext threaded, which
+ * is the surface behind pg_input_is_valid() and COPY ... ON_ERROR ignore.
+ *
+ * Reports the soft outcome through out-parameters rather than the return value,
+ * because in soft mode an invalid input is NOT an error from the caller's point
+ * of view: C returns normally and the caller inspects the context.
+ *   *soft_class = the recorded errcode class (0 = no soft error)
+ *   *isnull_out = fcinfo->isnull as C left it (a COMPARED sub-plane: C reaches
+ *                 PG_RETURN_NULL on the parse / element-input soft edges but
+ *                 returns a NULL RangeType pointer with isnull=false on the
+ *                 make_range edge, and those are different fmgr contracts)
+ * Return value is the image length class exactly as the hard entry: 0 = a range
+ * image was produced, PG_DIFF_ISNULL = SQL NULL, -1 = out of buffer.
+ */
+int
+pg_diff_range_in_soft(int typ, const char *str,
+					  unsigned char *out, int *outlen, int outcap,
+					  int *soft_class, int *isnull_out)
+{
+	Datum		args[3];
+	Datum		d;
+	bool		isnull;
+	int			rc;
+
+	*soft_class = 0;
+	*isnull_out = 0;
+	PG_DIFF_ENTER();
+	args[0] = CStringGetDatum(str);
+	args[1] = ObjectIdGetDatum(pg_rt_typ_oid(typ));
+	args[2] = Int32GetDatum(-1);
+	d = pg_rt_call_ctx(range_in, InvalidOid, 3, args, NULL, &isnull,
+					   PG_DIFF_SOFT_ESC);
+	*soft_class = pg_diff_errcode;
+	*isnull_out = isnull ? 1 : 0;
+	if (*soft_class != 0)
+		return 0;				/* soft failure: no image to compare */
+	rc = pg_rt_copy_range(d, isnull, out, outlen, outcap);
+	return rc;
 }
 
 int
@@ -9006,10 +9074,11 @@ pg_diff_range_ctor(int typ, int nargs,
 				   const unsigned char *n1, const unsigned char *n2,
 				   int null1, int null2,
 				   const unsigned char *flags_txt, int flags_len,
+				   int null3,
 				   unsigned char *out, int *outlen, int outcap)
 {
 	Datum		args[3];
-	bool		nulls[3] = {null1 != 0, null2 != 0, false};
+	bool		nulls[3] = {null1 != 0, null2 != 0, null3 != 0};
 	Datum		d;
 	bool		isnull;
 
@@ -9018,11 +9087,15 @@ pg_diff_range_ctor(int typ, int nargs,
 	args[1] = null2 ? (Datum) 0 : pg_rt_bound_datum(typ, v2, n2);
 	if (nargs == 3)
 	{
+		/* range_constructor3 is NON-STRICT in pg_proc, so a NULL flags
+		 * argument really does reach the body (C raises 22000 there); the
+		 * flags text length is driven too, so range_parse_flags' length
+		 * check is a compared arm and not just its character arms. */
 		text	   *t = palloc(VARHDRSZ + flags_len);
 
 		SET_VARSIZE(t, VARHDRSZ + flags_len);
 		memcpy(VARDATA(t), flags_txt, flags_len);
-		args[2] = PointerGetDatum(t);
+		args[2] = null3 ? (Datum) 0 : PointerGetDatum(t);
 		d = pg_rt_call(range_constructor3, pg_rt_typ_oid(typ), 3, args, nulls, &isnull);
 	}
 	else
