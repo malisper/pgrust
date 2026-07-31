@@ -353,3 +353,7 @@ pub use json_diff::json_diff;
 // arrayfuncs_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-arrayfuncs_diff.md.
 pub mod arrayfuncs_diff;
 pub use arrayfuncs_diff::arrayfuncs_diff;
+// mbconv_diff: encoding-conversion family (p1-lanez) — differential fuzz +
+// native exhaustive-diff driver vs the proofs/mbconv vendored 18.3 C.
+pub mod mbconv_diff;
+pub use mbconv_diff::mbconv_diff;

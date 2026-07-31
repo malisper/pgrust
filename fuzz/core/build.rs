@@ -208,6 +208,46 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .compile("pg_difffuzz_jsonfam");
+    // mbconv_diff oracle (p1-lanez): the SAME vendored 18.3 conversion-proc
+    // C the proofs/mbconv Kani family solves against (conv.c engines +
+    // all 25 conversion_procs modules + Unicode radix maps), compiled
+    // NATIVELY from its home in proofs/mbconv/c — one source of truth, no
+    // csrc copy to drift. The PROOF_EREPORT_FLAG convention (pg_mbconv.h:
+    // error => set pg_mbconv_err class + return -1) doubles as the native
+    // errcode-class capture plane. Renames: pg_utf_mblen/pg_utf8_islegal
+    // collide with pg_name_io.c's verbatim copies; bsearch is the header's
+    // CBMC linear-scan model and must not shadow libc bsearch for the rest
+    // of the binary.
+    let mut mbconv = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        mbconv.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in ["pg_utf_mblen", "pg_utf8_islegal", "bsearch"] {
+        mbconv.define(s, format!("mbconv_impl_{s}").as_str());
+    }
+    for f in [
+        "pg_mbconv_common.c", "pg_conv_check.c", "pg_conv_cyrillic_mic.c",
+        "pg_conv_euc_cn_mic.c", "pg_conv_euc_jp_sjis.c", "pg_conv_euc_kr_mic.c",
+        "pg_conv_euc_tw_big5.c", "pg_conv_euc2004_sjis2004.c",
+        "pg_conv_latin_mic.c", "pg_conv_latin2_win1250.c",
+        "pg_conv_utf8_big5.c", "pg_conv_utf8_cyrillic.c", "pg_conv_utf8_euc_cn.c",
+        "pg_conv_utf8_euc_jp.c", "pg_conv_utf8_euc_kr.c", "pg_conv_utf8_euc_tw.c",
+        "pg_conv_utf8_euc2004.c", "pg_conv_utf8_gb18030.c", "pg_conv_utf8_gbk.c",
+        "pg_conv_utf8_iso8859_1.c", "pg_conv_utf8_iso8859.c", "pg_conv_utf8_johab.c",
+        "pg_conv_utf8_sjis.c", "pg_conv_utf8_sjis2004.c", "pg_conv_utf8_uhc.c",
+        "pg_conv_utf8_win.c",
+    ] {
+        mbconv.file(format!("../../proofs/mbconv/c/{f}"));
+    }
+    mbconv.file("csrc/mbconv_glue.c");
+    mbconv
+        .define("PG_MBCONV_TLS", None) // thread-local err flag + glue accessors
+        .include("../../proofs/mbconv/c")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-O2")
+        .compile("pg_difffuzz_mbconv");
+    println!("cargo:rerun-if-changed=../../proofs/mbconv/c");
 
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");

@@ -1618,6 +1618,7 @@ dependencies = [
  "archive",
  "arrayfuncs",
  "cc",
+ "conv",
  "crc32c",
  "cryptohashfuncs",
  "datum",

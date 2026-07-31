@@ -74,6 +74,8 @@ keywords = { path = "../../crates/common/keywords" }
 unicode_category = { path = "../../crates/common/unicode_category" }
 # enc_tables_diff (p1-laneg encoding+tables batch):
 adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
+# mbconv_diff (p1-lanez encoding-conversion family):
+conv = { path = "../../crates/backend/utils/mb/conv" }
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
 adt_json = { path = "../../crates/backend/utils/adt/json" }  # json_diff (scaffold.py)
 arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }  # arrayfuncs_diff (scaffold.py)
