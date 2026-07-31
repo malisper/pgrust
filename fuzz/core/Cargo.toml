@@ -30,6 +30,14 @@ adt_encode = { path = "../../crates/backend/utils/adt/encode" }  # encode_diff (
 datum = { path = "../../crates/_support/types/datum" }  # fc-wrapper plane (scaffold.py)
 types_fmgr = { path = "../../crates/_support/types/fmgr" }  # fc-wrapper plane (scaffold.py)
 adt_date = { path = "../../crates/backend/utils/adt/adt_date" }  # datetime_io_diff (scaffold.py)
+adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }  # datetime_io_diff
+adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }  # datetime_io_diff env pin
+pgtz = { path = "../../crates/backend/timezone/pgtz" }  # datetime_io_diff env pin
+guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # datetime_io_diff env pin
+elog = { path = "../../crates/backend/utils/error/elog" }  # datetime_io_diff env pin
+fd = { path = "../../crates/backend/storage/file/fd" }  # datetime_io_diff env pin
+xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }  # datetime_io_diff env pin
+timestamp_seams = { path = "../../crates/backend/utils/adt/timestamp_seams" }  # datetime_io_diff env pin
 
 [build-dependencies]
 cc = "1"

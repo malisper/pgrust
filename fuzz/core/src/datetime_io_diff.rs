@@ -1,84 +1,240 @@
-//! datetime_io_diff: differential fuzz driver — shipped Rust `adt_date` vs vendored
-//! PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df) C
-//! (csrc/pg_datetime_io_io.c). Crate under test: crates/backend/utils/adt/adt_date.
+//! datetime_io_diff: differential fuzz driver — shipped Rust `adt_date` +
+//! `adt_datetime` parse/encode engine vs vendored PostgreSQL 18.3
+//! (Stamp-18.3, upstream sha 62d6c7d3df) C (csrc/pg_datetime_io_io.c).
+//! Crates under test: crates/backend/utils/adt/adt_date (entry points) and
+//! crates/backend/utils/adt/adt_datetime (ParseDateTime / DecodeDateTime /
+//! DecodeTimeOnly / Encode* engine, driven through them).
 //!
-//! GENERATED SKELETON (fuzz/scaffold.py) — every TODO(scaffold) below is
-//! hand-work; see fuzz/README-TODO-datetime_io_diff.md for the ordered checklist.
-//!
-//! Comparison planes (float_in_diff conventions): value bytes/bits,
+//! Comparison planes (float_in_diff conventions): value bytes/bits (date
+//! i32 / time i64 / timetz (i64,i32) fields / *_out text-image bytes),
 //! error-verdict, and errcode/sqlstate class. Message text is out of scope.
 //!
+//! PINNED ENVIRONMENT (mirrors csrc/pg_datetime_io_io.c's header exactly —
+//! environment, never computation):
+//!   - DateStyle x DateOrder fuzzed from a style byte on BOTH sides
+//!     (5 styles x 3 orders).
+//!   - session timezone = GMT; tz database = {GMT} only (PGRUST_TZDIR is
+//!     pointed at a nonexistent directory, so tzload fails for every named
+//!     zone while pg_tzset's GMT special case still works — the C oracle's
+//!     pg_tzset shim answers identically).
+//!   - current date/time pinned to 2026-06-15 12:30:45.123456 GMT via
+//!     xact_seams::get_current_transaction_start_timestamp (Rust) and the
+//!     GetCurrentDateTime/GetCurrentTimeUsec shims (C), making
+//!     "now"/"today"/"yesterday"/"tomorrow" and zone-less timetz input
+//!     deterministic.
+//!   - database encoding UTF-8 (Rust &str API; C oracle pins
+//!     pg_database_encoding_max_length() == 4).
+//!
 //! Input layout: [selector][payload]; selector % 9 picks the arm:
-//!   0 date_in  (oid 1084, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   1 date_out  (oid 1085, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   2 time_in  (oid 1143, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   3 time_out  (oid 1144, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   4 timetz_in  (oid 1350, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   5 timetz_out  (oid 1351, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   6 time_part  (oid 1385, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   7 make_time  (oid 3847, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   8 make_date  (oid 3846, C: date.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
+//!   0 date_in    (oid 1084) — [style][text]
+//!   1 date_out   (oid 1085) — [style][date i32 LE], folded into
+//!     valid-or-special domain (PG's on-disk invariant; out-of-range date
+//!     datums are unreachable through SQL and hit C UB in j2date)
+//!   2 time_in    (oid 1143) — [style][typmod][text]
+//!   3 time_out   (oid 1144) — [style][time i64 LE] folded into
+//!     0..=USECS_PER_DAY (PG invariant)
+//!   4 timetz_in  (oid 1350) — [style][typmod][text]
+//!   5 timetz_out (oid 1351) — [style][time i64][zone i32] folded into the
+//!     PG invariants (time in-range, |zone| < 16h)
+//!   6 time_part  (oid 1385) — [time i64][units bytes] (units < 64 bytes =
+//!     NAMEDATALEN, so identifier truncation never fires; float8 plane)
+//!   7 make_time  (oid 3847) — [hour i32][min i32][sec f64 raw bits]
+//!   8 make_date  (oid 3846) — [year i32][month i32][day i32]
 //!
-//! FC-WRAPPER PLANE: each arm additionally routes its (already core-vs-C
-//! checked) input through the crate's builtins.rs fc_* wrapper via a native
-//! types_fmgr::LocalFcinfo frame and asserts wrapper == core (Datum value /
-//! returned bytes / error verdict + sqlstate). C-parity keeps being carried
-//! by the core comparison; the plane makes the wrapper lines execute every
-//! iteration with an in-harness oracle.
+//! FC-WRAPPER PLANE: arms route their (already core-vs-C checked) input
+//! through the crate's builtins.rs fc_* wrapper via a native
+//! types_fmgr::LocalFcinfo frame and assert wrapper == core (Datum value /
+//! returned bytes / error verdict + sqlstate).
+//!   - time_part's fc wrapper (fc_time_part) needs a packed text varlena
+//!     argument; the core plane fully covers time_part_common, and the
+//!     4-line macro wrapper body is exercised by the crate's unit tests —
+//!     recorded as a routes-row note, not silently skipped.
 //!
-//! SKIPPED: TODO(scaffold) — record here every excluded row (stateful /
-//! PRNG / clock / locale carve-outs) and WHY, per the fuzzuproof-crate
-//! skill's exception rules.
+//! SKIPPED (state-seam carves, per the phase-1 filter and the routes rows):
+//! named-timezone resolution beyond GMT (tz database pinned), dynamic
+//! abbreviations (zoneabbrevtbl never installed), and the retnumeric
+//! (extract_*) plane — numeric result images belong to the extract_* rows.
 
-// Scaffold state: helpers below are exercised only once the arms are
-// implemented. Remove this allow together with the last todo!().
-#![allow(dead_code)]
+use std::ffi::CString;
+use std::sync::Once;
 
 use datum::{Datum, NullableDatum};
-use stringinfo::StringInfo;
-use types_error::PgResult;
+use types_error::PgError;
 use types_fmgr::{LocalFcinfo, PGFunction};
 
+use adt_date::{DateADT, TimeADT, TimeTzADT};
+use adt_datetime::MAXDATELEN;
+use adt_timestamp::PartValue;
+use adt_datetime::{
+    set_date_order, set_date_style, DATEORDER_DMY, DATEORDER_MDY, DATEORDER_YMD,
+    USE_GERMAN_DATES, USE_ISO_DATES, USE_POSTGRES_DATES, USE_SQL_DATES, USE_XSD_DATES,
+};
+
 extern "C" {
-    // Shared TLS errcode accessor (defined in csrc/pg_float_io.c).
-    fn pg_diff_errcode_get() -> i32;
-    // TODO(scaffold): declare the pg_diff_* oracle entries as you write them
-    // in csrc/pg_datetime_io_io.c (declarations are link-inert until called, so
-    // `cargo check` and `cargo test` stay green while sites are unfilled):
-    // TODO(scaffold): fn pg_diff_date_in(...) -> i32;   [oid 1084, date.c]
-    // TODO(scaffold): fn pg_diff_date_out(...) -> i32;   [oid 1085, date.c]
-    // TODO(scaffold): fn pg_diff_time_in(...) -> i32;   [oid 1143, date.c]
-    // TODO(scaffold): fn pg_diff_time_out(...) -> i32;   [oid 1144, date.c]
-    // TODO(scaffold): fn pg_diff_timetz_in(...) -> i32;   [oid 1350, date.c]
-    // TODO(scaffold): fn pg_diff_timetz_out(...) -> i32;   [oid 1351, date.c]
-    // TODO(scaffold): fn pg_diff_time_part(...) -> i32;   [oid 1385, date.c]
-    // TODO(scaffold): fn pg_diff_make_time(...) -> i32;   [oid 3847, date.c]
-    // TODO(scaffold): fn pg_diff_make_date(...) -> i32;   [oid 3846, date.c]
+    fn pg_diff_date_in(str_: *const i8, style: i32, order: i32, out: *mut i32) -> i32;
+    fn pg_diff_date_out(date: i32, style: i32, order: i32, buf: *mut u8) -> i32;
+    fn pg_diff_time_in(str_: *const i8, typmod: i32, style: i32, order: i32, out: *mut i64)
+        -> i32;
+    fn pg_diff_time_out(time: i64, style: i32, order: i32, buf: *mut u8) -> i32;
+    fn pg_diff_timetz_in(
+        str_: *const i8,
+        typmod: i32,
+        style: i32,
+        order: i32,
+        out_time: *mut i64,
+        out_zone: *mut i32,
+    ) -> i32;
+    fn pg_diff_timetz_out(time: i64, zone: i32, style: i32, order: i32, buf: *mut u8) -> i32;
+    fn pg_diff_time_part(units: *const u8, units_len: i32, time: i64, out: *mut f64) -> i32;
+    fn pg_diff_make_time(hour: i32, min: i32, sec: f64, out: *mut i64) -> i32;
+    fn pg_diff_make_date(year: i32, month: i32, day: i32, out: *mut i32) -> i32;
+}
+
+/// Pinned "current" instant: 2026-06-15 12:30:45.123456 GMT as a PG
+/// timestamp(tz) — 9662 days after 2000-01-01 (matches the C shim).
+const PINNED_NOW_USECS: i64 = 9662 * 86_400_000_000 + 45_045_000_000 + 123_456;
+
+const USECS_PER_DAY: i64 = 86_400_000_000;
+const TZDISP_LIMIT: i32 = 16 * 3600; /* datetime.h: max zone displacement */
+
+/// date.c valid DateADT domain: -2451545 (4714-11-24 BC) ..= 2932896
+/// (5874897-12-31), plus the NOBEGIN/NOEND sentinels.
+const DATE_MIN: i64 = -2_451_545;
+const DATE_MAX: i64 = 2_932_896;
+
+fn init_env() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: single-threaded libFuzzer init / first-test init, before
+        // any getenv (adt_date tests.rs gmt_session precedent).
+        unsafe {
+            std::env::set_var("PGRUST_TZDIR", "/nonexistent-pgrust-tzdir-datetime-io-diff")
+        };
+        pgtz::init_seams();
+        guc_tables::init_seams();
+        elog::init_seams();
+        fd::init_seams();
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
+        xact_seams::get_current_transaction_start_timestamp::set(|| PINNED_NOW_USECS);
+        // Pinned-clock snapshot installed directly (NOT
+        // adt_timestamp::init_seams, whose impls read the real xact
+        // thread-state clock): 2026-06-15 12:30:45.123456 GMT, the same
+        // constants as the C GetCurrentDateTime/GetCurrentTimeUsec shims.
+        fn pinned_now() -> types_error::PgResult<timestamp_seams::CurrentTimeUsec> {
+            let jd = adt_datetime::calendar::date2j(2026, 6, 15);
+            Ok(timestamp_seams::CurrentTimeUsec {
+                tm_sec: 45,
+                tm_min: 30,
+                tm_hour: 12,
+                tm_mday: 15,
+                tm_mon: 6,
+                tm_year: 2026,
+                tm_wday: adt_datetime::calendar::j2day(jd),
+                tm_yday: jd - adt_datetime::calendar::date2j(2026, 1, 1),
+                tm_isdst: 0,
+                tm_gmtoff: 0,
+                tm_zone: Some("GMT"),
+                fsec: 123_456,
+                tz: 0,
+            })
+        }
+        timestamp_seams::get_current_timestamp::set(|| PINNED_NOW_USECS);
+        timestamp_seams::get_current_datetime::set(pinned_now);
+        timestamp_seams::get_current_time_usec::set(pinned_now);
+        timestamp_seams::timestamptz_to_str::set(|_| String::from("(pinned)"));
+    });
+    // Session-timezone cells are per-thread: (re)pin on every thread.
+    std::thread_local! {
+        static TZ_PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    TZ_PINNED.with(|c| {
+        if !c.get() {
+            pgtz::pg_timezone_initialize();
+            c.set(true);
+        }
+    });
+}
+
+/// C oracle errcode classes (csrc/pg_datetime_io_io.c header).
+fn rust_err_class(e: &PgError) -> i32 {
+    use types_error::*;
+    if e.sqlstate == ERRCODE_INVALID_DATETIME_FORMAT {
+        1
+    } else if e.sqlstate == ERRCODE_DATETIME_FIELD_OVERFLOW
+        || e.sqlstate == ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
+    {
+        2
+    } else if e.sqlstate == ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE {
+        3
+    } else if e.sqlstate == ERRCODE_INTERVAL_FIELD_OVERFLOW {
+        4
+    } else if e.sqlstate == ERRCODE_INVALID_PARAMETER_VALUE {
+        5
+    } else if e.sqlstate == ERRCODE_FEATURE_NOT_SUPPORTED {
+        6
+    } else if e.sqlstate == ERRCODE_CONFIG_FILE_ERROR {
+        7
+    } else {
+        98 /* unmapped: always a divergence against the C classes */
+    }
+}
+
+/// (DateStyle, DateOrder) from the style byte — applied to BOTH sides.
+fn styles(b: u8) -> (i32, i32) {
+    let style = match b % 5 {
+        0 => USE_POSTGRES_DATES,
+        1 => USE_ISO_DATES,
+        2 => USE_SQL_DATES,
+        3 => USE_GERMAN_DATES,
+        _ => USE_XSD_DATES,
+    };
+    let order = match (b / 5) % 3 {
+        0 => DATEORDER_YMD,
+        1 => DATEORDER_DMY,
+        _ => DATEORDER_MDY,
+    };
+    set_date_style(style);
+    set_date_order(order);
+    (style, order)
+}
+
+/// Text payload guard: the shipped Rust APIs take &str and the C oracle a
+/// cstring, so the comparable domain is interior-NUL-free valid UTF-8 (the
+/// server validates client encoding long before datatype input).
+fn text_payload(b: &[u8]) -> Option<(&str, CString)> {
+    if b.len() > 200 || b.contains(&0) {
+        return None;
+    }
+    let s = std::str::from_utf8(b).ok()?;
+    Some((s, CString::new(b).unwrap()))
+}
+
+fn fold_date(raw: i32) -> DateADT {
+    if raw == i32::MIN || raw == i32::MAX {
+        return raw; /* DATEVAL_NOBEGIN / DATEVAL_NOEND */
+    }
+    ((raw as i64).rem_euclid(DATE_MAX - DATE_MIN + 1) + DATE_MIN) as DateADT
+}
+
+fn fold_time(raw: i64) -> TimeADT {
+    raw.rem_euclid(USECS_PER_DAY + 1)
+}
+
+fn fold_zone(raw: i32) -> i32 {
+    (raw as i64).rem_euclid(2 * (TZDISP_LIMIT as i64) - 1) as i32 - (TZDISP_LIMIT - 1)
 }
 
 // ---------------------------------------------------------------------------
-// fc-wrapper plane plumbing (native LocalFcinfo, real mcx — the proofs
-// wrapper-level pattern run without kani; verbatim from uuid_diff.rs).
+// fc-wrapper plane plumbing (native LocalFcinfo — the proofs wrapper-level
+// pattern run without kani).
 // ---------------------------------------------------------------------------
 
 /// Invoke an fc_* wrapper over non-null args; returns (result, isnull flag).
-fn fc_call<const N: usize>(
-    f: PGFunction,
-    m: mcx::Mcx<'_>,
-    args: [Datum; N],
-) -> (PgResult<Datum>, bool) {
+fn fc_call<const N: usize>(f: PGFunction, args: [Datum; N]) -> (types_error::PgResult<Datum>, bool) {
+    let cx = mcx::MemoryContext::new("datetime_io_diff_fc");
     let mut fcinfo = LocalFcinfo::<N>::new(0);
-    // SAFETY: the context owning `m` outlives this single call (caller scope).
-    unsafe { fcinfo.set_result_mcx(m) };
+    // SAFETY: cx outlives this single call (function scope).
+    unsafe { fcinfo.set_result_mcx(cx.mcx()) };
     for (i, a) in args.into_iter().enumerate() {
         fcinfo.args[i] = NullableDatum::value(a);
     }
@@ -86,19 +242,37 @@ fn fc_call<const N: usize>(
     (r, fcinfo.isnull)
 }
 
-/// First `n` bytes behind a by-ref result Datum. Caller contract: `d` came
-/// from a wrapper that returned an `n`-byte-or-longer allocation still live
-/// in the arming context (or thread-local out scratch).
-fn datum_bytes<'a>(d: Datum, n: usize) -> &'a [u8] {
-    // SAFETY: caller contract above.
-    unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, n) }
+/// Assert the fc wrapper's verdict+value matches the already-C-checked core
+/// result for a by-value Datum result.
+fn fc_check_value(
+    arm: &str,
+    f: PGFunction,
+    args_core: (&types_error::PgResult<Datum>, ),
+    fc: (types_error::PgResult<Datum>, bool),
+) {
+    let core = args_core.0;
+    match (core, &fc.0) {
+        (Ok(cv), Ok(fv)) => assert!(
+            cv.as_u64() == fv.as_u64(),
+            "{arm} FC-PLANE DIVERGENCE: core={:x} fc={:x}",
+            cv.as_u64(),
+            fv.as_u64()
+        ),
+        (Err(ce), Err(fe)) => assert!(
+            ce.sqlstate == fe.sqlstate,
+            "{arm} FC-PLANE sqlstate: core={:?} fc={:?}",
+            ce.sqlstate,
+            fe.sqlstate
+        ),
+        _ => panic!("{arm} FC-PLANE verdict mismatch: core.ok={} fc.ok={}", core.is_ok(), fc.0.is_ok()),
+    }
 }
 
-/// A StringInfo image over `bytes` in `m` (None = alloc failure: skip plane).
-fn make_si<'a>(m: mcx::Mcx<'a>, bytes: &[u8]) -> Option<StringInfo<'a>> {
-    let mut vec = mcx::vec_with_capacity_in::<u8>(m, bytes.len()).ok()?;
-    mcx::vec_append_bytes(&mut vec, bytes).ok()?;
-    StringInfo::from_vec(vec).ok()
+/// cstring result bytes behind a wrapper's returned Datum.
+fn datum_cstr_bytes<'a>(d: Datum) -> &'a [u8] {
+    // SAFETY: the wrapper returned a NUL-terminated cstring allocation live
+    // in the fc-call context (read before the context drops).
+    unsafe { std::ffi::CStr::from_ptr(d.as_usize() as *const i8).to_bytes() }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +280,7 @@ fn make_si<'a>(m: mcx::Mcx<'a>, bytes: &[u8]) -> Option<StringInfo<'a>> {
 // ---------------------------------------------------------------------------
 
 pub fn datetime_io_diff(data: &[u8]) {
+    init_env();
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };
@@ -122,238 +297,341 @@ pub fn datetime_io_diff(data: &[u8]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Arm: date_in (oid 1084; C source: date.c).
-// ---------------------------------------------------------------------------
-
 fn date_in_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_date_in(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::date_in(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_date_in via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): date_in arm not implemented");
-}
+    let Some((&sb, text)) = payload.split_first() else {
+        return;
+    };
+    let Some((s, cs)) = text_payload(text) else {
+        return;
+    };
+    let (style, order) = styles(sb);
 
-// ---------------------------------------------------------------------------
-// Arm: date_out (oid 1085; C source: date.c).
-// ---------------------------------------------------------------------------
+    let mut cval: i32 = 0;
+    let cerr = unsafe { pg_diff_date_in(cs.as_ptr(), style, order, &mut cval) };
+    let r = adt_date::date_in(s, None);
+    match &r {
+        Ok(v) => assert!(
+            cerr == 0 && *v == cval,
+            "date_in DIVERGENCE input={s:?} style={style}/{order}: C=(err {cerr}, {cval}) Rust=Ok({v})"
+        ),
+        Err(e) => {
+            let rc = rust_err_class(e);
+            assert!(
+                cerr == rc,
+                "date_in DIVERGENCE input={s:?} style={style}/{order}: C err {cerr} (val {cval}) vs Rust err {rc} ({})",
+                e.message
+            );
+        }
+    }
+
+    // fc plane: fc_date_in(cstring, oid, typmod)
+    let core = r.map(Datum::from_i32);
+    let fc = fc_call::<3>(
+        adt_date::builtins::fc_date_in,
+        [
+            Datum::from_usize(cs.as_ptr() as usize),
+            Datum::from_u32(0),
+            Datum::from_i32(-1),
+        ],
+    );
+    fc_check_value("date_in", adt_date::builtins::fc_date_in, (&core,), fc);
+}
 
 fn date_out_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_date_out(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::date_out(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_date_out via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): date_out arm not implemented");
-}
+    if payload.len() < 5 {
+        return;
+    }
+    let (style, order) = styles(payload[0]);
+    let date = fold_date(i32::from_le_bytes(payload[1..5].try_into().unwrap()));
 
-// ---------------------------------------------------------------------------
-// Arm: time_in (oid 1143; C source: date.c).
-// ---------------------------------------------------------------------------
+    let mut cbuf = [0u8; 256];
+    let cerr = unsafe { pg_diff_date_out(date, style, order, cbuf.as_mut_ptr()) };
+    let clen = cbuf.iter().position(|&b| b == 0).unwrap();
+
+    let mut rbuf = [0u8; MAXDATELEN + 1];
+    let n = adt_date::date_out(date, &mut rbuf);
+    assert!(
+        cerr == 0 && &rbuf[..n] == &cbuf[..clen],
+        "date_out DIVERGENCE date={date} style={style}/{order}: C=(err {cerr}, {:?}) Rust={:?}",
+        String::from_utf8_lossy(&cbuf[..clen]),
+        String::from_utf8_lossy(&rbuf[..n])
+    );
+
+    // fc plane: fc_date_out(date) -> cstring datum
+    let fc = fc_call::<1>(adt_date::builtins::fc_date_out, [Datum::from_i32(date)]);
+    match fc.0 {
+        Ok(d) => {
+            let b = datum_cstr_bytes(d);
+            assert!(
+                b == &rbuf[..n],
+                "date_out FC-PLANE: core={:?} fc={:?}",
+                String::from_utf8_lossy(&rbuf[..n]),
+                String::from_utf8_lossy(b)
+            );
+        }
+        Err(e) => panic!("date_out FC-PLANE unexpected error: {}", e.message),
+    }
+}
 
 fn time_in_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_time_in(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::time_in(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_time_in via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): time_in arm not implemented");
-}
+    if payload.len() < 2 {
+        return;
+    }
+    let (style, order) = styles(payload[0]);
+    let typmod = (payload[1] % 8) as i32 - 1; /* -1..=6 */
+    let Some((s, cs)) = text_payload(&payload[2..]) else {
+        return;
+    };
 
-// ---------------------------------------------------------------------------
-// Arm: time_out (oid 1144; C source: date.c).
-// ---------------------------------------------------------------------------
+    let mut cval: i64 = 0;
+    let cerr = unsafe { pg_diff_time_in(cs.as_ptr(), typmod, style, order, &mut cval) };
+    let r = adt_date::time_in(s, typmod, None);
+    match &r {
+        Ok(v) => assert!(
+            cerr == 0 && *v == cval,
+            "time_in DIVERGENCE input={s:?} typmod={typmod} style={style}/{order}: C=(err {cerr}, {cval}) Rust=Ok({v})"
+        ),
+        Err(e) => {
+            let rc = rust_err_class(e);
+            assert!(
+                cerr == rc,
+                "time_in DIVERGENCE input={s:?} typmod={typmod} style={style}/{order}: C err {cerr} vs Rust err {rc} ({})",
+                e.message
+            );
+        }
+    }
+
+    let core = r.map(Datum::from_i64);
+    let fc = fc_call::<3>(
+        adt_date::builtins::fc_time_in,
+        [
+            Datum::from_usize(cs.as_ptr() as usize),
+            Datum::from_u32(0),
+            Datum::from_i32(typmod),
+        ],
+    );
+    fc_check_value("time_in", adt_date::builtins::fc_time_in, (&core,), fc);
+}
 
 fn time_out_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_time_out(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::time_out(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_time_out via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): time_out arm not implemented");
-}
+    if payload.len() < 9 {
+        return;
+    }
+    let (style, order) = styles(payload[0]);
+    let time = fold_time(i64::from_le_bytes(payload[1..9].try_into().unwrap()));
 
-// ---------------------------------------------------------------------------
-// Arm: timetz_in (oid 1350; C source: date.c).
-// ---------------------------------------------------------------------------
+    let mut cbuf = [0u8; 256];
+    let cerr = unsafe { pg_diff_time_out(time, style, order, cbuf.as_mut_ptr()) };
+    let clen = cbuf.iter().position(|&b| b == 0).unwrap();
+
+    let mut rbuf = [0u8; MAXDATELEN + 1];
+    let n = adt_date::time_out(time, &mut rbuf);
+    assert!(
+        cerr == 0 && &rbuf[..n] == &cbuf[..clen],
+        "time_out DIVERGENCE time={time} style={style}/{order}: C={:?} Rust={:?}",
+        String::from_utf8_lossy(&cbuf[..clen]),
+        String::from_utf8_lossy(&rbuf[..n])
+    );
+
+    let fc = fc_call::<1>(adt_date::builtins::fc_time_out, [Datum::from_i64(time)]);
+    match fc.0 {
+        Ok(d) => assert!(
+            datum_cstr_bytes(d) == &rbuf[..n],
+            "time_out FC-PLANE mismatch"
+        ),
+        Err(e) => panic!("time_out FC-PLANE unexpected error: {}", e.message),
+    }
+}
 
 fn timetz_in_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_timetz_in(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::timetz_in(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_timetz_in via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): timetz_in arm not implemented");
-}
+    if payload.len() < 2 {
+        return;
+    }
+    let (style, order) = styles(payload[0]);
+    let typmod = (payload[1] % 8) as i32 - 1;
+    let Some((s, cs)) = text_payload(&payload[2..]) else {
+        return;
+    };
 
-// ---------------------------------------------------------------------------
-// Arm: timetz_out (oid 1351; C source: date.c).
-// ---------------------------------------------------------------------------
+    let mut ct: i64 = 0;
+    let mut cz: i32 = 0;
+    let cerr = unsafe { pg_diff_timetz_in(cs.as_ptr(), typmod, style, order, &mut ct, &mut cz) };
+    let r = adt_date::timetz_in(s, typmod, None);
+    match &r {
+        Ok(v) => assert!(
+            cerr == 0 && v.time == ct && v.zone == cz,
+            "timetz_in DIVERGENCE input={s:?} typmod={typmod} style={style}/{order}: C=(err {cerr}, t={ct} z={cz}) Rust=Ok(t={} z={})",
+            v.time,
+            v.zone
+        ),
+        Err(e) => {
+            let rc = rust_err_class(e);
+            assert!(
+                cerr == rc,
+                "timetz_in DIVERGENCE input={s:?} typmod={typmod} style={style}/{order}: C err {cerr} vs Rust err {rc} ({})",
+                e.message
+            );
+        }
+    }
+
+    // fc plane: fc_timetz_in returns a by-ref TimeTzADT datum.
+    let fc = fc_call::<3>(
+        adt_date::builtins::fc_timetz_in,
+        [
+            Datum::from_usize(cs.as_ptr() as usize),
+            Datum::from_u32(0),
+            Datum::from_i32(typmod),
+        ],
+    );
+    match (&r, &fc.0) {
+        (Ok(v), Ok(d)) => {
+            // SAFETY: wrapper returns &TimeTzADT allocated in the fc context.
+            let w = unsafe { &*(d.as_usize() as *const TimeTzADT) };
+            assert!(
+                w.time == v.time && w.zone == v.zone,
+                "timetz_in FC-PLANE value mismatch"
+            );
+        }
+        (Err(ce), Err(fe)) => assert!(ce.sqlstate == fe.sqlstate, "timetz_in FC-PLANE sqlstate"),
+        _ => panic!("timetz_in FC-PLANE verdict mismatch"),
+    }
+}
 
 fn timetz_out_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_timetz_out(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::timetz_out(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_timetz_out via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): timetz_out arm not implemented");
-}
+    if payload.len() < 13 {
+        return;
+    }
+    let (style, order) = styles(payload[0]);
+    let t = TimeTzADT {
+        time: fold_time(i64::from_le_bytes(payload[1..9].try_into().unwrap())),
+        zone: fold_zone(i32::from_le_bytes(payload[9..13].try_into().unwrap())),
+    };
 
-// ---------------------------------------------------------------------------
-// Arm: time_part (oid 1385; C source: date.c).
-// ---------------------------------------------------------------------------
+    let mut cbuf = [0u8; 256];
+    let cerr = unsafe { pg_diff_timetz_out(t.time, t.zone, style, order, cbuf.as_mut_ptr()) };
+    let clen = cbuf.iter().position(|&b| b == 0).unwrap();
+
+    let mut rbuf = [0u8; MAXDATELEN + 1];
+    let n = adt_date::timetz_out(&t, &mut rbuf);
+    assert!(
+        cerr == 0 && &rbuf[..n] == &cbuf[..clen],
+        "timetz_out DIVERGENCE t={} z={} style={style}/{order}: C={:?} Rust={:?}",
+        t.time,
+        t.zone,
+        String::from_utf8_lossy(&cbuf[..clen]),
+        String::from_utf8_lossy(&rbuf[..n])
+    );
+
+    let fc = fc_call::<1>(
+        adt_date::builtins::fc_timetz_out,
+        [Datum::from_usize(&t as *const TimeTzADT as usize)],
+    );
+    match fc.0 {
+        Ok(d) => assert!(
+            datum_cstr_bytes(d) == &rbuf[..n],
+            "timetz_out FC-PLANE mismatch"
+        ),
+        Err(e) => panic!("timetz_out FC-PLANE unexpected error: {}", e.message),
+    }
+}
 
 fn time_part_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_time_part(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::time_part(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_time_part via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): time_part arm not implemented");
-}
+    if payload.len() < 9 {
+        return;
+    }
+    let time = fold_time(i64::from_le_bytes(payload[0..8].try_into().unwrap()));
+    let units = &payload[8..];
+    if units.is_empty() || units.len() > 63 || units.contains(&0) {
+        return; /* < NAMEDATALEN: identifier truncation never fires */
+    }
 
-// ---------------------------------------------------------------------------
-// Arm: make_time (oid 3847; C source: date.c).
-// ---------------------------------------------------------------------------
+    let mut cval: f64 = 0.0;
+    let cerr = unsafe { pg_diff_time_part(units.as_ptr(), units.len() as i32, time, &mut cval) };
+    match adt_date::time_part_common(units, time, false) {
+        Ok(PartValue::Float(v)) => assert!(
+            cerr == 0 && v.to_bits() == cval.to_bits(),
+            "time_part DIVERGENCE units={:?} time={time}: C=(err {cerr}, {cval:e}) Rust=Ok({v:e})",
+            String::from_utf8_lossy(units)
+        ),
+        Ok(_) => panic!("time_part returned numeric with retnumeric=false"),
+        Err(e) => {
+            let rc = rust_err_class(&e);
+            assert!(
+                cerr == rc,
+                "time_part DIVERGENCE units={:?} time={time}: C err {cerr} vs Rust err {rc} ({})",
+                String::from_utf8_lossy(units),
+                e.message
+            );
+        }
+    }
+}
 
 fn make_time_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_make_time(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::make_time(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_make_time via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): make_time arm not implemented");
+    if payload.len() < 16 {
+        return;
+    }
+    let hour = i32::from_le_bytes(payload[0..4].try_into().unwrap());
+    let min = i32::from_le_bytes(payload[4..8].try_into().unwrap());
+    let sec = f64::from_le_bytes(payload[8..16].try_into().unwrap());
+
+    let mut cval: i64 = 0;
+    let cerr = unsafe { pg_diff_make_time(hour, min, sec, &mut cval) };
+    let r = adt_date::make_time(hour, min, sec);
+    match &r {
+        Ok(v) => assert!(
+            cerr == 0 && *v == cval,
+            "make_time DIVERGENCE h={hour} m={min} s={sec:e}: C=(err {cerr}, {cval}) Rust=Ok({v})"
+        ),
+        Err(e) => {
+            let rc = rust_err_class(e);
+            assert!(
+                cerr == rc,
+                "make_time DIVERGENCE h={hour} m={min} s={sec:e}: C err {cerr} vs Rust err {rc} ({})",
+                e.message
+            );
+        }
+    }
+
+    let core = r.map(Datum::from_i64);
+    let fc = fc_call::<3>(
+        adt_date::builtins::fc_make_time,
+        [Datum::from_i32(hour), Datum::from_i32(min), Datum::from_f64(sec)],
+    );
+    fc_check_value("make_time", adt_date::builtins::fc_make_time, (&core,), fc);
 }
 
-// ---------------------------------------------------------------------------
-// Arm: make_date (oid 3846; C source: date.c).
-// ---------------------------------------------------------------------------
-
 fn make_date_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (datetime_io_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_datetime_io_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_make_date(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: adt_date::make_date(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      adt_date::builtins::fc_make_date via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(datetime_io_diff): make_date arm not implemented");
+    if payload.len() < 12 {
+        return;
+    }
+    let y = i32::from_le_bytes(payload[0..4].try_into().unwrap());
+    let m = i32::from_le_bytes(payload[4..8].try_into().unwrap());
+    let d = i32::from_le_bytes(payload[8..12].try_into().unwrap());
+
+    let mut cval: i32 = 0;
+    let cerr = unsafe { pg_diff_make_date(y, m, d, &mut cval) };
+    let r = adt_date::make_date(y, m, d);
+    match &r {
+        Ok(v) => assert!(
+            cerr == 0 && *v == cval,
+            "make_date DIVERGENCE y={y} m={m} d={d}: C=(err {cerr}, {cval}) Rust=Ok({v})"
+        ),
+        Err(e) => {
+            let rc = rust_err_class(e);
+            assert!(
+                cerr == rc,
+                "make_date DIVERGENCE y={y} m={m} d={d}: C err {cerr} vs Rust err {rc} ({})",
+                e.message
+            );
+        }
+    }
+
+    let core = r.map(Datum::from_i32);
+    let fc = fc_call::<3>(
+        adt_date::builtins::fc_make_date,
+        [Datum::from_i32(y), Datum::from_i32(m), Datum::from_i32(d)],
+    );
+    fc_check_value("make_date", adt_date::builtins::fc_make_date, (&core,), fc);
 }
 
 // ---------------------------------------------------------------------------
@@ -363,11 +641,8 @@ mod tests {
     use super::*;
 
     /// Replay every checked-in seed (catches shim/link errors before the
-    /// nightly fuzz campaign). TODO(scaffold): un-ignore once the arms are
-    /// implemented and ../corpus/datetime_io_diff/ is seeded (>=30 seeds; corpora
-    /// are COMMITTED — plain `git add`, no -f needed).
+    /// nightly fuzz campaign).
     #[test]
-    #[ignore = "scaffold(datetime_io_diff): arms not implemented yet"]
     fn seed_corpus_replays_clean() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/datetime_io_diff");
         let mut n = 0;
@@ -381,13 +656,64 @@ mod tests {
         assert!(n >= 30, "expected >=30 seeds, found {n}");
     }
 
-    /// TODO(scaffold): per-arm smoke tests on stable (ok + error shapes per
-    /// arm, fc-plane smoke driving every wrapper at least once — see
-    /// uuid_diff.rs tests for the expected shape). Start by un-ignoring:
+    fn arm(sel: u8, tail: &[u8]) -> Vec<u8> {
+        let mut v = vec![sel];
+        v.extend_from_slice(tail);
+        v
+    }
+
     #[test]
-    #[ignore = "scaffold(datetime_io_diff): arms not implemented yet"]
     fn arms_smoke() {
-        // Arm 0 example: selector byte 0, then a payload for date_in.
-        datetime_io_diff(&[0u8]);
+        // in-arms: style byte + (typmod) + text; ok and error shapes
+        for style in 0u8..15 {
+            datetime_io_diff(&arm(0, &[style, b'2', b'0', b'2', b'4', b'-', b'1', b'-', b'5']));
+            datetime_io_diff(&arm(0, &[style, b'e', b'p', b'o', b'c', b'h']));
+            datetime_io_diff(&arm(0, &[style, b'n', b'o', b'w']));
+            datetime_io_diff(&arm(0, &[style, b'z', b'z']));
+            datetime_io_diff(&arm(2, &[style, 3, b'1', b'2', b':', b'3', b'4', b':', b'5', b'6']));
+            datetime_io_diff(&arm(4, &[style, 0, b'0', b'4', b':', b'0', b'5', b':', b'0', b'6', b'+', b'0', b'8']));
+            datetime_io_diff(&arm(4, &[style, 0, b'0', b'4', b':', b'0', b'5', b':', b'0', b'6']));
+            datetime_io_diff(&arm(4, &[style, 0, b'0', b'4', b':', b'0', b'5', b':', b'0', b'6', b' ', b'G', b'M', b'T']));
+        }
+        // out-arms over a value grid
+        for (i, raw) in [0i64, 1, -1, 86_400_000_000, i64::MAX, i64::MIN, 45_296_789_000].iter().enumerate() {
+            let mut p = vec![3, (i as u8) * 3];
+            p.extend_from_slice(&raw.to_le_bytes());
+            datetime_io_diff(&p);
+            let mut q = vec![5, (i as u8) * 3];
+            q.extend_from_slice(&raw.to_le_bytes());
+            q.extend_from_slice(&(*raw as i32).to_le_bytes());
+            datetime_io_diff(&q);
+        }
+        for raw in [0i32, 1, -1, 8780, -10957, i32::MAX, i32::MIN, 2_932_896, -2_451_545] {
+            let mut p = vec![1, 7];
+            p.extend_from_slice(&raw.to_le_bytes());
+            datetime_io_diff(&p);
+        }
+        // time_part over the full units table
+        for u in ["microseconds", "milliseconds", "second", "minute", "hour",
+                  "epoch", "timezone", "timezone_hour", "day", "year", "junk"] {
+            let mut p = vec![6];
+            p.extend_from_slice(&45_296_789_000i64.to_le_bytes());
+            p.extend_from_slice(u.as_bytes());
+            datetime_io_diff(&p);
+        }
+        // constructors incl. error + non-finite shapes
+        for (h, m, s) in [(12, 30, 45.5), (25, 0, 0.0), (0, 0, f64::NAN),
+                          (0, 0, f64::INFINITY), (23, 59, 59.999_999_5), (-1, 0, 0.0)] {
+            let mut p = vec![7];
+            p.extend_from_slice(&(h as i32).to_le_bytes());
+            p.extend_from_slice(&(m as i32).to_le_bytes());
+            p.extend_from_slice(&f64::to_le_bytes(s));
+            datetime_io_diff(&p);
+        }
+        for (y, m, d) in [(2024, 2, 29), (2023, 2, 29), (0, 1, 1), (-44, 3, 15),
+                          (5874897, 12, 31), (i32::MIN, 1, 1), (1, 13, 1), (1, 0, 1)] {
+            let mut p = vec![8];
+            p.extend_from_slice(&i32::to_le_bytes(y));
+            p.extend_from_slice(&i32::to_le_bytes(m));
+            p.extend_from_slice(&i32::to_le_bytes(d));
+            datetime_io_diff(&p);
+        }
     }
 }
