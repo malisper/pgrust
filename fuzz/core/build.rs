@@ -166,6 +166,7 @@ fn main() {
         // numutils_diff oracle (p1-laneaj): verbatim 18.3 numutils.c
         .file("csrc/pg_numutils.c")
         .file("csrc/pg_int_io.c")
+        .file("csrc/pg_network_io.c")
         .file("csrc/pg_uuid_io.c")
         .file("csrc/pg_mac_io.c")
         .file("csrc/pg_name_io.c")
