@@ -54,7 +54,7 @@ use types_error::{
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_ZERO_LENGTH_CHARACTER_STRING,
 };
-use types_fmgr::{LocalFcinfo, PGFunction, PackedVarlena};
+use types_fmgr::{ErrorSaveNode, LocalFcinfo, PGFunction, PackedVarlena};
 
 use adt_tsvector_core::builtins as fcb;
 use adt_tsvector_core::io::{
@@ -357,6 +357,19 @@ fn parse_both(m: mcx::Mcx<'_>, text: &[u8], ctext: &CString) -> Result<Vec<u8>, 
                 "C soft-mode verdict != hard-mode on {:?}",
                 String::from_utf8_lossy(text)
             );
+            // fc soft plane: escontext-armed wrapper must return SQL NULL
+            // (fc_tsvectorin builtins.rs return_null arm) with the error saved.
+            let mut node = ErrorSaveNode::new(true);
+            let mut fcinfo = LocalFcinfo::<1>::new(0);
+            // SAFETY: the context owning `m` outlives this single call.
+            unsafe { fcinfo.set_result_mcx(m) };
+            fcinfo.context = node.fm_node_ptr();
+            fcinfo.args[0] =
+                NullableDatum::value(Datum::from_usize(ctext.as_ptr() as usize));
+            let _ = fcb::fc_tsvectorin(None, &mut fcinfo)
+                .expect("fc_tsvectorin with escontext must not hard-error");
+            assert!(fcinfo.isnull, "fc soft-mode tsvectorin must return NULL");
+            assert!(node.ctx.error_occurred(), "fc soft context must save the error");
             Err(())
         }
         (Ok(_), 1) | (Err(_), 0) => {
@@ -421,6 +434,30 @@ fn arm_in_out_send(payload: &[u8]) {
     let d = fc_call::<1>(fcb::fc_tsvectorsend, m, [varlena_datum(&img)])
         .expect("fc_tsvectorsend verdict");
     assert_eq!(read_varlena_data(d), csend.bytes(), "fc_tsvectorsend != core");
+
+    // Short-varlena fc plane: a 1-byte-header stored form must expand to the
+    // same output (arg_tsvector's pv.is_short() branch, builtins.rs:27).
+    if let Some(simg) = short_varlena_image(&payload_img) {
+        let d = fc_call::<1>(fcb::fc_tsvectorout, m, [varlena_datum(&simg)])
+            .expect("fc_tsvectorout on short varlena");
+        let cs = unsafe { std::ffi::CStr::from_ptr(d.as_usize() as *const std::ffi::c_char) };
+        assert_eq!(cs.to_bytes(), cout.bytes(), "short-varlena fc_tsvectorout != long");
+    }
+}
+
+/// 1-byte-header (short) varlena image when the payload fits (total <= 126 B).
+fn short_varlena_image(payload: &[u8]) -> Option<Vec<u8>> {
+    let total = payload.len() + 1;
+    if total > 126 {
+        return None;
+    }
+    let mut img = Vec::with_capacity(total);
+    #[cfg(target_endian = "little")]
+    img.push(((total as u8) << 1) | 1);
+    #[cfg(target_endian = "big")]
+    img.push(0x80 | total as u8);
+    img.extend_from_slice(payload);
+    Some(img)
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +541,29 @@ fn arm_recv(payload: &[u8]) {
                     "tsvectorrecv divergence (beyond duplicate-lexeme tie order): rust {:02x?} vs C {:02x?} (wire {:02x?})",
                     rimg, cout.bytes(), payload
                 );
+            }
+            // Reconstruction plane (sorted wire only, where storage order ==
+            // entry order): rebuild the image with TsVecBuilder::push_raw and
+            // require byte identity — an independent check that the builder,
+            // the entry accessors, and strdata() agree with the decode.
+            if rimg[..] == *cout.bytes() {
+                let v = TsVec { payload: rimg };
+                let in_entry_order = (0..v.size()).all(|i| {
+                    i == 0 || v.entry(i - 1).pos() <= v.entry(i).pos()
+                });
+                if in_entry_order {
+                    let mut b = adt_tsvector_core::layout::TsVecBuilder::with_capacity(
+                        m, v.size(), v.strdata().len(),
+                    ).expect("builder cap");
+                    for i in 0..v.size() {
+                        let e = v.entry(i);
+                        b.push_raw(v.lexeme(e), v.posblock(e)).expect("push_raw");
+                    }
+                    assert_eq!(b.nentries(), v.size(), "builder nentries != decoded size");
+                    assert!(b.cur_off() <= v.strdata().len(), "builder cur_off past strdata");
+                    let rebuilt = b.finish(m).expect("builder finish");
+                    assert_eq!(&rebuilt[4..], rimg, "TsVecBuilder reconstruction != recv image");
+                }
             }
             // fc plane.
             let mut vec = mcx::vec_with_capacity_in::<u8>(m, payload.len()).unwrap();
@@ -1088,17 +1148,200 @@ fn arm_match(payload: &[u8]) {
     let d = fc_call::<2>(fcb::fc_ts_match_qv, m, [varlena_datum(&qimg), varlena_datum(&vimg)])
         .expect("fc_ts_match_qv verdict");
     assert_eq!(d.as_usize() & 1, cres as usize, "fc_ts_match_qv != C");
+
+    // Short-varlena fc plane for the tsquery arg (arg_tsquery's is_short()
+    // expansion branch, builtins.rs:38).
+    if let Some(sq) = short_varlena_image(&q) {
+        let d = fc_call::<2>(fcb::fc_ts_match_vq, m, [varlena_datum(&vimg), varlena_datum(&sq)])
+            .expect("fc_ts_match_vq short-q verdict");
+        assert_eq!(d.as_usize() & 1, cres as usize, "fc_ts_match_vq short-q != long");
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Arm 8 (sel 0xff): oversize inputs — the >MAXSTRPOS limit arms that no
+// input under MAX_TEXT can reach. All texts/wires are built DETERMINISTICALLY
+// on this side and fed identically to both engines; every mode must ERROR
+// with ERRCODE_PROGRAM_LIMIT_EXCEEDED on both sides.
+// ---------------------------------------------------------------------------
+
+fn arm_oversize(payload: &[u8]) {
+    const MAXSTRPOS: usize = (1 << 20) - 1;
+    let mode = payload.first().copied().unwrap_or(0) % 4;
+    // Small deterministic jitter so the corpus can carry distinct shapes.
+    let jitter = (payload.get(1).copied().unwrap_or(0) as usize) % 64;
+    let cx = MemoryContext::new("tsvec_fuzz_big");
+    let m = cx.mcx();
+
+    let expect_limit_err = |rres: &Result<(), (u32, [u8; 5])>, crc: i32, what: &str| {
+        // encoded as Err((class_marker, sqlstate)) below; here we only assert shape
+        let _ = rres;
+        assert_eq!(crc, 1, "{what}: C did not error on an over-limit input");
+        let cclass = unsafe { pg_diff_errcode_get() };
+        assert_eq!(cclass, 2, "{what}: C errcode class != program-limit");
+    };
+
+    match mode {
+        0 => {
+            // In-parse total-length guard (io.rs strlen_total > MAXSTRPOS).
+            // Distinct 8-byte words, total word bytes ~1.15 MiB.
+            let n = 150_000 + jitter;
+            let mut text = Vec::with_capacity(n * 9);
+            for i in 0..n {
+                text.extend_from_slice(format!("w{:07}", i).as_bytes());
+                text.push(b' ');
+            }
+            let ctext = CString::new(text.clone()).unwrap();
+            let rres = tsvector_in_core(m, &text, None);
+            let e = match rres {
+                Err(e) => e,
+                Ok(_) => panic!("oversize mode 0: Rust accepted a >MAXSTRPOS input"),
+            };
+            assert_eq!(err_class(&e), 2, "oversize mode 0: Rust class != program-limit");
+            let mut cout = COut::new();
+            let crc = unsafe {
+                pg_diff_tsvec_in(ctext.as_ptr(), 0, cout.buf.as_mut_ptr(), CBUF as i32,
+                                 &mut cout.len)
+            };
+            expect_limit_err(&Ok(()), crc, "oversize mode 0");
+            // Soft mode: the ereturn path records and returns None (io.rs:85).
+            let mut esc = SoftErrorContext::new(true);
+            let rsoft = tsvector_in_core(m, &text, Some(&mut esc));
+            assert!(matches!(rsoft, Ok(None)) && esc.error_occurred(),
+                    "oversize mode 0: Rust soft verdict != hard");
+            let mut cout2 = COut::new();
+            let crc2 = unsafe {
+                pg_diff_tsvec_in(ctext.as_ptr(), 1, cout2.buf.as_mut_ptr(), CBUF as i32,
+                                 &mut cout2.len)
+            };
+            assert_eq!(crc2, 2, "oversize mode 0: C soft verdict != hard");
+        }
+        1 => {
+            // Post-merge buflen guard (io.rs buflen > MAXSTRPOS): distinct
+            // 4-byte words, each with one position, so buflen (word + align +
+            // npos + pos = 8 B/word) crosses 1 MiB while strlen_total stays
+            // ~528 KiB under the in-parse guard.
+            let n = 132_000 + jitter;
+            let mut text = Vec::with_capacity(n * 7);
+            for i in 0..n {
+                text.extend_from_slice(format!("{:04}", i % 10_000).as_bytes());
+                text.extend_from_slice(format!("{:03}", i / 10_000).as_bytes());
+                text.extend_from_slice(b":1 ");
+            }
+            let ctext = CString::new(text.clone()).unwrap();
+            let rres = tsvector_in_core(m, &text, None);
+            let e = match rres {
+                Err(e) => e,
+                Ok(_) => panic!("oversize mode 1: Rust accepted a >MAXSTRPOS buflen"),
+            };
+            assert_eq!(err_class(&e), 2, "oversize mode 1: Rust class != program-limit");
+            let mut cout = COut::new();
+            let crc = unsafe {
+                pg_diff_tsvec_in(ctext.as_ptr(), 0, cout.buf.as_mut_ptr(), CBUF as i32,
+                                 &mut cout.len)
+            };
+            expect_limit_err(&Ok(()), crc, "oversize mode 1");
+            // Soft mode: the ereturn path records and returns None (io.rs:139).
+            let mut esc = SoftErrorContext::new(true);
+            let rsoft = tsvector_in_core(m, &text, Some(&mut esc));
+            assert!(matches!(rsoft, Ok(None)) && esc.error_occurred(),
+                    "oversize mode 1: Rust soft verdict != hard");
+            let mut cout2 = COut::new();
+            let crc2 = unsafe {
+                pg_diff_tsvec_in(ctext.as_ptr(), 1, cout2.buf.as_mut_ptr(), CBUF as i32,
+                                 &mut cout2.len)
+            };
+            assert_eq!(crc2, 2, "oversize mode 1: C soft verdict != hard");
+        }
+        2 => {
+            // Concat over-limit (op.rs b.strlen() > MAXSTRPOS): two halves
+            // that each parse fine but exceed the limit joined.
+            let mut halves: Vec<Vec<u8>> = Vec::with_capacity(2);
+            for half in 0..2u8 {
+                let n = 70_000 + jitter;
+                let mut text = Vec::with_capacity(n * 8);
+                for i in 0..n {
+                    text.push(b'a' + half);
+                    text.extend_from_slice(format!("{:06}:1 ", i).as_bytes());
+                }
+                let img = tsvector_in_core(m, &text, None)
+                    .expect("oversize half parse")
+                    .expect("no soft ctx");
+                halves.push(img[4..].to_vec());
+            }
+            let a = TsVec { payload: &halves[0] };
+            let b = TsVec { payload: &halves[1] };
+            let rres = adt_tsvector_core::op::tsvector_concat_core(m, a, b);
+            let e = match rres {
+                Err(e) => e,
+                Ok(_) => panic!("oversize mode 2: Rust concat accepted >MAXSTRPOS"),
+            };
+            assert_eq!(err_class(&e), 2, "oversize mode 2: Rust class != program-limit");
+            let mut cout = COut::new();
+            let crc = unsafe {
+                pg_diff_tsvec_concat(halves[0].as_ptr(), halves[0].len() as i32,
+                                     halves[1].as_ptr(), halves[1].len() as i32,
+                                     cout.buf.as_mut_ptr(), CBUF as i32, &mut cout.len)
+            };
+            expect_limit_err(&Ok(()), crc, "oversize mode 2");
+        }
+        _ => {
+            // recv total-lexeme-length guard (io.rs b.strlen() > MAXSTRPOS):
+            // ascending 207-byte lexemes; the guard fires only BEFORE an
+            // entry push, so the limit must be crossed before the last one:
+            // (n-1)*207 > MAXSTRPOS needs n >= 5069.
+            let n = 5_200 + jitter;
+            let mut wire = Vec::with_capacity(n * 220 + 4);
+            wire.extend_from_slice(&(n as i32).to_be_bytes());
+            for i in 0..n {
+                wire.extend_from_slice(format!("{:07}", i).as_bytes());
+                wire.extend_from_slice(&[b'a'; 200]);
+                wire.push(0);
+                wire.extend_from_slice(&0i16.to_be_bytes());
+            }
+            let rres = (|| -> types_error::PgResult<Vec<u8>> {
+                let mut vec = mcx::vec_with_capacity_in::<u8>(m, wire.len())?;
+                mcx::vec_append_bytes(&mut vec, &wire)?;
+                let mut si = stringinfo::StringInfo::from_vec(vec)?;
+                Ok(tsvector_recv_core(m, &mut si)?[4..].to_vec())
+            })();
+            let e = match rres {
+                Err(e) => e,
+                Ok(_) => panic!("oversize mode 3: Rust recv accepted >MAXSTRPOS"),
+            };
+            // recv reports the limit as a generic protocol error in both
+            // engines ("invalid tsvector: maximum total lexeme length
+            // exceeded" — errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
+            // on the C side); require the SAME class both sides.
+            let rclass = err_class(&e);
+            let mut cout = COut::new();
+            let crc = unsafe {
+                pg_diff_tsvec_recv(wire.as_ptr(), wire.len() as i32, cout.buf.as_mut_ptr(),
+                                   CBUF as i32, &mut cout.len)
+            };
+            assert_eq!(crc, 1, "oversize mode 3: C recv did not error");
+            let cclass = unsafe { pg_diff_errcode_get() };
+            assert_eq!(rclass, cclass, "oversize mode 3: errcode class divergence");
+        }
+    }
+}
+
 pub fn tsvector_core_diff(data: &[u8]) {
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };
     pin_utf8();
+    if sel == 0xff {
+        // Arm 8 (oversize): sel byte 0xff reserved AFTER the CI cluster floor run
+        // to witness the >MAXSTRPOS limit arms unreachable under MAX_TEXT.
+        arm_oversize(payload);
+        return;
+    }
     match sel % 8 {
         0 => arm_in_out_send(payload),
         1 => arm_recv(payload),

@@ -21,7 +21,11 @@
 
 use adt_tsvector_core::query::{Item, Operand, Operator, OP_AND, OP_NOT, OP_OR, OP_PHRASE};
 
-pub const MAX_ITEMS: usize = 32;
+// 96 (was 32 through the first CI cluster floor): >40 collected operands are
+// needed to reach pg_qsort's med3-of-9 pivot band in tsrank's
+// SortAndUniqItems — SQL-reachable (a 41-operand query), so the generator
+// envelope must include it.
+pub const MAX_ITEMS: usize = 96;
 
 /// Byte-stream cursor over the fuzz payload.
 struct Cur<'a> {

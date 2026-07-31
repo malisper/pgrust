@@ -172,7 +172,10 @@ fn build_weights_payload(shape: u8, ws: &[f32; 4], extra: f32) -> Vec<u8> {
         }
     };
     let ndim: i32 = if arm == 1 { 2 } else { 1 };
-    let hasnull = arm == 3;
+    // arm 3 = a null bit CLEARED (error on both sides); shape bit 3 = null
+    // bitmap PRESENT with all bits set (no nulls) — legal wire shape that
+    // exercises the dataoffset!=0 read path in getWeights (builtins.rs:43).
+    let hasnull = arm == 3 || shape & 8 != 0;
 
     // header after vl_len_: ndim, dataoffset, elemtype
     p.extend_from_slice(&ndim.to_ne_bytes());
@@ -196,9 +199,11 @@ fn build_weights_payload(shape: u8, ws: &[f32; 4], extra: f32) -> Vec<u8> {
         p.extend_from_slice(&1i32.to_ne_bytes());
     }
     if hasnull {
-        // one null bit cleared (element 2 null) -> "must not contain nulls"
         let mut bitmap = vec![0xFFu8; ((nitems as usize) + 7) / 8];
-        bitmap[0] &= !(1 << 2);
+        if arm == 3 {
+            // one null bit cleared (element 2 null) -> "must not contain nulls"
+            bitmap[0] &= !(1 << 2);
+        }
         p.extend_from_slice(&bitmap);
     }
     // pad to the data offset (payload offsets = image offsets minus vl_len_)
