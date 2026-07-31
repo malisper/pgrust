@@ -153,7 +153,7 @@ mod harnesses {
     }
 
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(32)] // assert_eq! on [i32;6] lowers to builtin memcmp (25-iter byte loop)
     fn eq_mda_get_range() {
         // i16-folded endpoints (no i32 overflow in endp-st+1).
         let n = sym_n();
@@ -173,7 +173,7 @@ mod harnesses {
     }
 
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(32)] // assert_eq! on [i32;6] lowers to builtin memcmp (25-iter byte loop)
     fn eq_mda_get_prod() {
         let n: i32 = kani::any();
         kani::assume((1..=MAXDIM as i32).contains(&n)); // C writes prod[n-1]
@@ -189,7 +189,7 @@ mod harnesses {
     }
 
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(32)] // assert_eq! on [i32;6] lowers to builtin memcmp (25-iter byte loop)
     fn eq_mda_get_offset_values() {
         let n: i32 = kani::any();
         kani::assume((1..=MAXDIM as i32).contains(&n));
@@ -209,7 +209,7 @@ mod harnesses {
     }
 
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(32)] // assert_eq! on [i32;6] lowers to builtin memcmp (25-iter byte loop)
     fn eq_mda_next_tuple() {
         // C precondition: span >= 1, curr a valid tuple under span.
         let n = sym_n(); // n = 0 probes the n<=0 early return
