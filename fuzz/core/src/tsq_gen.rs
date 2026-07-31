@@ -63,7 +63,7 @@ fn gen_node(cur: &mut Cur<'_>, budget: &mut usize, depth: usize) -> Node {
     let b = cur.u8();
     // leaf if out of budget, too deep, or the byte says so
     if *budget < 3 || depth > 6 || b & 0x80 == 0 {
-        *budget -= 1;
+        *budget = budget.saturating_sub(1);
         let sel = cur.u8();
         let lex: Vec<u8> = if sel & 0x40 != 0 {
             // fuzz-derived lexeme: 1..=4 raw bytes, NUL/quote-free ASCII-fold
@@ -82,11 +82,11 @@ fn gen_node(cur: &mut Cur<'_>, budget: &mut usize, depth: usize) -> Node {
     }
     match b % 4 {
         0 => {
-            *budget -= 1;
+            *budget = budget.saturating_sub(1);
             Node::Not { child: Box::new(gen_node(cur, budget, depth + 1)) }
         }
         oper => {
-            *budget -= 1;
+            *budget = budget.saturating_sub(1);
             let distance = if oper == 3 {
                 // OP_PHRASE distance: bias small, allow up to MAXENTRYPOS
                 let d = ((cur.u8() as u16) << 8 | cur.u8() as u16) % 16385;

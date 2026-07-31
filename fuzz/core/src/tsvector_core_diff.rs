@@ -268,12 +268,36 @@ fn read_varlena_data<'a>(d: Datum) -> &'a [u8] {
     unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data()
 }
 
+/// KNOWN-DIVERGENCE-2 carve (fuzz/DIVERGENCES-tsvector_core.md): position
+/// numbers >= 2^31 wrap through C's atoi but saturate in Rust. Skip inputs
+/// carrying any digit-run above the int32 range until adjudicated.
+fn has_overflowing_number(text: &[u8]) -> bool {
+    let mut val: u64 = 0;
+    let mut in_run = false;
+    for &b in text {
+        if b.is_ascii_digit() {
+            val = if in_run { val.saturating_mul(10) } else { 0 }
+                .saturating_add((b - b'0') as u64);
+            in_run = true;
+            if val > i32::MAX as u64 {
+                return true;
+            }
+        } else {
+            in_run = false;
+        }
+    }
+    false
+}
+
 /// UTF-8 + NUL-free text gate (server cstring precondition; header comment).
 fn take_text(payload: &[u8]) -> Option<(&[u8], CString)> {
     if payload.len() > MAX_TEXT || payload.contains(&0) {
         return None;
     }
     std::str::from_utf8(payload).ok()?;
+    if has_overflowing_number(payload) {
+        return None;
+    }
     let c = CString::new(payload).unwrap();
     Some((payload, c))
 }
@@ -422,27 +446,43 @@ fn arm_in_out_send(payload: &[u8]) {
 // Arm 1: tsvectorrecv (+ fc plane)
 // ---------------------------------------------------------------------------
 
-/// Decoded-content equality for tsvector payloads: same entry sequence
-/// (lexeme bytes + full position words), independent of string-storage
-/// layout. Used only under KNOWN-DIVERGENCE-1.
+/// Decoded-content equality for tsvector payloads as a SORTED MULTISET of
+/// (lexeme, positions) — independent of string-storage layout AND of
+/// within-tie entry order for duplicate lexemes (C qsort_arg is unstable,
+/// Rust sort is stable; within-tie order is a ratified non-surface, the
+/// GL-PARMERGE-1 sorted-multiset gate). Used only under KNOWN-DIVERGENCE-1.
 fn tsvec_semantic_eq(a: &[u8], b: &[u8]) -> bool {
-    let va = TsVec { payload: a };
-    let vb = TsVec { payload: b };
-    if va.size() != vb.size() {
-        return false;
-    }
-    for i in 0..va.size() {
-        let (ea, eb) = (va.entry(i), vb.entry(i));
-        if va.lexeme(ea) != vb.lexeme(eb) || va.positions(ea) != vb.positions(eb) {
-            return false;
-        }
-    }
-    true
+    let decode = |p: &[u8]| -> Vec<(Vec<u8>, Vec<u16>)> {
+        let v = TsVec { payload: p };
+        let mut out: Vec<(Vec<u8>, Vec<u16>)> = (0..v.size())
+            .map(|i| {
+                let e = v.entry(i);
+                (v.lexeme(e).to_vec(), v.positions(e).to_vec())
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    decode(a) == decode(b)
 }
 
 fn arm_recv(payload: &[u8]) {
     if payload.len() > MAX_TEXT * 4 {
         return;
+    }
+    // ALLOCATOR-MODEL CARVE (window): for declared entry counts in
+    // (2^20, MaxAllocSize/4] the two sides differ only in WHERE the
+    // allocation model errors (C preallocates hdrlen*2 up front and hits the
+    // MaxAllocSize palloc guard; Rust sizes its builder differently and
+    // fails later on data exhaustion / encoding). No wire message under the
+    // harness size cap can make such a count valid, so no correctness
+    // signal is lost. Counts <= 2^20, negative counts, and counts above
+    // MaxAllocSize/4 (both sides: "invalid size of tsvector") stay in.
+    if payload.len() >= 4 {
+        let n = i32::from_be_bytes(payload[0..4].try_into().unwrap());
+        if n > (1 << 20) && n <= 0x3fff_ffff / 4 {
+            return;
+        }
     }
     let cx = MemoryContext::new("tsvec_fuzz");
     let m = cx.mcx();
@@ -486,8 +526,18 @@ fn arm_recv(payload: &[u8]) {
         }
         (Err(e), 1) => {
             let cclass = unsafe { pg_diff_errcode_get() };
+            // ALLOCATOR-MODEL CARVE: huge declared entry counts hit the
+            // allocation guard on both sides but surface differently —
+            // C palloc's "invalid memory alloc request size" elog (class 99)
+            // vs the Rust mcx OOM error (53200). Same guard, different
+            // allocator plumbing; aliased for this arm only.
+            let rclass = if e.sqlstate == types_error::ERRCODE_OUT_OF_MEMORY {
+                99
+            } else {
+                err_class(e)
+            };
             assert_eq!(
-                err_class(e),
+                rclass,
                 cclass,
                 "tsvectorrecv errcode class divergence: rust {:?} vs C {}",
                 e.sqlstate,

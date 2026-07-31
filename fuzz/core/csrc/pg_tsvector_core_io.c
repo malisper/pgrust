@@ -108,10 +108,23 @@ pg_tsvec_arena_track(void *p)
 	pg_tsvec_arena[pg_tsvec_arena_n++] = p;
 }
 
+/* real palloc contract: requests beyond MaxAllocSize are rejected with
+ * elog(ERROR, "invalid memory alloc request size") — enforced here so the
+ * oracle can never balloon the fuzz host either. */
+static void
+pg_tsvec_alloc_guard(size_t n)
+{
+	if (n > (size_t) 0x3fffffff)
+		pg_tsvec_elog_error("invalid memory alloc request size");
+}
+
 void *
 pg_tsvec_palloc(size_t n)
 {
-	void	   *p = malloc(n ? n : 1);
+	void	   *p;
+
+	pg_tsvec_alloc_guard(n);
+	p = malloc(n ? n : 1);
 
 	assert(p != NULL);
 	pg_tsvec_arena_track(p);
@@ -121,7 +134,10 @@ pg_tsvec_palloc(size_t n)
 void *
 pg_tsvec_palloc0(size_t n)
 {
-	void	   *p = calloc(1, n ? n : 1);
+	void	   *p;
+
+	pg_tsvec_alloc_guard(n);
+	p = calloc(1, n ? n : 1);
 
 	assert(p != NULL);
 	pg_tsvec_arena_track(p);
@@ -137,7 +153,10 @@ pg_tsvec_repalloc(void *old, size_t n)
 	{
 		if (pg_tsvec_arena[i] == old)
 		{
-			void	   *p = realloc(old, n);
+			void	   *p;
+
+			pg_tsvec_alloc_guard(n);
+			p = realloc(old, n);
 
 			assert(p != NULL);
 			pg_tsvec_arena[i] = p;
@@ -366,7 +385,118 @@ pq_getmsgint(StringInfo msg, int b)
 	return result;
 }
 
-/* pq_getmsgrawstring + identity conversion (pqformat.c contract) */
+/* VERBATIM from src/common/wchar.c @ 62d6c7d3df */
+static bool
+pg_utf8_islegal(const unsigned char *source, int length)
+{
+	unsigned char a;
+
+	switch (length)
+	{
+		default:
+			/* reject lengths 5 and 6 for now */
+			return false;
+		case 4:
+			a = source[3];
+			if (a < 0x80 || a > 0xBF)
+				return false;
+			/* FALL THRU */
+		case 3:
+			a = source[2];
+			if (a < 0x80 || a > 0xBF)
+				return false;
+			/* FALL THRU */
+		case 2:
+			a = source[1];
+			switch (*source)
+			{
+				case 0xE0:
+					if (a < 0xA0 || a > 0xBF)
+						return false;
+					break;
+				case 0xED:
+					if (a < 0x80 || a > 0x9F)
+						return false;
+					break;
+				case 0xF0:
+					if (a < 0x90 || a > 0xBF)
+						return false;
+					break;
+				case 0xF4:
+					if (a < 0x80 || a > 0x8F)
+						return false;
+					break;
+				default:
+					if (a < 0x80 || a > 0xBF)
+						return false;
+					break;
+			}
+			/* FALL THRU */
+		case 1:
+			a = *source;
+			if (a >= 0x80 && a < 0xC2)
+				return false;
+			if (a > 0xF4)
+				return false;
+			break;
+	}
+	return true;
+}
+
+/* VERBATIM from src/common/wchar.c @ 62d6c7d3df */
+static int
+pg_utf8_verifychar(const unsigned char *s, int len)
+{
+	int			l;
+
+	if ((*s & 0x80) == 0)
+	{
+		if (*s == '\0')
+			return -1;
+		return 1;
+	}
+	else if ((*s & 0xe0) == 0xc0)
+		l = 2;
+	else if ((*s & 0xf0) == 0xe0)
+		l = 3;
+	else if ((*s & 0xf8) == 0xf0)
+		l = 4;
+	else
+		l = 1;
+
+	if (l > len)
+		return -1;
+
+	if (!pg_utf8_islegal(s, l))
+		return -1;
+
+	return l;
+}
+
+/* pg_verify_mbstr(PG_UTF8, ...) contract: invalid byte sequence -> 22021
+ * (real pq_getmsgstring runs pg_client_to_server -> pg_any_to_server,
+ * which VALIDATES even when client==server encoding). */
+static void
+pg_tsvec_verify_utf8(const char *s, int len)
+{
+	const unsigned char *p = (const unsigned char *) s;
+	int			remaining = len;
+
+	while (remaining > 0)
+	{
+		int			l = pg_utf8_verifychar(p, remaining);
+
+		if (l < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+					 errmsg("invalid byte sequence for encoding")));
+		p += l;
+		remaining -= l;
+	}
+}
+
+/* pq_getmsgrawstring + validating same-encoding conversion (pqformat.c +
+ * mbutils.c pg_any_to_server contract) */
 const char *
 pq_getmsgstring(StringInfo msg)
 {
@@ -378,6 +508,7 @@ pq_getmsgstring(StringInfo msg)
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg("invalid string in message")));
 	msg->cursor += (int) slen + 1;
+	pg_tsvec_verify_utf8(str, (int) slen);
 	return str;
 }
 
