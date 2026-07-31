@@ -267,9 +267,32 @@ pub fn aclitemin(
     Ok(Some(aip))
 }
 
+/// Decimal rendering of an oid — the numeric fallback aclitemout uses when
+/// a role oid has no pg_authid entry (C: `sprintf(p, "%u", oid)`).
+/// Behavior-identical to `oid.to_string()`; factored out of core::fmt so the
+/// proofs/aclcheck family can prove it C≡Rust without the formatting
+/// machinery (spot_aclitemout_numeric symex wall, 2026-07-31).
+pub fn push_oid_decimal(out: &mut Vec<u8>, oid: u32) {
+    let mut tmp = [0u8; 10];
+    let mut n = 0usize;
+    let mut v = oid;
+    loop {
+        tmp[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        out.push(tmp[n]);
+    }
+}
+
 fn put_role_name(out: &mut Vec<u8>, roleid: u32) -> PgResult<()> {
     let Some(tuple) = SearchSysCache1(AUTHOID, SysCacheKey::Value(Datum::from_oid(roleid)))? else {
-        out.extend_from_slice(roleid.to_string().as_bytes());
+        push_oid_decimal(out, roleid);
         return Ok(());
     };
     let d = SysCacheGetAttrNotNull(AUTHOID, &tuple, ANUM_PG_AUTHID_ROLNAME)?;
@@ -296,6 +319,53 @@ pub fn aclitemout_into(aip: &AclItem, buf: &mut Vec<u8>) -> PgResult<()> {
     buf.push(b'/');
     put_role_name(buf, aip.ai_grantor)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Behavior-identity witness for the kernel extraction: push_oid_decimal
+    /// must render exactly what `oid.to_string()` rendered before the
+    /// refactor (proofs/aclcheck eq_oid_decimal proves it against the C
+    /// sprintf-%u model; this pins the Rust-vs-Rust identity).
+    #[test]
+    fn push_oid_decimal_matches_to_string() {
+        let cases: &[u32] = &[
+            0,
+            1,
+            9,
+            10,
+            99,
+            100,
+            999,
+            1000,
+            9999,
+            10000,
+            99999,
+            100000,
+            999999,
+            1000000,
+            9999999,
+            10000000,
+            99999999,
+            100000000,
+            999999999,
+            1000000000,
+            305419896,
+            4294967294,
+            4294967295,
+        ];
+        for &v in cases {
+            let mut buf = Vec::new();
+            super::push_oid_decimal(&mut buf, v);
+            assert_eq!(buf, v.to_string().into_bytes(), "v={v}");
+        }
+        // dense sweep across the low range
+        for v in 0u32..100000 {
+            let mut buf = Vec::new();
+            super::push_oid_decimal(&mut buf, v);
+            assert_eq!(buf, v.to_string().into_bytes(), "v={v}");
+        }
+    }
 }
 
 pub fn aclitemout<'mcx>(mcx: Mcx<'mcx>, aip: &AclItem) -> PgResult<PgVec<'mcx, u8>> {
