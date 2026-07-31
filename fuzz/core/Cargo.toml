@@ -74,6 +74,15 @@ unicode_category = { path = "../../crates/common/unicode_category" }
 # enc_tables_diff (p1-laneg encoding+tables batch):
 adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }  # timestamp_diff (scaffold.py)
+
+adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }  # timestamp_diff
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }  # timestamp_diff fc plane (owed fc_timestamp_mi)
+pgtz = { path = "../../crates/backend/timezone/pgtz" }  # timestamp_diff env pin
+elog = { path = "../../crates/backend/utils/error/elog" }  # timestamp_diff env pin
+fd = { path = "../../crates/backend/storage/file/fd" }  # timestamp_diff env pin
+xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }  # timestamp_diff env pin
+timestamp_seams = { path = "../../crates/backend/utils/adt/timestamp_seams" }  # timestamp_diff env pin
 
 [build-dependencies]
 cc = "1"

@@ -13,6 +13,9 @@ init_small = { path = "../../init/init_small" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 numutils = { path = "../numutils" }
+# strtod model for ParseISO8601Number (differential-validated scanner;
+# p1-laney fuzz witnesses: 'P1Y2E314' 22015-vs-22007, 'P0X8Y' hex accept)
+adt_float = { path = "../float" }
 localtime = { path = "../../../timezone/localtime" }
 pgtz = { path = "../../../timezone/pgtz" }
 timestamp_seams = { path = "../timestamp_seams" }

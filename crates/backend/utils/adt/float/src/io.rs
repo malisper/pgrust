@@ -49,20 +49,23 @@ fn ldexp(mant: f64, exp: i32) -> f64 {
     result
 }
 
-enum NumKind {
+pub enum NumKind {
     Decimal,
     Hex,
 }
 
-struct NumToken {
-    len: usize,
-    nonzero: bool,
-    kind: NumKind,
+pub struct NumToken {
+    pub len: usize,
+    pub nonzero: bool,
+    pub kind: NumKind,
 }
 
 // The strtod/strtof-recognizable leading token: decimal grammar plus the C99
 // hex-float grammar the platform strtod accepts. No leading-whitespace skip.
-fn scan_number(s: &[u8]) -> Option<NumToken> {
+// pub for adt_datetime's ParseISO8601Number strtod model (p1-laney: its
+// "anything strtod would take" contract needs the same scanner; the fuzz
+// witness is 'P0X8Y' = 8 years on real 18.3).
+pub fn scan_number(s: &[u8]) -> Option<NumToken> {
     let mut i = 0usize;
     if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
         i += 1;
@@ -153,7 +156,7 @@ fn scan_number(s: &[u8]) -> Option<NumToken> {
     })
 }
 
-fn parse_hex_float(token: &[u8]) -> f64 {
+pub fn parse_hex_float(token: &[u8]) -> f64 {
     round_to_float(token, 52, 11)
 }
 
@@ -483,7 +486,7 @@ fn nan_payload_len(s: &[u8]) -> usize {
 }
 
 // Order matters: "Infinity" before "inf". strtod also accepts a signed NaN.
-fn special_float8(s: &[u8]) -> Option<(f64, usize)> {
+pub fn special_float8(s: &[u8]) -> Option<(f64, usize)> {
     if strncasecmp_eq(s, b"NaN") {
         Some((get_float8_nan(), nan_payload_len(s)))
     } else if (s.first() == Some(&b'+') || s.first() == Some(&b'-')) && strncasecmp_eq(&s[1..], b"NaN")

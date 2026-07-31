@@ -2487,45 +2487,34 @@ pub fn DecodeInterval(
 }
 
 /// C strtod prefix parse: value and byte offset just past the parsed number.
-fn strtod_prefix(s: &[u8]) -> Option<(f64, usize)> {
-    let mut i = 0usize;
-    while i < s.len() && is_space(s[i]) {
-        i += 1;
+/// Platform-`strtod` model: value, consumed length, and the errno==ERANGE
+/// flag. ParseISO8601Number's contract is "anything that strtod() would
+/// take" (datetime.c:3887) — that includes C99 hex floats ('P0X8Y' is
+/// 8 years on real 18.3; fuzz witness p1-laney) and inf/nan specials —
+/// and its errno!=0 check makes over/underflow DTERR_BAD_FORMAT, not
+/// FIELD_OVERFLOW ('P1Y2E314' is 22007 on real 18.3, 22015 here before
+/// this model; fuzz witness p1-laney). ERANGE per glibc/macOS strtod:
+/// overflow to ±inf, or underflow to zero-or-subnormal from a nonzero
+/// mantissa. No leading-whitespace skip (the caller's first-byte guard
+/// already excludes it).
+fn strtod_model(s: &[u8]) -> Option<(f64, usize, bool)> {
+    if let Some(tok) = adt_float::scan_number(s) {
+        // SAFETY-free slice: scan_number consumed ASCII only.
+        let token = &s[..tok.len];
+        let val = match tok.kind {
+            adt_float::NumKind::Decimal => {
+                core::str::from_utf8(token).ok()?.parse::<f64>().ok()?
+            }
+            adt_float::NumKind::Hex => adt_float::parse_hex_float(token),
+        };
+        let erange = val.is_infinite()
+            || (tok.nonzero && val.abs() < f64::MIN_POSITIVE);
+        return Some((val, tok.len, erange));
     }
-    let start = i;
-    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
-        i += 1;
-    }
-    let mut saw_digit = false;
-    while i < s.len() && is_digit(s[i]) {
-        i += 1;
-        saw_digit = true;
-    }
-    if i < s.len() && s[i] == b'.' {
-        i += 1;
-        while i < s.len() && is_digit(s[i]) {
-            i += 1;
-            saw_digit = true;
-        }
-    }
-    if saw_digit && i < s.len() && (s[i] == b'e' || s[i] == b'E') {
-        let mut j = i + 1;
-        if j < s.len() && (s[j] == b'+' || s[j] == b'-') {
-            j += 1;
-        }
-        let exp_start = j;
-        while j < s.len() && is_digit(s[j]) {
-            j += 1;
-        }
-        if j > exp_start {
-            i = j;
-        }
-    }
-    if !saw_digit {
-        return None;
-    }
-    let parsed = core::str::from_utf8(&s[start..i]).ok()?;
-    parsed.parse::<f64>().ok().map(|v| (v, i))
+    // ±inf/±infinity/±nan(...) — strtod accepts these with errno 0; the
+    // range check downstream turns them into DTERR_FIELD_OVERFLOW exactly
+    // as C does ('P-infY' is 22015 on real 18.3).
+    adt_float::special_float8(s).map(|(v, n)| (v, n, false))
 }
 
 fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f64) -> i32 {
@@ -2535,10 +2524,10 @@ fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f6
     {
         return DTERR_BAD_FORMAT;
     }
-    let Some((val, e)) = strtod_prefix(s) else {
+    let Some((val, e, erange)) = strtod_model(s) else {
         return DTERR_BAD_FORMAT;
     };
-    if e == 0 {
+    if e == 0 || erange {
         return DTERR_BAD_FORMAT;
     }
     *end = e;

@@ -237,3 +237,11 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+# timestamp_diff: scaffolded by fuzz/scaffold.py — see README-TODO-timestamp_diff.md.
+[[bin]]
+name = "timestamp_diff"
+path = "fuzz_targets/timestamp_diff.rs"
+test = false
+doc = false
+bench = false
