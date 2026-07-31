@@ -1,0 +1,13 @@
+[package]
+name = "proof-strfam"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED ports, not copies.
+wait_error = { path = "../../crates/common/wait_error" }
+relpath = { path = "../../crates/common/relpath" }
+pg_string = { path = "../../crates/common/string" }
+types_core = { path = "../../crates/_support/types/types_core" }
+
+[workspace]

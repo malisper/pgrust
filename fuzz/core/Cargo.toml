@@ -29,6 +29,15 @@ adt_geo = { path = "../../crates/backend/utils/adt/geo" }
 adt_encode = { path = "../../crates/backend/utils/adt/encode" }  # encode_diff (scaffold.py)
 datum = { path = "../../crates/_support/types/datum" }  # fc-wrapper plane (scaffold.py)
 types_fmgr = { path = "../../crates/_support/types/fmgr" }  # fc-wrapper plane (scaffold.py)
+# strfam_diff (p1-lanec string-family batch):
+pg_string = { path = "../../crates/common/string" }
+archive = { path = "../../crates/common/archive" }
+percentrepl = { path = "../../crates/common/percentrepl" }
+relpath = { path = "../../crates/common/relpath" }
+relpath_seams = { path = "../../crates/common/relpath_seams" }
+wait_error = { path = "../../crates/common/wait_error" }
+types_storage = { path = "../../crates/_support/types/types_storage" }
+libc = "0.2"
 
 [build-dependencies]
 cc = "1"

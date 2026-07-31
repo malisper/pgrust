@@ -107,3 +107,10 @@ path = "fuzz_targets/encode_diff.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "strfam_diff"
+path = "fuzz_targets/strfam_diff.rs"
+test = false
+doc = false
+bench = false
