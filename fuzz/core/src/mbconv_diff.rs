@@ -653,6 +653,24 @@ mod tests {
         }
     }
 
+    /// Replay the COMMITTED corpus (seeds + CI cluster coverage-guided growth)
+    /// through the fuzz entry — the mutation-audit kill rail: every input
+    /// libFuzzer retained for new C/Rust edges becomes a standing witness,
+    /// no libfuzzer build needed.
+    #[test]
+    fn corpus_replay() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/mbconv_diff");
+        let mut n = 0u32;
+        for e in std::fs::read_dir(dir).expect("committed corpus dir") {
+            let p = e.unwrap().path();
+            if p.is_file() {
+                mbconv_diff(&std::fs::read(&p).unwrap());
+                n += 1;
+            }
+        }
+        assert!(n > 5000, "corpus unexpectedly small: {n}");
+    }
+
     /// Full 1-byte and 2-byte domains for every pair (fast: 84 x 65792 x 2).
     #[test]
     fn exhaustive_k1_k2_all_pairs() {
