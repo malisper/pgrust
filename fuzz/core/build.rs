@@ -217,10 +217,20 @@ fn main() {
         // SCAFFOLD-TODO #error paste site in csrc/pg_tsrank_io.c is filled
         // with verbatim vendored C (README-TODO-tsrank_diff.md step 1).
         // .file("csrc/pg_tsrank_io.c")
-        // COMPILE GATE (tsvector_core_diff, scaffold.py): uncomment ONLY after every
-        // SCAFFOLD-TODO #error paste site in csrc/pg_tsvector_core_io.c is filled
-        // with verbatim vendored C (README-TODO-tsvector_core_diff.md step 1).
-        // .file("csrc/pg_tsvector_core_io.c")
+        // tsvector_core_diff oracle (p1-laneae): runtime shims + driver
+        // entries in pg_tsvector_core_io.c; VERBATIM 18.3 C under
+        // csrc/tsvec/ (tsvector.c, tsvector_parser.c, tsvector_op.c with
+        // labeled carve blocks, pg_qsort/qsort_arg for tie-order parity).
+        .file("csrc/pg_tsvector_core_io.c")
+        .file("csrc/tsvec/tsvector.c")
+        .file("csrc/tsvec/tsvector_parser.c")
+        .file("csrc/tsvec/tsvector_op.c")
+        .file("csrc/tsvec/qsort.c")
+        .file("csrc/tsvec/qsort_arg.c")
+        // tsvec oracle header web: AFTER csrc/shim so ryu/other oracles
+        // keep resolving "postgres.h" to the shim one; the tsvec TUs find
+        // their own postgres.h/c.h same-directory (quote-include rule).
+        .include("csrc/tsvec/include")
         .compile("pg_difffuzz_oracle");
 
     // wcharfam oracle (p1-laneah): verbatim 18.3 wchar.c + encnames.c +

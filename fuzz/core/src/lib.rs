@@ -537,6 +537,7 @@ pub use define_diff::define_diff;
 pub mod nodesfam_diff;
 
 // tsvector_core_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-tsvector_core_diff.md.
+pub mod tsq_gen;
 pub mod tsvector_core_diff;
 pub use tsvector_core_diff::tsvector_core_diff;
 
