@@ -301,11 +301,19 @@ fn setup() -> bool {
                 oprcanhash: true,
             }))
         });
+        // Pinned map for THIS harness's oids; every other oid delegates to
+        // the real fmgr so sibling modules sharing the test binary (e.g.
+        // arrayfuncs_diff's width_bucket arm resolving btint4cmp 351 /
+        // bttextcmp 360) still work when this module owns the environment.
         fmgr_seams::fmgr_info::set(|oid| match oid {
             65 => Ok(FmgrInfo::new(adt_int::builtins::fc_int4eq, 65, 2, true, false)),
             67 => Ok(FmgrInfo::new(varlena::builtins::fc_texteq, 67, 2, true, false)),
-            _ => panic!("fmgr_info: unexpected oid {oid}"),
+            _ => fmgr_core::fmgr_info(oid),
         });
+        // fmgr_core::init_seams's second install (arrayfuncs_diff runs it
+        // under catch_unwind) aborts at the fmgr_info panic before reaching
+        // this seam — install it here so the environment stays complete.
+        fmgr_seams::fmgr_info_not_ported_name::set(fmgr_core::fmgr_info_not_ported_name);
         fmgr_seams::get_fn_expr_argtype::set(|_flinfo, _argnum| ARGTYPE_PIN.with(|c| c.get()));
         // catch_unwind tolerates another lane's harness installing the
         // detoast seam first (double-install panics; all lanes share one

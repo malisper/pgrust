@@ -114,6 +114,14 @@ fn init_ops_env() {
             detoast_seams::detoast_attr::set(detoast::detoast_attr)
         });
     });
+    // If the varstr pin above LOST to the real pg_locale (jsonpath_diff
+    // installs pg_locale::init_seams; seam installs are first-wins), the
+    // real varstr_cmp_locale needs the per-thread default locale armed —
+    // pinned to C it is behaviorally identical to this module's
+    // varstrfastcmp_c pin (jsonpath_diff::setup convention).
+    if !pg_locale::default_locale_installed() {
+        pg_locale::set_default_locale_c_for_tests();
+    }
 }
 
 /// 8-aligned byte buffer (PG datum images are read with aligned int32/

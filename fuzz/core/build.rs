@@ -133,6 +133,20 @@ fn main() {
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         jsonbfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
+    // SYMBOL ISOLATION vs pg_hashfn_io.c (p1-laneh): jsonbfam/hashfn.c is a
+    // second verbatim hashfn.c compile; GNU ld hard-errors on the duplicate
+    // definitions (multiple definition of `string_hash` …) while Apple ld64
+    // tolerates them — the exact wave-1 first-definition-wins hazard, and
+    // the reason every Linux mutants rail at the wave-3 train sha refused
+    // to build. Rename every extern this TU exports (macro renames like
+    // mbconv's bsearch carve).
+    for s in [
+        "hash_bytes", "hash_bytes_extended", "hash_bytes_uint32",
+        "hash_bytes_uint32_extended", "string_hash", "tag_hash",
+        "uint32_hash",
+    ] {
+        jsonbfam.define(s, format!("jbfam_{s}").as_str());
+    }
     for f in [
         "pg_jsonbio_io.c", "jsonbfam/jsonapi.c", "jsonbfam/wchar.c",
         "jsonbfam/stringinfo.c", "jsonbfam/jsonb_util.c",

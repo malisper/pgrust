@@ -111,11 +111,22 @@ macro_rules! seam {
                 ::std::sync::atomic::AtomicPtr::new(__uninstalled_stub as Signature as *mut ());
 
             pub fn set(implementation: Signature) {
-                let prev = SLOT.swap(
-                    implementation as *mut (),
-                    ::std::sync::atomic::Ordering::Relaxed,
-                );
-                if prev != __stub_ptr() {
+                // compare_exchange from the stub, NOT swap-then-panic: a
+                // second install must FAIL WITHOUT CLOBBERING the first.
+                // (Found by the wave-3 fuzz train: test harnesses that
+                // tolerate the double-install panic via catch_unwind were
+                // silently replacing the owning module's seam — the panic
+                // fired AFTER the swap, so "tolerated" meant
+                // last-writer-wins and a mixed seam environment.)
+                if SLOT
+                    .compare_exchange(
+                        __stub_ptr(),
+                        implementation as *mut (),
+                        ::std::sync::atomic::Ordering::Relaxed,
+                        ::std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_err()
+                {
                     panic!(concat!("seam installed twice: ", module_path!()));
                 }
             }
