@@ -151,6 +151,14 @@ const TZDISP_LIMIT: i32 = 16 * 3600; /* datetime.h: max zone displacement */
 const DATE_MIN: i64 = -2_451_545;
 const DATE_MAX: i64 = 2_932_896;
 
+/// The pinned environment is shared with the sibling `datetime_convert_diff`
+/// target (identical GMT / clock / tz-database pins, mirroring the same C
+/// oracle); exposed so there is ONE definition of it rather than two that can
+/// silently drift apart.
+pub fn init_env_for_siblings() {
+    init_env();
+}
+
 fn init_env() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

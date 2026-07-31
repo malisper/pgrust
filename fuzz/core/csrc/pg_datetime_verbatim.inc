@@ -259,6 +259,96 @@ dt2time(Timestamp jd, int *hour, int *min, int *sec, fsec_t *fsec)
 	*fsec = time - (*sec * USECS_PER_SEC);
 }								/* dt2time() */
 
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c timestamp2tm ==== */
+
+int
+timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec, const char **tzn, pg_tz *attimezone)
+{
+	Timestamp	date;
+	Timestamp	time;
+	pg_time_t	utime;
+
+	/* Use session timezone if caller asks for default */
+	if (attimezone == NULL)
+		attimezone = session_timezone;
+
+	time = dt;
+	TMODULO(time, date, USECS_PER_DAY);
+
+	if (time < INT64CONST(0))
+	{
+		time += USECS_PER_DAY;
+		date -= 1;
+	}
+
+	/* add offset to go from J2000 back to standard Julian date */
+	date += POSTGRES_EPOCH_JDATE;
+
+	/* Julian day routine does not work for negative Julian days */
+	if (date < 0 || date > (Timestamp) INT_MAX)
+		return -1;
+
+	j2date((int) date, &tm->tm_year, &tm->tm_mon, &tm->tm_mday);
+	dt2time(time, &tm->tm_hour, &tm->tm_min, &tm->tm_sec, fsec);
+
+	/* Done if no TZ conversion wanted */
+	if (tzp == NULL)
+	{
+		tm->tm_isdst = -1;
+		tm->tm_gmtoff = 0;
+		tm->tm_zone = NULL;
+		if (tzn != NULL)
+			*tzn = NULL;
+		return 0;
+	}
+
+	/*
+	 * If the time falls within the range of pg_time_t, use pg_localtime() to
+	 * rotate to the local time zone.
+	 *
+	 * First, convert to an integral timestamp, avoiding possibly
+	 * platform-specific roundoff-in-wrong-direction errors, and adjust to
+	 * Unix epoch.  Then see if we can convert to pg_time_t without loss. This
+	 * coding avoids hardwiring any assumptions about the width of pg_time_t,
+	 * so it should behave sanely on machines without int64.
+	 */
+	dt = (dt - *fsec) / USECS_PER_SEC +
+		(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+	utime = (pg_time_t) dt;
+	if ((Timestamp) utime == dt)
+	{
+		struct pg_tm *tx = pg_localtime(&utime, attimezone);
+
+		tm->tm_year = tx->tm_year + 1900;
+		tm->tm_mon = tx->tm_mon + 1;
+		tm->tm_mday = tx->tm_mday;
+		tm->tm_hour = tx->tm_hour;
+		tm->tm_min = tx->tm_min;
+		tm->tm_sec = tx->tm_sec;
+		tm->tm_isdst = tx->tm_isdst;
+		tm->tm_gmtoff = tx->tm_gmtoff;
+		tm->tm_zone = tx->tm_zone;
+		*tzp = -tm->tm_gmtoff;
+		if (tzn != NULL)
+			*tzn = tm->tm_zone;
+	}
+	else
+	{
+		/*
+		 * When out of range of pg_time_t, treat as GMT
+		 */
+		*tzp = 0;
+		/* Mark this as *no* time zone available */
+		tm->tm_isdst = -1;
+		tm->tm_gmtoff = 0;
+		tm->tm_zone = NULL;
+		if (tzn != NULL)
+			*tzn = NULL;
+	}
+
+	return 0;
+}
+
 /* ==== VERBATIM: src/backend/utils/adt/timestamp.c GetEpochTime ==== */
 
 void
@@ -5176,4 +5266,363 @@ timetz_out(PG_FUNCTION_ARGS)
 
 	result = pstrdup(buf);
 	PG_RETURN_CSTRING(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c date2timestamptz_opt_overflow ==== */
+
+TimestampTz
+date2timestamptz_opt_overflow(DateADT dateVal, int *overflow)
+{
+	TimestampTz result;
+	struct pg_tm tt,
+			   *tm = &tt;
+	int			tz;
+
+	if (overflow)
+		*overflow = 0;
+
+	if (DATE_IS_NOBEGIN(dateVal))
+		TIMESTAMP_NOBEGIN(result);
+	else if (DATE_IS_NOEND(dateVal))
+		TIMESTAMP_NOEND(result);
+	else
+	{
+		/*
+		 * Since dates have the same minimum values as timestamps, only upper
+		 * boundary need be checked for overflow.
+		 */
+		if (dateVal >= (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE))
+		{
+			if (overflow)
+			{
+				*overflow = 1;
+				TIMESTAMP_NOEND(result);
+				return result;
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+						 errmsg("date out of range for timestamp")));
+			}
+		}
+
+		j2date(dateVal + POSTGRES_EPOCH_JDATE,
+			   &(tm->tm_year), &(tm->tm_mon), &(tm->tm_mday));
+		tm->tm_hour = 0;
+		tm->tm_min = 0;
+		tm->tm_sec = 0;
+		tz = DetermineTimeZoneOffset(tm, session_timezone);
+
+		result = dateVal * USECS_PER_DAY + tz * USECS_PER_SEC;
+
+		/*
+		 * Since it is possible to go beyond allowed timestamptz range because
+		 * of time zone, check for allowed timestamp range after adding tz.
+		 */
+		if (!IS_VALID_TIMESTAMP(result))
+		{
+			if (overflow)
+			{
+				if (result < MIN_TIMESTAMP)
+				{
+					*overflow = -1;
+					TIMESTAMP_NOBEGIN(result);
+				}
+				else
+				{
+					*overflow = 1;
+					TIMESTAMP_NOEND(result);
+				}
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+						 errmsg("date out of range for timestamp")));
+			}
+		}
+	}
+
+	return result;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c date2timestamptz ==== */
+
+static TimestampTz
+date2timestamptz(DateADT dateVal)
+{
+	return date2timestamptz_opt_overflow(dateVal, NULL);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c date_timestamptz ==== */
+
+Datum
+date_timestamptz(PG_FUNCTION_ARGS)
+{
+	DateADT		dateVal = PG_GETARG_DATEADT(0);
+	TimestampTz result;
+
+	result = date2timestamptz(dateVal);
+
+	PG_RETURN_TIMESTAMP(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c timestamp_date ==== */
+
+Datum
+timestamp_date(PG_FUNCTION_ARGS)
+{
+	Timestamp	timestamp = PG_GETARG_TIMESTAMP(0);
+	DateADT		result;
+	struct pg_tm tt,
+			   *tm = &tt;
+	fsec_t		fsec;
+
+	if (TIMESTAMP_IS_NOBEGIN(timestamp))
+		DATE_NOBEGIN(result);
+	else if (TIMESTAMP_IS_NOEND(timestamp))
+		DATE_NOEND(result);
+	else
+	{
+		if (timestamp2tm(timestamp, NULL, tm, &fsec, NULL, NULL) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+					 errmsg("timestamp out of range")));
+
+		result = date2j(tm->tm_year, tm->tm_mon, tm->tm_mday) - POSTGRES_EPOCH_JDATE;
+	}
+
+	PG_RETURN_DATEADT(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c timestamptz_date ==== */
+
+Datum
+timestamptz_date(PG_FUNCTION_ARGS)
+{
+	TimestampTz timestamp = PG_GETARG_TIMESTAMP(0);
+	DateADT		result;
+	struct pg_tm tt,
+			   *tm = &tt;
+	fsec_t		fsec;
+	int			tz;
+
+	if (TIMESTAMP_IS_NOBEGIN(timestamp))
+		DATE_NOBEGIN(result);
+	else if (TIMESTAMP_IS_NOEND(timestamp))
+		DATE_NOEND(result);
+	else
+	{
+		if (timestamp2tm(timestamp, &tz, tm, &fsec, NULL, NULL) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+					 errmsg("timestamp out of range")));
+
+		result = date2j(tm->tm_year, tm->tm_mon, tm->tm_mday) - POSTGRES_EPOCH_JDATE;
+	}
+
+	PG_RETURN_DATEADT(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c timestamp_time ==== */
+
+Datum
+timestamp_time(PG_FUNCTION_ARGS)
+{
+	Timestamp	timestamp = PG_GETARG_TIMESTAMP(0);
+	TimeADT		result;
+	struct pg_tm tt,
+			   *tm = &tt;
+	fsec_t		fsec;
+
+	if (TIMESTAMP_NOT_FINITE(timestamp))
+		PG_RETURN_NULL();
+
+	if (timestamp2tm(timestamp, NULL, tm, &fsec, NULL, NULL) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("timestamp out of range")));
+
+	/*
+	 * Could also do this with time = (timestamp / USECS_PER_DAY *
+	 * USECS_PER_DAY) - timestamp;
+	 */
+	result = ((((tm->tm_hour * MINS_PER_HOUR + tm->tm_min) * SECS_PER_MINUTE) + tm->tm_sec) *
+			  USECS_PER_SEC) + fsec;
+
+	PG_RETURN_TIMEADT(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c timestamptz_time ==== */
+
+Datum
+timestamptz_time(PG_FUNCTION_ARGS)
+{
+	TimestampTz timestamp = PG_GETARG_TIMESTAMP(0);
+	TimeADT		result;
+	struct pg_tm tt,
+			   *tm = &tt;
+	int			tz;
+	fsec_t		fsec;
+
+	if (TIMESTAMP_NOT_FINITE(timestamp))
+		PG_RETURN_NULL();
+
+	if (timestamp2tm(timestamp, &tz, tm, &fsec, NULL, NULL) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("timestamp out of range")));
+
+	/*
+	 * Could also do this with time = (timestamp / USECS_PER_DAY *
+	 * USECS_PER_DAY) - timestamp;
+	 */
+	result = ((((tm->tm_hour * MINS_PER_HOUR + tm->tm_min) * SECS_PER_MINUTE) + tm->tm_sec) *
+			  USECS_PER_SEC) + fsec;
+
+	PG_RETURN_TIMEADT(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c timestamptz_timetz ==== */
+
+Datum
+timestamptz_timetz(PG_FUNCTION_ARGS)
+{
+	TimestampTz timestamp = PG_GETARG_TIMESTAMP(0);
+	TimeTzADT  *result;
+	struct pg_tm tt,
+			   *tm = &tt;
+	int			tz;
+	fsec_t		fsec;
+
+	if (TIMESTAMP_NOT_FINITE(timestamp))
+		PG_RETURN_NULL();
+
+	if (timestamp2tm(timestamp, &tz, tm, &fsec, NULL, NULL) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("timestamp out of range")));
+
+	result = (TimeTzADT *) palloc(sizeof(TimeTzADT));
+
+	tm2timetz(tm, fsec, tz, result);
+
+	PG_RETURN_TIMETZADT_P(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c interval_time ==== */
+
+Datum
+interval_time(PG_FUNCTION_ARGS)
+{
+	Interval   *span = PG_GETARG_INTERVAL_P(0);
+	TimeADT		result;
+
+	if (INTERVAL_NOT_FINITE(span))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("cannot convert infinite interval to time")));
+
+	result = span->time % USECS_PER_DAY;
+	if (result < 0)
+		result += USECS_PER_DAY;
+
+	PG_RETURN_TIMEADT(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c time_pl_interval ==== */
+
+Datum
+time_pl_interval(PG_FUNCTION_ARGS)
+{
+	TimeADT		time = PG_GETARG_TIMEADT(0);
+	Interval   *span = PG_GETARG_INTERVAL_P(1);
+	TimeADT		result;
+
+	if (INTERVAL_NOT_FINITE(span))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("cannot add infinite interval to time")));
+
+	result = time + span->time;
+	result -= result / USECS_PER_DAY * USECS_PER_DAY;
+	if (result < INT64CONST(0))
+		result += USECS_PER_DAY;
+
+	PG_RETURN_TIMEADT(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c time_mi_interval ==== */
+
+Datum
+time_mi_interval(PG_FUNCTION_ARGS)
+{
+	TimeADT		time = PG_GETARG_TIMEADT(0);
+	Interval   *span = PG_GETARG_INTERVAL_P(1);
+	TimeADT		result;
+
+	if (INTERVAL_NOT_FINITE(span))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("cannot subtract infinite interval from time")));
+
+	result = time - span->time;
+	result -= result / USECS_PER_DAY * USECS_PER_DAY;
+	if (result < INT64CONST(0))
+		result += USECS_PER_DAY;
+
+	PG_RETURN_TIMEADT(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c timetz_pl_interval ==== */
+
+Datum
+timetz_pl_interval(PG_FUNCTION_ARGS)
+{
+	TimeTzADT  *time = PG_GETARG_TIMETZADT_P(0);
+	Interval   *span = PG_GETARG_INTERVAL_P(1);
+	TimeTzADT  *result;
+
+	if (INTERVAL_NOT_FINITE(span))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("cannot add infinite interval to time")));
+
+	result = (TimeTzADT *) palloc(sizeof(TimeTzADT));
+
+	result->time = time->time + span->time;
+	result->time -= result->time / USECS_PER_DAY * USECS_PER_DAY;
+	if (result->time < INT64CONST(0))
+		result->time += USECS_PER_DAY;
+
+	result->zone = time->zone;
+
+	PG_RETURN_TIMETZADT_P(result);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/date.c timetz_mi_interval ==== */
+
+Datum
+timetz_mi_interval(PG_FUNCTION_ARGS)
+{
+	TimeTzADT  *time = PG_GETARG_TIMETZADT_P(0);
+	Interval   *span = PG_GETARG_INTERVAL_P(1);
+	TimeTzADT  *result;
+
+	if (INTERVAL_NOT_FINITE(span))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("cannot subtract infinite interval from time")));
+
+	result = (TimeTzADT *) palloc(sizeof(TimeTzADT));
+
+	result->time = time->time - span->time;
+	result->time -= result->time / USECS_PER_DAY * USECS_PER_DAY;
+	if (result->time < INT64CONST(0))
+		result->time += USECS_PER_DAY;
+
+	result->zone = time->zone;
+
+	PG_RETURN_TIMETZADT_P(result);
 }

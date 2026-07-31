@@ -93,6 +93,12 @@ def main(out):
     sec("src/backend/parser/scansup.c downcase_identifier",
         extract_fn(sc, "downcase_identifier"))
     sec("src/backend/utils/adt/timestamp.c dt2time", extract_fn(ts, "dt2time"))
+    # timestamp2tm: the shared kernel of every adt_date timestamp->date/time
+    # conversion entry point (datetime_convert_diff target). Its tzp!=NULL
+    # branch crosses the localtime-library boundary via pg_localtime, which
+    # pg_datetime_io_io.c answers with the GMT breakdown (same seam as
+    # pg_next_dst_boundary et al).
+    sec("src/backend/utils/adt/timestamp.c timestamp2tm", extract_fn(ts, "timestamp2tm"))
     sec("src/backend/utils/adt/timestamp.c GetEpochTime", extract_fn(ts, "GetEpochTime"))
 
     # datetime.c tables
@@ -137,7 +143,15 @@ def main(out):
               "make_date", "time_in", "tm2time", "time_overflows",
               "float_time_overflows", "time2tm", "time_out", "make_time",
               "AdjustTimeForTypmod", "time_part_common", "time_part",
-              "tm2timetz", "timetz_in", "timetz2tm", "timetz_out"]:
+              "tm2timetz", "timetz_in", "timetz2tm", "timetz_out",
+              # datetime_convert_diff target: timestamp<->date/time/timetz
+              # conversions and the time/timetz +- interval arithmetic.
+              "date2timestamptz_opt_overflow", "date2timestamptz",
+              "date_timestamptz",
+              "timestamp_date", "timestamptz_date",
+              "timestamp_time", "timestamptz_time", "timestamptz_timetz",
+              "interval_time", "time_pl_interval", "time_mi_interval",
+              "timetz_pl_interval", "timetz_mi_interval"]:
         sec(f"src/backend/utils/adt/date.c {f}", extract_fn(date, f))
 
     w.close()

@@ -478,6 +478,52 @@ pg_gmtime(const pg_time_t *timep)
 	return &epoch_tm;
 }
 
+/*
+ * GMT pg_localtime: timestamp2tm's tzp!=NULL branch crosses the
+ * localtime-library boundary here (same seam as pg_next_dst_boundary /
+ * pg_interpret_timezone_abbrev above). The session zone is pinned to GMT, so
+ * the answer is the UTC civil breakdown with offset 0 and no DST.
+ *
+ * The calendar arithmetic is PostgreSQL's OWN vendored j2date/j2day, not a
+ * reimplementation: only the epoch-seconds -> (Julian day, second-of-day)
+ * split is shim plumbing, which is precisely the part a real tzfile zone with
+ * a single fixed 0 transition performs. The Rust side answers this through its
+ * REAL pgtz GMT zone (installed by pg_tzset(b"GMT")), so C-shim == Rust-real
+ * for GMT is itself part of what these arms fuzz.
+ */
+struct pg_tm *
+pg_localtime(const pg_time_t *timep, const pg_tz *tz)
+{
+	static _Thread_local struct pg_tm tmbuf;
+	pg_time_t	t = *timep;
+	pg_time_t	days = t / SECS_PER_DAY;
+	pg_time_t	rem = t % SECS_PER_DAY;
+	int			y,
+				mo,
+				d;
+
+	(void) tz;					/* GMT only; pg_tzset admits nothing else */
+	if (rem < 0)
+	{
+		rem += SECS_PER_DAY;
+		days -= 1;
+	}
+	j2date((int) (UNIX_EPOCH_JDATE + days), &y, &mo, &d);
+	memset(&tmbuf, 0, sizeof(tmbuf));
+	tmbuf.tm_year = y - 1900;	/* POSIX 1900-based, as timestamp2tm expects */
+	tmbuf.tm_mon = mo - 1;		/* POSIX 0-based */
+	tmbuf.tm_mday = d;
+	tmbuf.tm_hour = (int) (rem / SECS_PER_HOUR);
+	tmbuf.tm_min = (int) ((rem % SECS_PER_HOUR) / SECS_PER_MINUTE);
+	tmbuf.tm_sec = (int) (rem % SECS_PER_MINUTE);
+	tmbuf.tm_wday = j2day((int) (UNIX_EPOCH_JDATE + days));
+	tmbuf.tm_yday = (int) (UNIX_EPOCH_JDATE + days) - date2j(y, 1, 1);
+	tmbuf.tm_isdst = 0;
+	tmbuf.tm_gmtoff = 0;
+	tmbuf.tm_zone = "GMT";
+	return &tmbuf;
+}
+
 /* Pinned current date/time: 2026-06-15 12:30:45.123456 GMT (see header).
  * These OVERRIDE datetime.c's clock-reading originals (not extracted). */
 void
@@ -622,8 +668,17 @@ pg_dt_reset(int style, int order)
 	DateOrder = order;
 }
 
-/* Build a minimal fcinfo; args filled by callers. */
-static struct FunctionCallInfoBaseData pg_dt_fcinfo_data;
+/* Build a minimal fcinfo; args filled by callers.
+ *
+ * _Thread_local for the same reason DateStyle/DateOrder above are (and the
+ * per-exec arena below): the multi-threaded `cargo test` rails run several
+ * drivers at once, and a process-global scratch fcinfo let one thread's
+ * memset() land between another's arg store and the vendored entry's
+ * PG_GETARG — reading a zeroed Datum as a TimeTzADT/Interval POINTER, which
+ * segfaults. (libFuzzer runs one thread per process, so no campaign verdict
+ * was affected; found by the datetime_convert_diff rails, whose entries are
+ * the first fcinfo users to pass by-reference args.) */
+static _Thread_local struct FunctionCallInfoBaseData pg_dt_fcinfo_data;
 
 static FunctionCallInfo
 pg_dt_fcinfo(void)
@@ -967,4 +1022,200 @@ pg_diff_isoweekdate2date(int32 isoweek, int32 wday,
 						 int32 *year, int32 *mon, int32 *mday)
 {
 	isoweekdate2date(isoweek, wday, (int *) year, (int *) mon, (int *) mday);
+}
+
+/*
+ * ---- datetime_convert_diff entries ----
+ *
+ * timestamp<->date/time/timetz conversions and time/timetz +- interval
+ * arithmetic: all twelve are VERBATIM date.c fmgr entry points, driven through
+ * the shim fcinfo exactly like time_part/make_time above. Their shared kernel
+ * timestamp2tm is verbatim timestamp.c; its tzp!=NULL branch resolves through
+ * the GMT pg_localtime shim.
+ *
+ * Return convention (all entries): 0 = value returned, 1 = SQL NULL (the
+ * PG_RETURN_NULL() arms of timestamp_time/timestamptz_time/
+ * timestamptz_timetz), otherwise the errcode class (see header).
+ */
+#define PG_DT_NULLED	1
+
+int
+pg_diff_timestamp_date(int64 ts, int32 *out)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	fcinfo->args[0].value = Int64GetDatum(ts);
+	d = timestamp_date(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	*out = DatumGetDateADT(d);
+	return 0;
+}
+
+int
+pg_diff_timestamptz_date(int64 ts, int32 *out)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	fcinfo->args[0].value = Int64GetDatum(ts);
+	d = timestamptz_date(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	*out = DatumGetDateADT(d);
+	return 0;
+}
+
+int
+pg_diff_timestamp_time(int64 ts, int64 *out)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	fcinfo->args[0].value = Int64GetDatum(ts);
+	d = timestamp_time(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	*out = DatumGetTimeADT(d);
+	return 0;
+}
+
+int
+pg_diff_timestamptz_time(int64 ts, int64 *out)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	fcinfo->args[0].value = Int64GetDatum(ts);
+	d = timestamptz_time(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	*out = DatumGetTimeADT(d);
+	return 0;
+}
+
+int
+pg_diff_timestamptz_timetz(int64 ts, int64 *out_time, int32 *out_zone)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Datum		d;
+	TimeTzADT  *r;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	fcinfo->args[0].value = Int64GetDatum(ts);
+	d = timestamptz_timetz(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	r = DatumGetTimeTzADTP(d);
+	*out_time = r->time;
+	*out_zone = r->zone;
+	return 0;
+}
+
+int
+pg_diff_date_timestamptz(int32 date, int64 *out)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	fcinfo->args[0].value = DateADTGetDatum(date);
+	d = date_timestamptz(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	*out = DatumGetTimestampTz(d);
+	return 0;
+}
+
+int
+pg_diff_interval_time(int64 time, int32 day, int32 month, int64 *out)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Interval	span;
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	span.time = time;
+	span.day = day;
+	span.month = month;
+	fcinfo->args[0].value = IntervalPGetDatum(&span);
+	d = interval_time(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	*out = DatumGetTimeADT(d);
+	return 0;
+}
+
+/* time +- interval; sub selects pl(0) / mi(1) */
+int
+pg_diff_time_pm_interval(int sub, int64 time, int64 sp_time, int32 sp_day,
+						 int32 sp_month, int64 *out)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Interval	span;
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+	fcinfo->args[0].value = TimeADTGetDatum(time);
+	fcinfo->args[1].value = IntervalPGetDatum(&span);
+	d = sub ? time_mi_interval(fcinfo) : time_pl_interval(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	*out = DatumGetTimeADT(d);
+	return 0;
+}
+
+/* timetz +- interval; sub selects pl(0) / mi(1) */
+int
+pg_diff_timetz_pm_interval(int sub, int64 time, int32 zone, int64 sp_time,
+						   int32 sp_day, int32 sp_month,
+						   int64 *out_time, int32 *out_zone)
+{
+	FunctionCallInfo fcinfo = pg_dt_fcinfo();
+	Interval	span;
+	TimeTzADT	arg;
+	TimeTzADT  *r;
+	Datum		d;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+	arg.time = time;
+	arg.zone = zone;
+	fcinfo->args[0].value = TimeTzADTPGetDatum(&arg);
+	fcinfo->args[1].value = IntervalPGetDatum(&span);
+	d = sub ? timetz_mi_interval(fcinfo) : timetz_pl_interval(fcinfo);
+	if (fcinfo->isnull)
+		return PG_DT_NULLED;
+	r = DatumGetTimeTzADTP(d);
+	*out_time = r->time;
+	*out_zone = r->zone;
+	return 0;
 }
