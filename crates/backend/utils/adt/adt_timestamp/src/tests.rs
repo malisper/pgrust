@@ -681,6 +681,61 @@ fn interval_agg_family_matches_c() {
     assert_eq!(iv_out(&interval_avg_final(&a).unwrap().unwrap()), "2 days");
 }
 
+// C timestamp.c interval_avg_serialize wire image (5 fields, big-endian).
+#[cfg(test)]
+fn interval_agg_wire(n: i64, time: i64, day: i32, month: i32, pinf: i64, ninf: i64) -> Vec<u8> {
+    let mut img = Vec::new();
+    img.extend_from_slice(&n.to_be_bytes());
+    img.extend_from_slice(&time.to_be_bytes());
+    img.extend_from_slice(&day.to_be_bytes());
+    img.extend_from_slice(&month.to_be_bytes());
+    img.extend_from_slice(&pinf.to_be_bytes());
+    img.extend_from_slice(&ninf.to_be_bytes());
+    img
+}
+
+// interval_avg_deserialize parses via pq_getmsg*: the exact 40-byte payload
+// round-trips; short input and trailing bytes error like C (pq_getmsgbytes /
+// pq_getmsgend, both ERRCODE_PROTOCOL_VIOLATION).
+#[test]
+fn interval_agg_deserialize_matches_c() {
+    use crate::interval::interval_agg_state_deserialize;
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+
+    let ctx = MemoryContext::new("interval-agg-deser");
+    let mcx = ctx.mcx();
+    let bytes = interval_agg_wire(3, 86_400_000_000, 4, 7, 1, 2);
+    assert_eq!(bytes.len(), 40);
+
+    let mut buf = StringInfo::new_in(mcx).unwrap();
+    buf.append_bytes(&bytes).unwrap();
+    let st = interval_agg_state_deserialize(&mut buf).unwrap();
+    assert_eq!(st.N, 3);
+    assert_eq!(st.sumX.time, 86_400_000_000);
+    assert_eq!(st.sumX.day, 4);
+    assert_eq!(st.sumX.month, 7);
+    assert_eq!(st.pInfcount, 1);
+    assert_eq!(st.nInfcount, 2);
+
+    // Valid payload + 1 trailing byte: C's pq_getmsgend rejects it.
+    let mut buf = StringInfo::new_in(mcx).unwrap();
+    buf.append_bytes(&bytes).unwrap();
+    buf.append_bytes(&[0]).unwrap();
+    let e = interval_agg_state_deserialize(&mut buf).map(|_| ()).unwrap_err();
+    assert_eq!(e.message(), "invalid message format");
+    assert_eq!(e.sqlstate, types_error::ERRCODE_PROTOCOL_VIOLATION);
+
+    // Truncated payload: C's pq_getmsgint64/pq_getmsgint reject it.
+    for cut in [0, 1, 8, 20, 39] {
+        let mut buf = StringInfo::new_in(mcx).unwrap();
+        buf.append_bytes(&bytes[..cut]).unwrap();
+        let e = interval_agg_state_deserialize(&mut buf).map(|_| ()).unwrap_err();
+        assert_eq!(e.message(), "insufficient data left in message");
+        assert_eq!(e.sqlstate, types_error::ERRCODE_PROTOCOL_VIOLATION);
+    }
+}
+
 #[test]
 fn interval_typmod_least_field_matches_c() {
     use adt_datetime::{DAY, HOUR, INTERVAL_MASK, MINUTE, MONTH, SECOND, YEAR};

@@ -1308,6 +1308,24 @@ pub fn interval_agg_combine(
     Ok(())
 }
 
+// C timestamp.c interval_avg_deserialize, body past the AggCheckCallContext
+// gate: the pq_getmsg* layer rejects short input ("insufficient data left in
+// message") and pq_getmsgend rejects trailing bytes ("invalid message
+// format"), both ERRCODE_PROTOCOL_VIOLATION.
+pub fn interval_agg_state_deserialize(
+    buf: &mut ::stringinfo::StringInfo<'_>,
+) -> PgResult<IntervalAggState> {
+    let mut result = IntervalAggState::default();
+    result.N = ::pqformat::pq_getmsgint64(buf)?;
+    result.sumX.time = ::pqformat::pq_getmsgint64(buf)?;
+    result.sumX.day = ::pqformat::pq_getmsgint(buf, 4)? as i32;
+    result.sumX.month = ::pqformat::pq_getmsgint(buf, 4)? as i32;
+    result.pInfcount = ::pqformat::pq_getmsgint64(buf)?;
+    result.nInfcount = ::pqformat::pq_getmsgint64(buf)?;
+    ::pqformat::pq_getmsgend(buf)?;
+    Ok(result)
+}
+
 pub fn interval_avg_final(state: &IntervalAggState) -> PgResult<Option<Interval>> {
     if state.N + state.pInfcount + state.nInfcount == 0 {
         return Ok(None);

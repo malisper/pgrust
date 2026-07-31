@@ -814,16 +814,10 @@ pub fn fc_interval_avg_deserialize(
     }
     // SAFETY: strict fn — arg 0 is a non-null bytea varlena.
     let sstate = unsafe { fcinfo.arg_varlena_packed(0)? };
-    let d = sstate.data();
-    let rd8 = |off: usize| i64::from_be_bytes(d[off..off + 8].try_into().unwrap());
-    let rd4 = |off: usize| i32::from_be_bytes(d[off..off + 4].try_into().unwrap());
-    let state = IntervalAggState {
-        N: rd8(0),
-        sumX: Interval { time: rd8(8), day: rd4(16), month: rd4(20) },
-        pInfcount: rd8(24),
-        nInfcount: rd8(32),
-    };
     let mcx = fcinfo.result_mcx();
+    let mut buf = ::stringinfo::StringInfo::with_capacity_in(mcx, sstate.data().len() + 1)?;
+    buf.append_bytes(sstate.data())?;
+    let state = crate::interval::interval_agg_state_deserialize(&mut buf)?;
     let layout = core::alloc::Layout::new::<IntervalAggState>();
     let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
     let p = raw.cast::<IntervalAggState>().as_ptr();
