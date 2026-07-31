@@ -245,7 +245,7 @@ thread_local! {
 const MAX_RANGES: usize = 6;
 
 /// sqlstate -> the oracle's errcode CLASS (pg_multirangetypes_io.c header).
-fn err_class(e: &PgError) -> i32 {
+pub(crate) fn err_class(e: &PgError) -> i32 {
     use types_error as te;
     if e.sqlstate == te::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE {
         1
@@ -269,11 +269,15 @@ fn err_class(e: &PgError) -> i32 {
         10
     } else if e.sqlstate == te::ERRCODE_INVALID_PARAMETER_VALUE {
         11
-    } else if e.sqlstate == te::ERRCODE_CARDINALITY_VIOLATION {
-        12
-    } else if e.sqlstate == te::ERRCODE_NULL_VALUE_NOT_ALLOWED {
-        13
     } else if e.sqlstate == te::ERRCODE_PROGRAM_LIMIT_EXCEEDED {
+        // 12 is the RANGE oracle's number for this class and the two oracles
+        // share one table (pg_multirangetypes_io.c #includes it) — see the
+        // shared-table note there, and cross_target_err_class_agreement in
+        // rangetypes_diff.rs.
+        12
+    } else if e.sqlstate == te::ERRCODE_CARDINALITY_VIOLATION {
+        13
+    } else if e.sqlstate == te::ERRCODE_NULL_VALUE_NOT_ALLOWED {
         14
     } else if e.sqlstate == te::ERRCODE_INTERNAL_ERROR {
         // C's elog(ERROR) records class 99 and PgError::error defaults to

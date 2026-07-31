@@ -116,13 +116,23 @@ typedef struct
 #define NUMMULTIRANGEOID   4532
 #define INT8MULTIRANGEOID  4536
 
-/* errcode classes ADDED by the multirange surface (the range oracle's table
- * is 1..11 + 98/99; the Rust driver mirrors these numbers) */
-#define ERRCODE_CARDINALITY_VIOLATION   12  /* 21000 */
-#define ERRCODE_NULL_VALUE_NOT_ALLOWED  13  /* 22004 */
+/* errcode classes ADDED by the multirange surface.
+ *
+ * ONE SHARED TABLE with pg_rangetypes_io.c, which this file #includes: that
+ * file owns 1..12 (12 = ERRCODE_PROGRAM_LIMIT_EXCEEDED) plus 98/99, so the
+ * multirange additions start at 13. Both Rust drivers' err_class() mirror
+ * these exact numbers, and fuzz/core/src/rangetypes_diff.rs carries a test
+ * asserting the two mappings agree on every shared sqlstate.
+ *
+ * The two files were developed in parallel and BOTH minted a class 12 with
+ * different meanings; the merge caught it as a redefinition, but had the
+ * numbering silently diverged instead, every error-plane comparison would
+ * have compared incomparable integers. Never mint a class number here without
+ * checking the range oracle's table first. */
+#define ERRCODE_CARDINALITY_VIOLATION   13  /* 21000 */
+#define ERRCODE_NULL_VALUE_NOT_ALLOWED  14  /* 22004 */
 
 #define TYPECACHE_MULTIRANGE_INFO 0x10000
-#define ERRCODE_PROGRAM_LIMIT_EXCEEDED  14  /* 54000 */
 
 /* ---- plumbing the multirange surface needs beyond the range oracle's ---- */
 /* PG_NARGS: fcinfo->nargs, as in fmgr.h */
@@ -142,14 +152,8 @@ pnstrdup(const char *in, Size len)
 	return out;
 }
 
-/* resetStringInfo (src/common/stringinfo.c): keep the buffer, drop content. */
-static void
-resetStringInfo(StringInfo str)
-{
-	str->data[0] = '\0';
-	str->len = 0;
-	str->cursor = 0;
-}
+/* resetStringInfo: provided by the included pg_rangetypes_io.c (same verbatim
+ * body plus C's own Assert). Deliberately not redefined here. */
 
 
 /* ==== multirangetypes.c MultirangeIOData — VERBATIM ==== */
@@ -3377,11 +3381,16 @@ pg_diff_mr_merge(const unsigned char *img,
 {
 	Datum		args[1];
 	Datum		d;
+	bool		isnull;
 
 	PG_DIFF_ENTER();
 	args[0] = PointerGetDatum(img);
-	d = pg_mr_call(range_merge_from_multirange, InvalidOid, 1, args, NULL, NULL);
-	return pg_rt_copy_range(d, out, outlen, outcap);
+	/* isnull is THREADED, not discarded: range_merge(multirange) returns SQL
+	 * NULL on an empty multirange, and pg_rt_copy_range dereferencing a NULL
+	 * Datum was the pg_diff_range_accessors SEGV shape earlier in this lane.
+	 * The range oracle grew the isnull parameter for exactly that reason. */
+	d = pg_mr_call(range_merge_from_multirange, InvalidOid, 1, args, NULL, &isnull);
+	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 
 /*

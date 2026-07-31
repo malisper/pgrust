@@ -199,7 +199,7 @@ const OUTCAP: usize = 2 << 20;
 const C_BUFCAP: i32 = -1;
 
 /// sqlstate -> the oracle's errcode CLASS (pg_rangetypes_io.c header table).
-fn err_class(e: &PgError) -> i32 {
+pub(crate) fn err_class(e: &PgError) -> i32 {
     use types_error as te;
     if e.sqlstate == te::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE {
         1
@@ -1790,5 +1790,51 @@ mod carriers {
             as *const AggFnArgTypes;
         assert_eq!(pa, pb, "each ops_flinfo() minted a FRESH carrier: still allocating");
         assert_eq!(pa, &RNG_RETTYPE[0] as *const AggFnArgTypes);
+    }
+}
+
+#[cfg(test)]
+mod shared_errclass_table {
+    use types_error as te;
+
+    /// The range and multirange oracles are ONE translation unit
+    /// (pg_multirangetypes_io.c #includes pg_rangetypes_io.c), so their
+    /// PG_DIFF_ERR_* class numbers form one table — and each Rust driver's
+    /// err_class() must mirror it identically. The two halves of this lane
+    /// were built in parallel and both minted a class 12 with DIFFERENT
+    /// meanings (PROGRAM_LIMIT_EXCEEDED vs CARDINALITY_VIOLATION); the merge
+    /// surfaced it only because C rejects a macro redefinition. Had the
+    /// numbering drifted without a redefinition, every error-plane assert
+    /// would have compared incomparable integers and passed vacuously.
+    ///
+    /// This test is the durable guard: any sqlstate BOTH drivers classify
+    /// must get the same number from both.
+    #[test]
+    fn cross_target_err_class_agreement() {
+        let shared = [
+            ("NUMERIC_VALUE_OUT_OF_RANGE", te::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+            ("INVALID_TEXT_REPRESENTATION", te::ERRCODE_INVALID_TEXT_REPRESENTATION),
+            ("PROTOCOL_VIOLATION", te::ERRCODE_PROTOCOL_VIOLATION),
+            ("DATA_EXCEPTION", te::ERRCODE_DATA_EXCEPTION),
+            ("UNDEFINED_FUNCTION", te::ERRCODE_UNDEFINED_FUNCTION),
+            ("DATETIME_VALUE_OUT_OF_RANGE", te::ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+            ("INVALID_BINARY_REPRESENTATION", te::ERRCODE_INVALID_BINARY_REPRESENTATION),
+            ("FEATURE_NOT_SUPPORTED", te::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ("SYNTAX_ERROR", te::ERRCODE_SYNTAX_ERROR),
+            ("DATATYPE_MISMATCH", te::ERRCODE_DATATYPE_MISMATCH),
+            ("INVALID_PARAMETER_VALUE", te::ERRCODE_INVALID_PARAMETER_VALUE),
+            ("PROGRAM_LIMIT_EXCEEDED", te::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        ];
+        for (name, sqlstate) in shared {
+            let e = te::PgError::error("x").with_sqlstate(sqlstate);
+            let rt = super::err_class(&e);
+            let mr = crate::multirangetypes_diff::err_class(&e);
+            assert_eq!(
+                rt, mr,
+                "{name}: rangetypes_diff class {rt} != multirangetypes_diff class {mr} \
+                 — the shared oracle errcode table has drifted"
+            );
+            assert_ne!(rt, 98, "{name} must be classified, not fall through to 98");
+        }
     }
 }
