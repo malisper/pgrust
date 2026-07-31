@@ -38,6 +38,7 @@ postgres_seams = { path = "../../crates/backend/tcop/postgres_seams" }
 # tablesfam_diff (p1-lanef tables batch):
 keywords = { path = "../../crates/common/keywords" }
 unicode_category = { path = "../../crates/common/unicode_category" }
+adt_encode = { path = "../../crates/backend/utils/adt/encode" }  # encode_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"

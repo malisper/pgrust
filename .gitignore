@@ -4,3 +4,4 @@ CI-results/
 *.profraw
 **/target-*/
 scripts/__pycache__/
+proofs/coverage/__pycache__/

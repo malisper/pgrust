@@ -1592,6 +1592,7 @@ dependencies = [
 name = "decoder_fuzz"
 version = "0.0.0"
 dependencies = [
+ "adt_encode",
  "adt_float",
  "adt_geo",
  "cc",
