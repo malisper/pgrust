@@ -3113,3 +3113,5 @@ base64	eq_b64_decode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-co
 base64	eq_b64_enc_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced to overflow-free domain 0..=3*(MAX/4)-2
 base64	eq_b64_dec_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced 0..=MAX/3
 base64	control_encode_vs_decode_must_fail	-Z c-ffi --c-lib c/pg_base64.c	must-fail	defect-witness	2	DEFAULT solver (suite convention); fails on intended assert
+name-ascii	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_name_ascii.c --solver kissat	green	per-commit	2	src[u8;8] full sym (incl interior NULs) + destsiz<=8; whole-dest-image parity; unwind(10)
+name-ascii	control_safe_strlcpy_shorter_src_must_fail	-Z c-ffi --c-lib c/pg_name_ascii.c	must-fail	defect-witness	2	DEFAULT solver; fails on intended assert (first cut src[..7] was unobservable at destsiz 8 — rewritten to src[..3])

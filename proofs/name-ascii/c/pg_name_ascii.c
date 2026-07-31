@@ -303,3 +303,45 @@ pg_name_text(const unsigned char *name, unsigned char *out /* [NAMEDATALEN] */ )
 
 	return len;
 }
+
+/*
+ * ascii_safe_strlcpy (ascii.c, REL_18_STABLE / 18.3 @62d6c7d3df, added
+ * 2026-07-30 p1-laneg): body VERBATIM (shim: stddef.h for size_t only).
+ */
+#include <stddef.h>
+
+void
+ascii_safe_strlcpy(char *dest, const char *src, size_t destsiz)
+{
+	if (destsiz == 0)			/* corner case: no room for trailing nul */
+		return;
+
+	while (--destsiz > 0)
+	{
+		/* use unsigned char here to avoid compiler warning */
+		unsigned char ch = *src++;
+
+		if (ch == '\0')
+			break;
+		/* Keep printable ASCII characters */
+		if (32 <= ch && ch <= 127)
+			*dest = ch;
+		/* White-space is also OK */
+		else if (ch == '\n' || ch == '\r' || ch == '\t')
+			*dest = ch;
+		/* Everything else is replaced with '?' */
+		else
+			*dest = '?';
+		dest++;
+	}
+
+	*dest = '\0';
+}
+
+/* Kani FFI bridge (void-return ABI wart): int-returning wrapper. */
+int
+pg_c_ascii_safe_strlcpy(char *dest, const char *src, size_t destsiz)
+{
+	ascii_safe_strlcpy(dest, src, destsiz);
+	return 0;
+}
