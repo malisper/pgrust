@@ -229,3 +229,11 @@ path = "fuzz_targets/quote_diff.rs"
 test = false
 doc = false
 bench = false
+
+# geo_io_diff: geo text-I/O family differential (p1-laner).
+[[bin]]
+name = "geo_io_diff"
+path = "fuzz_targets/geo_io_diff.rs"
+test = false
+doc = false
+bench = false
