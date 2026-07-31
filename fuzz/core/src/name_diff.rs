@@ -301,6 +301,20 @@ fn namein_arm(payload: &[u8]) {
         read_name(din) == r.data,
         "fc_namein vs core DIVERGENCE input={payload:?}"
     );
+    // Second call through the SAME resolved FmgrInfo: the retained-scratch
+    // reuse arm (fn_extra already set — the varlena textin precedent).
+    let din2 = fc_call(
+        nb::fc_namein,
+        Some(&mut fl),
+        0,
+        None,
+        [Datum::from_usize(cs.as_ptr() as usize)],
+    )
+    .expect("fc_namein is infallible");
+    assert!(
+        read_name(din2) == r.data,
+        "fc_namein scratch-reuse vs core DIVERGENCE input={payload:?}"
+    );
 
     // fc_nameout: cstring result in the thread-local scratch.
     let dout = fc_call(nb::fc_nameout, None, 0, None, [name_datum(&r.data)])
