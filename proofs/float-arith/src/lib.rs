@@ -11,10 +11,13 @@
 //! compile-gated only, NOT yet solved; see runqueue.txt):
 //! - rounding five + in_range pair: full-domain expected-GREEN (rint/ceil/
 //!   floor/compare + one f64 add/sub — no 53-bit multiply/divide).
-//! - dsqrt: probe (sqrt at 53-bit width, CBMC-native); spots_dsqrt is the
-//!   standing fallback grid, VERDICT-ONLY on its constant-reachable Err arm
-//!   (Kani Err(Box) f64 defect below); eq_dsqrt's symbolic Err arm keeps
-//!   sqlstate 2201F/22003 parity in-theorem.
+//! - dsqrt: eq_dsqrt is full-symbolic with the two CBMC sqrt-model carve-
+//!   outs (NaN payloads, subnormal mis-round — native bits pinned in
+//!   tests/dsqrt_grid_native.rs); spots_dsqrt is the standing 16-cell
+//!   grid. BOTH are VERDICT-ONLY on the Err arm: the Kani Err(Box) f64
+//!   defect (witness pair below) fires on symbolic-reachable arms too
+//!   (triaged 2026-07-30), so sqlstate 2201F/22003 parity for dsqrt is
+//!   pinned natively (tests/semantics_check.rs), not in-theorem.
 //! - CANONICAL-NAN SHIM: screened NOT NEEDED — no vendored section reaches
 //!   the NAN macro or get_float8_nan (propagation-only; models correctly).
 //!   tests/semantics_check.rs pins canonical-NaN propagation natively.
@@ -433,20 +436,66 @@ mod proofs {
         eq_radians: fc_radians / pg_radians;
     }
 
-    // ---------- dsqrt: PROBE harness (class on the result) ----------
+    // ---------- dsqrt: full-symbolic harness (model-defect carve-outs) ----------
     //
-    // IEEE sqrt is CBMC-native, and the guard circuit is
-    // compare/isinf/is-zero only — but sqrt sits at 53-bit significand
-    // width, so this is a PROBE per NEXT-200: full-symbolic first; if it
-    // walls, the spot grid below is the standing fallback (record
-    // `proved(specials grid; full-sym wall)`). The full-symbolic Err arm
-    // (arg<0 → 2201F, plus overflow/underflow taxonomy — both
-    // C-unreachable for sqrt on finite non-negative inputs, verdict
-    // parity asserts that agreement) is symbolic-reachable, so
-    // sqlstate/level parity is safe to read (the Kani Err(Box) defect
-    // needs a CONSTANT-reachable arm).
-    fallible_un! {
-        eq_dsqrt: fc_dsqrt / pg_dsqrt;
+    // TRIAGE 2026-07-30 (CI cluster FAILED at 33d7d09d31, mechanism isolated —
+    // resolves the "mechanism isolation owed" runqueue note): the plain
+    // fallible_un form of this harness FAILED in the goto-linked program
+    // for exactly the TWO already-documented model defects, NOT a
+    // divergence (native parity bit-exact in tests/dsqrt_grid_native.rs):
+    //
+    //  1. Ok-arm bit mismatch, concrete counterexample bits = 0x1 (min
+    //     denormal, 5e-324): CBMC's sqrt MODEL mis-rounds SUBNORMAL
+    //     inputs, and the Rust f64::sqrt lowering and the C shim's libm
+    //     sqrt() do not funnel to one model call — so the two sides can
+    //     disagree in-model where real silicon gives the identical
+    //     0x1e60000000000000 (= 2^-537) on both. Equality through an
+    //     imprecisely-modeled primitive fabricates counterexamples.
+    //     Same defect arm spots_dsqrt already carves (decoded 2026-07-29).
+    //  2. Err-arm payload reads (e.sqlstate / e.level) plus a spurious
+    //     __rust_dealloc / drop_in_place::<Box<PgError>> corruption
+    //     cascade: the Kani 0.67.0 Err(Box<PgError>) f64-payload defect
+    //     (witness pair at the bottom of this file). Previously believed
+    //     to need a CONSTANT-reachable Err arm; this failure witnesses it
+    //     on a fully SYMBOLIC-reachable arm too. VERDICT parity
+    //     (cerr == 0 ⇔ Ok) was SUCCESS in the same failing run.
+    //
+    // Fix: same theorem shape as spots_dsqrt at full width — NaN inputs
+    // both-NaN classification, subnormal inputs positive-finite
+    // classification (bit-exactness for both cells pinned NATIVELY in
+    // tests/dsqrt_grid_native.rs), everything else bit-exact; Err arm
+    // VERDICT-ONLY (sqlstate/level parity pinned natively in
+    // tests/semantics_check.rs::dsqrt_negative_arg_semantics).
+    #[kani::proof]
+    #[kani::stub(types_error::PgError::error, stub_pg_error_error)]
+    fn eq_dsqrt() {
+        let a = any_f64();
+        let mut cval: f64 = 0.0;
+        let cerr = unsafe { pg_dsqrt(a, &mut cval) };
+        match call1(adt_float::builtins::fc_dsqrt, Datum::from_f64(a)) {
+            Ok(d) => {
+                kani::cover!(cerr == 0); // vacuity witness
+                assert!(cerr == 0);
+                let r = d.as_f64();
+                if a.is_nan() {
+                    // CBMC sqrt model defect 1 (NaN payloads): in-model
+                    // both-NaN only; payload parity pinned natively.
+                    assert!(r.is_nan() && cval.is_nan());
+                } else if a.is_subnormal() {
+                    // CBMC sqrt model defect 2 (subnormal mis-round): in-
+                    // model classification only; bits pinned natively.
+                    assert!(r.is_finite() && r > 0.0);
+                    assert!(cval.is_finite() && cval > 0.0);
+                } else {
+                    assert!(r.to_bits() == cval.to_bits());
+                }
+            }
+            Err(e) => {
+                kani::cover!(cerr != 0); // vacuity witness
+                assert!(cerr != 0);
+                std::mem::forget(e); // Kani defect: payload untouchable
+            }
+        }
     }
 
     /// Spot-grid fallback for dsqrt: same theorem over the 16-value
@@ -455,8 +504,9 @@ mod proofs {
     /// defect (witness pair below) — so this harness is VERDICT-ONLY on
     /// the error arm: C flag must be 4 (negative arg; overflow/underflow
     /// are unreachable from the grid), payload forgotten. sqlstate/level
-    /// parity for the same shipped error constructor is proven in
-    /// eq_dsqrt (and natively in tests/semantics_check.rs).
+    /// parity for the same shipped error constructor is pinned natively
+    /// in tests/semantics_check.rs (eq_dsqrt is also verdict-only since
+    /// the 2026-07-30 triage — the Err(Box) defect fires symbolically).
     #[kani::proof]
     #[kani::stub(types_error::PgError::error, stub_pg_error_error)]
     fn spots_dsqrt() {
@@ -502,6 +552,15 @@ mod proofs {
     /// Bisect helper for the spots_dsqrt in-model FAILED: one loop
     /// iteration per grid row; CBMC reports each unwind copy's assertion
     /// separately, naming the failing index.
+    ///
+    /// TRIAGE 2026-07-30: the CI cluster swept this diagnostic as a suite
+    /// member and it FAILED at grid index 7 (min denormal 0x1) — the
+    /// SAME CBMC sqrt subnormal mis-round carve spots_dsqrt carries
+    /// (native bits pinned in tests/dsqrt_grid_native.rs). It predated
+    /// the 2026-07-29 subnormal carve (it was the tool that DECODED that
+    /// index) and was never updated. Now carries the identical carve so
+    /// it is a green suite member; its per-index bisect value is
+    /// retained for any FUTURE in-model divergence on the other cells.
     #[kani::proof]
     #[kani::unwind(17)]
     #[kani::stub(types_error::PgError::error, stub_pg_error_error)]
@@ -515,6 +574,14 @@ mod proofs {
                 Ok(d) => d.as_f64(),
                 Err(e) => { std::mem::forget(e); continue }
             };
+            if a.is_subnormal() {
+                // CBMC sqrt-model subnormal mis-round carve (see
+                // spots_dsqrt): classification only in-model; bit-
+                // exactness pinned natively.
+                assert!(r.is_finite() && r > 0.0);
+                assert!(cval.is_finite() && cval > 0.0);
+                continue;
+            }
             let same = (r.is_nan() && cval.is_nan()) || r.to_bits() == cval.to_bits();
             assert!(same);
         }
@@ -931,8 +998,12 @@ mod proofs {
     // CONSTANT-REACHABLE (concrete or constant-folded inputs): the Box
     // pointer loses provenance and field reads return garbage, with
     // spurious __rust_dealloc/drop_in_place safety failures. The identical
-    // Result<f32, _> shape is fine, and fully-SYMBOLIC harnesses through
-    // the shipped fns are fine (their Err arms are cover!-witnessed above).
+    // Result<f32, _> shape is fine. Fully-SYMBOLIC arms were believed
+    // immune, but the eq_dsqrt triage (2026-07-30) witnessed the same
+    // corruption cascade on a symbolic-reachable Err arm — treat any
+    // Result<f64, Box<PgError>> Err-payload read as suspect; the
+    // arithmetic harnesses above remain green as solved, but on any
+    // future Err-arm FAILED in this file, suspect this defect FIRST.
     // Consequence here: concrete special-pair grids for f8-width DIV error
     // arms cannot be trusted; witness pair below documents the defect.
     //

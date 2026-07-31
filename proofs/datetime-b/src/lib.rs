@@ -223,6 +223,33 @@ mod proofs {
         elevel >= ERROR
     }
 
+    /// Kani stub for `adt_numeric::var::word_buf_take` — the shipped
+    /// pool-miss arm (`pop()` on an empty pool -> `unwrap_or_default()`).
+    /// Buffer recycling leaves the proof (numeric-probe recipe); see the
+    /// timetz_part_cell macro comment for the Linux pthread_key_create
+    /// status-6 mechanism this cuts.
+    fn stub_word_buf_take() -> Vec<u16> {
+        Vec::new()
+    }
+
+    /// Kani stub for `adt_numeric::var::word_buf_put` — the shipped
+    /// `capacity() == 0` early-return arm (recycling out of proof).
+    fn stub_word_buf_put(_v: Vec<u16>) {}
+
+    /// Kani stub for `adt_numeric::var::digit_buf_heap_realloc`: the tz
+    /// cells never feasibly construct a numeric (retnumeric=false, units
+    /// literal), so reaching the digit heap arm is a harness defect —
+    /// panic loudly (never a silent fence).
+    fn stub_digit_buf_heap_realloc(_heap: &mut Vec<i16>, _n: usize) {
+        panic!("DigitBuf heap arm reached in a tz-only timetz_part cell");
+    }
+
+    /// Kani stub for `adt_numeric::var::digit_buf_put` — drop-time pool
+    /// return (recycling out of proof; numeric-probe precedent).
+    fn stub_digit_buf_put(v: Vec<i16>) {
+        core::mem::forget(v);
+    }
+
     /// Unreachable at runtime here (the only builder-level report is the
     /// intervaltypmodin precision WARNING, suppressed by
     /// model_level_interesting); present so reachability codegen never
@@ -1400,6 +1427,31 @@ mod proofs {
             // pthread_key_create type mismatch; CI cluster 31ad423d).
             #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
             #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            // Numeric TLS-pool stub quartet (CI cluster 33d7d09d31 status-6
+            // repair; numeric-probe recipe): part_result's statically-
+            // present Numeric arms pull adt_numeric's NumericVar/
+            // NumericImage machinery into the call graph, and its
+            // DIGIT_POOL/WORD_POOL `thread_local!`s hold Drop-carrying
+            // Vecs — the only Drop-carrying TLS these harnesses reach
+            // (goto call graph: the sole callers of std's TLS-destructor
+            // `register` are the two pool Storage initializers). On the
+            // LINUX toolchain that registration path converts a call to
+            // CBMC's builtin pthread_key_create, whose destructor
+            // parameter type-mismatches Kani's declaration (struct_tag vs
+            // pointer) -> CBMC status 6 -> reported "VERIFICATION FAILED"
+            // with no property counterexample. macOS std registers TLS
+            // destructors via _tlv_atexit instead, so laptop runs can't
+            // reproduce — which is how the 2026-07-29 env/OnceLock repair
+            // was banked green here while this TLS remained. The stubs
+            // are the shipped pool-miss / no-recycle arms (numeric-probe
+            // precedent): buffer recycling leaves the proof, values are
+            // bit-identical. The tz cells never feasibly build a numeric
+            // (retnumeric=false, units literal), so the realloc stub
+            // panics loudly if ever reached.
+            #[kani::stub(adt_numeric::var::word_buf_take, stub_word_buf_take)]
+            #[kani::stub(adt_numeric::var::word_buf_put, stub_word_buf_put)]
+            #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+            #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
             fn $h() {
                 let zone: i32 = kani::any();
                 // Contract fence (lane doctrine): validated timetz zone
