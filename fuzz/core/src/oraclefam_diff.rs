@@ -22,7 +22,11 @@
 //! Input layout: [selector][enc_sel][payload]; selector % 12 picks the arm:
 //!    0 case      [which][text]         asc_tolower/toupper/initcap kernels +
 //!                                      crate lower/upper/initcap/casefold at
-//!                                      C_COLLATION_OID + fc wrappers
+//!                                      C_COLLATION_OID + fc wrappers;
+//!                                      which & 0x80 => the INVALID-collid
+//!                                      arm (collid = InvalidOid, 42P22
+//!                                      verdict both sides — rule-pinned,
+//!                                      see carves)
 //!    1 lpad      [len4][mode][l2][s2][s1]
 //!    2 rpad      [len4][mode][l2][s2][s1]
 //!    3 trim      [flags][setlen][set][string]  btrim/ltrim/rtrim + 1-arg forms
@@ -47,6 +51,26 @@
 //!     UTF8 + C collation => asc_tolower — the value plane there is still
 //!     the C asc_tolower oracle. (Vendoring str_casefold itself would drag
 //!     in the carved-out locale dispatch.)
+//!   - INVALID-collid verdicts are likewise RULE-PINNED to formatting.c @
+//!     62d6c7d3df: str_tolower/str_toupper/str_initcap/str_casefold all
+//!     gate `!OidIsValid(collid)` FIRST (before any locale lookup, and in
+//!     str_casefold before its encoding gate — formatting.c:1645-1656,
+//!     1709-1720, 1773-1784, 1837-1848) and raise 42P22
+//!     ERRCODE_INDETERMINATE_COLLATION. The C oracle entries don't model
+//!     the collid check (it lives in the carved-out str_* dispatch);
+//!     value plane n/a on the error verdict, message text out of scope
+//!     (str_casefold spells its message with "lower()" — errcode plane
+//!     only).
+//!   - ENCODING GRID: arms 6 (ascii) and 7 (chr) draw from a FOUR-encoding
+//!     grid {SQL_ASCII, UTF8, LATIN1, EUC_JP} — EUC_JP (max_length 3)
+//!     reaches their multibyte-non-UTF8 reject arms (ascii 54000
+//!     "character too large"; chr's is_mb && cvalue > 127 54000), which
+//!     are unreachable under the single-byte/UTF8 trio. These two
+//!     functions only consult pg_encoding_max_length and the first byte —
+//!     no mblen walking — so the C oracle needs only the pinned
+//!     max_length row (wchar.c EUC_JP maxmblen = 3). All other arms stay
+//!     on the three-encoding grid; EUC_JP is never routed through the
+//!     mblen-walking family.
 //!   - ascii() under UTF8 assumes server-verified text (the C body indexes
 //!     continuation bytes unchecked — invalid UTF8 is C out-of-bounds, not
 //!     a comparable behavior): inputs failing pg_verify_mbstr(UTF8) are
@@ -92,11 +116,12 @@ use adt_oracle_compat::{builtins, casemap};
 use datum::{Datum, NullableDatum, Varlena};
 use mcx::{Mcx, MemoryContext};
 use types_error::{
-    PgResult, SqlState, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SUBSTRING_ERROR, ERRCODE_SYNTAX_ERROR,
+    PgResult, SqlState, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_INDETERMINATE_COLLATION,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SUBSTRING_ERROR,
+    ERRCODE_SYNTAX_ERROR,
 };
 use types_fmgr::{LocalFcinfo, PGFunction};
-use wchar::{pg_enc, PG_LATIN1, PG_SQL_ASCII, PG_UTF8};
+use wchar::{pg_enc, PG_EUC_JP, PG_LATIN1, PG_SQL_ASCII, PG_UTF8};
 
 extern "C" {
     fn pg_diff_oc_case(
@@ -190,6 +215,9 @@ fn c_class_state(rc: i32) -> SqlState {
 }
 
 const ENCS: [pg_enc; 3] = [PG_SQL_ASCII, PG_UTF8, PG_LATIN1];
+/// Arms 6/7 (ascii/chr) only — see the EUC_JP encoding-grid note in the
+/// header. Never routed through the mblen-walking family.
+const ENCS4: [pg_enc; 4] = [PG_SQL_ASCII, PG_UTF8, PG_LATIN1, PG_EUC_JP];
 const TEXT_CAP: usize = 400;
 
 // ---------------------------------------------------------------------------
@@ -326,13 +354,46 @@ fn check_fc_text(who: &str, fc: PgResult<Datum>, core: &PgResult<Varlena<'_>>) {
 // ---------------------------------------------------------------------------
 
 fn case_diff(enc: pg_enc, payload: &[u8]) {
-    let Some((&which, s)) = payload.split_first() else {
+    let Some((&wb, s)) = payload.split_first() else {
         return;
     };
-    let which = which % 4;
+    let which = wb % 4;
     let s = cap(s, TEXT_CAP);
     let ctx = MemoryContext::new("oraclefam_diff");
     let mcx = ctx.mcx();
+
+    // INVALID-collid arm (wb & 0x80): both the crate entry and the fc
+    // wrapper must raise 42P22 — rule-pinned to formatting.c's leading
+    // !OidIsValid(collid) gates (see the header carve; the C side of this
+    // verdict is the carved-out str_* dispatch, so no oracle call here).
+    if wb & 0x80 != 0 {
+        let invalid = types_core::INVALID_OID;
+        let core = match which {
+            0 => adt_oracle_compat::lower(mcx, s, invalid),
+            1 => adt_oracle_compat::upper(mcx, s, invalid),
+            2 => adt_oracle_compat::initcap(mcx, s, invalid),
+            _ => adt_oracle_compat::casefold(mcx, s, invalid),
+        };
+        match &core {
+            Ok(_) => panic!("case entry which={which}: invalid collid must error (42P22)"),
+            Err(e) => assert!(
+                e.sqlstate() == ERRCODE_INDETERMINATE_COLLATION,
+                "case entry which={which}: invalid collid raised ({:?} {}) not 42P22",
+                e.sqlstate(),
+                e.message
+            ),
+        }
+        let img = text_image(s);
+        let td = Datum::from_usize(img.as_ptr() as usize);
+        let fc: PGFunction = match which {
+            0 => builtins::fc_lower,
+            1 => builtins::fc_upper,
+            2 => builtins::fc_initcap,
+            _ => builtins::fc_casefold,
+        };
+        check_fc_text("fc_case_invalid_collid", fc_call(fc, mcx, invalid, [td]), &core);
+        return;
+    }
 
     // C kernel oracle (casefold's UTF8+C-collation value oracle is
     // asc_tolower — see the rule-pin carve in the header).
@@ -920,10 +981,17 @@ pub fn oraclefam_diff(data: &[u8]) {
     let Some((&enc_sel, payload)) = rest.split_first() else {
         return;
     };
-    let enc = ENCS[(enc_sel % 3) as usize];
+    let arm = sel % 12;
+    // ascii/chr draw from the four-encoding grid (EUC_JP reject arms —
+    // header note); every other arm stays on the three-encoding grid.
+    let enc = if arm == 6 || arm == 7 {
+        ENCS4[(enc_sel % 4) as usize]
+    } else {
+        ENCS[(enc_sel % 3) as usize]
+    };
     // Rust-side encoding environment pin (the C side pins per entry).
     mbutils::SetDatabaseEncoding(enc).expect("grid encoding valid");
-    match sel % 12 {
+    match arm {
         0 => case_diff(enc, payload),
         1 => pad_diff(enc, payload, true),
         2 => pad_diff(enc, payload, false),
@@ -994,7 +1062,23 @@ mod tests {
                 let mut d = vec![0, enc_sel, which];
                 d.extend_from_slice(b"miXed CASE\x00dropped tail");
                 oraclefam_diff(&d);
+                // invalid-collid arm: 42P22 verdict, entry + fc wrapper.
+                let mut d = vec![0, enc_sel, which | 0x80];
+                d.extend_from_slice(b"any text");
+                oraclefam_diff(&d);
             }
+        }
+        // ascii/chr under EUC_JP (enc_sel % 4 == 3): the multibyte-non-UTF8
+        // 54000 reject arms (character/value too large) plus the accept arm.
+        for t in [&b"A"[..], b"\x80rest", b"\xff", b""] {
+            let mut d = vec![6, 3];
+            d.extend_from_slice(t);
+            oraclefam_diff(&d);
+        }
+        for arg in [1i32, 127, 128, 255, 256, 0x7FFF_FFFF] {
+            let mut d = vec![7, 3, 0];
+            d.extend_from_slice(&arg.to_le_bytes());
+            oraclefam_diff(&d);
         }
         // lpad/rpad: multi-char pad into width 7, len bands, empty pad.
         for sel in [1u8, 2] {
@@ -1085,12 +1169,13 @@ mod tests {
 
     /// chr deterministic sweep: the full boundary band -2..=0x120000 (all
     /// UTF8 length steps, the surrogate band, U+10FFFF/0x110000, the
-    /// single-byte 127/128/255/256 edges) x 3 encodings, all planes, every
-    /// cargo test. The FULL i32 domain runs under ORACLE_EXHAUSTIVE=1
-    /// (CI cluster; core+C planes — the fc wrapper adds no chr logic).
+    /// single-byte 127/128/255/256 edges) x 4 encodings (incl. the EUC_JP
+    /// multibyte-non-UTF8 reject arm), all planes, every cargo test. The
+    /// FULL i32 domain runs under ORACLE_EXHAUSTIVE=1 (CI cluster; core+C
+    /// planes — the fc wrapper adds no chr logic).
     #[test]
     fn chr_boundary_sweep() {
-        for &enc in &ENCS {
+        for &enc in &ENCS4 {
             let mut arg: i64 = -2;
             while arg <= 0x12_0000 {
                 let ctx = MemoryContext::new("oraclefam_chr_sweep");
@@ -1118,7 +1203,7 @@ mod tests {
             eprintln!("chr_exhaustive_full_i32: skipped (set ORACLE_EXHAUSTIVE=1)");
             return;
         }
-        for &enc in &ENCS {
+        for &enc in &ENCS4 {
             let mut arg: i64 = i32::MIN as i64;
             while arg <= i32::MAX as i64 {
                 let ctx = MemoryContext::new("oraclefam_chr_exhaustive");

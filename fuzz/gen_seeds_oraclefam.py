@@ -52,6 +52,10 @@ for enc in range(3):
         seed(f"case-nul-{which}-e{enc}",
              bytes([0, enc, which]) + b"miXed\x00DROPPED tail")
     seed(f"case-mb-e{enc}", bytes([0, enc, 2]) + E2 + b"lan " + E4 + b"word")
+    # invalid-collid arm (which | 0x80): 42P22 verdict, entry + fc wrapper
+    for which in range(4):
+        seed(f"case-invcoll-{which}-e{enc}",
+             bytes([0, enc, which | 0x80]) + b"any text")
 
     # --- lpad/rpad (arms 1/2) -------------------------------------------
     for sel, tag in ((1, "lpad"), (2, "rpad")):
@@ -158,6 +162,14 @@ for flags in range(3):
 seed("bytetrim-emptyset", bytes([4, 0, 0, 0]) + BASE_STR)
 seed("bytetrim-emptystr", bytes([4, 0, 0, 2]) + BASE_SET)
 seed("bytetrim-ff", bytes([4, 0, 0, 1]) + b"\xff" + b"\xff\xffmid\xff")
+
+# --- EUC_JP arm (ascii/chr only; enc_sel % 4 == 3): multibyte-non-UTF8
+# 54000 reject arms + accept arm -----------------------------------------
+for name, t in (("plain", b"A"), ("hi", b"\x80rest"), ("ff", b"\xff"),
+                ("empty", b"")):
+    seed(f"ascii-eucjp-{name}", bytes([6, 3]) + t)
+for arg in (1, 127, 128, 255, 0x7FFFFFFF):
+    seed(f"chr-eucjp-{arg:x}", bytes([7, 3, 0]) + i32(arg))
 
 # --- UTF8 boundary-position seeds: 2/3/4-byte char at head/mid/tail -------
 for name, ch in (("b2", E2), ("b3", E3), ("b4", E4)):
