@@ -125,3 +125,39 @@ Durable lessons worth carrying to sibling lanes:
    oracle's loud guards are live in exactly the build the campaign runs. Had
    they been compiled out, every guard would have been a debug-only tripwire on
    a release-live path — the debug-assert-masking class, self-inflicted.
+
+## H6 — byref image layout: a COVERAGE GAP, not the SEGV it was reported as
+
+Raised by the sibling multirange lane (`proofs/p1-laneac-mr`) as a malformed-image
+SEGV blocking this campaign. Decoded differently, with evidence:
+
+* **Their banked reproducer passes here unchanged.** Its flags are `0x30` =
+  `RANGE_LB_NULL|RANGE_UB_INF` — exactly the case `fence_flags` already handles
+  (H1, committed ac6d2da619) — and the SEGV site they cite (`numeric_cmp`) is
+  H1's NULL byref bound deref. With `LB_NULL` fenced that input writes a single
+  lower bound and never pads at all.
+* **The layout observation is real.** Measured for numrange `[1.5,2.5)`:
+
+      serializer : 5c000000 420f0000 0f 80800100 8813 0f 80800200 8813 02
+      hand-built : 7c000000 420f0000 28000000 80800100 8813 0000 28000000 ...
+
+  numeric is packable (`typstorage 'm'`), so `datum_write` converts a small
+  bound to a 1-byte SHORT header with no alignment; the hand builder writes a
+  4-byte header plus pad bytes.
+* **But it is not a defect.** The C accessors entry reads the hand-built image
+  with `ret=0` and all seven per-call errcodes `0`, returning exactly the
+  4-byte-header bounds written. Both sides deserialize it identically, so
+  comparisons over it were sound — they simply never exercised
+  `fetch_att`/`att_addlength_pointer`/`att_align_pointer`'s `VARATT_IS_1B` arms.
+
+**Resolution:** their fix adopted as an ADDITION, not a replacement. Both layouts
+are now fuzzed on a payload bit — the hand builder keeps the arbitrary-flags
+domain the constructor cannot express, and `build_image_ctor` covers the
+packed-short layout where builder/serializer skew is structurally impossible.
+Replacing the hand builder outright would have traded one coverage gap for
+another.
+
+**Lesson (the one worth carrying):** "the oracle crashed on my input" and "my
+input is malformed" are different claims, and the second does not follow from the
+first. Read what the reader actually does with the bytes before rewriting the
+writer — and check whether an already-committed fence covers the reproducer.
