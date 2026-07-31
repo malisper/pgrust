@@ -1627,6 +1627,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "name",
+ "numutils",
  "percentrepl",
  "pg_b64",
  "pg_hmac",
