@@ -459,6 +459,74 @@ try {
     });
   }
 
+  // ---- paste ------------------------------------------------------------------
+  // Real-psql paste spec (observed over a PTY): complete lines execute as they
+  // arrive, a trailing unterminated line stays in the editing buffer. And a
+  // paste must work even when the input is NOT focused (the state right after
+  // copying text out of the scrollback) — that was the "paste does not work"
+  // bug: no document-level routing existed.
+  {
+    // a) UNFOCUSED multi-line paste with a trailing partial line
+    await evaluate(`(() => {
+      document.getElementById('input').blur();
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'select 701,\\n 702;\\nselect 703');
+      document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await check('unfocused paste: complete statement executed', () =>
+      waitFor((t) => /701[\s\S]*702[\s\S]*\(1 row\)/.test(t), 'pasted statement result', 60000));
+    await check('unfocused paste: trailing partial line stays in the input, unexecuted', async () => {
+      const v = await inputValue();
+      if (v !== 'select 703') throw new Error(`input holds ${JSON.stringify(v)}`);
+      const t = (await evaluate(TERM_TEXT)) || '';
+      if (/\b703\b[\s\S]*\(1 row\)/.test(t)) throw new Error('the partial line executed');
+    });
+    await check('unfocused paste: input took focus (terminal-emulator routing)', async () => {
+      const f = await evaluate(`document.activeElement && document.activeElement.id`);
+      if (f !== 'input') throw new Error(`focus on ${JSON.stringify(f)}`);
+    });
+    await evaluate(`(() => { const el = document.getElementById('input'); el.value = ''; return true; })()`);
+    if (PSQL) {
+      await pressUp();
+      await check('pasted statement is ONE history entry (newlines preserved)', async () => {
+        const v = await inputValue();
+        if (v !== 'select 701,\n 702;') throw new Error(`got ${JSON.stringify(v)}`);
+      });
+      await clearInput();
+    }
+    // b) FOCUSED multi-line paste ending in a newline: everything executes
+    await evaluate(`(() => {
+      const el = document.getElementById('input');
+      el.focus();
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'select 42*10 as pasted_focused;\\n');
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await check('focused multi-line paste executed in full', () =>
+      waitFor((t) => /pasted_focused[\s\S]*420/.test(t), 'focused paste result', 60000));
+    await check('focused paste left an empty input', async () => {
+      const v = await inputValue();
+      if (v !== '') throw new Error(`input holds ${JSON.stringify(v)}`);
+    });
+    // c) paste into ANOTHER text field keeps native handling (not rerouted)
+    await check('paste aimed at a different text field is not hijacked', async () => {
+      const r = await evaluate(`(() => {
+        const el = document.getElementById('updates-email');
+        if (!el) return { skip: true };
+        const dt = new DataTransfer();
+        dt.setData('text/plain', 'user@example.com');
+        const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+        el.dispatchEvent(ev);
+        return { prevented: ev.defaultPrevented, terminal: document.getElementById('input').value };
+      })()`);
+      if (r.skip) return;
+      if (r.prevented) throw new Error('terminal handler stole the email field paste');
+      if (r.terminal.includes('example.com')) throw new Error('email paste leaked into the terminal input');
+    });
+  }
+
   // ---- phase 2: reset gives a PRISTINE datadir, in place -------------------
   // site_t exists right now (the battery created and read it back).
   await clickButton('btn-reset');

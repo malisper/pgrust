@@ -988,6 +988,62 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') flushPersist();
 });
 
+// ---- paste ------------------------------------------------------------------
+// Real psql over a PTY treats a paste as raw bytes (observed, PGDG 18.4): every
+// COMPLETE line executes as it arrives — statements run one after another,
+// prompt-paced, one history entry per statement — and a trailing unterminated
+// line stays in the editing buffer, unexecuted and not in history. Match that:
+// complete lines feed the terminal (the same queue the sidebar examples use),
+// the remainder lands in the input box at the caret.
+function pasteIntoTerminal(text) {
+  const t = String(text).replace(/\r\n?/g, '\n');
+  if (!t) return;
+  const v = inputEl.value;
+  const s = inputEl.selectionStart != null ? inputEl.selectionStart : v.length;
+  const e = inputEl.selectionEnd != null ? inputEl.selectionEnd : v.length;
+  const combined = v.slice(0, s) + t + v.slice(e);
+  const lastNl = combined.lastIndexOf('\n');
+  if (lastNl === -1) {
+    setInputValue(combined);
+    const caret = s + t.length;
+    try { inputEl.setSelectionRange(caret, caret); } catch { /* not focusable yet */ }
+    return;
+  }
+  const lines = combined.slice(0, lastNl).split('\n');
+  const rest = combined.slice(lastNl + 1);
+  setInputValue(rest);
+  try { inputEl.setSelectionRange(rest.length, rest.length); } catch { /* ditto */ }
+  histIdx = null;
+  feedLines(lines, { blurAfterRun: isMobileViewport() });
+}
+
+// Multi-line paste INTO the input: intercept so the complete lines run now
+// (native insertion would just pile newlines into the box until Enter).
+// Single-line paste keeps the browser's native insertion (caret/undo intact).
+inputEl.addEventListener('paste', (e) => {
+  const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+  if (!text || !/[\r\n]/.test(text)) return;
+  e.preventDefault();
+  pasteIntoTerminal(text);
+});
+
+// Paste anywhere else on the page routes to the terminal, the way real
+// terminal emulators behave. This is the fix for "paste does not work": after
+// copying text out of the scrollback the input is deliberately NOT refocused
+// (the selection would be lost), so the very next Cmd/Ctrl-V used to land on
+// <body> and vanish. Other text fields (the updates-dialog email box) keep
+// their native paste.
+document.addEventListener('paste', (e) => {
+  const tgt = e.target;
+  if (tgt === inputEl) return; // the input's own handler owns this
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+  const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+  if (!text) return;
+  e.preventDefault();
+  focusInput();
+  pasteIntoTerminal(text);
+});
+
 // Click-to-focus, WITHOUT stealing a selection: a click that ends a
 // drag-select (or lands inside any selection) must leave the selection alive
 // so Cmd/Ctrl-C can copy it — refocusing the input here collapsed it (the
