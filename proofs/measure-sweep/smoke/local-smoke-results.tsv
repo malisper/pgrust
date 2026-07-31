@@ -1,0 +1,6 @@
+family	harness	tier	expected	outcome	wall_s	verdict
+int-cmp	proofs::eq_btboolcmp	unmeasured	unmeasured	unmeasured-green	10	VERIFICATION:- SUCCESSFUL
+int-cmp	proofs::eq_btint24cmp	unmeasured	unmeasured	unmeasured-green	1	VERIFICATION:- SUCCESSFUL
+int-cmp	proofs::eq_btint84cmp	unmeasured	unmeasured	unmeasured-green	2	VERIFICATION:- SUCCESSFUL
+json-escape	census_len1_plain	unmeasured	unmeasured	unmeasured-failed	21	NO-VERDICT
+json-escape	census_len1_twochar	unmeasured	unmeasured	unmeasured-failed	1	NO-VERDICT

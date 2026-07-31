@@ -1,0 +1,122 @@
+family	harness	tier	expected	outcome	wall_s	timeout_s	verdict	log
+float-arith	proofs::control_dtrunc_vs_c_round	unmeasured	unmeasured	unmeasured-failed	10	600	VERIFICATION:- FAILED	float-arith--proofs__control_dtrunc_vs_c_round_.log
+float-agg	proofs::grid_regr_slope	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__grid_regr_slope_.log
+float-agg	proofs::grid_stddev_pop	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__grid_stddev_pop_.log
+float-agg	proofs::grid_stddev_samp	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__grid_stddev_samp_.log
+float-agg	proofs::grid_var_pop	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__grid_var_pop_.log
+float-agg	proofs::plane_float4_accum_first	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__plane_float4_accum_first_.log
+float-agg	proofs::plane_float8_accum_first	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__plane_float8_accum_first_.log
+float-agg	proofs::plane_float8_combine_n1zero	unmeasured	unmeasured	unmeasured-green	21	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__plane_float8_combine_n1zero_.log
+float-agg	proofs::plane_float8_combine_n2zero	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__plane_float8_combine_n2zero_.log
+float-agg	proofs::plane_regr_accum_first	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__plane_regr_accum_first_.log
+float-agg	proofs::plane_regr_combine_n1zero	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__plane_regr_combine_n1zero_.log
+float-agg	proofs::plane_regr_combine_n2zero	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__plane_regr_combine_n2zero_.log
+float-agg	proofs::probe_det_sqrt_model_determinism	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__probe_det_sqrt_model_determinism_.log
+float-agg	proofs::probe_sqrt_self_determinism	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	float-agg--proofs__probe_sqrt_self_determinism_.log
+float-arith	proofs::control_in_range_f8_vs_noreject	unmeasured	unmeasured	unmeasured-failed	10	600	VERIFICATION:- FAILED	float-arith--proofs__control_in_range_f8_vs_noreject_.log
+float-arith	proofs::eq_dceil	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_dceil_.log
+float-arith	proofs::eq_dfloor	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_dfloor_.log
+float-agg	proofs::grid_var_samp	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__grid_var_samp_.log
+float-arith	proofs::eq_dround	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_dround_.log
+float-arith	proofs::eq_dsign	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_dsign_.log
+float-arith	proofs::eq_dtrunc	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_dtrunc_.log
+float-agg	proofs::grid_regr_r2	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__grid_regr_r2_.log
+float-arith	proofs::dsqrt_bisect_grid	unmeasured	unmeasured	unmeasured-failed	20	600	VERIFICATION:- FAILED	float-arith--proofs__dsqrt_bisect_grid_.log
+float-arith	proofs::control_float8send_vs_c_float4send	unmeasured	unmeasured	unmeasured-failed	40	600	VERIFICATION:- FAILED	float-arith--proofs__control_float8send_vs_c_float4send_.log
+float-arith	proofs::eq_dsqrt	unmeasured	unmeasured	unmeasured-failed	40	600	VERIFICATION:- FAILED	float-arith--proofs__eq_dsqrt_.log
+float-arith	proofs::eq_in_range_float4_float8	unmeasured	unmeasured	unmeasured-green	50	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_in_range_float4_float8_.log
+geo-cmp	ext2::proofs_ext2::eq_box_distance_grid	unmeasured	unmeasured	unmeasured-green	40	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_distance_grid_.log
+float-arith	proofs::eq_float4send	unmeasured	unmeasured	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_float4send_.log
+float-arith	proofs::grid_width_bucket_float8	unmeasured	unmeasured	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__grid_width_bucket_float8_.log
+float-arith	proofs::spots_dsqrt	unmeasured	unmeasured	unmeasured-green	61	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__spots_dsqrt_.log
+float-arith	proofs::eq_in_range_float8_float8	unmeasured	unmeasured	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_in_range_float8_float8_.log
+float-arith	proofs::eq_width_bucket_reject	unmeasured	unmeasured	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_width_bucket_reject_.log
+float-arith	proofs::eq_float8send	unmeasured	unmeasured	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	float-arith--proofs__eq_float8send_.log
+geo-cmp	ext2::proofs_ext2::eq_box_diagonal_img	unmeasured	unmeasured	unmeasured-green	110	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_diagonal_img_.log
+float-agg	proofs::grid_regr_intercept	unmeasured	unmeasured	unmeasured-green	171	600	VERIFICATION:- SUCCESSFUL	float-agg--proofs__grid_regr_intercept_.log
+geo-cmp	ext2::proofs_ext2::eq_box_circle_grid	unmeasured	unmeasured	unmeasured-green	160	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_circle_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c6	unmeasured	unmeasured	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c6_.log
+geo-cmp	ext2::proofs_ext2::control_box_add_vs_c_box_sub	unmeasured	unmeasured	unmeasured-failed	191	600	VERIFICATION:- FAILED	geo-cmp--ext2__proofs_ext2__control_box_add_vs_c_box_sub_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c7	unmeasured	unmeasured	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c7_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c5	unmeasured	unmeasured	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c5_.log
+geo-cmp	ext2::proofs_ext2::eq_box_intersect_img	unmeasured	unmeasured	unmeasured-green	150	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_intersect_img_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c0	unmeasured	unmeasured	unmeasured-green	251	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c0_.log
+geo-cmp	ext2::proofs_ext2::eq_box_add_img	unmeasured	unmeasured	unmeasured-green	311	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_add_img_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c6	unmeasured	unmeasured	unmeasured-green	110	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c6_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c5	unmeasured	unmeasured	unmeasured-green	121	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c5_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c1	unmeasured	unmeasured	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c1_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c7	unmeasured	unmeasured	unmeasured-green	121	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c7_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell0	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell0_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c0	unmeasured	unmeasured	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c0_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell1	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell1_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell2	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell2_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell3	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell3_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell4_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell5	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell5_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c1	unmeasured	unmeasured	unmeasured-green	270	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c1_.log
+geo-cmp	ext2::proofs_ext2::eq_cr_circle_img	unmeasured	unmeasured	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_cr_circle_img_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell7	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell7_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell6	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell6_.log
+geo-cmp	ext2::proofs_ext2::eq_construct_point_img	unmeasured	unmeasured	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_construct_point_img_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_cell8	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_inter_sb_cell8_.log
+geo-cmp	ext2::proofs_ext2::eq_boxes_bound_box_img	unmeasured	unmeasured	unmeasured-green	100	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_boxes_bound_box_img_.log
+geo-cmp	ext2::proofs_ext2::eq_line_horizontal	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_horizontal_.log
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm1	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_perp_arm1_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c2	unmeasured	unmeasured	unmeasured-green	271	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c2_.log
+geo-cmp	ext2::proofs_ext2::eq_line_eq_nan_plane	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_eq_nan_plane_.log
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm2	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_perp_arm2_.log
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm3	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_perp_arm3_.log
+geo-cmp	ext2::proofs_ext2::eq_line_perp_arm4	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_perp_arm4_.log
+geo-cmp	ext2::proofs_ext2::eq_line_vertical	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_vertical_.log
+geo-cmp	ext2::proofs_ext2::eq_line_perp_grid	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_perp_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_on_pl_hplane	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_on_pl_hplane_.log
+geo-cmp	ext2::proofs_ext2::eq_on_pl_vplane	unmeasured	unmeasured	unmeasured-green	30	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_on_pl_vplane_.log
+geo-cmp	ext2::proofs_ext2::eq_on_sb	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_on_sb_.log
+geo-cmp	ext2::proofs_ext2::eq_line_eq_grid	unmeasured	unmeasured	unmeasured-green	70	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_eq_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c2	unmeasured	unmeasured	unmeasured-green	451	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c2_.log
+geo-cmp	ext2::proofs_ext2::eq_on_ps_grid	unmeasured	unmeasured	unmeasured-green	60	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_on_ps_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c4	unmeasured	unmeasured	unmeasured-green	471	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c4_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_p2c3	unmeasured	unmeasured	unmeasured-green	492	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_div_p2c3_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c4	unmeasured	unmeasured	unmeasured-green	371	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c4_.log
+geo-cmp	ext2::proofs_ext2::eq_on_sl_vplane	unmeasured	unmeasured	unmeasured-green	80	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_on_sl_vplane_.log
+geo-cmp	ext2::proofs_ext2::eq_on_pl_dplane	unmeasured	unmeasured	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_on_pl_dplane_.log
+geo-cmp	ext2::proofs_ext2::eq_line_construct_pp_grid	unmeasured	unmeasured	unmeasured-green	160	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_line_construct_pp_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_point_box_img	unmeasured	unmeasured	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_point_box_img_.log
+geo-cmp	ext2::proofs_ext2::eq_on_sl_hplane	unmeasured	unmeasured	unmeasured-green	110	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_on_sl_hplane_.log
+geo-cmp	ext2::proofs_ext2::eq_box_circle_hslice	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	geo-cmp--ext2__proofs_ext2__eq_box_circle_hslice_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_p2c3	unmeasured	unmeasured	unmeasured-green	421	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_mul_p2c3_.log
+geo-cmp	ext2::proofs_ext2::eq_box_sub_img	unmeasured	unmeasured	unmeasured-green	301	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_box_sub_img_.log
+geo-cmp	ext2::proofs_ext2::eq_box_distance_hslice	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	geo-cmp--ext2__proofs_ext2__eq_box_distance_hslice_.log
+geo-cmp	ext2::proofs_ext2::eq_points_box_img	unmeasured	unmeasured	unmeasured-green	90	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_points_box_img_.log
+geo-cmp	ext2::proofs_ext2::eq_point_mul_grid	unmeasured	unmeasured	unmeasured-green	130	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_point_mul_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_box_div_pow2plane	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	geo-cmp--ext2__proofs_ext2__eq_box_div_pow2plane_.log
+geo-cmp	ext2::proofs_ext2::eq_point_div_grid	unmeasured	unmeasured	unmeasured-green	181	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_point_div_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_inter_sb_grid	unmeasured	unmeasured	unmeasured-rss-kill	341	600	NO-VERDICT	geo-cmp--ext2__proofs_ext2__eq_inter_sb_grid_.log
+geo-cmp	proofs::control_point_left_vs_ieee	unmeasured	unmeasured	unmeasured-failed	10	600	VERIFICATION:- FAILED	geo-cmp--proofs__control_point_left_vs_ieee_.log
+geo-cmp	proofs::eq_box_above	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_above_.log
+geo-cmp	proofs::eq_box_above_eq	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_above_eq_.log
+geo-cmp	proofs::eq_box_area_grid	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_area_grid_.log
+geo-cmp	proofs::eq_box_area_zero_plane	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_area_zero_plane_.log
+geo-cmp	proofs::eq_box_below	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_below_.log
+geo-cmp	proofs::eq_box_below_eq	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_below_eq_.log
+geo-cmp	ext2::proofs_ext2::eq_point_mul_pow2plane	unmeasured	unmeasured	unmeasured-green	261	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_point_mul_pow2plane_.log
+geo-cmp	proofs::eq_box_cn_spots	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_cn_spots_.log
+geo-cmp	proofs::eq_box_contain_pt	unmeasured	unmeasured	unmeasured-green	10	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_contain_pt_.log
+geo-cmp	proofs::eq_box_contain	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_contain_.log
+geo-cmp	proofs::eq_box_contained	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_contained_.log
+geo-cmp	proofs::eq_box_eq_grid	unmeasured	unmeasured	unmeasured-green	20	600	VERIFICATION:- SUCCESSFUL	geo-cmp--proofs__eq_box_eq_grid_.log
+geo-cmp	ext2::proofs_ext2::eq_box_mul_pow2plane	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	geo-cmp--ext2__proofs_ext2__eq_box_mul_pow2plane_.log
+geo-cmp	ext2::proofs_ext2::probe_inter_sb_full	unmeasured	unmeasured	unmeasured-rss-kill	341	600	NO-VERDICT	geo-cmp--ext2__proofs_ext2__probe_inter_sb_full_.log
+geo-cmp	ext2::proofs_ext2::probe_line_construct_pp_vshared	unmeasured	unmeasured	unmeasured-green	341	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__probe_line_construct_pp_vshared_.log
+geo-cmp	ext::proofs_ext::eq_circle_contained_hslice	unmeasured	unmeasured	unmeasured-green	341	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext__proofs_ext__eq_circle_contained_hslice_.log
+geo-cmp	ext::proofs_ext::eq_lseg_lt_hslice	unmeasured	unmeasured	unmeasured-green	391	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext__proofs_ext__eq_lseg_lt_hslice_.log
+geo-cmp	ext2::proofs_ext2::eq_point_div_pow2plane	unmeasured	unmeasured	unmeasured-green	542	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext2__proofs_ext2__eq_point_div_pow2plane_.log
+geo-cmp	ext2::proofs_ext2::eq_on_sl_dplane	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	geo-cmp--ext2__proofs_ext2__eq_on_sl_dplane_.log
+geo-cmp	ext::proofs_ext::eq_circle_distance_hslice	unmeasured	unmeasured	unmeasured-green	511	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext__proofs_ext__eq_circle_distance_hslice_.log
+geo-cmp	ext::proofs_ext::eq_lseg_gt_hslice	unmeasured	unmeasured	unmeasured-green	542	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext__proofs_ext__eq_lseg_gt_hslice_.log
+geo-cmp	ext3::proofs_ext3::eq_poly_same_n2	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	geo-cmp--ext3__proofs_ext3__eq_poly_same_n2_.log
+geo-cmp	ext3::proofs_ext3::eq_poly_same_n3	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	geo-cmp--ext3__proofs_ext3__eq_poly_same_n3_.log
+geo-cmp	ext::proofs_ext::eq_lseg_le_hslice	unmeasured	unmeasured	unmeasured-green	542	600	VERIFICATION:- SUCCESSFUL	geo-cmp--ext__proofs_ext__eq_lseg_le_hslice_.log
+geo-cmp	ext::proofs_ext::eq_lseg_ge_hslice	unmeasured	unmeasured	unmeasured-timeout	602	600	NO-VERDICT	geo-cmp--ext__proofs_ext__eq_lseg_ge_hslice_.log
+geo-cmp	ext::proofs_ext::eq_lseg_parallel_arms	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	geo-cmp--ext__proofs_ext__eq_lseg_parallel_arms_.log
+geo-cmp	ext::proofs_ext::eq_lseg_perp_arms	unmeasured	unmeasured	unmeasured-timeout	601	600	NO-VERDICT	geo-cmp--ext__proofs_ext__eq_lseg_perp_arms_.log
