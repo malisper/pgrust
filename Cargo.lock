@@ -220,6 +220,7 @@ dependencies = [
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
+ "adt_float",
  "elog",
  "fd",
  "guc_tables",
