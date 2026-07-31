@@ -1,0 +1,44 @@
+# arrayfuncs_diff dictionary (scaffolded by fuzz/scaffold.py).
+# TODO(scaffold): add multi-byte tokens the parsers compare against —
+# keywords, unit suffixes, type-name literals, format tokens — harvested
+# mechanically from the vendored regress SQL literals (gen_seeds.sh pattern)
+# plus every past divergence. CmpLog + dictionary is day-one for
+# parser-shaped targets (fuzzuproof-crate skill).
+# arm selectors
+"\x00"
+"\x01"
+"\x02"
+"\x03"
+"\x04"
+"\x05"
+"\x06"
+"\x07"
+"\x08"
+"\x09"
+# array literal tokens (arrays.sql harvest + array_in grammar)
+"{"
+"}"
+","
+"\""
+"\\"
+"NULL"
+"null"
+"["
+"]"
+":"
+"="
+"{{"
+"}}"
+"{}"
+"[1:2]="
+"[-1:0]="
+"[2147483646:2147483647]="
+"{1,2,3}"
+"{{1,2},{3,4}}"
+"{NULL}"
+"0x"
+"0o"
+"0b"
+"_"
+"2147483647"
+"-2147483648"

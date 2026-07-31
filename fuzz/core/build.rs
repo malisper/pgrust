@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // arrayfuncs_diff oracle (p1-lanex): verbatim 18.3 arrayfuncs.c core
+        // + arrayutils/numutils helpers; pg_afx_-prefixed symbols (see the
+        // file header for provenance + shims).
+        .file("csrc/pg_arrayfuncs_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).

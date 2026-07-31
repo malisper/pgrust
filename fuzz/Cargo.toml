@@ -237,3 +237,11 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+# arrayfuncs_diff: scaffolded by fuzz/scaffold.py — see README-TODO-arrayfuncs_diff.md.
+[[bin]]
+name = "arrayfuncs_diff"
+path = "fuzz_targets/arrayfuncs_diff.rs"
+test = false
+doc = false
+bench = false
