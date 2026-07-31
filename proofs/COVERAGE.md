@@ -172,19 +172,26 @@ compiler-grade statement count; do not compare these percentages against
 numbers produced with a different rule.
 
 **Rule v2 exists, built and measured, default OFF pending Michael's
-ruling** (`proofs/coverage/SLOC-RULE-V2.md`): v1 minus pure control-flow
-syntax lines (`} else {`, `else {`, bare `else`, `loop {`, `unsafe {`,
-punctuation-only match-arm heads) — the lines no instrument can
-meaningfully map, which every established coverage tool (llvm-cov line
-tables, gcov/lcov, coverage.py, Istanbul, JaCoCo) leaves out of its
-denominator, and which under v1 read permanently uncovered. Under v2 the
-7-crate `any` headline moves 72.12% -> 73.57% (SLOC 21,986 -> 21,408; 472
-permanently-red lines reclassified). `merge-coverage.py --sloc-rule v2`
-for captures, `recut-sloc.py` to re-cut ANY existing capture (including
-the full-tree run) as pure post-processing, `tree-sloc.py --sloc-rule v2`
-for the tree census (tree: 883,248 -> 870,496). The rule statement, the
-per-tool research, the instrument line-table precedence, and the
-generated-tables decision table live in SLOC-RULE-V2.md.
+ruling** (`proofs/coverage/SLOC-RULE-V2.md`): v1 minus the lines no
+instrument can meaningfully map — pure control-flow syntax (`} else {`,
+`loop {`, `unsafe {`, bodiless match-arm heads) AND declaration lines
+(`use`/`mod`, attributes incl. `#[derive]`, struct/enum/union definition
+lines, single-line consts/statics at any nesting depth, impl/trait
+headers, `thread_local!` blocks, `macro_rules!` scaffolding) — the
+classification every established coverage tool (llvm-cov line tables,
+gcov/lcov, coverage.py, Istanbul, JaCoCo) already embodies, and which
+under v1 read permanently uncovered. Every shape's verdict was measured
+on rustc 1.96 llvm output, not assumed; asserts (including
+`debug_assert!`, which stays mapped even with debug-assertions off) and
+macro template bodies stay. Under v2 the 7-crate `any` headline moves
+72.12% -> 81.09% (SLOC 21,986 -> 19,325; 2,475 permanently-red lines
+reclassified). `merge-coverage.py --sloc-rule v2` for captures,
+`recut-sloc.py` to re-cut ANY existing capture (including the full-tree
+run) as pure post-processing, `tree-sloc.py --sloc-rule v2` for the tree
+census (tree: 883,248 -> 779,276). The rule statement, the per-tool
+research, the per-shape measurement tables, the instrument line-table
+precedence, the rendered-output audit, and the generated-tables decision
+table live in SLOC-RULE-V2.md.
 
 Region-to-line mapping caveats:
 - Kani reports source **regions** (spans). Every SLOC line intersecting
