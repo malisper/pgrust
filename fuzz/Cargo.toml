@@ -316,6 +316,10 @@ path = "fuzz_targets/timestamp_diff.rs"
 [[bin]]
 name = "jsonpath_diff"
 path = "fuzz_targets/jsonpath_diff.rs"
+# rangetypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-rangetypes_diff.md.
+[[bin]]
+name = "rangetypes_diff"
+path = "fuzz_targets/rangetypes_diff.rs"
 test = false
 doc = false
 bench = false
@@ -324,6 +328,10 @@ bench = false
 [[bin]]
 name = "jsonpathexec_diff"
 path = "fuzz_targets/jsonpathexec_diff.rs"
+# multirangetypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-multirangetypes_diff.md.
+[[bin]]
+name = "multirangetypes_diff"
+path = "fuzz_targets/multirangetypes_diff.rs"
 test = false
 doc = false
 bench = false

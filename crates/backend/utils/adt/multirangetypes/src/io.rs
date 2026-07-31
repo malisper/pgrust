@@ -259,8 +259,13 @@ pub fn multirange_recv<'m>(
 
     for _ in 0..range_count {
         let range_len = ::pqformat::pq_getmsgint(buf, 4)? as usize;
-        let mut tmpbuf = ::stringinfo::StringInfo::with_capacity_in(mcx, range_len)?;
-        tmpbuf.append_bytes(::pqformat::pq_getmsgbytes(buf, range_len)?)?;
+        // C ordering is load-bearing (multirangetypes.c multirange_recv): the
+        // pq_getmsgbytes bounds check runs BEFORE the buffer exists, and the
+        // buffer itself is a fixed-default initStringInfo reset per element.
+        // See the sibling note in adt_rangetypes::io::range_recv.
+        let range_data = ::pqformat::pq_getmsgbytes(buf, range_len)?;
+        let mut tmpbuf = ::stringinfo::StringInfo::new_in(mcx)?;
+        tmpbuf.append_bytes(range_data)?;
         let d = receive_function_call(
             &mut cache.typioproc,
             Some(&mut tmpbuf),

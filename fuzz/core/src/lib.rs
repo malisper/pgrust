@@ -423,3 +423,28 @@ pub use jsonpath_diff::jsonpath_diff;
 // ../../README-TODO-jsonpathexec_diff.md.
 pub mod jsonpathexec_diff;
 pub use jsonpathexec_diff::jsonpathexec_diff;
+// rangetypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-rangetypes_diff.md.
+pub mod rangetypes_diff;
+pub use rangetypes_diff::rangetypes_diff;
+
+// multirangetypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-multirangetypes_diff.md.
+pub mod multirangetypes_diff;
+pub use multirangetypes_diff::multirangetypes_diff;
+
+/// SHARED detoast-seam installer for the range family targets.
+///
+/// `seam_core::seam!`'s `set()` PANICS on a second install, and both
+/// rangetypes_diff and multirangetypes_diff need the seam. Two independent
+/// `Once` guards therefore raced to a "seam installed twice" panic as soon as
+/// both drivers ran in one process — which is exactly what the shared
+/// `cargo test` binary does, and what a multi-target fuzz job would do. One
+/// `Once` for the process, called by both.
+///
+/// The seam is ENVIRONMENT; the detoast logic is COMPUTATION and is the SHIPPED
+/// implementation, never a mock (minimal-seaming rule).
+pub fn install_detoast_seam_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        detoast_seams::detoast_attr::set(detoast::detoast_attr);
+    });
+}

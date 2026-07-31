@@ -440,8 +440,15 @@ pub fn range_recv<'m>(
             return Ok(Datum::from_usize(0));
         }
         let bound_len = ::pqformat::pq_getmsgint(buf, 4)? as usize;
-        let mut bound_buf = ::stringinfo::StringInfo::with_capacity_in(mcx, bound_len)?;
-        bound_buf.append_bytes(::pqformat::pq_getmsgbytes(buf, bound_len)?)?;
+        // C ordering is load-bearing (rangetypes.c range_recv): pq_getmsgbytes
+        // VALIDATES the wire length against the remaining message BEFORE any
+        // allocation, then initStringInfo takes its fixed default size. Sizing
+        // the buffer from the unvalidated wire length instead let a zero-length
+        // bound reach a zero-capacity buffer (dangling NUL write) and let a
+        // bogus huge length request a multi-GiB reserve C never attempts.
+        let bound_data = ::pqformat::pq_getmsgbytes(buf, bound_len)?;
+        let mut bound_buf = ::stringinfo::StringInfo::new_in(mcx)?;
+        bound_buf.append_bytes(bound_data)?;
         receive_function_call(
             &mut cache.typioproc,
             Some(&mut bound_buf),
