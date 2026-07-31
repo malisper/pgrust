@@ -132,6 +132,8 @@ adt_like = { path = "../../crates/backend/utils/adt/like" }  # like_diff (scaffo
 adt_regexp = { path = "../../crates/backend/utils/adt/regexp" }  # regexp_diff (scaffold.py)
 regexp_alt = { path = "../../crates/backend/utils/adt/regexp_alt" }  # regexp_diff: pin regex_engine=spencer (RE2 dispatch carve)
 regex_core = { path = "../../crates/backend/regex/regex_core" }  # regexp_diff: install the Spencer engine seams
+pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }  # like_diff: C_LOCALE for the direct-kernel arms
+types_nodes = { path = "../../crates/_support/types/nodes" }  # like_diff: NodeTag for the prosupport unhandled-tag plane
 
 [build-dependencies]
 cc = "1"

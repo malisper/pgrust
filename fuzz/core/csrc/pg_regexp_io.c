@@ -8,10 +8,13 @@
  *   - src/backend/utils/adt/regexp.c: pg_re_flags, regexp_matches_ctx,
  *     RE_wchar_execute, RE_execute, RE_compile_and_execute, parse_re_flags,
  *     the textregexeq/textregexne/texticregexeq/texticregexne/nameregexeq/
- *     nameregexne cores, textregexsubstr, similar_escape_internal (+ its
- *     three SQL faces), setup_regexp_matches, build_regexp_match_result,
- *     build_regexp_split_result, and the regexp_count/instr/like/substr/
- *     match/matches/split_to_array cores.
+ *     nameregexne/nameicregexeq/nameicregexne cores, textregexsubstr,
+ *     similar_escape_internal (+ its three SQL faces),
+ *     setup_regexp_matches, build_regexp_match_result,
+ *     build_regexp_split_result, the regexp_count/instr/like/substr/
+ *     match/matches/split_to_array cores, and regexp_fixed_prefix (its
+ *     engine half, pg_regprefix, is the verbatim vendored
+ *     csrc/regexfam/regprefix.c).
  *   - src/backend/utils/adt/varlena.c: charlen_to_bytelen,
  *     check_replace_text_has_escape, appendStringInfoRegexpSubstr,
  *     appendStringInfoText, replace_text_regexp (the regexp_replace-family
@@ -1545,6 +1548,35 @@ pg_diff_nameregexne(const unsigned char *n, int nlen,
 	return 0;
 }
 
+/* --- nameicregexeq/ne [regexp.c oids 1240/1241]: verbatim call shapes
+ * (REG_ADVANCED | REG_ICASE over NameStr/strlen, unwrapped to (ptr,len)
+ * exactly as the case-sensitive name entries above). */
+int
+pg_diff_nameicregexeq(const unsigned char *n, int nlen,
+					  const unsigned char *p, int plen, int *out)
+{
+	text	   *pt;
+
+	PG_DIFF_REGEXP_ENTRY_BEGIN();
+	pt = pg_diff_regexp_text(p, plen);
+	*out = RE_compile_and_execute(pt, (char *) n, nlen,
+								  REG_ADVANCED | REG_ICASE, PG_GET_COLLATION(), 0, NULL);
+	return 0;
+}
+
+int
+pg_diff_nameicregexne(const unsigned char *n, int nlen,
+					  const unsigned char *p, int plen, int *out)
+{
+	text	   *pt;
+
+	PG_DIFF_REGEXP_ENTRY_BEGIN();
+	pt = pg_diff_regexp_text(p, plen);
+	*out = !RE_compile_and_execute(pt, (char *) n, nlen,
+								   REG_ADVANCED | REG_ICASE, PG_GET_COLLATION(), 0, NULL);
+	return 0;
+}
+
 /* --- similar_escape family [regexp.c] ---------------------------------
  * One entry covers all three SQL faces: pat_isnull models the non-strict
  * legacy similar_escape(NULL, ...) -> NULL; has_esc=0 models the 1-arg
@@ -2207,5 +2239,84 @@ pg_diff_regexp_split(const unsigned char *sb, int slen,
 	*out_n = i;
 	*out_ptrs = (const unsigned char *const *) ptrs;
 	*out_lens = lens;
+	return 0;
+}
+
+/* --- regexp_fixed_prefix [regexp.c planner support; no SQL face] --------
+ * Body VERBATIM from regexp.c regexp_fixed_prefix @ 62d6c7d3df (the engine
+ * side, pg_regprefix, is the verbatim vendored csrc/regexfam/regprefix.c).
+ * Shims (plumbing only): the (char *result, bool *exact) fmgr-less shell
+ * becomes (out,outlen,out_exact,out_isnull) writeback (out_isnull models
+ * the NULL "no fixed prefix" return); pfree(str) becomes free(str) because
+ * pg_regprefix's MALLOC is malloc-family under the regexfam shim
+ * (regcustom.h palloc_extended -> malloc), not this TU's palloc arena. */
+int
+pg_diff_regexp_fixed_prefix(const unsigned char *pb, int plen,
+							int case_insensitive,
+							const unsigned char **out, int *outlen,
+							int *out_exact, int *out_isnull)
+{
+	text	   *text_re;
+	char	   *result;
+	regex_t    *re;
+	int			cflags;
+	int			re_result;
+	pg_wchar   *str;
+	size_t		slen;
+	size_t		maxlen;
+	char		errMsg[100];
+	bool		exact;
+
+	PG_DIFF_REGEXP_ENTRY_BEGIN();
+	text_re = pg_diff_regexp_text(pb, plen);
+
+	exact = false;				/* default result */
+
+	/* Compile RE */
+	cflags = REG_ADVANCED;
+	if (case_insensitive)
+		cflags |= REG_ICASE;
+
+	re = RE_compile_and_cache(text_re, cflags | REG_NOSUB, PG_GET_COLLATION());
+
+	/* Examine it to see if there's a fixed prefix */
+	re_result = pg_regprefix(re, &str, &slen);
+
+	switch (re_result)
+	{
+		case REG_NOMATCH:
+			*out_isnull = 1;
+			return 0;
+
+		case REG_PREFIX:
+			/* continue with wchar conversion */
+			break;
+
+		case REG_EXACT:
+			exact = true;
+			/* continue with wchar conversion */
+			break;
+
+		default:
+			/* re failed??? */
+			pg_regerror(re_result, re, errMsg, sizeof(errMsg));
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
+					 errmsg("regular expression failed: %s", errMsg)));
+			break;
+	}
+
+	/* Convert pg_wchar result back to database encoding */
+	maxlen = pg_database_encoding_max_length() * slen + 1;
+	result = (char *) palloc(maxlen);
+	slen = pg_wchar2mb_with_len(str, result, slen);
+	Assert(slen < maxlen);
+
+	free(str);					/* SHIM: engine MALLOC is malloc-family here */
+
+	*out = (const unsigned char *) result;
+	*outlen = (int) slen;
+	*out_exact = exact ? 1 : 0;
+	*out_isnull = 0;
 	return 0;
 }

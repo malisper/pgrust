@@ -507,8 +507,9 @@ fn main() {
         .compile("pg_difffuzz_jsonpath");
     // regexp_diff oracle (p1-laneag): the VERBATIM 18.3 Spencer regex engine
     // (csrc/regexfam/, own shim include tree — regcomp.c/regexec.c #include
-    // their regc_*/rege_* siblings, so only the four top-level engine TUs
-    // compile) + the regexp.c/varlena.c wrapper oracle pg_regexp_io.c.
+    // their regc_*/rege_* siblings, so only the five top-level engine TUs
+    // compile; regprefix.c added for the regexp_fixed_prefix arm) + the
+    // regexp.c/varlena.c wrapper oracle pg_regexp_io.c.
     // Separate build so the regexfam shim postgres.h/mb tree never shadows
     // the main oracle lib's csrc/shim headers (and vice versa). Cross-family
     // mb-helper symbols carry a pg_regexfam_ prefix (see the shim headers) —
@@ -526,6 +527,7 @@ fn main() {
         .file("csrc/regexfam/regexec.c")
         .file("csrc/regexfam/regerror.c")
         .file("csrc/regexfam/regfree.c")
+        .file("csrc/regexfam/regprefix.c")
         .file("csrc/regexfam/pg_regexfam_glue.c")
         .file("csrc/pg_regexp_io.c")
         .include("csrc/regexfam")

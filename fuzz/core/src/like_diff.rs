@@ -9,7 +9,7 @@
 //! libFuzzer minimizes that into the divergence reproducer.
 //!
 //! Input layout: [selector][mode][l0][l1][piece A][piece B]
-//!   selector % 12 picks the arm:
+//!   selector % 15 picks the arm:
 //!     0 textlike    (oid  850)  A = text,   B = pattern
 //!     1 textnlike   (oid  851)  A = text,   B = pattern
 //!     2 namelike    (oid  858)  A = name,   B = pattern
@@ -22,14 +22,27 @@
 //!     9 bytealike   (oid 2005)  A = bytes,  B = pattern (raw bytes)
 //!    10 byteanlike  (oid 2006)  A = bytes,  B = pattern (raw bytes)
 //!    11 like_escape_bytea (oid 2009) A = pattern, B = escape (raw bytes)
+//!    12 sb_match_text   [kernel] A = text, B = pattern (raw bytes) —
+//!       direct SB_MatchText stamping diff, tristate TRUE/FALSE/ABORT
+//!    13 utf8_match_text [kernel] A = text, B = pattern (raw bytes) —
+//!       direct UTF8_MatchText stamping diff
+//!    14 sb_imatch_text  [kernel] A = text, B = pattern (raw bytes) —
+//!       direct SB_IMatchText stamping diff (C locale, ASCII fold)
 //!   mode bit0 = encoding plane: 0 -> UTF8 (max_length 4), 1 -> LATIN1
 //!     (max_length 1) — set per exec on BOTH sides
 //!     (mbutils::SetDatabaseEncoding / pg_diff_like_set_encoding).
 //!   mode bit1 = collation: 0 -> C_COLLATION_OID (950), 1 -> InvalidOid
 //!     (exercises the 42P22 indeterminate-collation arm); ignored by the
-//!     escape and bytea arms whose C bodies never read collation.
+//!     escape and bytea arms whose C bodies never read collation.  The
+//!     kernel arms 12/13 reuse it as the locale selector: 0 -> Some(C
+//!     locale) on both sides, 1 -> None/NULL (C's bytealike / lowered-ILIKE
+//!     `MatchText(..., 0)` call shape); arm 14's SB_IMatchText always folds
+//!     through the C locale.
 //!   [l0][l1] little-endian u16; len(A) = u16 % (rest.len() + 1); B is the
-//!   remainder.
+//!   remainder.  Kernel-arm pieces are RAW BYTES: none of the three
+//!   stampings consults pg_mblen (the UTF8 stamping's NextChar is the pure
+//!   continuation-byte skip), so no text/encoding gate applies there; the
+//!   only reachable error is the trailing-escape 22025.
 //!
 //! INPUT INVARIANTS (enforced here, mirroring the server's datum contracts):
 //!   - Each piece is capped at 512 bytes: MatchText recursion depth is
@@ -61,9 +74,13 @@
 //!     values fuzzed here (fc_textlike etc.) — covered by identity.
 //!   - textlike_support/texticlike_support/textregexeq_support/
 //!     texticregexeq_support/text_starts_with_support (oids 1023-1025,
-//!     1364, 6242): planner prosupport rows; the shipped wrappers are
-//!     panic-on-arrival stubs for the closed-set planner legs and take an
-//!     `internal` node pointer — no pure byte-level entry to differ.
+//!     1364, 6242): planner prosupport rows.  Their UNHANDLED-TAG leg (C
+//!     like_regex_support returns NULL for any request other than
+//!     Selectivity/IndexCondition) IS exercised — every exec runs the five
+//!     wrappers over non-planner NodeTags and asserts Ok(Datum 0)
+//!     (fc_support_unhandled_tag_plane).  Only the Selectivity/
+//!     IndexCondition panic legs stay untested: they are the defensive
+//!     closed-set planner assertion, deliberately never triggered.
 //!   - Non-UTF8 MULTIBYTE encodings: out of scope on both sides of this
 //!     target — shipped Rust raises 0A000 (mb_matchtext_unported) while C
 //!     runs MB_MatchText; the two fuzzed planes (UTF8, LATIN1) never route
@@ -146,6 +163,19 @@ extern "C" {
     fn pg_diff_like_escape_bytea(
         p: *const c_char, plen: i32, e: *const c_char, elen: i32,
         out: *mut c_char, outlen: *mut i32,
+    ) -> i32;
+    // Direct kernel entries (arms 12..14): raw LIKE_TRUE/FALSE/ABORT.
+    fn pg_diff_like_sb_match(
+        t: *const c_char, tlen: i32, p: *const c_char, plen: i32,
+        use_locale: i32, out: *mut i32,
+    ) -> i32;
+    fn pg_diff_like_utf8_match(
+        t: *const c_char, tlen: i32, p: *const c_char, plen: i32,
+        use_locale: i32, out: *mut i32,
+    ) -> i32;
+    fn pg_diff_like_sb_imatch(
+        t: *const c_char, tlen: i32, p: *const c_char, plen: i32,
+        out: *mut i32,
     ) -> i32;
 }
 
@@ -314,7 +344,10 @@ pub fn like_diff(data: &[u8]) {
         return;
     };
     let Some(f) = decode(payload) else { return };
-    match sel % 12 {
+    // Deterministic prosupport plane (module header): the unhandled-tag NULL
+    // leg of the five *_support wrappers, every exec (cheap: a tag read).
+    fc_support_unhandled_tag_plane();
+    match sel % 15 {
         0 => textlike_diff(&f),
         1 => textnlike_diff(&f),
         2 => namelike_diff(&f),
@@ -326,8 +359,125 @@ pub fn like_diff(data: &[u8]) {
         8 => like_escape_diff(&f),
         9 => bytealike_diff(&f),
         10 => byteanlike_diff(&f),
-        _ => like_escape_bytea_diff(&f),
+        11 => like_escape_bytea_diff(&f),
+        12 => kernel_match_diff(&f, KernelArm::Sb),
+        13 => kernel_match_diff(&f, KernelArm::Utf8),
+        _ => kernel_match_diff(&f, KernelArm::SbI),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Prosupport unhandled-tag plane (module header): C like_regex_support /
+// text_starts_with_support return NULL for any request that is not
+// Selectivity/IndexCondition; the shipped wrappers mirror that with
+// Ok(Datum 0).  The panic legs are the planner closed-set defensive arm and
+// must never be triggered here.
+// ---------------------------------------------------------------------------
+
+fn fc_support_unhandled_tag_plane() {
+    use types_nodes::NodeTag;
+    for tag in [
+        NodeTag::T_Invalid,
+        NodeTag::T_SupportRequestSimplify,
+        NodeTag::T_SupportRequestCost,
+    ] {
+        for (fname, func) in [
+            ("fc_textlike_support", lb::fc_textlike_support as PGFunction),
+            ("fc_texticlike_support", lb::fc_texticlike_support),
+            ("fc_textregexeq_support", lb::fc_textregexeq_support),
+            ("fc_texticregexeq_support", lb::fc_texticregexeq_support),
+            ("fc_text_starts_with_support", lb::fc_text_starts_with_support),
+        ] {
+            let d = fc_call(
+                func,
+                None,
+                0,
+                None,
+                [Datum::from_usize(&tag as *const NodeTag as usize)],
+            )
+            .unwrap_or_else(|e| {
+                panic!("{fname} DIVERGENCE: Err({:?}) on unhandled tag {tag:?} (C returns NULL)",
+                       e.sqlstate)
+            });
+            assert!(
+                d.as_usize() == 0,
+                "{fname} DIVERGENCE: non-NULL Datum on unhandled tag {tag:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arms 12..14: direct like_match.c kernel stampings (module header) — the
+// shipped pub wrappers sb_match_text / utf8_match_text / sb_imatch_text vs
+// the C SB_MatchText / UTF8_MatchText / SB_IMatchText stampings, on the raw
+// LIKE_TRUE/FALSE/ABORT tristate.  Raw-byte domain; mode bit1 selects
+// None/NULL vs Some(C) locale for the CS arms.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum KernelArm {
+    Sb,
+    Utf8,
+    SbI,
+}
+
+fn kernel_match_diff(f: &Frame<'_>, arm: KernelArm) {
+    let use_locale = f.coll != 0; // mode bit1 clear -> C locale on both sides
+    let locale = use_locale.then_some(&pg_locale::C_LOCALE);
+    let mut cval = 0i32;
+    let (fname, cst, core) = match arm {
+        KernelArm::Sb => (
+            "sb_match_text",
+            unsafe {
+                pg_diff_like_sb_match(
+                    cptr(f.a), f.a.len() as i32, cptr(f.b), f.b.len() as i32,
+                    use_locale as i32, &mut cval,
+                )
+            },
+            adt_like::sb_match_text(f.a, f.b, locale),
+        ),
+        KernelArm::Utf8 => (
+            "utf8_match_text",
+            unsafe {
+                pg_diff_like_utf8_match(
+                    cptr(f.a), f.a.len() as i32, cptr(f.b), f.b.len() as i32,
+                    use_locale as i32, &mut cval,
+                )
+            },
+            adt_like::utf8_match_text(f.a, f.b, locale),
+        ),
+        KernelArm::SbI => (
+            "sb_imatch_text",
+            unsafe {
+                pg_diff_like_sb_imatch(
+                    cptr(f.a), f.a.len() as i32, cptr(f.b), f.b.len() as i32, &mut cval,
+                )
+            },
+            adt_like::sb_imatch_text(f.a, f.b, &pg_locale::C_LOCALE),
+        ),
+    };
+    let ctx = format!("t={:?} p={:?} use_locale={use_locale}", f.a, f.b);
+    match &core {
+        // Exact tristate: LIKE_ABORT must match too, not just truthiness.
+        Ok(v) => assert!(
+            cst == 0 && cval == *v,
+            "{fname} DIVERGENCE {ctx}: C=(st {cst}, val {cval}) Rust=Ok({v})"
+        ),
+        Err(e) => {
+            let rc = rust_err_class(e);
+            assert!(
+                cst == rc && cst != 0,
+                "{fname} DIVERGENCE {ctx}: C=(st {cst}) Rust=Err(class {rc}, {})",
+                e.message
+            );
+        }
+    }
+    let cerr = unsafe { pg_diff_errcode_get() };
+    assert!(
+        cst == cerr || cst == 0,
+        "{fname} oracle errcode plane inconsistent {ctx}: st={cst} errcode={cerr}"
+    );
 }
 
 /// Shared comparator: C entry outcome vs shipped-core outcome vs fc wrapper.
@@ -706,11 +856,31 @@ mod tests {
     /// (fc plane rides inside every drive).
     #[test]
     fn arms_smoke() {
-        for sel in 0u8..12 {
+        for sel in 0u8..15 {
             for mode in 0u8..4 {
                 for (t, p) in witness_pairs() {
                     drive(sel, mode, t, p);
                 }
+            }
+        }
+    }
+
+    /// Direct kernel arms (12..14): raw-byte domain (invalid UTF-8 legal),
+    /// the ABORT tristate, both locale selections, trailing-escape error,
+    /// and ASCII case folding through SB_IMatchText.
+    #[test]
+    fn kernel_arms_smoke() {
+        for sel in [12u8, 13, 14] {
+            for mode in 0u8..4 {
+                drive(sel, mode, b"abc", b"a%c");
+                drive(sel, mode, b"abc", b"%zz"); // %-scan exhausts text: ABORT
+                drive(sel, mode, b"abc", b"ab"); // text longer than pattern
+                drive(sel, mode, b"ab", b"ab_"); // pattern longer: ABORT tail
+                drive(sel, mode, b"abc", b"abc\\"); // trailing escape: 22025
+                drive(sel, mode, b"AbC", b"a_c"); // folds only under arm 14
+                drive(sel, mode, b"\xff\xfe\x80", b"_%"); // raw non-UTF8 bytes
+                drive(sel, mode, "é".as_bytes(), b"_"); // _ char-width differs by arm
+                drive(sel, mode, b"", b"%%");
             }
         }
     }

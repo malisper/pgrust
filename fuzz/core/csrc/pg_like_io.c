@@ -3047,3 +3047,44 @@ pg_diff_like_escape_bytea(const char *pdat, int plen_in, const char *edat,
 	}
 	return 0;
 }
+
+/* --- direct kernel entries (driver arms 12..14): the like_match.c
+ * stampings themselves, returning the raw LIKE_TRUE/LIKE_FALSE/LIKE_ABORT
+ * tristate.  NOT Postgres fmgr rows — these diff the shipped crate's pub
+ * kernel wrappers (adt_like::sb_match_text / utf8_match_text /
+ * sb_imatch_text) against the same stampings that GenericMatchText /
+ * Generic_Text_IC_like dispatch to above.  None of these three stampings
+ * consults pg_mblen (the UTF8 stamping's NextChar is the pure
+ * continuation-byte skip), so raw bytes are in-domain; the only reachable
+ * error is the trailing-escape 22025 (class 1).  use_locale selects a NULL
+ * locale (C's bytealike / lowered-ILIKE call shape, `MatchText(..., 0)`)
+ * vs the pinned C locale; SB_IMatchText always takes the C locale (its
+ * GETCHAR case-folds through it). */
+int
+pg_diff_like_sb_match(const char *t, int tlen, const char *p, int plen,
+					  int use_locale, int *out)
+{
+	PG_DIFF_LIKE_ENTRY_PROLOGUE();
+	*out = SB_MatchText(t, tlen, p, plen,
+						use_locale ? &pg_like_c_locale : NULL);
+	return 0;
+}
+
+int
+pg_diff_like_utf8_match(const char *t, int tlen, const char *p, int plen,
+						int use_locale, int *out)
+{
+	PG_DIFF_LIKE_ENTRY_PROLOGUE();
+	*out = UTF8_MatchText(t, tlen, p, plen,
+						  use_locale ? &pg_like_c_locale : NULL);
+	return 0;
+}
+
+int
+pg_diff_like_sb_imatch(const char *t, int tlen, const char *p, int plen,
+					   int *out)
+{
+	PG_DIFF_LIKE_ENTRY_PROLOGUE();
+	*out = SB_IMatchText(t, tlen, p, plen, &pg_like_c_locale);
+	return 0;
+}

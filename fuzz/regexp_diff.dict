@@ -148,3 +148,19 @@
 "banana"
 "aabbb"
 "the quick brown fox"
+# hardening pass (2026-07-31): new arm selectors 19/20 (nameicregexeq/ne)
+# and 21 (regexp_fixed_prefix)
+"\x13"
+"\x14"
+"\x15"
+# fixed-prefix shapes (anchoring drives NOMATCH/PREFIX/EXACT)
+"^abc"
+"^abc$"
+"^abc[xy]"
+"^(abc|abd)"
+# digit-first regexp_replace 4th arg (start-parameter HINT error)
+"01"
+"9g"
+# multibyte / junk option bytes (invalid_re_option mblen slice)
+"z\xc3\xa9"
+"\xe2\x82\xac"

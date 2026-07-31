@@ -56,3 +56,11 @@ esc_hash_pct="#%"
 esc_hash_us="#_"
 esc_two_char="xy"
 esc_doubled="##"
+# hardening pass (2026-07-31): direct kernel arm selectors 12/13/14
+# (sb_match_text / utf8_match_text / sb_imatch_text)
+"\x0c"
+"\x0d"
+"\x0e"
+# ABORT-tristate witnesses (%-scan exhausts the text)
+abort_scan="%zz"
+abort_tail="ab_"

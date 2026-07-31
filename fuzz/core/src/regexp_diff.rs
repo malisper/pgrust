@@ -41,7 +41,7 @@
 //!     wrappers (regexp_matches / regexp_split_to_table, fn_extra state
 //!     machine) are exercised by the crate's own tests, not this target.
 //!
-//! Input layout: [selector][payload]; selector % 19 picks the arm.  Fields
+//! Input layout: [selector][payload]; selector % 22 picks the arm.  Fields
 //! are drawn by a cursor: `text(cap)` = 1..2 length bytes (mod cap+1), then
 //! that many bytes (short reads allowed at end-of-payload); ints are 1 byte
 //! small-biased (-3..=247 plus MIN/MAX/65536/1e6/256 sentinels); optional
@@ -69,16 +69,21 @@
 //!  17 regexp_split_to_array [2767/2768] nopt(0..=1), pat, s, [flags]
 //!  18 textregexreplace_extended [6251/52/53] nopt(0..=2), pat, s, r,
 //!     start, [n], [flags]
+//!  19 nameicregexeq  [oid 1240]  pat, s (name payload; fc plane when <64B)
+//!  20 nameicregexne  [oid 1241]  pat, s
+//!  21 regexp_fixed_prefix [planner support, no SQL face] bits(bit0 =
+//!     case_insensitive), pat — diffed against the verbatim C
+//!     regexp_fixed_prefix + pg_regprefix (csrc/regexfam/regprefix.c,
+//!     vendored verbatim); planes: (prefix bytes, exact flag) / NULL +
+//!     verdict + errcode.
 //!
 //! SKIPPED rows (executable exceptions live in the arms/tests, not comments
 //! only — the SRF carve above is enforced by the arm set itself):
 //!   - 2763/2764 regexp_matches, 2765/2766 regexp_split_to_table: SRF fmgr
 //!     machinery (fn_extra/multi-call state) — their per-row CORES are arm
 //!     16/17's loops; the SRF shells are crate-test-covered.
-//!   - 1240/1241 nameicregexeq/ne and 1656..1659 bpchar*: same cores as
-//!     arms 2..5 (identical prosrc dispatch), covered through them.
-//!   - regexp_fixed_prefix (planner support, no SQL face): out of the lane's
-//!     SQL-facing scope; regprefix.c is deliberately not vendored.
+//!   - 1656..1659 bpchar*: same cores as arms 2..5 (identical prosrc
+//!     dispatch), covered through them.
 
 use datum::{Datum, NullableDatum};
 use types_core::C_COLLATION_OID;
@@ -103,6 +108,12 @@ extern "C" {
     fn pg_diff_texticregexne(s: *const u8, slen: i32, p: *const u8, plen: i32, out: *mut i32) -> i32;
     fn pg_diff_nameregexeq(n: *const u8, nlen: i32, p: *const u8, plen: i32, out: *mut i32) -> i32;
     fn pg_diff_nameregexne(n: *const u8, nlen: i32, p: *const u8, plen: i32, out: *mut i32) -> i32;
+    fn pg_diff_nameicregexeq(n: *const u8, nlen: i32, p: *const u8, plen: i32, out: *mut i32) -> i32;
+    fn pg_diff_nameicregexne(n: *const u8, nlen: i32, p: *const u8, plen: i32, out: *mut i32) -> i32;
+    fn pg_diff_regexp_fixed_prefix(
+        p: *const u8, plen: i32, case_insensitive: i32,
+        out: *mut *const u8, outlen: *mut i32, out_exact: *mut i32, out_isnull: *mut i32,
+    ) -> i32;
     fn pg_diff_similar_escape(
         pat: *const u8, patlen: i32, pat_isnull: i32,
         esc: *const u8, esclen: i32, has_esc: i32,
@@ -384,7 +395,7 @@ pub fn regexp_diff(data: &[u8]) {
         return;
     };
     pin();
-    match sel % 19 {
+    match sel % 22 {
         0 => textre_bool_diff(payload, BoolArm::TextEq),
         1 => textre_bool_diff(payload, BoolArm::TextNe),
         2 => textre_bool_diff(payload, BoolArm::TextIcEq),
@@ -403,7 +414,10 @@ pub fn regexp_diff(data: &[u8]) {
         15 => regexp_substr_diff(payload),
         16 => regexp_match_diff(payload),
         17 => regexp_split_diff(payload),
-        _ => textregexreplace_extended_diff(payload),
+        18 => textregexreplace_extended_diff(payload),
+        19 => textre_bool_diff(payload, BoolArm::NameIcEq),
+        20 => textre_bool_diff(payload, BoolArm::NameIcNe),
+        _ => regexp_fixed_prefix_diff(payload),
     }
 }
 
@@ -419,6 +433,8 @@ enum BoolArm {
     TextIcNe,
     NameEq,
     NameNe,
+    NameIcEq,
+    NameIcNe,
 }
 
 fn textre_bool_diff(payload: &[u8], arm: BoolArm) {
@@ -439,6 +455,8 @@ fn textre_bool_diff(payload: &[u8], arm: BoolArm) {
             BoolArm::TextIcNe => pg_diff_texticregexne(s.as_ptr(), s.len() as i32, pat.as_ptr(), pat.len() as i32, &mut cb),
             BoolArm::NameEq => pg_diff_nameregexeq(s.as_ptr(), s.len() as i32, pat.as_ptr(), pat.len() as i32, &mut cb),
             BoolArm::NameNe => pg_diff_nameregexne(s.as_ptr(), s.len() as i32, pat.as_ptr(), pat.len() as i32, &mut cb),
+            BoolArm::NameIcEq => pg_diff_nameicregexeq(s.as_ptr(), s.len() as i32, pat.as_ptr(), pat.len() as i32, &mut cb),
+            BoolArm::NameIcNe => pg_diff_nameicregexne(s.as_ptr(), s.len() as i32, pat.as_ptr(), pat.len() as i32, &mut cb),
         }
     };
 
@@ -452,6 +470,8 @@ fn textre_bool_diff(payload: &[u8], arm: BoolArm) {
         BoolArm::TextIcNe => "texticregexne",
         BoolArm::NameEq => "nameregexeq",
         BoolArm::NameNe => "nameregexne",
+        BoolArm::NameIcEq => "nameicregexeq",
+        BoolArm::NameIcNe => "nameicregexne",
     };
     let r = match arm {
         BoolArm::TextEq => adt_regexp::textregexeq(m, s, pat, C),
@@ -460,6 +480,8 @@ fn textre_bool_diff(payload: &[u8], arm: BoolArm) {
         BoolArm::TextIcNe => adt_regexp::texticregexne(m, s, pat, C),
         BoolArm::NameEq => adt_regexp::nameregexeq(m, s, pat, C),
         BoolArm::NameNe => adt_regexp::nameregexne(m, s, pat, C),
+        BoolArm::NameIcEq => adt_regexp::nameicregexeq(m, s, pat, C),
+        BoolArm::NameIcNe => adt_regexp::nameicregexne(m, s, pat, C),
     };
 
     let core: Result<bool, i32> = match (cst, &r) {
@@ -490,7 +512,10 @@ fn textre_bool_diff(payload: &[u8], arm: BoolArm) {
     };
 
     // fc-wrapper plane.  Name arms need the payload to fit a NameData block.
-    let is_name = matches!(arm, BoolArm::NameEq | BoolArm::NameNe);
+    let is_name = matches!(
+        arm,
+        BoolArm::NameEq | BoolArm::NameNe | BoolArm::NameIcEq | BoolArm::NameIcNe
+    );
     if is_name && s.len() >= 64 {
         return;
     }
@@ -510,6 +535,8 @@ fn textre_bool_diff(payload: &[u8], arm: BoolArm) {
         BoolArm::TextIcNe => adt_regexp::builtins::fc_texticregexne,
         BoolArm::NameEq => adt_regexp::builtins::fc_nameregexeq,
         BoolArm::NameNe => adt_regexp::builtins::fc_nameregexne,
+        BoolArm::NameIcEq => adt_regexp::builtins::fc_nameicregexeq,
+        BoolArm::NameIcNe => adt_regexp::builtins::fc_nameicregexne,
     };
     match (fc_call::<2>(f, m, [sarg, text_arg(&pimg)]).0, &core) {
         (Ok(d), Ok(b)) => assert!(
@@ -1384,6 +1411,66 @@ fn regexp_split_diff(payload: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
+// Arm 21: regexp_fixed_prefix (planner support; no SQL face, no fc plane).
+// Planes: Some((prefix bytes, exact)) / None + verdict + errcode class.
+// ---------------------------------------------------------------------------
+
+fn regexp_fixed_prefix_diff(payload: &[u8]) {
+    let mut cur = Cur::new(payload);
+    let case_insensitive = cur.byte() & 1 != 0;
+    let pat = cur.field(PAT_CAP);
+    if !text_ok(pat) {
+        return;
+    }
+
+    let mut out: *const u8 = core::ptr::null();
+    let mut outlen: i32 = 0;
+    let mut exact: i32 = 0;
+    let mut isnull: i32 = 0;
+    let cst = unsafe {
+        pg_diff_regexp_fixed_prefix(
+            pat.as_ptr(), pat.len() as i32, case_insensitive as i32,
+            &mut out, &mut outlen, &mut exact, &mut isnull,
+        )
+    };
+    let cres: Result<Option<(Vec<u8>, bool)>, i32> = if cst != 0 {
+        Err(cst)
+    } else if isnull != 0 {
+        Ok(None)
+    } else {
+        // SAFETY: arena bytes valid until the next pg_diff_* call; copied now.
+        Ok(Some((
+            unsafe { core::slice::from_raw_parts(out, outlen as usize) }.to_vec(),
+            exact != 0,
+        )))
+    };
+
+    let cx = mcx::MemoryContext::new("regexp_fuzz");
+    let m = cx.mcx();
+    let rres = adt_regexp::regexp_fixed_prefix(m, pat, case_insensitive, C)
+        .map(|o| o.map(|(v, e)| (v.as_slice().to_vec(), e)));
+
+    match (cres, rres) {
+        (Ok(c), Ok(r)) => assert!(
+            c == r,
+            "regexp_fixed_prefix(ci={case_insensitive}): value DIVERGENCE pat={pat:?}: C={c:?} Rust={r:?}"
+        ),
+        (Err(code), Err(e)) => assert!(
+            err_class(&e) == code,
+            "regexp_fixed_prefix: sqlstate DIVERGENCE pat={pat:?}: C class {code} Rust {} ({:?})",
+            err_class(&e),
+            e.sqlstate
+        ),
+        (Ok(_), Err(e)) if known_etoobig_divergence(&e) => {}
+        (c, r) => panic!(
+            "regexp_fixed_prefix: verdict DIVERGENCE pat={pat:?} ci={case_insensitive}: C ok={} Rust ok={}",
+            c.is_ok(),
+            r.is_ok()
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // parse_re_flags plane (in-test exhaustive sweep; also exercised through the
 // flags field of every arm above).
 // ---------------------------------------------------------------------------
@@ -1507,10 +1594,15 @@ mod tests {
     fn arms_smoke() {
         let cap_pat: &[u8] = b"^(a+)(b+)$"; // captures
         let bad: &[u8] = b"(unbalanced";
-        for sel in 0..=5u8 {
+        for sel in [0u8, 1, 2, 3, 4, 5, 19, 20] {
             regexp_diff(&arm(sel, &[&f1(cap_pat), &f2(b"aabbb")]));
             regexp_diff(&arm(sel, &[&f1(cap_pat), &f2(b"xyz")]));
             regexp_diff(&arm(sel, &[&f1(bad), &f2(b"abc")]));
+        }
+        // nameic arms: the fold is the point.
+        for sel in [19u8, 20] {
+            regexp_diff(&arm(sel, &[&f1(b"^abc$"), &f2(b"AbC")]));
+            regexp_diff(&arm(sel, &[&f1(b"^ABC$"), &f2(b"xyz")]));
         }
         // similar_escape family: value + null shapes (arm 6 bits byte).
         regexp_diff(&arm(6, &[&[0], &f1(b"ab%_"), &f1(b"")]));
@@ -1550,6 +1642,86 @@ mod tests {
         regexp_diff(&arm(17, &[&[0], &f1(b""), &f2(b"abc"), &f1(b"")])); // empty pattern
         regexp_diff(&arm(17, &[&[1], &f1(b"a*"), &f2(b"baaab"), &f1(b"i")]));
         regexp_diff(&arm(17, &[&[0], &f1(bad), &f2(b"abc"), &f1(b"")]));
+        // fixed prefix: none / prefix / exact / icase-degraded / error.
+        regexp_diff(&arm(21, &[&[0], &f1(b"abc")])); // unanchored: no prefix
+        regexp_diff(&arm(21, &[&[0], &f1(b"^abc")])); // prefix
+        regexp_diff(&arm(21, &[&[0], &f1(b"^abc$")])); // exact
+        regexp_diff(&arm(21, &[&[0], &f1(b"^abc[xy]z*")]));
+        regexp_diff(&arm(21, &[&[1], &f1(b"^abc")])); // icase: two colors/char
+        regexp_diff(&arm(21, &[&[1], &f1(b"^123$")])); // icase, caseless chars
+        regexp_diff(&arm(21, &[&[0], &f1(bad)])); // 2201B both sides
+        regexp_diff(&arm(21, &[&[0], &f1("^\u{e9}t\u{e9}".as_bytes())])); // mb prefix
+    }
+
+    /// Every documented argument-validation / early-return branch of the
+    /// regexp_count/instr/like/substr/split faces, one witness each (the
+    /// same shapes are seeded into corpus/regexp_diff for coverage replay).
+    #[test]
+    fn matches_branch_witnesses() {
+        // 'g' flag rejected by the non-SRF faces.
+        regexp_diff(&arm(12, &[&[2], &f1(b"a"), &f2(b"banana"), &ib(1), &f1(b"g")]));
+        regexp_diff(&arm(13, &[&[4], &f1(b"a"), &f2(b"banana"), &ib(1), &ib(1), &ib(0), &f1(b"g"), &ib(0)]));
+        regexp_diff(&arm(14, &[&[1], &f1(b"a"), &f2(b"banana"), &f1(b"g")]));
+        regexp_diff(&arm(15, &[&[3], &f1(b"a"), &f2(b"banana"), &ib(1), &ib(1), &f1(b"g"), &ib(0)]));
+        regexp_diff(&arm(17, &[&[1], &f1(b"a"), &f2(b"banana"), &f1(b"g")]));
+        // start <= 0 (count/instr/substr + replace_extended).
+        regexp_diff(&arm(12, &[&[1], &f1(b"a"), &f2(b"banana"), &ib(0), &f1(b"")]));
+        regexp_diff(&arm(13, &[&[1], &f1(b"a"), &f2(b"banana"), &ib(-2), &f1(b"")]));
+        regexp_diff(&arm(18, &[&[0], &f1(b"a"), &f2(b"banana"), &f1(b"X"), &ib(0), &ib(1), &f1(b"")]));
+        regexp_diff(&arm(18, &[&[1], &f1(b"a"), &f2(b"banana"), &f1(b"X"), &ib(-3), &ib(1), &f1(b"")]));
+        // n <= 0 / n > nmatches.
+        regexp_diff(&arm(13, &[&[2], &f1(b"an"), &f2(b"banana"), &ib(1), &ib(0), &ib(0), &f1(b""), &ib(0)]));
+        regexp_diff(&arm(15, &[&[2], &f1(b"an"), &f2(b"banana"), &ib(1), &ib(-1), &f1(b""), &ib(0)]));
+        regexp_diff(&arm(13, &[&[2], &f1(b"an"), &f2(b"banana"), &ib(1), &ib(5), &ib(0), &f1(b""), &ib(0)]));
+        regexp_diff(&arm(15, &[&[2], &f1(b"an"), &f2(b"banana"), &ib(1), &ib(5), &f1(b""), &ib(0)]));
+        // endoption outside {0,1}.
+        regexp_diff(&arm(13, &[&[3], &f1(b"an"), &f2(b"banana"), &ib(1), &ib(1), &ib(2), &f1(b""), &ib(0)]));
+        regexp_diff(&arm(13, &[&[3], &f1(b"an"), &f2(b"banana"), &ib(1), &ib(1), &ib(-1), &f1(b""), &ib(0)]));
+        // subexpr < 0 / > npatterns / unmatched optional group (so < 0).
+        regexp_diff(&arm(13, &[&[5], &f1(b"(a)(n)"), &f2(b"banana"), &ib(1), &ib(1), &ib(0), &f1(b""), &ib(-1)]));
+        regexp_diff(&arm(15, &[&[4], &f1(b"(a)(n)"), &f2(b"banana"), &ib(1), &ib(1), &f1(b""), &ib(-2)]));
+        regexp_diff(&arm(13, &[&[5], &f1(b"(a)(n)"), &f2(b"banana"), &ib(1), &ib(1), &ib(0), &f1(b""), &ib(3)]));
+        regexp_diff(&arm(15, &[&[4], &f1(b"(a)(n)"), &f2(b"banana"), &ib(1), &ib(1), &f1(b""), &ib(3)]));
+        regexp_diff(&arm(13, &[&[5], &f1(b"foo(bar)?"), &f2(b"foo"), &ib(1), &ib(1), &ib(0), &f1(b""), &ib(1)]));
+        regexp_diff(&arm(15, &[&[4], &f1(b"foo(bar)?"), &f2(b"foo"), &ib(1), &ib(1), &f1(b""), &ib(1)]));
+        // digit-first 4th arg on textregexreplace: 22023 + HINT path.
+        regexp_diff(&arm(11, &[&f1(b"o"), &f2(b"hello"), &f1(b"0"), &f1(b"1")]));
+        regexp_diff(&arm(11, &[&f1(b"o"), &f2(b"hello"), &f1(b"0"), &f1(b"9g")]));
+        // invalid multibyte / junk option letters (invalid_re_option mblen).
+        regexp_diff(&arm(14, &[&[1], &f1(b"a.c"), &f2(b"abc"), &f1("\u{e9}".as_bytes())]));
+        regexp_diff(&arm(12, &[&[2], &f1(b"a"), &f2(b"banana"), &ib(1), &f1("z\u{20ac}".as_bytes())]));
+        // similar_escape empty / 2-char / multibyte escapes, both faces.
+        regexp_diff(&arm(8, &[&f1(b"a%b_c\\d"), &f1(b"")])); // Some(empty): elen==0
+        regexp_diff(&arm(6, &[&[0], &f1(b"a%b"), &f1(b"")])); // legacy face, empty esc
+        regexp_diff(&arm(8, &[&f1(b"a%b"), &f1(b"xy")])); // 2 chars: 22025
+        regexp_diff(&arm(8, &[&f1("a\u{e9}%b".as_bytes()), &f1("\u{e9}".as_bytes())])); // 1 mb char: legal
+        regexp_diff(&arm(6, &[&[0], &f1(b"a#%"), &f1("\u{e9}x".as_bytes())])); // mb+1: 22025
+        // multibyte pattern char immediately AFTER a multibyte escape (the
+        // afterescape mblen>1 arm) + escape-char-is-prefix-mismatch shapes.
+        regexp_diff(&arm(8, &[&f1("\u{e9}\u{e9}%x".as_bytes()), &f1("\u{e9}".as_bytes())]));
+        regexp_diff(&arm(6, &[&[0], &f1("\u{e9}\u{20ac}".as_bytes()), &f1("\u{e9}".as_bytes())]));
+    }
+
+    /// RE cache eviction (adt_regexp::MAX_CACHED_RES = 32, thread-local):
+    /// compile more than 32 distinct patterns on one thread, then re-use the
+    /// first (evicted -> recompiled) and a recent one (hit + move-to-front).
+    /// Deterministic, no oracle side — the cache is this lane's carve; only
+    /// the Rust results are asserted.
+    #[test]
+    fn re_cache_eviction_sweep() {
+        pin();
+        let cx = mcx::MemoryContext::new("t");
+        let m = cx.mcx();
+        for i in 0..(adt_regexp::MAX_CACHED_RES + 8) {
+            let pat = format!("^evict{i}Z$");
+            let subj = format!("evict{i}Z");
+            assert!(adt_regexp::matches::regexp_like(m, subj.as_bytes(), pat.as_bytes(), None, C)
+                .expect("compile"));
+        }
+        // hit + move-to-front (i > 0 branch), then the evicted first pattern.
+        assert!(adt_regexp::matches::regexp_like(m, b"evict38Z", b"^evict38Z$", None, C).unwrap());
+        assert!(adt_regexp::matches::regexp_like(m, b"evict0Z", b"^evict0Z$", None, C).unwrap());
+        assert!(!adt_regexp::matches::regexp_like(m, b"nope", b"^evict0Z$", None, C).unwrap());
     }
 
     /// Degenerate/empty-match loops (prev_match_end / start_search+1) and
