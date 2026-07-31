@@ -201,6 +201,27 @@ const INT8MULTIRANGEOID: Oid = 4536;
 const NUMMULTIRANGEOID: Oid = 4532;
 
 const OUTCAP: usize = 8192;
+/// Buffers for the TEXT-IO arm, which is the only arm whose output size is not
+/// bounded by its input size: one `1e16383` bound expands to a ~16 KB decimal
+/// string through numeric_out, so a handful of members can produce hundreds of
+/// kilobytes of image and text. Sized to make overflow unreachable rather than
+/// skipped — a size-conditional `return` would be a vacuous pass. Reused across
+/// iterations (a fresh multi-MiB zeroed Vec per exec would dominate the run).
+const BIGCAP: usize = 4 << 20;
+/// Literal length cap for the text arm. multirange_in's surface is brace /
+/// quote / escape / member-splitting structure, all of which lives in a few
+/// tens of bytes; the bound-value parsing surface below it belongs to
+/// rangetypes_diff and the adt/numeric lane.
+const TEXT_LIT_CAP: usize = 192;
+
+thread_local! {
+    /// image scratch for the text arm (borrowed alone; never aliased with TEXT_BUF)
+    static IMG_BUF: core::cell::RefCell<Vec<u8>> =
+        core::cell::RefCell::new(vec![0u8; BIGCAP]);
+    /// output-text scratch for the text arm
+    static TEXT_BUF: core::cell::RefCell<Vec<i8>> =
+        core::cell::RefCell::new(vec![0i8; BIGCAP]);
+}
 /// Max ranges fed into one multirange (keeps every image inside OUTCAP).
 const MAX_RANGES: usize = 6;
 
@@ -534,6 +555,15 @@ enum Bound {
     Num(Vec<u8>),
 }
 
+impl Bound {
+    fn datum(&self) -> Datum {
+        match self {
+            Bound::ByVal(v) => Datum::from_i64(*v),
+            Bound::Num(b) => Datum::from_usize(b.as_ptr() as usize),
+        }
+    }
+}
+
 /// On-disk-legal range flags: the shape make_range emits (no CONTAIN_EMPTY, no
 /// xB_NULL, no INC on an infinite side). See the within-tie fence.
 fn wf_flags(raw: u8) -> u8 {
@@ -552,46 +582,59 @@ fn wf_flags(raw: u8) -> u8 {
     }
 }
 
-/// Hand-build a serialized RANGE image (on-disk spec, the rangetypes_diff
-/// builder: 4B varlena header, range oid, bounds present iff
-/// RANGE_HAS_L/UBOUND(flags), alignment pad, flags byte last).
-fn build_range_image(t: usize, flags: u8, lo: &Bound, up: &Bound) -> Vec<u8> {
-    let p = PINS[t];
-    let mut img = vec![0u8; 8];
-    img[4..8].copy_from_slice(&p.rngtypid.to_ne_bytes());
-    let has_l = flags & (rt::RANGE_EMPTY | rt::RANGE_LB_NULL | rt::RANGE_LB_INF) == 0;
-    let has_u = flags & (rt::RANGE_EMPTY | rt::RANGE_UB_NULL | rt::RANGE_UB_INF) == 0;
-    let push = |img: &mut Vec<u8>, b: &Bound| match b {
-        Bound::ByVal(v) => {
-            if p.typlen == 4 {
-                while img.len() % 4 != 0 {
-                    img.push(0);
-                }
-                img.extend_from_slice(&(*v as i32).to_le_bytes());
-            } else {
-                while img.len() % 8 != 0 {
-                    img.push(0);
-                }
-                img.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        Bound::Num(bytes) => {
-            while img.len() % 4 != 0 {
-                img.push(0);
-            }
-            img.extend_from_slice(bytes);
-        }
+/// Build a serialized RANGE image through the SHIPPED range constructor
+/// (fc_range_constructor3 -> make_range -> range_serialize -> datum_write), so
+/// the bytes are exactly what a SQL `numrange(1,2,'[)')` produces.
+///
+/// A hand-rolled serializer is NOT good enough here and the first smoke run
+/// proved it: PG's datum_write PACKS a packable byref bound (numeric,
+/// typstorage 'm') into a SHORT 1-byte varlena header and then applies NO
+/// alignment padding (datum_compute_size's VARATT_CAN_MAKE_SHORT arm +
+/// att_align_datum's VARATT_IS_SHORT arm). A builder that stores the 4-byte
+/// form behind 4-byte padding produces an image no make_range would ever emit,
+/// and C's range_deserialize then reads the pad bytes as a varlena header —
+/// which SEGV'd inside numeric_cmp on a garbage bound pointer. Constructing
+/// through the shipped serializer makes builder/serializer skew impossible.
+/// A NULL bound argument means an infinite bound, exactly as in SQL.
+fn build_range_image(
+    t: usize,
+    flags: u8,
+    lo: &Bound,
+    up: &Bound,
+    mcx: mcx::Mcx<'_>,
+) -> Option<Vec<u8>> {
+    let empty = flags & rt::RANGE_EMPTY != 0;
+    // flags text: "[]" / "[)" / "(]" / "()" — range_parse_flags' whole domain.
+    // An EMPTY range is requested as equal bounds with both sides exclusive,
+    // which make_range canonicalizes to the empty range on every subtype.
+    let inc_l = !empty && flags & rt::RANGE_LB_INC != 0;
+    let inc_u = !empty && flags & rt::RANGE_UB_INC != 0;
+    let ftxt = [if inc_l { b'[' } else { b'(' }, if inc_u { b']' } else { b')' }];
+    // text varlena for the flags argument (4B header + 2 bytes)
+    let mut ftext = Vec::with_capacity(6);
+    ftext.extend_from_slice(&datum::set_varsize_4b(6));
+    ftext.extend_from_slice(&ftxt);
+
+    let inf_l = !empty && flags & rt::RANGE_LB_INF != 0;
+    let inf_u = !empty && flags & rt::RANGE_UB_INF != 0;
+    let (lo_d, up_d) = if empty {
+        // equal bounds, both exclusive => the empty range
+        (Some(lo.datum()), Some(lo.datum()))
+    } else {
+        (
+            if inf_l { None } else { Some(lo.datum()) },
+            if inf_u { None } else { Some(up.datum()) },
+        )
     };
-    if has_l {
-        push(&mut img, lo);
-    }
-    if has_u {
-        push(&mut img, up);
-    }
-    img.push(flags);
-    let n = img.len();
-    img[0..4].copy_from_slice(&datum::set_varsize_4b(n));
-    img
+
+    let mut fl = range_probe_flinfo(t);
+    let r = fc_call(
+        rt::builtins::fc_range_constructor3,
+        Some(&mut fl),
+        mcx,
+        [lo_d, up_d, Some(Datum::from_usize(ftext.as_ptr() as usize))],
+    );
+    r.result.ok().map(|d| datum_varlena_bytes(d).to_vec())
 }
 
 /// Decode one range for a multirange's sort input: normalized flags and bounds
@@ -606,7 +649,7 @@ fn decode_range(t: usize, rd: &mut Rd, mcx: mcx::Mcx<'_>) -> Option<Vec<u8>> {
         0 | 1 => (Bound::ByVal(lo_v), Bound::ByVal(up_v)),
         _ => (Bound::Num(mint_numeric_int(mcx, lo_v)?), Bound::Num(mint_numeric_int(mcx, up_v)?)),
     };
-    Some(build_range_image(t, flags, &lo, &up))
+    build_range_image(t, flags, &lo, &up, mcx)
 }
 
 /// A range whose bounds may be full-width / dscale-diverse: the RANGE operand
@@ -626,18 +669,10 @@ fn decode_wide_range(t: usize, rd: &mut Rd, mcx: mcx::Mcx<'_>) -> Option<Vec<u8>
             (Bound::Num(mint_numeric_lit(mcx, &l1)?), Bound::Num(mint_numeric_lit(mcx, &l2)?))
         }
     };
-    let img = build_range_image(t, flags, &lo, &up);
-    let mut fl = range_probe_flinfo(t);
-    let out = fc_call(
-        rt::builtins::fc_range_eq,
-        Some(&mut fl),
-        mcx,
-        [
-            Some(Datum::from_usize(img.as_ptr() as usize)),
-            Some(Datum::from_usize(img.as_ptr() as usize)),
-        ],
-    );
-    out.result.ok().map(|_| img)
+    // The shipped constructor rejects lower > upper itself (the range crate's
+    // error plane, owned by rangetypes_diff), so a None here just means this
+    // iteration had no valid range operand to offer.
+    build_range_image(t, flags, &lo, &up, mcx)
 }
 
 /// flinfo for probing a RANGE (fn_extra = RangeInfo, as the range crate's own
@@ -826,75 +861,88 @@ pub fn multirangetypes_diff(data: &[u8]) {
 }
 
 fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
-    if payload.len() > 512 || payload.contains(&0) {
+    if payload.len() > TEXT_LIT_CAP || payload.contains(&0) {
         return;
     }
     let Ok(cs) = CString::new(payload) else { return };
-    let mut cbuf = vec![0u8; OUTCAP];
-    let mut clen = 0i32;
-    let cret = unsafe {
-        pg_diff_mr_in(t as i32, cs.as_ptr(), cbuf.as_mut_ptr(), &mut clen, OUTCAP as i32)
-    };
-    let mut fl = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_input);
-    let r = fc_call(
-        mb::fc_multirange_in,
-        Some(&mut fl),
-        mcx,
-        [
-            Some(Datum::from_usize(cs.as_ptr() as usize)),
-            Some(Datum::from_u32(PINS[t].mltrngtypid.into())),
-            Some(Datum::from_i32(-1)),
-        ],
-    );
     let dbg = format!("t={t} in={:?}", String::from_utf8_lossy(payload));
-    compare_image("multirange_in", cret, &cbuf[..clen as usize], &r, &dbg);
 
-    let Ok(d) = &r.result else { return };
-    let img = datum_varlena_bytes(*d).to_vec();
-    let mut ctxt = vec![0i8; OUTCAP];
-    let mut colen = 0i32;
-    let cret2 =
-        unsafe { pg_diff_mr_out(img.as_ptr(), ctxt.as_mut_ptr(), &mut colen, OUTCAP as i32) };
-    let mut flo = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_output);
-    let ro = fc_call(
-        mb::fc_multirange_out,
-        Some(&mut flo),
-        mcx,
-        [Some(Datum::from_usize(img.as_ptr() as usize))],
-    );
-    assert!(cret2 >= 0, "multirange_out: oracle buffer overflow {dbg}");
-    match &ro.result {
-        Ok(od) => {
-            assert!(cret2 == 0, "multirange_out DIVERGENCE {dbg}: C err {cret2} vs Rust Ok");
-            let rtxt = datum_cstring_bytes(*od);
-            let ctext: Vec<u8> = ctxt[..colen as usize].iter().map(|&c| c as u8).collect();
-            assert!(
-                rtxt == &ctext[..],
-                "multirange_out DIVERGENCE {dbg}: C={:?} Rust={:?}",
-                String::from_utf8_lossy(&ctext),
-                String::from_utf8_lossy(rtxt)
-            );
+    // multirange_in: image + errclass
+    let img = IMG_BUF.with(|b| {
+        let mut cbuf = b.borrow_mut();
+        let mut clen = 0i32;
+        let cret = unsafe {
+            pg_diff_mr_in(t as i32, cs.as_ptr(), cbuf.as_mut_ptr(), &mut clen, BIGCAP as i32)
+        };
+        let mut fl = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_input);
+        let r = fc_call(
+            mb::fc_multirange_in,
+            Some(&mut fl),
+            mcx,
+            [
+                Some(Datum::from_usize(cs.as_ptr() as usize)),
+                Some(Datum::from_u32(PINS[t].mltrngtypid.into())),
+                Some(Datum::from_i32(-1)),
+            ],
+        );
+        compare_image("multirange_in", cret, &cbuf[..clen as usize], &r, &dbg);
+        r.result.ok().map(|d| datum_varlena_bytes(d).to_vec())
+    });
+    let Some(img) = img else { return };
+
+    // multirange_out roundtrip over the agreed image
+    TEXT_BUF.with(|b| {
+        let mut ctxt = b.borrow_mut();
+        let mut colen = 0i32;
+        let cret2 = unsafe {
+            pg_diff_mr_out(img.as_ptr(), ctxt.as_mut_ptr(), &mut colen, BIGCAP as i32)
+        };
+        let mut flo = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_output);
+        let ro = fc_call(
+            mb::fc_multirange_out,
+            Some(&mut flo),
+            mcx,
+            [Some(Datum::from_usize(img.as_ptr() as usize))],
+        );
+        assert!(cret2 >= 0, "multirange_out: oracle buffer overflow {dbg}");
+        match &ro.result {
+            Ok(od) => {
+                assert!(cret2 == 0, "multirange_out DIVERGENCE {dbg}: C err {cret2} vs Rust Ok");
+                let rtxt = datum_cstring_bytes(*od);
+                let ctext: &[u8] = unsafe {
+                    core::slice::from_raw_parts(ctxt.as_ptr() as *const u8, colen as usize)
+                };
+                assert!(
+                    rtxt == ctext,
+                    "multirange_out DIVERGENCE {dbg}: C={:?} Rust={:?}",
+                    String::from_utf8_lossy(ctext),
+                    String::from_utf8_lossy(rtxt)
+                );
+            }
+            Err(e) => {
+                let rc = err_class(e);
+                assert!(
+                    cret2 == rc,
+                    "multirange_out DIVERGENCE {dbg}: C err {cret2} vs Rust {rc}"
+                );
+            }
         }
-        Err(e) => {
-            let rc = err_class(e);
-            assert!(cret2 == rc, "multirange_out DIVERGENCE {dbg}: C err {cret2} vs Rust {rc}");
-        }
-    }
+    });
 }
 
 /// Wire range_count above which the binary-io arm stops comparing.
 ///
 /// PREALLOCATION CARVE (narrow, documented; the P2 finding of this lane).
-/// multirange_recv reads range_count off the wire and preallocates
-/// range_count pointers BEFORE validating the rest of the message — C does
-/// this too (`palloc(range_count * sizeof(RangeType *))`), so the ORDERING is
-/// C-parity and not a defect. What differs is only what each allocator does
-/// with an absurd size: C's palloc succeeds for anything under MaxAllocSize
-/// (and the oracle's arena succeeds regardless), while PgVec's fallible
-/// reserve fails and surfaces an alloc-size error. That is a resource surface,
-/// not a value surface, and it is recorded separately as P2. Counts up to this
-/// bound keep the whole wire-parsing surface — element lengths, truncation,
-/// the zero-length element that was P1 — under full comparison.
+/// multirange_recv reads range_count off the wire and preallocates range_count
+/// pointers BEFORE validating the rest of the message — C does this too
+/// (`palloc(range_count * sizeof(RangeType *))`), so the ORDERING is C-parity,
+/// not a defect. What differs is only what each allocator does with an absurd
+/// size: C's palloc succeeds for anything under MaxAllocSize (and the oracle's
+/// arena succeeds regardless) while PgVec's fallible reserve fails and surfaces
+/// an alloc-size error. That is a resource surface, not a value surface, and it
+/// is recorded separately as P2. Counts up to this bound keep the whole
+/// wire-parsing surface — element lengths, truncation, the zero-length element
+/// that was P1 — under full comparison.
 const RECV_COUNT_CARVE: u32 = 4096;
 
 fn arm_binary_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
