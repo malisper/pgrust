@@ -164,14 +164,27 @@ fn read_dimension_int(s: &[u8], pos: &mut usize, escontext: Option<&mut ErrorSav
         }
         _ => {}
     }
+    let digits_start = i;
     let mut acc: i64 = 0;
     let mut overflow = false;
     while i < s.len() && s[i].is_ascii_digit() {
-        acc = acc * 10 + (s[i] - b'0') as i64;
         if acc > i64::from(i32::MAX) + 1 {
+            // Saturate like strtol's ERANGE clamp: the flag is already set,
+            // don't keep growing acc (i64 overflow on very long digit runs).
             overflow = true;
+        } else {
+            acc = acc * 10 + (s[i] - b'0') as i64;
         }
         i += 1;
+    }
+    if i == digits_start {
+        // strtol contract (C ReadDimensionInt, arrayfuncs.c 519..542): a
+        // bare sign with no digits consumes NOTHING (endptr = start), so
+        // the caller's no-progress "Missing array dimension value." check
+        // fires under 22P02. Advancing past the sign here mis-surfaced
+        // '[1:-]={...}' as a 2202E bound error (arrayfuncs_diff
+        // KNOWN-DIV-3, p1-lanex 2026-07-31).
+        return Ok(Some(0));
     }
     *pos = i;
     let val = if neg { -acc } else { acc };

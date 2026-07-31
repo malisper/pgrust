@@ -6,7 +6,10 @@ use ::types_core::{
     Oid, CHAROID, CSTRINGOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, NAMEOID, OIDOID,
     REGTYPEOID, TEXTOID, TIDOID, XIDOID,
 };
-use ::types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+};
 
 use crate::foundation::*;
 use ::arrayutils::{array_check_bounds, array_get_n_items};
@@ -187,9 +190,11 @@ pub fn construct_md_array<'mcx>(
     elmalign: u8,
 ) -> PgResult<PgVec<'mcx, u8>> {
     if ndims < 0 {
-        return Err(Box::new(PgError::error(alloc::format!(
-            "invalid number of dimensions: {ndims}"
-        ))));
+        // C: ereport(ERRCODE_INVALID_PARAMETER_VALUE) — arrayfuncs.c 3508..3511.
+        return Err(Box::new(
+            PgError::error(alloc::format!("invalid number of dimensions: {ndims}"))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
     }
     if ndims as usize > MAXDIM {
         return Err(Box::new(

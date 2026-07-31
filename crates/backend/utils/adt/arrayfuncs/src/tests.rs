@@ -1926,3 +1926,73 @@ mod corruption_plane {
         assert!(soft.error_occurred());
     }
 }
+
+// ---- p1-lanex regressions (arrayfuncs_diff findings, 2026-07-31) ----------
+mod p1_lanex_regressions {
+    use super::*;
+    use crate::construct::construct_md_array;
+    use crate::foundation::fetch_att;
+    use ::mcx::MemoryContext;
+
+    fn sqlstate_str(e: &::types_error::PgError) -> String {
+        core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate()))
+            .unwrap()
+            .to_string()
+    }
+
+    // KNOWN-DIV-2: C's fetch_att sign-extends byval words (Int32GetDatum);
+    // the zero-extending version made array-fetched datums bit-unequal to
+    // Datum::from_i32 of the same value (full-word consumers like
+    // datum_is_equal misfire).
+    #[test]
+    fn fetch_att_sign_extends_like_c() {
+        let v32: i32 = -1;
+        let b4 = v32.to_ne_bytes();
+        let d = fetch_att(b4.as_ptr(), true, 4);
+        assert_eq!(d.as_usize(), Datum::from_i32(v32).as_usize());
+        let v16: i16 = -2;
+        let b2 = v16.to_ne_bytes();
+        let d = fetch_att(b2.as_ptr(), true, 2);
+        assert_eq!(d.as_usize(), Datum::from_i16(v16).as_usize());
+        let v8: i8 = -3;
+        let b1 = v8.to_ne_bytes();
+        let d = fetch_att(b1.as_ptr(), true, 1);
+        assert_eq!(d.as_usize(), Datum::from_i8(v8).as_usize());
+        // Positive values stay zero-high-bits either way.
+        let b4 = 7i32.to_ne_bytes();
+        assert_eq!(fetch_att(b4.as_ptr(), true, 4).as_usize(), 7);
+    }
+
+    // KNOWN-DIV-1: C raises 22023 for ndims < 0 (arrayfuncs.c 3508..3511).
+    #[test]
+    fn construct_md_array_negative_ndims_sqlstate() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let e = construct_md_array(mcx, &[], None, -1, &[], &[], INT4OID, 4, true, b'i')
+            .unwrap_err();
+        assert_eq!(sqlstate_str(&e), "22023");
+        assert_eq!(e.message(), "invalid number of dimensions: -1");
+    }
+
+    // KNOWN-DIV-3: bare sign in the dimension section must surface C's
+    // 22P02 "Missing array dimension value." (strtol consumes nothing),
+    // not a later 2202E bound error.
+    #[test]
+    fn array_in_bare_sign_dimension_is_22p02() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let m = meta_int4();
+        for lit in ["[1:-]={1,2,3}", "[-:1]={1,2,3}", "[1:+]={1,2,3}"] {
+            let mut ip = int4_in();
+            let e = array_in(mcx, lit, &m, &mut ip, -1, None).unwrap_err();
+            assert_eq!(sqlstate_str(&e), "22P02", "literal {lit:?}");
+        }
+        // Signed dimensions with digits still parse.
+        let mut ip = int4_in();
+        let img = array_in(mcx, "[-2:0]={1,2,3}", &m, &mut ip, -1, None)
+            .unwrap()
+            .unwrap();
+        let mut op = int4_out();
+        assert_eq!(as_str(&array_out(mcx, &img, &m, &mut op).unwrap()), "[-2:0]={1,2,3}");
+    }
+}
