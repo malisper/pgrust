@@ -295,19 +295,93 @@ fn deep_nesting_within_cap() {
 /// campaign; also measures the corpus carve hit-rate printed on demand).
 #[test]
 fn seed_corpus_replays_clean() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/jsonpathexec_diff");
-    let mut n = 0;
-    for e in std::fs::read_dir(dir).expect("corpus/jsonpathexec_diff missing") {
-        let p = e.unwrap().path();
-        if p.is_file() {
-            jsonpathexec_diff(&std::fs::read(&p).unwrap());
-            n += 1;
-        }
-    }
-    assert!(n >= 30, "expected >=30 seeds, found {n}");
-    let total = EXEC_TOTAL.load(Ordering::Relaxed);
-    let carved = CARVE_HITS.load(Ordering::Relaxed);
-    println!("corpus replay: {n} seeds, {total} in-domain execs, {carved} datetime-carve hits");
+    // The campaign's deep-nesting seeds sit just below the driver's input
+    // caps, which are tuned against libFuzzer's 8 MiB main-thread stack;
+    // debug-build frames on the (smaller) libtest thread need explicit
+    // headroom, so replay on a thread that matches that reality + margin.
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(|| {
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/jsonpathexec_diff");
+            let mut n = 0;
+            for e in std::fs::read_dir(dir).expect("corpus/jsonpathexec_diff missing") {
+                let p = e.unwrap().path();
+                if p.is_file() {
+                    jsonpathexec_diff(&std::fs::read(&p).unwrap());
+                    n += 1;
+                }
+            }
+            assert!(n >= 30, "expected >=30 seeds, found {n}");
+            let total = EXEC_TOTAL.load(Ordering::Relaxed);
+            let carved = CARVE_HITS.load(Ordering::Relaxed);
+            println!(
+                "corpus replay: {n} seeds, {total} in-domain execs, {carved} datetime-carve hits"
+            );
+        })
+        .expect("spawn replay thread")
+        .join()
+        .expect("replay thread panicked");
+}
+
+/// Task-B recursion probe: with the server's stack guard ARMED on this
+/// thread (set_stack_base + the default max_stack_depth), no jsonpath_exec
+/// recursion shape may abort the process — deep docs driven through the
+/// crate's recursive walkers (.** = execute_any_item, .keyvalue() =
+/// build_value_from_container, plain exec = execute_item) must come back as
+/// Ok or a clean PgError (54001 once the guard engages). The fuzz driver
+/// itself carves this plane via input caps (the C oracle has no armed
+/// guard); this probe checks the shipped crate's own guards fire.
+#[test]
+fn recursion_guard_probe() {
+    std::thread::Builder::new()
+        .stack_size(32 << 20)
+        .spawn(|| {
+            setup();
+            let _base = stack_depth::set_stack_base();
+            let mut guard_fired_in_exec = false;
+            for n in [16usize, 128, 1024, 8192, 65536] {
+                for (open, close) in [("[", "]"), ("{\"a\":", "}")] {
+                    let doc = format!("{}1{}", open.repeat(n), close.repeat(n));
+                    let cx = mcx::MemoryContext::new("recursion_probe");
+                    let m = cx.mcx();
+                    let Ok(Some(doc_image)) = adt_jsonb::io::jsonb_in(m, doc.as_bytes(), None)
+                    else {
+                        // Doc-parse guard (adt_jsonb's plane) bounded the
+                        // input first; exec can never see a deeper doc.
+                        continue;
+                    };
+                    for path in ["$.**.size()", "$.keyvalue()", "strict $.**{last}", "$"] {
+                        let p = adt_jsonpath::path::jsonpath_in(m, path.as_bytes(), None)
+                            .expect("shallow path parses")
+                            .expect("non-null");
+                        let r = adt_jsonpath_exec::jsonb_path_query_core(
+                            m,
+                            &doc_image[4..],
+                            &p[..],
+                            adt_jsonpath_exec::JsonPathVars::None,
+                            false,
+                            false,
+                        );
+                        // Ok and clean domain errors (e.g. keyvalue-on-array)
+                        // are both fine; what must never happen is a process
+                        // abort (the join() below would see it). Record when
+                        // the stack guard itself is the error source.
+                        if let Err(e) = r {
+                            if e.sqlstate().0 == types_error::ERRCODE_STATEMENT_TOO_COMPLEX.0 {
+                                guard_fired_in_exec = true;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                guard_fired_in_exec,
+                "probe never engaged the exec stack guard — deepen the ladder"
+            );
+        })
+        .expect("spawn probe thread")
+        .join()
+        .expect("probe thread panicked (process-abort class recursion defect)");
 }
 
 /// Witness pairs (single-dimension deltas — seeding obligation): the same

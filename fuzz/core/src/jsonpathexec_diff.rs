@@ -188,6 +188,7 @@ fn setup() {
         let _ = std::panic::catch_unwind(|| {
             postgres_seams::check_for_interrupts::set(|| Ok(()));
         });
+        adt_jsonpath_exec::init_seams();
     });
     let _ = mbutils::SetDatabaseEncoding(wchar::PG_UTF8);
     if !pg_locale::default_locale_installed() {
@@ -592,6 +593,20 @@ fn rust_wrapper(
     })
 }
 
+/// Re-frame a 4B-header varlena image as a 1-byte-header short varlena
+/// (little-endian bit layout, as PG on this platform), when the payload fits.
+fn short_frame(img: &[u8]) -> Option<Vec<u8>> {
+    let payload = &img[4..];
+    if payload.len() + 1 <= 0x7F {
+        let mut s = Vec::with_capacity(payload.len() + 1);
+        s.push((((payload.len() + 1) as u8) << 1) | 1);
+        s.extend_from_slice(payload);
+        Some(s)
+    } else {
+        None
+    }
+}
+
 /// Read back a full 4B-header varlena image behind a by-ref result Datum.
 fn datum_image<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
@@ -778,6 +793,110 @@ fn run_exec_diff(
             "fc wrapper vs core DIVERGENCE {}: wrapper={wv:?} core={rv:?}",
             ctx()
         );
+    }
+
+    // ---- SHORT-VARLENA PLANE (mirrors jsonpath_diff arm 1) ----
+    // arg_varlena (builtins.rs) mirrors PG_GETARG_JSONB_P's expansion of a
+    // 1-byte-header short varlena into an aligned 4B-header copy. Everything
+    // this harness builds is 4B-headed, so exercise the expansion
+    // deliberately: re-frame each argument image as a short varlena (when it
+    // fits) and require the fc wrapper to produce the identical verdict
+    // through the short framings.
+    let sdoc = short_frame(doc_image);
+    let spath = short_frame(path_image);
+    let svars = short_frame(vars_image);
+    if sdoc.is_some() || spath.is_some() || svars.is_some() {
+        if let Some(wv) = rust_wrapper(
+            arm,
+            m,
+            sdoc.as_deref().unwrap_or(doc_image),
+            spath.as_deref().unwrap_or(path_image),
+            svars.as_deref().unwrap_or(vars_image),
+            silent,
+            tz,
+        ) {
+            assert!(
+                wv == rv,
+                "fc wrapper SHORT-VARLENA vs core DIVERGENCE {}: wrapper={wv:?} core={rv:?}",
+                ctx()
+            );
+        }
+    }
+
+    // ---- JSON_EXISTS executor-entry plane (json_path_exists, List vars) ----
+    // The PASSING-list model [(k, NULL), ...] is exactly equivalent to a vars
+    // jsonb whose top-level values are ALL null: hits produce JbV::Null under
+    // both models, misses raise the same undefined-object error, and the
+    // base-object id difference (jsonb hit id=1 vs null-list hit id=0) is
+    // unobservable through a null value (keyvalue, the only id consumer,
+    // cannot apply to a null). Non-null values would require
+    // json_item_from_datum (the claim's fmgr-datum carve), so the plane runs
+    // only when the model fits; the exists core's C parity is already carried
+    // by the exists arm above, making it the in-harness oracle here.
+    let vp = &vars_image[4..];
+    if adt_jsonb::container::container_is_object(vp)
+        && !adt_jsonb::container::container_is_scalar(vp)
+    {
+        let mut names: Vec<&[u8]> = Vec::new();
+        let mut all_null = true;
+        if let Ok(mut it) = adt_jsonb::iter::JsonbIterator::init(m, vp) {
+            loop {
+                let (tok, item) = it.next(true);
+                match tok {
+                    adt_jsonb::iter::WjbToken::Done => break,
+                    adt_jsonb::iter::WjbToken::Key => {
+                        if let adt_jsonb::container::JsonbItem::String(k) = item {
+                            names.push(k);
+                        }
+                    }
+                    adt_jsonb::iter::WjbToken::Value => {
+                        if !matches!(item, adt_jsonb::container::JsonbItem::Null) {
+                            all_null = false;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            all_null = false;
+        }
+        if all_null {
+            let list: Vec<adt_jsonpath_exec::JsonPathVariable> = names
+                .iter()
+                .map(|n| adt_jsonpath_exec::JsonPathVariable {
+                    name: n,
+                    typid: 0,
+                    typmod: -1,
+                    value: Datum::from_usize(0),
+                    isnull: true,
+                })
+                .collect();
+            let pv = match adt_jsonpath_exec::json_path_exists(
+                m,
+                &doc_image[4..],
+                path_image,
+                silent,
+                &list,
+            ) {
+                Ok(Some(b)) => ExecVerdict::Bool(b),
+                Ok(None) => ExecVerdict::Null,
+                Err(e) => ExecVerdict::Hard(e.sqlstate().0),
+            };
+            let refv = verdict_of_bool(adt_jsonpath_exec::jsonb_path_exists_core(
+                m,
+                &doc_image[4..],
+                path_image,
+                JsonPathVars::Jsonb(vp),
+                silent,
+                true, // json_path_exists is use_tz=true by definition (C: JsonPathExists)
+            ));
+            assert!(
+                pv == refv,
+                "json_path_exists(List) vs exists core DIVERGENCE {}: entry={pv:?} core={refv:?}",
+                ctx()
+            );
+        }
     }
 }
 

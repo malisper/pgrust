@@ -76,6 +76,7 @@ adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (sca
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
 adt_jsonpath = { path = "../../crates/backend/utils/adt/jsonpath" }  # jsonpath_diff (p1-laneaa)
 adt_jsonpath_exec = { path = "../../crates/backend/utils/adt/jsonpath_exec" }  # jsonpathexec_diff (p1-laneaa)
+stack_depth = { path = "../../crates/backend/utils/misc/stack_depth" }  # jsonpathexec_diff recursion_guard_probe
 adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }  # jsonpathexec_diff: doc/vars parsed ONCE (input strategy)
 pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }  # jsonpath_diff: pinned C-ctype default collation (both sides)
 
