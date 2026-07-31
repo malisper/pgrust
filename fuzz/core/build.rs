@@ -39,7 +39,6 @@ fn main() {
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).
         .file("csrc/pg_quote_io.c")
-    cc::Build::new()
         // COMPILE GATE (hashfn_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_hashfn_io.c is filled
         // with verbatim vendored C (README-TODO-hashfn_diff.md step 1).
