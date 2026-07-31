@@ -197,6 +197,7 @@ pg_diff_oc_pfree(void *p)
 /* ---------------- encoding environment (see header) ---------------- */
 
 #define PG_SQL_ASCII 0
+#define PG_EUC_JP 1
 #define PG_UTF8 6
 #define PG_LATIN1 8
 
@@ -208,11 +209,16 @@ GetDatabaseEncoding(void)
 	return pg_diff_oc_enc;
 }
 
-/* pg_wchar_table maxmblen rows for the three supported encodings */
+/* pg_wchar_table maxmblen rows for the supported encodings (wchar.c:
+ * SQL_ASCII 1, EUC_JP 3, UTF8 4, LATIN1 1). EUC_JP is pinned ONLY by the
+ * non-walking ascii/chr driver entries (they consult max_length and the
+ * first byte, never an mblen walk); the pad/trim/translate family is never
+ * routed through it — pg_db_mblen below stays a {single-byte, UTF8}
+ * dispatch. */
 static int
 pg_encoding_max_length(int encoding)
 {
-	return encoding == PG_UTF8 ? 4 : 1;
+	return encoding == PG_UTF8 ? 4 : encoding == PG_EUC_JP ? 3 : 1;
 }
 
 static int
