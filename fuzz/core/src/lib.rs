@@ -242,6 +242,11 @@ pub fn wire_pqformat(data: &[u8]) {
 pub mod diff;
 pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff, geo_diff};
 
+// hashenc_diff (p1-lanee): base64/md5/sha1/sha2/hmac/scram/to_ascii/crc
+// family vs vendored 18.3 C (csrc/hashenc/). See hashenc.rs.
+pub mod hashenc;
+pub use hashenc::hashenc_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
