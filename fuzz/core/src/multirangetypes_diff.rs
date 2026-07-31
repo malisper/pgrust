@@ -286,6 +286,22 @@ struct Pin {
     typstorage: u8,
 }
 
+// fn_expr rettype carriers. STATICS, not per-call Box::leak: the CI cluster's
+// LSan run flagged a 24-byte leak per iteration (PINS is const and there are
+// only three instantiations, so nothing needs to be allocated at all). Leaks
+// abort a libFuzzer campaign, and macOS has no LSan, so this class is
+// invisible on the laptop — the CI cluster Linux run is the only detector.
+static MR_RETTYPE: [AggFnArgTypes; 3] = [
+    AggFnArgTypes { rettype: INT4MULTIRANGEOID, argtypes: &[] },
+    AggFnArgTypes { rettype: INT8MULTIRANGEOID, argtypes: &[] },
+    AggFnArgTypes { rettype: NUMMULTIRANGEOID, argtypes: &[] },
+];
+static RNG_RETTYPE: [AggFnArgTypes; 3] = [
+    AggFnArgTypes { rettype: INT4RANGEOID, argtypes: &[] },
+    AggFnArgTypes { rettype: INT8RANGEOID, argtypes: &[] },
+    AggFnArgTypes { rettype: NUMRANGEOID, argtypes: &[] },
+];
+
 const PINS: [Pin; 3] = [
     Pin {
         mltrngtypid: INT4MULTIRANGEOID,
@@ -375,8 +391,7 @@ fn multirange_info(t: usize) -> mrt::MultirangeInfo {
 fn ops_flinfo(t: usize) -> FmgrInfo {
     let mut fl = FmgrInfo::new(mb::fc_multirange_eq, 0, 2, true, false);
     fl.set_fn_extra(multirange_info(t));
-    let carrier: &'static AggFnArgTypes =
-        Box::leak(Box::new(AggFnArgTypes { rettype: PINS[t].mltrngtypid, argtypes: &[] }));
+    let carrier: &'static AggFnArgTypes = &MR_RETTYPE[t];
     // SAFETY: leaked 'static carrier outlives every read.
     fl.fn_expr = Some(unsafe { FnExprErased::from_node_ref(carrier) });
     fl
@@ -685,7 +700,7 @@ fn range_probe_flinfo(t: usize) -> FmgrInfo {
     let mut fl = FmgrInfo::new(rt::builtins::fc_range_eq, 0, 2, true, false);
     fl.set_fn_extra(range_info(t));
     let carrier: &'static AggFnArgTypes =
-        Box::leak(Box::new(AggFnArgTypes { rettype: PINS[t].rngtypid, argtypes: &[] }));
+        &RNG_RETTYPE[t];
     // SAFETY: leaked 'static carrier outlives every read.
     fl.fn_expr = Some(unsafe { FnExprErased::from_node_ref(carrier) });
     fl
@@ -1635,6 +1650,23 @@ mod tests {
             run(&[1, t, 0, 0]); // truncated count
             run(&[1, t, 0, 0, 0, 1, 0, 0, 0, 0]); // zero-length element (P1 shape)
             run(&[1, t, 0, 0, 0, 1, 0xEB, 0xff, 0xff, 0xff]); // oversized element
+        }
+    }
+}
+
+#[cfg(test)]
+mod carrier_tests {
+    use super::*;
+
+    /// The rettype carriers are parallel arrays to PINS; a reordering of
+    /// either would silently hand the wrong rettype to every constructor.
+    #[test]
+    fn rettype_carriers_track_pins() {
+        for t in 0..3 {
+            assert_eq!(MR_RETTYPE[t].rettype, PINS[t].mltrngtypid, "MR_RETTYPE[{t}]");
+            assert_eq!(RNG_RETTYPE[t].rettype, PINS[t].rngtypid, "RNG_RETTYPE[{t}]");
+            assert!(MR_RETTYPE[t].argtypes.is_empty());
+            assert!(RNG_RETTYPE[t].argtypes.is_empty());
         }
     }
 }
