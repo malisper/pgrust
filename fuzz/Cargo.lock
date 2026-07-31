@@ -1612,6 +1612,7 @@ dependencies = [
  "pg_string",
  "pqformat",
  "relpath",
+ "relpath_seams",
  "stringinfo",
  "types_core",
  "types_error",

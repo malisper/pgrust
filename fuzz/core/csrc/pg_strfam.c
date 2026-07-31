@@ -82,6 +82,13 @@ pg_strfam_ereport_fire(void)
 
 /* ---- allocator shims ---- */
 #define palloc_extended(sz, flags) malloc(sz)
+
+/* Last pstrdup result: BuildRestoreCommand's nativePath is pstrdup'd before
+ * replace_percent_placeholders can longjmp past its pfree — real PG reclaims
+ * it via memory-context reset; the error exit frees it here (CI cluster LSan
+ * caught the 1-byte leak at 146 execs). */
+static _Thread_local char *pg_strfam_last_strdup;
+
 static char *
 pstrdup(const char *s)
 {
@@ -89,6 +96,7 @@ pstrdup(const char *s)
 
 	if (!r)
 		abort();
+	pg_strfam_last_strdup = r;
 	return r;
 }
 #define pfree(p) free(p)
@@ -674,13 +682,17 @@ pg_diff_build_restore_command(const char *cmd, const char *xlogpath,
 							  char **out)
 {
 	pg_diff_errcode = 0;
+	pg_strfam_last_strdup = NULL;
 	if (setjmp(pg_strfam_jmp) != 0)
 	{
 		pg_strfam_free_pending();
+		free(pg_strfam_last_strdup);	/* nativePath (see pstrdup shim) */
+		pg_strfam_last_strdup = NULL;
 		return pg_diff_errcode;
 	}
 	*out = BuildRestoreCommand(cmd, xlogpath, xlogfname, restartname);
 	pg_strfam_pending = NULL;	/* ownership to caller */
+	pg_strfam_last_strdup = NULL;	/* body already pfree'd nativePath */
 	return 0;
 }
 

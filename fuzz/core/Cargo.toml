@@ -31,6 +31,7 @@ pg_string = { path = "../../crates/common/string" }
 archive = { path = "../../crates/common/archive" }
 percentrepl = { path = "../../crates/common/percentrepl" }
 relpath = { path = "../../crates/common/relpath" }
+relpath_seams = { path = "../../crates/common/relpath_seams" }
 wait_error = { path = "../../crates/common/wait_error" }
 types_storage = { path = "../../crates/_support/types/types_storage" }
 libc = "0.2"

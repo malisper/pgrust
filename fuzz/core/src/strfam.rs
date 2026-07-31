@@ -257,7 +257,19 @@ fn diff_build_restore_command(payload: &[u8]) {
     }
 }
 
+/// One-time seam registration through the SHIPPED init_seams entry points —
+/// the seam-dispatch wrappers (relpathbackend/relpathperm) are then exercised
+/// below through the seam, exactly as backend callers reach them.
+fn init_seams_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        pg_string::init_seams();
+        relpath::init_seams();
+    });
+}
+
 fn diff_relpath(payload: &[u8]) {
+    init_seams_once();
     if payload.len() < 14 {
         return;
     }
@@ -302,12 +314,30 @@ fn diff_relpath(payload: &[u8]) {
         )
     };
     let c_path = CStr::from_bytes_until_nul(&c_buf).unwrap().to_str().unwrap();
-    let r_path = relpath::GetRelationPath(
-        RelFileLocator::new(spc_oid, db_oid, rel_number),
-        proc_number,
-        fork,
-    );
+    // forkname_chars over the drawn fork (all four valid cells; the MAIN cell
+    // is never reached through GetRelationPath, which skips the suffix).
+    // Byte-equivalence to the C forkNames table is the Kani theorem
+    // (eq_forkname_chars_*); the executed sanity floor here is non-emptiness.
+    assert!(!relpath::forkname_chars(fork).is_empty());
+
+    let rloc = RelFileLocator::new(spc_oid, db_oid, rel_number);
+    let r_path = relpath::GetRelationPath(rloc, proc_number, fork);
     assert_eq!(r_path, c_path, "GetRelationPath diverged");
+
+    // The shipped seam-dispatch wrappers over the same draw (relpathbackend /
+    // relpathperm are how backend callers reach GetRelationPath).
+    assert_eq!(
+        relpath_seams::relpathbackend::call(rloc, proc_number, fork),
+        c_path,
+        "relpathbackend seam diverged"
+    );
+    if proc_number == INVALID_PROC_NUMBER {
+        assert_eq!(
+            relpath_seams::relpathperm::call(rloc, fork),
+            c_path,
+            "relpathperm seam diverged"
+        );
+    }
 
     // GetDatabasePath over the same draw (global => dbOid 0 held above).
     let ctx = MemoryContext::new("strfam_diff");
@@ -513,6 +543,9 @@ mod tests {
             d.push(4); // errno pin draw
             strfam_diff(&d);
         }
+        // CI LSan regression (leak-00a6eea8): BuildRestoreCommand error
+        // path leaked the shim-side nativePath past the ereport longjmp.
+        strfam_diff(&[0x04, 0x25, 0xe3, 0x91, 0x87]);
         // isspace: full byte sweep.
         for b in 0u8..=255 {
             strfam_diff(&[7, b]);
