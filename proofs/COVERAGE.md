@@ -171,9 +171,15 @@ the three percentages are comparable with each other. It is not a
 compiler-grade statement count; do not compare these percentages against
 numbers produced with a different rule.
 
-**Rule v2 exists, built and measured, default OFF pending Michael's
-ruling** (`proofs/coverage/SLOC-RULE-V2.md`): v1 minus the lines no
-instrument can meaningfully map — pure control-flow syntax (`} else {`,
+**ADOPTED (Michael, 2026-07-30): rule v2 with data tables excluded is the
+denominator of record** — `--sloc-rule v2 --exclude-const-tables` are the
+defaults in merge-coverage.py / recut-sloc.py / tree-sloc.py; v1 stays
+behind flags for comparability, and every excluded table span is published
+in `excluded-tables.json` for review. Adopted headline (this capture):
+SLOC 18,544 — any 84.50%, kani 6.98%, fuzz 2.65%, regress 83.22%; tree
+denominator 640,701. The v1 numbers throughout this file are the
+pre-ruling record. Details (`proofs/coverage/SLOC-RULE-V2.md`): v2 = v1
+minus the lines no instrument can meaningfully map — pure control-flow syntax (`} else {`,
 `loop {`, `unsafe {`, bodiless match-arm heads) AND declaration lines
 (`use`/`mod`, attributes incl. `#[derive]`, struct/enum/union definition
 lines, single-line consts/statics at any nesting depth, impl/trait
