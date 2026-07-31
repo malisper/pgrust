@@ -3333,31 +3333,55 @@ j2day(int date)
 	return date;
 }								/* j2day() */
 
+/*
+ * POINTER-PROVENANCE SHIM (plumbing only; comparison logic verbatim).
+ *
+ * Upstream carries the search interval in the pointers `base`/`last` and
+ * narrows with `last = position - 1` / `base = position + 1`. When the
+ * interval collapses at the left edge, `position - 1` materializes a
+ * pointer one element BEFORE the array, and `base = position + 1` one
+ * past it; both are undefined behavior in C (benign on real hardware, and
+ * this is PostgreSQL's own long-standing bsearch idiom). CBMC enforces
+ * pointer provenance strictly and reports "pointer outside object bounds"
+ * on the very next `position->token` dereference — and once a
+ * dereference check fails, CBMC continues with an unconstrained value, so
+ * every downstream assertion in the harness becomes garbage. CI job
+ * pgrust-kani-suite-1785496407 reported exactly that: a bogus hit/miss
+ * mismatch on keys "ago" and the all-NUL key that was pure UB fallout,
+ * NOT a Rust-vs-C divergence (confirmed by per-cell bisection).
+ *
+ * The interval bookkeeping is therefore carried as integer offsets, which
+ * never form an out-of-object pointer. This is the SAME search: identical
+ * midpoint (`(hi - lo) >> 1`), identical narrowing, identical
+ * key[0]-precheck and strncmp comparisons, identical return value. Only
+ * the loop's index arithmetic differs from upstream's pointer arithmetic.
+ */
 static const datetkn *
 datebsearch(const char *key, const datetkn *base, int nel)
 {
 	if (nel > 0)
 	{
-		const datetkn *last = base + nel - 1,
-				   *position;
+		int			lo = 0,
+					hi = nel - 1,
+					position;
 		int			result;
 
-		while (last >= base)
+		while (hi >= lo)
 		{
-			position = base + ((last - base) >> 1);
+			position = lo + ((hi - lo) >> 1);
 			/* precheck the first character for a bit of extra speed */
-			result = (int) key[0] - (int) position->token[0];
+			result = (int) key[0] - (int) base[position].token[0];
 			if (result == 0)
 			{
 				/* use strncmp so that we match truncated tokens */
-				result = strncmp(key, position->token, TOKMAXLEN);
+				result = strncmp(key, base[position].token, TOKMAXLEN);
 				if (result == 0)
-					return position;
+					return &base[position];
 			}
 			if (result < 0)
-				last = position - 1;
+				hi = position - 1;
 			else
-				base = position + 1;
+				lo = position + 1;
 		}
 	}
 	return NULL;

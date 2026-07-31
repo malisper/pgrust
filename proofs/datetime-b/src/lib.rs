@@ -3531,30 +3531,67 @@ mod hlp {
     }
 
     #[kani::proof]
-    #[kani::unwind(80)]
-    fn eq_datebsearch_date_spots() {
-        let idx: usize = kani::any();
-        kani::assume(idx < DATE_KEYS.len());
-        check_datebsearch_cell(DATE_KEYS[idx], &DATETKTBL, pg_hlp_datebsearch_date);
+    #[kani::unwind(16)]
+    fn eq_datebsearch_date_cells() {
+        // Sequential CONCRETE calls, not a symbolic index over the grid: a
+        // symbolic index merges the loop states and CBMC then cannot bound
+        // the data-dependent bsearch loop at all (the unwinding assertion
+        // for `while (last >= base)` FAILED at unwind 16 AND 80, > table
+        // size 61/72, on CI cluster job pgrust-kani-suite-1785496407 — and a
+        // failed unwinding assertion makes every downstream check garbage:
+        // it reported a bogus pointer-OOB in strncmp and a bogus hit/miss
+        // mismatch that were pure loop-truncation artifacts, NOT a
+        // Rust-vs-C divergence). Concrete keys fold the loop; 0.43s/cell.
+        let mut i = 0;
+        while i < DATE_KEYS.len() {
+            match i {
+                0 => check_datebsearch_cell(DATE_KEYS[0], &DATETKTBL, pg_hlp_datebsearch_date),
+                1 => check_datebsearch_cell(DATE_KEYS[1], &DATETKTBL, pg_hlp_datebsearch_date),
+                2 => check_datebsearch_cell(DATE_KEYS[2], &DATETKTBL, pg_hlp_datebsearch_date),
+                3 => check_datebsearch_cell(DATE_KEYS[3], &DATETKTBL, pg_hlp_datebsearch_date),
+                4 => check_datebsearch_cell(DATE_KEYS[4], &DATETKTBL, pg_hlp_datebsearch_date),
+                5 => check_datebsearch_cell(DATE_KEYS[5], &DATETKTBL, pg_hlp_datebsearch_date),
+                6 => check_datebsearch_cell(DATE_KEYS[6], &DATETKTBL, pg_hlp_datebsearch_date),
+                7 => check_datebsearch_cell(DATE_KEYS[7], &DATETKTBL, pg_hlp_datebsearch_date),
+                8 => check_datebsearch_cell(DATE_KEYS[8], &DATETKTBL, pg_hlp_datebsearch_date),
+                9 => check_datebsearch_cell(DATE_KEYS[9], &DATETKTBL, pg_hlp_datebsearch_date),
+                10 => check_datebsearch_cell(DATE_KEYS[10], &DATETKTBL, pg_hlp_datebsearch_date),
+                11 => check_datebsearch_cell(DATE_KEYS[11], &DATETKTBL, pg_hlp_datebsearch_date),
+                12 => check_datebsearch_cell(DATE_KEYS[12], &DATETKTBL, pg_hlp_datebsearch_date),
+                _ => check_datebsearch_cell(DATE_KEYS[13], &DATETKTBL, pg_hlp_datebsearch_date),
+            }
+            i += 1;
+        }
     }
 
     #[kani::proof]
-    #[kani::unwind(80)]
-    fn eq_datebsearch_delta_spots() {
-        let idx: usize = kani::any();
-        kani::assume(idx < DELTA_KEYS.len());
-        check_datebsearch_cell(DELTA_KEYS[idx], &DELTATKTBL, pg_hlp_datebsearch_delta);
+    #[kani::unwind(16)]
+    fn eq_datebsearch_delta_cells() {
+        // Same concrete-cell discipline as the date row above.
+        let mut i = 0;
+        while i < DELTA_KEYS.len() {
+            match i {
+                0 => check_datebsearch_cell(DELTA_KEYS[0], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                1 => check_datebsearch_cell(DELTA_KEYS[1], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                2 => check_datebsearch_cell(DELTA_KEYS[2], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                3 => check_datebsearch_cell(DELTA_KEYS[3], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                4 => check_datebsearch_cell(DELTA_KEYS[4], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                5 => check_datebsearch_cell(DELTA_KEYS[5], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                6 => check_datebsearch_cell(DELTA_KEYS[6], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                7 => check_datebsearch_cell(DELTA_KEYS[7], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                8 => check_datebsearch_cell(DELTA_KEYS[8], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                9 => check_datebsearch_cell(DELTA_KEYS[9], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                10 => check_datebsearch_cell(DELTA_KEYS[10], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                _ => check_datebsearch_cell(DELTA_KEYS[11], &DELTATKTBL, pg_hlp_datebsearch_delta),
+            }
+            i += 1;
+        }
     }
 
-    /// Cache-miss then cache-hit path (double call, field 0), spot keys
-    /// (same wall + remedy as the datebsearch rows).
-    #[kani::proof]
-    #[kani::unwind(80)]
-    fn eq_decode_special_spots() {
-        let idx: usize = kani::any();
-        kani::assume(idx < DATE_KEYS.len());
+    fn check_decode_special_cell(key10: &[u8]) {
         let mut kbuf = [0u8; 11];
-        kbuf[..10].copy_from_slice(&DATE_KEYS[idx][..10]);
+        kbuf[..10].copy_from_slice(&key10[..10]);
+        // cache-miss then cache-hit path
         for _ in 0..2 {
             let mut r_val: i32 = -99;
             let r_type = DecodeSpecial(0, &kbuf, &mut r_val);
@@ -3565,13 +3602,9 @@ mod hlp {
         }
     }
 
-    #[kani::proof]
-    #[kani::unwind(80)]
-    fn eq_decode_units_spots() {
-        let idx: usize = kani::any();
-        kani::assume(idx < DELTA_KEYS.len());
+    fn check_decode_units_cell(key10: &[u8]) {
         let mut kbuf = [0u8; 11];
-        kbuf[..10].copy_from_slice(&DELTA_KEYS[idx][..10]);
+        kbuf[..10].copy_from_slice(&key10[..10]);
         for _ in 0..2 {
             let mut r_val: i32 = -99;
             let r_type = DecodeUnits(0, &kbuf, &mut r_val);
@@ -3579,6 +3612,54 @@ mod hlp {
             let c_type =
                 unsafe { pg_hlp_decode_units(0, kbuf.as_ptr() as *const c_char, &mut c_val) };
             assert!(r_type == c_type && r_val == c_val);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn eq_decode_special_cells() {
+        let mut i = 0;
+        while i < DATE_KEYS.len() {
+            match i {
+                0 => check_decode_special_cell(DATE_KEYS[0]),
+                1 => check_decode_special_cell(DATE_KEYS[1]),
+                2 => check_decode_special_cell(DATE_KEYS[2]),
+                3 => check_decode_special_cell(DATE_KEYS[3]),
+                4 => check_decode_special_cell(DATE_KEYS[4]),
+                5 => check_decode_special_cell(DATE_KEYS[5]),
+                6 => check_decode_special_cell(DATE_KEYS[6]),
+                7 => check_decode_special_cell(DATE_KEYS[7]),
+                8 => check_decode_special_cell(DATE_KEYS[8]),
+                9 => check_decode_special_cell(DATE_KEYS[9]),
+                10 => check_decode_special_cell(DATE_KEYS[10]),
+                11 => check_decode_special_cell(DATE_KEYS[11]),
+                12 => check_decode_special_cell(DATE_KEYS[12]),
+                _ => check_decode_special_cell(DATE_KEYS[13]),
+            }
+            i += 1;
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn eq_decode_units_cells() {
+        let mut i = 0;
+        while i < DELTA_KEYS.len() {
+            match i {
+                0 => check_decode_units_cell(DELTA_KEYS[0]),
+                1 => check_decode_units_cell(DELTA_KEYS[1]),
+                2 => check_decode_units_cell(DELTA_KEYS[2]),
+                3 => check_decode_units_cell(DELTA_KEYS[3]),
+                4 => check_decode_units_cell(DELTA_KEYS[4]),
+                5 => check_decode_units_cell(DELTA_KEYS[5]),
+                6 => check_decode_units_cell(DELTA_KEYS[6]),
+                7 => check_decode_units_cell(DELTA_KEYS[7]),
+                8 => check_decode_units_cell(DELTA_KEYS[8]),
+                9 => check_decode_units_cell(DELTA_KEYS[9]),
+                10 => check_decode_units_cell(DELTA_KEYS[10]),
+                _ => check_decode_units_cell(DELTA_KEYS[11]),
+            }
+            i += 1;
         }
     }
 
@@ -3661,6 +3742,21 @@ mod hlp {
                 == (unsafe { pg_hlp_float_time_overflows(h, m, sec) } != 0)
         );
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     /// Negative control (MUST FAIL, default solver): j2day off-by-one skew.
     #[kani::proof]
