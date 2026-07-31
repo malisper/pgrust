@@ -116,6 +116,16 @@ test = false
 doc = false
 bench = false
 
+# float.c remainder (p1-lanead, 2026-07-31): rounding/sqrt/degrees unary
+# family + extra_float_digits<=0 output arm (pg_strfromd) + recv/send wire
+# images. One selector byte routes all arms.
+[[bin]]
+name = "float_misc_diff"
+path = "fuzz_targets/float_misc_diff.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "pseudotypes_diff"
 path = "fuzz_targets/pseudotypes_diff.rs"

@@ -18,8 +18,9 @@
 use std::ffi::{c_char, CString};
 
 use types_error::{
-    PgError, ERRCODE_INVALID_ARGUMENT_FOR_LOG, ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION,
-    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    PgError, ERRCODE_DIVISION_BY_ZERO, ERRCODE_INVALID_ARGUMENT_FOR_LOG,
+    ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROTOCOL_VIOLATION,
 };
 
 extern "C" {
@@ -39,6 +40,14 @@ extern "C" {
     // server float-out path never calls (lane-0B, common/ryu done-gate).
     fn double_to_shortest_decimal_buf(f: f64, result: *mut c_char) -> i32;
     fn float_to_shortest_decimal_buf(f: f32, result: *mut c_char) -> i32;
+    // p1-lanead (float_misc_diff): extra_float_digits <= 0 output arm
+    // (pg_strfromd %.*g path) + float4/8 recv/send wire images.
+    fn pg_diff_float8out_efd(num: f64, efd: i32, buf32: *mut c_char) -> i32;
+    fn pg_diff_float4out_efd(num: f32, efd: i32, buf32: *mut c_char) -> i32;
+    fn pg_diff_float4recv(data: *const c_char, len: i32, out: *mut f32) -> i32;
+    fn pg_diff_float8recv(data: *const c_char, len: i32, out: *mut f64) -> i32;
+    fn pg_diff_float4send(num: f32, out4: *mut c_char);
+    fn pg_diff_float8send(num: f64, out8: *mut c_char);
 }
 
 /// Oracle error classes (see the errcode shims in csrc/pg_float_io.c and
@@ -47,6 +56,8 @@ const C_ERR_INVALID_TEXT: i32 = 1; /* 22P02 */
 const C_ERR_OUT_OF_RANGE: i32 = 2; /* 22003 */
 const C_ERR_INVALID_LOG_ARG: i32 = 3; /* 2201E */
 const C_ERR_INVALID_POWER_ARG: i32 = 4; /* 2201F */
+const C_ERR_DIVISION_BY_ZERO: i32 = 5; /* 22012 */
+const C_ERR_PROTOCOL_VIOLATION: i32 = 6; /* 08P01 */
 
 fn c_errcode() -> i32 {
     unsafe { pg_diff_errcode_get() }
@@ -61,6 +72,10 @@ fn rust_err_class(e: &PgError) -> i32 {
         C_ERR_INVALID_LOG_ARG
     } else if e.sqlstate == ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION {
         C_ERR_INVALID_POWER_ARG
+    } else if e.sqlstate == ERRCODE_DIVISION_BY_ZERO {
+        C_ERR_DIVISION_BY_ZERO
+    } else if e.sqlstate == ERRCODE_PROTOCOL_VIOLATION {
+        C_ERR_PROTOCOL_VIOLATION
     } else {
         99
     }
@@ -458,6 +473,171 @@ pub fn float_math2_diff(data: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
+// Target: float_misc_diff — the float.c remainder the four float targets do
+// not reach (p1-lanead): the rounding/sqrt/degrees unary family (C ids
+// 31..38, appended to pg_diff_fmath_table), the extra_float_digits <= 0
+// output arm (pg_strfromd %.*g path — the only caller of the shipped
+// format_g), and the float4/8 recv/send wire images (proofs-ledger
+// wall(symex: pointer-datum recv ABI) rows).
+// ---------------------------------------------------------------------------
+//
+// Input layout: [selector][payload...]. selector % 13 picks the arm:
+//   0..=7: unary math (payload = 8 bytes le f64) — degrees, radians, dsqrt,
+//          dsign, dtrunc, dround, dceil, dfloor (C ids 31..38).
+//   8: float4recv (payload = raw bytes, len capped at 8; short buffers
+//      exercise the 08P01 arm). 9: float8recv (cap 16).
+//   10: float4out efd arm: payload = [efd byte][4 bytes le f32];
+//       efd = 3 - (byte % 19) spans the GUC range [-15, 3].
+//   11: float8out efd arm: payload = [efd byte][8 bytes le f64].
+//   12: float4send + float8send images (payload = 8 bytes le f64; the f32
+//       leg casts). Extra bytes ignored so libFuzzer can grow/shrink freely.
+
+fn dsign_ok(x: f64) -> types_error::PgResult<f64> {
+    Ok(adt_float::dsign(x)) /* infallible in both C and Rust */
+}
+fn dtrunc_ok(x: f64) -> types_error::PgResult<f64> {
+    Ok(adt_float::dtrunc(x))
+}
+fn dround_ok(x: f64) -> types_error::PgResult<f64> {
+    Ok(adt_float::dround(x))
+}
+fn dceil_ok(x: f64) -> types_error::PgResult<f64> {
+    Ok(adt_float::dceil(x))
+}
+fn dfloor_ok(x: f64) -> types_error::PgResult<f64> {
+    Ok(adt_float::dfloor(x))
+}
+
+/// (name, C fn_id in pg_diff_fmath_table, fn). APPEND-ONLY ids; 0..30 are
+/// owned by FLOAT_MATH1/FLOAT_MATH2 and never renumbered.
+pub const FLOAT_MATH1B: &[(&str, i32, Math1)] = &[
+    ("degrees", 31, adt_float::degrees),
+    ("radians", 32, adt_float::radians),
+    ("dsqrt", 33, adt_float::dsqrt),
+    ("dsign", 34, dsign_ok),
+    ("dtrunc", 35, dtrunc_ok),
+    ("dround", 36, dround_ok),
+    ("dceil", 37, dceil_ok),
+    ("dfloor", 38, dfloor_ok),
+];
+
+pub fn float_misc_diff(data: &[u8]) {
+    let Some((&sel, rest)) = data.split_first() else {
+        return;
+    };
+    match sel % 13 {
+        arm @ 0..=7 => {
+            if rest.len() < 8 {
+                return;
+            }
+            let x = f64::from_le_bytes(rest[..8].try_into().unwrap());
+            let (name, id, f) = FLOAT_MATH1B[arm as usize];
+            float_math_compare(name, id, x, 0.0, f(x));
+        }
+        8 => {
+            let buf = &rest[..rest.len().min(8)];
+            let mut cval = 0.0f32;
+            let cerr =
+                unsafe { pg_diff_float4recv(buf.as_ptr().cast(), buf.len() as i32, &mut cval) };
+            match adt_float::float4recv(buf) {
+                Ok(r) => assert!(
+                    cerr == 0 && r.to_bits() == cval.to_bits(),
+                    "float4recv DIVERGENCE buf={buf:02x?}: C=(err {cerr}, {:08x}) Rust=Ok({:08x})",
+                    cval.to_bits(),
+                    r.to_bits()
+                ),
+                Err(e) => {
+                    let rerr = rust_err_class(&e);
+                    assert!(
+                        cerr == rerr,
+                        "float4recv DIVERGENCE buf={buf:02x?}: C err {cerr} vs Rust err {rerr} ({})",
+                        e.message
+                    );
+                }
+            }
+        }
+        9 => {
+            let buf = &rest[..rest.len().min(16)];
+            let mut cval = 0.0f64;
+            let cerr =
+                unsafe { pg_diff_float8recv(buf.as_ptr().cast(), buf.len() as i32, &mut cval) };
+            match adt_float::float8recv(buf) {
+                Ok(r) => assert!(
+                    cerr == 0 && r.to_bits() == cval.to_bits(),
+                    "float8recv DIVERGENCE buf={buf:02x?}: C=(err {cerr}, {:016x}) Rust=Ok({:016x})",
+                    cval.to_bits(),
+                    r.to_bits()
+                ),
+                Err(e) => {
+                    let rerr = rust_err_class(&e);
+                    assert!(
+                        cerr == rerr,
+                        "float8recv DIVERGENCE buf={buf:02x?}: C err {cerr} vs Rust err {rerr} ({})",
+                        e.message
+                    );
+                }
+            }
+        }
+        10 => {
+            if rest.len() < 5 {
+                return;
+            }
+            let efd = 3 - (rest[0] % 19) as i32; /* GUC range [-15, 3] */
+            let v = f32::from_le_bytes(rest[1..5].try_into().unwrap());
+            let mut cbuf = [0u8; 40];
+            let clen = unsafe { pg_diff_float4out_efd(v, efd, cbuf.as_mut_ptr().cast()) } as usize;
+            let mut rbuf = [0u8; 64];
+            let rlen = adt_float::float4out_with(v, efd, &mut rbuf);
+            assert!(
+                &cbuf[..clen] == &rbuf[..rlen],
+                "float4out(efd={efd}) DIVERGENCE bits={:08x}: C={:?} Rust={:?}",
+                v.to_bits(),
+                std::str::from_utf8(&cbuf[..clen]),
+                std::str::from_utf8(&rbuf[..rlen])
+            );
+        }
+        11 => {
+            if rest.len() < 9 {
+                return;
+            }
+            let efd = 3 - (rest[0] % 19) as i32;
+            let v = f64::from_le_bytes(rest[1..9].try_into().unwrap());
+            let mut cbuf = [0u8; 40];
+            let clen = unsafe { pg_diff_float8out_efd(v, efd, cbuf.as_mut_ptr().cast()) } as usize;
+            let mut rbuf = [0u8; 64];
+            let rlen = adt_float::float8out_internal_with(v, efd, &mut rbuf);
+            assert!(
+                &cbuf[..clen] == &rbuf[..rlen],
+                "float8out(efd={efd}) DIVERGENCE bits={:016x}: C={:?} Rust={:?}",
+                v.to_bits(),
+                std::str::from_utf8(&cbuf[..clen]),
+                std::str::from_utf8(&rbuf[..rlen])
+            );
+        }
+        _ => {
+            if rest.len() < 8 {
+                return;
+            }
+            let v8 = f64::from_le_bytes(rest[..8].try_into().unwrap());
+            let v4 = v8 as f32;
+            let mut c4 = [0u8; 4];
+            let mut c8 = [0u8; 8];
+            unsafe {
+                pg_diff_float4send(v4, c4.as_mut_ptr().cast());
+                pg_diff_float8send(v8, c8.as_mut_ptr().cast());
+            }
+            let r4 = adt_float::float4send(v4);
+            let r8 = adt_float::float8send(v8);
+            assert!(
+                r4 == c4 && r8 == c8,
+                "float send DIVERGENCE bits={:016x}: C4={c4:02x?} R4={r4:02x?} C8={c8:02x?} R8={r8:02x?}",
+                v8.to_bits()
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stable-toolchain smoke tests: drive each differential over an edge-case
 // corpus so `cargo test` exercises the C link + comparators without
 // cargo-fuzz. These are the same corpora gen_seeds.sh seeds libFuzzer with.
@@ -786,6 +966,49 @@ mod tests {
                     d.extend_from_slice(&b.to_le_bytes());
                     float_math2_diff(&d);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn float_misc_corpus() {
+        let payload_nan = f64::from_bits(0xfff800000000dead);
+        let mut vals = FLOAT_MATH_VAL_CORPUS.to_vec();
+        vals.push(payload_nan);
+        // Unary rounding/sqrt/degrees family, full value grid.
+        for arm in 0..FLOAT_MATH1B.len() {
+            for &x in &vals {
+                let mut d = vec![arm as u8];
+                d.extend_from_slice(&x.to_le_bytes());
+                float_misc_diff(&d);
+            }
+        }
+        // recv arms: every wire length 0..=16 (short-buffer 08P01 arms) over
+        // the bit-pattern corpus.
+        for &bits in F64_BITS_CORPUS {
+            let be = bits.to_be_bytes();
+            for n in 0..=8usize {
+                let mut d = vec![8u8];
+                d.extend_from_slice(&be[..n.min(4)]);
+                float_misc_diff(&d);
+                let mut d8 = vec![9u8];
+                d8.extend_from_slice(&be[..n]);
+                float_misc_diff(&d8);
+            }
+            // send images
+            let mut ds = vec![12u8];
+            ds.extend_from_slice(&bits.to_le_bytes());
+            float_misc_diff(&ds);
+        }
+        // efd output arms: every extra_float_digits in [-15, 3] x bit corpus.
+        for efd_byte in 0..19u8 {
+            for &bits in F64_BITS_CORPUS {
+                let mut d = vec![11u8, efd_byte];
+                d.extend_from_slice(&bits.to_le_bytes());
+                float_misc_diff(&d);
+                let mut d4 = vec![10u8, efd_byte];
+                d4.extend_from_slice(&((bits >> 32) as u32).to_le_bytes());
+                float_misc_diff(&d4);
             }
         }
     }
