@@ -1,0 +1,16 @@
+# proofs/coverage-laneh/exceptions.tsv — hand-adjudicated residual lines for the
+# p1-laneh integer-kernel batch (pg_prng + arrayutils + hashfn), 2026-07-31.
+# Complements auto-exceptions.tsv (5 auto:fmt-cont measurement notes).
+# columns: file<TAB>line<TAB>class<TAB>c_counterpart<TAB>justification
+file	line	class	c_counterpart	justification
+crates/backend/utils/adt/arrayutils/src/lib.rs	84	instrument-unmapped-executed	arrayutils.c:81-84	bare `-1,` argument continuation of the ereturn arm; the arm EXECUTES under fuzz (ndims/negative-dims error paths, arrayutils_diff arm 0) and under the eq_array_get_n_items proof; no DA record while neighbors are instrumented
+crates/backend/utils/adt/arrayutils/src/lib.rs	123	instrument-unmapped-executed	arrayutils.c:137-141	bare `false,` argument continuation of the ereturn arm; arm EXECUTES under fuzz (add-overflow path, arrayutils_diff arm 1, full-range lb) and under the eq_array_check_bounds proof; no DA record while neighbors are instrumented
+crates/common/hashfn/src/lib.rs	4	platform-other	hashfn.c:169 (WORDS_BIGENDIAN arm)	compile_error! big-endian guard: compile-time-only line, unreachable on every supported (little-endian) target; the C BE arms are deliberately not ported and the guard makes that a build failure rather than silent wrong hashes
+crates/common/pg_prng/src/lib.rs	134	phase1-carve	pg_prng.c:34 (pg_global_prng_state)	global_prng: thread-local session-state accessor — OUT of phase-1 pure scope by the claim carve (claims row 2026-07-30); not a pure function
+crates/common/pg_prng/src/lib.rs	135	phase1-carve	pg_prng.c:34	global_prng body (see line 134 row)
+crates/common/pg_prng/src/lib.rs	136	phase1-carve	pg_prng.c:34	global_prng body
+crates/common/pg_prng/src/lib.rs	137	phase1-carve	pg_prng.c:34	global_prng body
+crates/common/pg_prng/src/lib.rs	138	phase1-carve	pg_prng.c:34	global_prng body
+crates/common/pg_prng/src/lib.rs	139	phase1-carve	pg_prng.c:34	global_prng body
+crates/common/pg_prng/src/lib.rs	143	phase1-carve	-	init_seams: pgrust-only seam glue (circular-dep breaker registration) — OUT by claim carve
+crates/common/pg_prng/src/lib.rs	144	phase1-carve	-	init_seams body (see line 143 row)

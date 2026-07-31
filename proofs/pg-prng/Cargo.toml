@@ -1,0 +1,10 @@
+[package]
+name = "poc-pg-prng"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED port, not a copy.
+pg_prng = { path = "../../crates/common/pg_prng" }
+
+[workspace]

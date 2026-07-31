@@ -188,6 +188,10 @@ bench = false
 [[bin]]
 name = "uuid_diff"
 path = "fuzz_targets/uuid_diff.rs"
+# pg_prng_diff: scaffolded by fuzz/scaffold.py — see README-TODO-pg_prng_diff.md.
+[[bin]]
+name = "pg_prng_diff"
+path = "fuzz_targets/pg_prng_diff.rs"
 test = false
 doc = false
 bench = false
@@ -195,6 +199,10 @@ bench = false
 [[bin]]
 name = "strfam_diff"
 path = "fuzz_targets/strfam_diff.rs"
+# arrayutils_diff: scaffolded by fuzz/scaffold.py — see README-TODO-arrayutils_diff.md.
+[[bin]]
+name = "arrayutils_diff"
+path = "fuzz_targets/arrayutils_diff.rs"
 test = false
 doc = false
 bench = false
@@ -296,6 +304,10 @@ path = "fuzz_targets/array_userfuncs_diff.rs"
 [[bin]]
 name = "jsonbops_diff"
 path = "fuzz_targets/jsonbops_diff.rs"
+# hashfn_diff: scaffolded by fuzz/scaffold.py — see README-TODO-hashfn_diff.md.
+[[bin]]
+name = "hashfn_diff"
+path = "fuzz_targets/hashfn_diff.rs"
 test = false
 doc = false
 bench = false

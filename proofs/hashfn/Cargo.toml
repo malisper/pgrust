@@ -1,0 +1,10 @@
+[package]
+name = "poc-hashfn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED port, not a copy.
+hashfn = { path = "../../crates/common/hashfn" }
+
+[workspace]

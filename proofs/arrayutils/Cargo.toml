@@ -1,0 +1,11 @@
+[package]
+name = "poc-arrayutils"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED port, not a copy.
+arrayutils = { path = "../../crates/backend/utils/adt/arrayutils" }
+types_error = { path = "../../crates/_support/types/types_error" }
+
+[workspace]

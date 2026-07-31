@@ -382,3 +382,14 @@ pub use jsonbio_diff::jsonbio_diff;
 // jsonbops_diff: two-doc ops/mutate/getfield sibling (p1-lanev).
 pub mod jsonbops_diff;
 pub use jsonbops_diff::jsonbops_diff;
+// pg_prng_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-pg_prng_diff.md.
+pub mod pg_prng_diff;
+pub use pg_prng_diff::pg_prng_diff;
+
+// arrayutils_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-arrayutils_diff.md.
+pub mod arrayutils_diff;
+pub use arrayutils_diff::arrayutils_diff;
+
+// hashfn_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-hashfn_diff.md.
+pub mod hashfn_diff;
+pub use hashfn_diff::hashfn_diff;

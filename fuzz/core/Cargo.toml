@@ -110,6 +110,11 @@ adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }  # jsonbio_diff (s
 detoast = { path = "../../crates/backend/access/common/detoast" }
 detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
 pg_locale_seams = { path = "../../crates/backend/utils/adt/pg_locale_seams" }
+datum = { path = "../../crates/_support/types/datum" }  # fc-wrapper plane (scaffold.py)
+types_fmgr = { path = "../../crates/_support/types/fmgr" }  # fc-wrapper plane (scaffold.py)
+pg_prng = { path = "../../crates/common/pg_prng" }  # pg_prng_diff (scaffold.py)
+arrayutils = { path = "../../crates/backend/utils/adt/arrayutils" }  # arrayutils_diff (scaffold.py)
+hashfn = { path = "../../crates/common/hashfn" }  # hashfn_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"
