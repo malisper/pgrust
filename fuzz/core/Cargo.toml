@@ -32,7 +32,13 @@ adt_mac = { path = "../../crates/backend/utils/adt/mac" }
 adt_mac8 = { path = "../../crates/backend/utils/adt/mac8" }
 name = { path = "../../crates/backend/utils/adt/name" }
 adt_cash = { path = "../../crates/backend/utils/adt/cash" }
+# example-only (cash_numeric_sample): numeric text-in/out for the money<->numeric planes
+adt_numeric = { path = "../../crates/backend/utils/adt/numeric" }
 ryu = { path = "../../crates/common/ryu" }
+# fc-wrapper plane (builtins.rs coverage through LocalFcinfo, the proofs
+# wrapper-level pattern run natively):
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
 
 [build-dependencies]
 cc = "1"
