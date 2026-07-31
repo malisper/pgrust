@@ -242,6 +242,11 @@ pub fn wire_pqformat(data: &[u8]) {
 pub mod diff;
 pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff, geo_diff};
 
+// enc_tables_diff (p1-laneg batch): base64 / to_ascii / keywords vs
+// vendored 18.3 C. See enc_tables.rs.
+pub mod enc_tables;
+pub use enc_tables::enc_tables_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;

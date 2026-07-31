@@ -99,3 +99,15 @@ path = "fuzz_targets/float_math2_diff.rs"
 test = false
 doc = false
 bench = false
+
+# enc_tables_diff (p1-laneg encoding+tables batch, 2026-07-30): common/base64
+# + adt/adt_ascii + common/keywords vs vendored 18.3 C (csrc/pg_enc_tables.c,
+# postgres-src 62d6c7d3df). Value/dst-image + verdict + errcode-class planes;
+# see the target header in core/src/enc_tables.rs for the two documented
+# wrapper plumbing planes.
+[[bin]]
+name = "enc_tables_diff"
+path = "fuzz_targets/enc_tables_diff.rs"
+test = false
+doc = false
+bench = false

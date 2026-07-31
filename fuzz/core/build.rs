@@ -7,10 +7,15 @@ fn main() {
         .file("csrc/pg_float_io.c")
         .file("csrc/pg_float_math.c")
         .file("csrc/pg_geo_io.c")
+        .file("csrc/pg_enc_tables.c")
         .file("csrc/ryu/d2s.c")
         .file("csrc/ryu/f2s.c")
         .include("csrc/shim")
         .include("csrc/ryu")
+        // pg_enc_tables.c includes the SAME generated kwlist_d.h the
+        // shipped keywords crate's build.rs transcribes (table parity by
+        // shared source of truth)
+        .include("../../crates/common/keywords")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         // FP-CONTRACTION CARVE (2026-07-30, found by float_math_diff):

@@ -26,6 +26,12 @@ wchar = { path = "../../crates/common/wchar" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+# enc_tables_diff (p1-laneg encoding+tables batch):
+pg_b64 = { path = "../../crates/common/base64" }
+keywords = { path = "../../crates/common/keywords" }
+adt_ascii = { path = "../../crates/backend/utils/adt/adt_ascii" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
 
 [build-dependencies]
 cc = "1"
