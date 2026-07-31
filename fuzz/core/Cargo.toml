@@ -113,6 +113,9 @@ fd = { path = "../../crates/backend/storage/file/fd" }  # timestamp_diff env pin
 xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }  # timestamp_diff env pin
 timestamp_seams = { path = "../../crates/backend/utils/adt/timestamp_seams" }  # timestamp_diff env pin
 adt_jsonpath = { path = "../../crates/backend/utils/adt/jsonpath" }  # jsonpath_diff (p1-laneaa)
+adt_jsonpath_exec = { path = "../../crates/backend/utils/adt/jsonpath_exec" }  # jsonpathexec_diff (p1-laneaa)
+stack_depth = { path = "../../crates/backend/utils/misc/stack_depth" }  # jsonpathexec_diff recursion_guard_probe
+adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }  # jsonpathexec_diff: doc/vars parsed ONCE (input strategy)
 pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }  # jsonpath_diff: pinned C-ctype default collation (both sides)
 
 [build-dependencies]

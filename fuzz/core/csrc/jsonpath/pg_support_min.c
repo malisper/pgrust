@@ -47,6 +47,7 @@
 #include "utils/ascii.h"
 #include "utils/builtins.h"
 #include "utils/json.h"
+#include "port/pg_bitutils.h"
 
 /* ================= 1. src/port/pgstrcasecmp.c ================= */
 
@@ -538,30 +539,16 @@ done:
 
 /* ================= 4. src/backend/nodes/list.c ================= */
 
-/* shim: single-context model — list cells live on the TLS arena */
-typedef void *MemoryContext;
+/* shim: single-context model — list cells live on the TLS arena
+ * (MemoryContext itself is declared in the shim postgres.h) */
 #define GetMemoryChunkContext(pointer) ((MemoryContext) NULL)
 #define MemoryContextAlloc(context, sz) palloc(sz)
 
 /* check_list_invariants: assert-only, compiled out (production build) */
 #define check_list_invariants(l)  ((void) 0)
 
-/* ---- pg_bitutils.h:189-201 VERBATIM (pg_nextpower2_32) ---- */
-static inline uint32
-pg_nextpower2_32(uint32 num)
-{
-	Assert(num > 0 && num <= PG_UINT32_MAX / 2 + 1);
-
-	/*
-	 * A power 2 number has only 1 bit set.  Subtracting 1 from such a number
-	 * will turn on all previous bits resulting in no common bits being set
-	 * between num and num-1.
-	 */
-	if ((num & (num - 1)) == 0)
-		return num;				/* already power 2 */
-
-	return ((uint32) 1) << (32 - __builtin_clz(num));
-}
+/* pg_nextpower2_32 now comes from the shared shim include/port/pg_bitutils.h
+ * (verbatim body moved there for the jsonpathexec_diff family) */
 
 /* list.c:47-49 VERBATIM */
 #define LIST_HEADER_OVERHEAD  \
@@ -1891,5 +1878,424 @@ pg_server_to_client(const char *s, int len)
 	/* pg_server_to_client -> pg_server_to_any, same-encoding arm: returns the
 	 * input unchanged (no validation on the way out, matching mbutils.c) */
 	return (char *) s;
+}
+
+/* ---- numutils.c:29-61 VERBATIM (DIGIT_TABLE + decimalLength32) ---- */
+static const char DIGIT_TABLE[200] =
+"00" "01" "02" "03" "04" "05" "06" "07" "08" "09"
+"10" "11" "12" "13" "14" "15" "16" "17" "18" "19"
+"20" "21" "22" "23" "24" "25" "26" "27" "28" "29"
+"30" "31" "32" "33" "34" "35" "36" "37" "38" "39"
+"40" "41" "42" "43" "44" "45" "46" "47" "48" "49"
+"50" "51" "52" "53" "54" "55" "56" "57" "58" "59"
+"60" "61" "62" "63" "64" "65" "66" "67" "68" "69"
+"70" "71" "72" "73" "74" "75" "76" "77" "78" "79"
+"80" "81" "82" "83" "84" "85" "86" "87" "88" "89"
+"90" "91" "92" "93" "94" "95" "96" "97" "98" "99";
+
+/*
+ * Adapted from http://graphics.stanford.edu/~seander/bithacks.html#IntegerLog10
+ */
+static inline int
+decimalLength32(const uint32 v)
+{
+	int			t;
+	static const uint32 PowersOfTen[] = {
+		1, 10, 100,
+		1000, 10000, 100000,
+		1000000, 10000000, 100000000,
+		1000000000
+	};
+
+	/*
+	 * Compute base-10 logarithm by dividing the base-2 logarithm by a
+	 * good-enough approximation of the base-2 logarithm of 10
+	 */
+	t = (pg_leftmost_one_pos32(v) + 1) * 1233 / 4096;
+	return t + (v >= PowersOfTen[t]);
+}
+
+/* ---- numutils.c:1047-1109 VERBATIM (pg_ultoa_n) ---- */
+/*
+ * pg_ultoa_n: converts an unsigned 32-bit integer to its string representation,
+ * not NUL-terminated, and returns the length of that string representation
+ *
+ * Caller must ensure that 'a' points to enough memory to hold the result (at
+ * least 10 bytes)
+ */
+int
+pg_ultoa_n(uint32 value, char *a)
+{
+	int			olength,
+				i = 0;
+
+	/* Degenerate case */
+	if (value == 0)
+	{
+		*a = '0';
+		return 1;
+	}
+
+	olength = decimalLength32(value);
+
+	/* Compute the result string. */
+	while (value >= 10000)
+	{
+		const uint32 c = value - 10000 * (value / 10000);
+		const uint32 c0 = (c % 100) << 1;
+		const uint32 c1 = (c / 100) << 1;
+
+		char	   *pos = a + olength - i;
+
+		value /= 10000;
+
+		memcpy(pos - 2, DIGIT_TABLE + c0, 2);
+		memcpy(pos - 4, DIGIT_TABLE + c1, 2);
+		i += 4;
+	}
+	if (value >= 100)
+	{
+		const uint32 c = (value % 100) << 1;
+
+		char	   *pos = a + olength - i;
+
+		value /= 100;
+
+		memcpy(pos - 2, DIGIT_TABLE + c, 2);
+		i += 2;
+	}
+	if (value >= 10)
+	{
+		const uint32 c = value << 1;
+
+		char	   *pos = a + olength - i;
+
+		memcpy(pos - 2, DIGIT_TABLE + c, 2);
+	}
+	else
+	{
+		*a = (char) ('0' + value);
+	}
+
+	return olength;
+}
+
+/* ---- jsonpathexec_diff additions (VERBATIM; shares hexlookup above) ---- */
+/* ---- int.h:575-602 VERBATIM (pg_neg_u64_overflow) ---- */
+static inline bool
+pg_neg_u64_overflow(uint64 a, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_sub_overflow(0, a, result);
+#elif defined(HAVE_INT128)
+	int128		res = -((int128) a);
+
+	if (unlikely(res < PG_INT64_MIN))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
+	return false;
+#else
+	if (unlikely(a > (uint64) PG_INT64_MAX + 1))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	if (unlikely(a == (uint64) PG_INT64_MAX + 1))
+		*result = PG_INT64_MIN;
+	else
+		*result = -((int64) a);
+	return false;
+#endif
+}
+
+/* ---- numutils.c:621-647 VERBATIM (pg_strtoint64) ---- */
+/*
+ * Convert input string to a signed 64 bit integer.  Input strings may be
+ * expressed in base-10, hexadecimal, octal, or binary format, all of which
+ * can be prefixed by an optional sign character, either '+' (the default) or
+ * '-' for negative numbers.  Hex strings are recognized by the digits being
+ * prefixed by 0x or 0X while octal strings are recognized by the 0o or 0O
+ * prefix.  The binary representation is recognized by the 0b or 0B prefix.
+ *
+ * Allows any number of leading or trailing whitespace characters.  Digits may
+ * optionally be separated by a single underscore character.  These can only
+ * come between digits and not before or after the digits.  Underscores have
+ * no effect on the return value and are supported only to assist in improving
+ * the human readability of the input strings.
+ *
+ * pg_strtoint64() will throw ereport() upon bad input format or overflow;
+ * while pg_strtoint64_safe() instead returns such complaints in *escontext,
+ * if it's an ErrorSaveContext.
+ *
+ * NB: Accumulate input as an unsigned number, to deal with two's complement
+ * representation of the most negative number, which can't be represented as a
+ * signed positive number.
+ */
+int64
+pg_strtoint64(const char *s)
+{
+	return pg_strtoint64_safe(s, NULL);
+}
+
+/* ---- numutils.c:649-880 VERBATIM (pg_strtoint64_safe) ---- */
+int64
+pg_strtoint64_safe(const char *s, Node *escontext)
+{
+	const char *ptr = s;
+	const char *firstdigit;
+	uint64		tmp = 0;
+	bool		neg = false;
+	unsigned char digit;
+	int64		result;
+
+	/*
+	 * The majority of cases are likely to be base-10 digits without any
+	 * underscore separator characters.  We'll first try to parse the string
+	 * with the assumption that's the case and only fallback on a slower
+	 * implementation which handles hex, octal and binary strings and
+	 * underscores if the fastpath version cannot parse the string.
+	 */
+
+	/* leave it up to the slow path to look for leading spaces */
+
+	if (*ptr == '-')
+	{
+		ptr++;
+		neg = true;
+	}
+
+	/* a leading '+' is uncommon so leave that for the slow path */
+
+	/* process the first digit */
+	digit = (*ptr - '0');
+
+	/*
+	 * Exploit unsigned arithmetic to save having to check both the upper and
+	 * lower bounds of the digit.
+	 */
+	if (likely(digit < 10))
+	{
+		ptr++;
+		tmp = digit;
+	}
+	else
+	{
+		/* we need at least one digit */
+		goto slow;
+	}
+
+	/* process remaining digits */
+	for (;;)
+	{
+		digit = (*ptr - '0');
+
+		if (digit >= 10)
+			break;
+
+		ptr++;
+
+		if (unlikely(tmp > -(PG_INT64_MIN / 10)))
+			goto out_of_range;
+
+		tmp = tmp * 10 + digit;
+	}
+
+	/* when the string does not end in a digit, let the slow path handle it */
+	if (unlikely(*ptr != '\0'))
+		goto slow;
+
+	if (neg)
+	{
+		if (unlikely(pg_neg_u64_overflow(tmp, &result)))
+			goto out_of_range;
+		return result;
+	}
+
+	if (unlikely(tmp > PG_INT64_MAX))
+		goto out_of_range;
+
+	return (int64) tmp;
+
+slow:
+	tmp = 0;
+	ptr = s;
+	/* no need to reset neg */
+
+	/* skip leading spaces */
+	while (isspace((unsigned char) *ptr))
+		ptr++;
+
+	/* handle sign */
+	if (*ptr == '-')
+	{
+		ptr++;
+		neg = true;
+	}
+	else if (*ptr == '+')
+		ptr++;
+
+	/* process digits */
+	if (ptr[0] == '0' && (ptr[1] == 'x' || ptr[1] == 'X'))
+	{
+		firstdigit = ptr += 2;
+
+		for (;;)
+		{
+			if (isxdigit((unsigned char) *ptr))
+			{
+				if (unlikely(tmp > -(PG_INT64_MIN / 16)))
+					goto out_of_range;
+
+				tmp = tmp * 16 + hexlookup[(unsigned char) *ptr++];
+			}
+			else if (*ptr == '_')
+			{
+				/* underscore must be followed by more digits */
+				ptr++;
+				if (*ptr == '\0' || !isxdigit((unsigned char) *ptr))
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+	}
+	else if (ptr[0] == '0' && (ptr[1] == 'o' || ptr[1] == 'O'))
+	{
+		firstdigit = ptr += 2;
+
+		for (;;)
+		{
+			if (*ptr >= '0' && *ptr <= '7')
+			{
+				if (unlikely(tmp > -(PG_INT64_MIN / 8)))
+					goto out_of_range;
+
+				tmp = tmp * 8 + (*ptr++ - '0');
+			}
+			else if (*ptr == '_')
+			{
+				/* underscore must be followed by more digits */
+				ptr++;
+				if (*ptr == '\0' || *ptr < '0' || *ptr > '7')
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+	}
+	else if (ptr[0] == '0' && (ptr[1] == 'b' || ptr[1] == 'B'))
+	{
+		firstdigit = ptr += 2;
+
+		for (;;)
+		{
+			if (*ptr >= '0' && *ptr <= '1')
+			{
+				if (unlikely(tmp > -(PG_INT64_MIN / 2)))
+					goto out_of_range;
+
+				tmp = tmp * 2 + (*ptr++ - '0');
+			}
+			else if (*ptr == '_')
+			{
+				/* underscore must be followed by more digits */
+				ptr++;
+				if (*ptr == '\0' || *ptr < '0' || *ptr > '1')
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+	}
+	else
+	{
+		firstdigit = ptr;
+
+		for (;;)
+		{
+			if (*ptr >= '0' && *ptr <= '9')
+			{
+				if (unlikely(tmp > -(PG_INT64_MIN / 10)))
+					goto out_of_range;
+
+				tmp = tmp * 10 + (*ptr++ - '0');
+			}
+			else if (*ptr == '_')
+			{
+				/* underscore may not be first */
+				if (unlikely(ptr == firstdigit))
+					goto invalid_syntax;
+				/* and it must be followed by more digits */
+				ptr++;
+				if (*ptr == '\0' || !isdigit((unsigned char) *ptr))
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+	}
+
+	/* require at least one digit */
+	if (unlikely(ptr == firstdigit))
+		goto invalid_syntax;
+
+	/* allow trailing whitespace, but not other trailing chars */
+	while (isspace((unsigned char) *ptr))
+		ptr++;
+
+	if (unlikely(*ptr != '\0'))
+		goto invalid_syntax;
+
+	if (neg)
+	{
+		if (unlikely(pg_neg_u64_overflow(tmp, &result)))
+			goto out_of_range;
+		return result;
+	}
+
+	if (tmp > PG_INT64_MAX)
+		goto out_of_range;
+
+	return (int64) tmp;
+
+out_of_range:
+	ereturn(escontext, 0,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("value \"%s\" is out of range for type %s",
+					s, "bigint")));
+
+invalid_syntax:
+	ereturn(escontext, 0,
+			(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+			 errmsg("invalid input syntax for type %s: \"%s\"",
+					"bigint", s)));
+}
+
+/* ---- numutils.c:1111-1133 VERBATIM (pg_ltoa) ---- */
+/*
+ * pg_ltoa: converts a signed 32-bit integer to its string representation and
+ * returns strlen(a).
+ *
+ * It is the caller's responsibility to ensure that a is at least 12 bytes long,
+ * which is enough room to hold a minus sign, a maximally long int32, and the
+ * above terminating NUL.
+ */
+int
+pg_ltoa(int32 value, char *a)
+{
+	uint32		uvalue = (uint32) value;
+	int			len = 0;
+
+	if (value < 0)
+	{
+		uvalue = (uint32) 0 - uvalue;
+		a[len++] = '-';
+	}
+	len += pg_ultoa_n(uvalue, a + len);
+	a[len] = '\0';
+	return len;
 }
 

@@ -231,6 +231,7 @@ extern void *pg_jsonpath_palloc0(Size size);
 extern void *pg_jsonpath_repalloc(void *ptr, Size size);
 extern void pg_jsonpath_pfree(void *ptr);
 extern char *pg_jsonpath_pstrdup(const char *in);
+extern char *pnstrdup(const char *in, Size len);
 
 #define palloc(sz) pg_jsonpath_palloc(sz)
 #define palloc0(sz) pg_jsonpath_palloc0(sz)
@@ -379,4 +380,162 @@ extern unsigned char pg_ascii_tolower(unsigned char ch);
 #define VALGRIND_MAKE_MEM_NOACCESS(addr, len) ((void) 0)
 #define VALGRIND_MAKE_MEM_UNDEFINED(addr, len) ((void) 0)
 
+
+/* --- additions for the jsonpathexec_diff oracle family (shim, NOT PG code):
+ * Datum conversion inlines VERBATIM shapes from postgres.h @ 18.3 --- */
+static inline uint32
+DatumGetUInt32(Datum X)
+{
+	return (uint32) X;
+}
+
+static inline Datum
+UInt32GetDatum(uint32 X)
+{
+	return (Datum) X;
+}
+
+static inline uint64
+DatumGetUInt64(Datum X)
+{
+	return (uint64) X;
+}
+
+static inline Datum
+UInt64GetDatum(uint64 X)
+{
+	return (Datum) X;
+}
+
+static inline int64
+DatumGetInt64(Datum X)
+{
+	return (int64) X;
+}
+
+static inline Datum
+Int64GetDatum(int64 X)
+{
+	return (Datum) X;
+}
+
+static inline char
+DatumGetChar(Datum X)
+{
+	return (char) X;
+}
+
+static inline Datum
+CharGetDatum(char X)
+{
+	return (Datum) X;
+}
+
+static inline float8
+DatumGetFloat8(Datum X)
+{
+	union { int64 value; float8 retval; } myunion;
+	myunion.value = (int64) X;
+	return myunion.retval;
+}
+
+static inline Datum
+Float8GetDatum(float8 X)
+{
+	union { float8 value; int64 retval; } myunion;
+	myunion.value = X;
+	return (Datum) myunion.retval;
+}
+
+/* pg_rotate_left32 VERBATIM from port/pg_bitutils.h @ 18.3 */
+static inline uint32
+pg_rotate_left32(uint32 word, int n)
+{
+	return (word << n) | (word >> (32 - n));
+}
+
+
+/* --- additions for the jsonpathexec_diff oracle family (shim; sqlstates are
+ * the real MAKE_SQLSTATE encodings from errcodes.h @ 18.3) --- */
+#define ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE MAKE_SQLSTATE('2','2','0','3','0')
+#define ERRCODE_DIVISION_BY_ZERO MAKE_SQLSTATE('2','2','0','1','2')
+#define ERRCODE_UNDEFINED_OBJECT MAKE_SQLSTATE('4','2','7','0','4')
+#define ERRCODE_SINGLETON_SQL_JSON_ITEM_REQUIRED MAKE_SQLSTATE('2','2','0','3','8')
+#define ERRCODE_NON_NUMERIC_SQL_JSON_ITEM MAKE_SQLSTATE('2','2','0','3','6')
+#define ERRCODE_INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION MAKE_SQLSTATE('2','2','0','3','1')
+#define ERRCODE_INVALID_SQL_JSON_SUBSCRIPT MAKE_SQLSTATE('2','2','0','3','3')
+#define ERRCODE_SQL_JSON_ARRAY_NOT_FOUND MAKE_SQLSTATE('2','2','0','3','9')
+#define ERRCODE_SQL_JSON_MEMBER_NOT_FOUND MAKE_SQLSTATE('2','2','0','3','A')
+#define ERRCODE_SQL_JSON_NUMBER_NOT_FOUND MAKE_SQLSTATE('2','2','0','3','B')
+#define ERRCODE_SQL_JSON_OBJECT_NOT_FOUND MAKE_SQLSTATE('2','2','0','3','C')
+#define ERRCODE_SQL_JSON_SCALAR_REQUIRED MAKE_SQLSTATE('2','2','0','3','F')
+#define ERRCODE_SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE MAKE_SQLSTATE('2','2','0','3','G')
+#define ERRCODE_DATETIME_FIELD_OVERFLOW MAKE_SQLSTATE('2','2','0','0','8')
+#define ERRCODE_INVALID_DATETIME_FORMAT MAKE_SQLSTATE('2','2','0','0','7')
+#define ERRCODE_MORE_THAN_ONE_SQL_JSON_ITEM MAKE_SQLSTATE('2','2','0','3','4')
+#define ERRCODE_NO_SQL_JSON_ITEM MAKE_SQLSTATE('2','2','0','3','5')
+#define ERRCODE_INVALID_JSON_TEXT MAKE_SQLSTATE('2','2','0','3','2')
+
+/* qsort_arg (vendored verbatim pg_qsort_arg.c) */
+typedef int (*qsort_arg_comparator) (const void *a, const void *b, void *arg);
+extern void qsort_arg(void *base, size_t nel, size_t elsize,
+					  qsort_arg_comparator cmp, void *arg);
+
+
+/* MemoryContext model (shim): the oracle family runs on the TLS pointer
+ * arena in pg_jsonpath_env.c; contexts are opaque tokens, switches are
+ * recorded but allocation always goes to the arena (per-entry reset). The
+ * JsonTable machinery that creates/resets private contexts is UNREACHABLE
+ * (executor carve) and its context entry points are loud abort stubs. */
+typedef struct MemoryContextData *MemoryContext;
+extern MemoryContext CurrentMemoryContext;
+extern MemoryContext TopMemoryContext;
+extern MemoryContext MemoryContextSwitchTo(MemoryContext context);
+extern MemoryContext AllocSetContextCreate(MemoryContext parent,
+										   const char *name, int flags);
+extern void MemoryContextResetOnly(MemoryContext context);
+extern void MemoryContextDelete(MemoryContext context);
+#define ALLOCSET_DEFAULT_SIZES 0
+#define ALLOCSET_SMALL_SIZES 0
+extern void MemoryContextSetIdentifier(MemoryContext context, const char *id);
+extern void MemoryContextSetParent(MemoryContext context, MemoryContext new_parent);
+
+
+/* asserts compiled out (production build model) */
+#define PG_USED_FOR_ASSERTS_ONLY pg_attribute_unused()
+#ifndef pg_attribute_unused
+#define pg_attribute_unused() __attribute__((unused))
+#endif
+
+static inline text *
+DatumGetTextP(Datum X)
+{
+	return (text *) PG_DETOAST_DATUM(X);
+}
+
+
+static inline float4
+DatumGetFloat4(Datum X)
+{
+	union { int32 value; float4 retval; } myunion;
+	myunion.value = (int32) X;
+	return myunion.retval;
+}
+
+/* unconstify VERBATIM from c.h @ 18.3 */
+#define unconstify(underlying_type, expr) \
+	(StaticAssertExpr(__builtin_types_compatible_p(__typeof(expr), const underlying_type), \
+					  "wrong cast"), \
+	 (underlying_type) (expr))
+#ifndef StaticAssertExpr
+#define StaticAssertExpr(condition, errmessage) \
+	((void) ({ _Static_assert(condition, errmessage); }))
+#endif
+
+/* no TOAST in this harness: all varlenas are plain 4B-header images */
+static inline struct varlena *
+pg_detoast_datum_packed(struct varlena *datum)
+{
+	return datum;
+}
 #endif							/* PG_JSONPATH_DIFF_SHIM_POSTGRES_H */

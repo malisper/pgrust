@@ -71,12 +71,25 @@ typedef struct FunctionCallInfoBaseData
 #define PG_GETARG_CSTRING(n) DatumGetCString(PG_GETARG_DATUM(n))
 #define PG_GETARG_BOOL(n)	 DatumGetBool(PG_GETARG_DATUM(n))
 
+/* the shim PG_DETOAST_DATUM never copies (all fuzz inputs are plain
+ * 4B-header varlenas), so FREE_IF_COPY is a documented no-op */
+#define PG_FREE_IF_COPY(ptr,n) ((void) 0)
+
 #define PG_RETURN_DATUM(x)	 return (x)
 #define PG_RETURN_NULL()  \
 	do { fcinfo->isnull = true; return (Datum) 0; } while (0)
 #define PG_RETURN_POINTER(x) return PointerGetDatum(x)
 #define PG_RETURN_CSTRING(x) return CStringGetDatum(x)
 #define PG_RETURN_BOOL(x)	 return BoolGetDatum(x)
+#define PG_RETURN_INT32(x)	 return Int32GetDatum(x)
+#define PG_RETURN_INT64(x)	 return Int64GetDatum(x)
+#define PG_RETURN_INT16(x)	 return Int32GetDatum((int32) (x))
+#define PG_RETURN_FLOAT8(x)  return Float8GetDatum(x)
+#define PG_GETARG_INT16(n)	 ((int16) PG_GETARG_DATUM(n))
+#define PG_GETARG_INT64(n)	 DatumGetInt64(PG_GETARG_DATUM(n))
+#define PG_GETARG_FLOAT4(n)	 DatumGetFloat4(PG_GETARG_DATUM(n))
+#define PG_GETARG_FLOAT8(n)	 DatumGetFloat8(PG_GETARG_DATUM(n))
+#define PG_GETARG_ARRAYTYPE_P(n) ((ArrayType *) PG_GETARG_POINTER(n))
 #define PG_RETURN_BYTEA_P(x) PG_RETURN_POINTER(x)
 #define PG_RETURN_TEXT_P(x)  PG_RETURN_POINTER(x)
 
@@ -110,5 +123,42 @@ pg_jsonpath_direct_call(PGFunction func, Node *context, int nargs,
 	pg_jsonpath_direct_call(func, NULL, 2, (a0), (a1), (Datum) 0)
 #define DirectFunctionCall3(func, a0, a1, a2) \
 	pg_jsonpath_direct_call(func, NULL, 3, (a0), (a1), (a2))
+
+/*
+ * DirectInputFunctionCallSafe: semantics VERBATIM-equivalent to fmgr.c @
+ * 18.3 (the flinfo-less direct form; str is never NULL at the vendored call
+ * sites). Soft errors are detected with SOFT_ERROR_OCCURRED, so the caller
+ * sees exactly the real protocol.
+ */
+#include "nodes/miscnodes.h"
+
+static inline bool
+DirectInputFunctionCallSafe(PGFunction func, char *str,
+							Oid typioparam, int32 typmod,
+							struct Node *escontext,
+							Datum *result)
+{
+	LOCAL_FCINFO(fcinfo, 3);
+
+	memset(fcinfo, 0, SizeForFunctionCallInfo(3));
+	fcinfo->nargs = 3;
+	fcinfo->context = (Node *) escontext;
+	fcinfo->args[0].value = CStringGetDatum(str);
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = (Datum) typioparam;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = (Datum) (int64) typmod;
+	fcinfo->args[2].isnull = false;
+
+	*result = (*func) (fcinfo);
+
+	if (SOFT_ERROR_OCCURRED(escontext))
+		return false;
+
+	if (fcinfo->isnull)
+		elog(ERROR, "input function returned NULL");
+
+	return true;
+}
 
 #endif							/* FMGR_H */

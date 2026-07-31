@@ -399,3 +399,8 @@ pub use timestamp_diff::timestamp_diff;
 // jsonpath_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-jsonpath_diff.md.
 pub mod jsonpath_diff;
 pub use jsonpath_diff::jsonpath_diff;
+
+// jsonpathexec_diff (p1-laneaa, adt/jsonpath_exec) — see
+// ../../README-TODO-jsonpathexec_diff.md.
+pub mod jsonpathexec_diff;
+pub use jsonpathexec_diff::jsonpathexec_diff;
