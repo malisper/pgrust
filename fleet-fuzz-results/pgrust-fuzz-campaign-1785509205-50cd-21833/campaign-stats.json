@@ -1,0 +1,14 @@
+{
+  "job": "pgrust-fuzz-campaign-1785509205-50cd-21833",
+  "sha": "37aed2df7cfc0cecb88c528812e5420789647ec5",
+  "nightly": "nightly-2026-07-17",
+  "budget": {"runs": "10000000", "secs": "", "fork": "0"},
+  "corpus_prefix": "s3://ci-results/fuzz-campaign/corpus",
+  "divergences_total": 0,
+  "sanitizer_artifacts_total": 0,
+  "crashed_early_total": 0,
+  "rc": 0,
+  "targets": [
+    {"target": "float_in_diff", "outcome": "run", "execs": 10000000, "execs_requested": 10000000, "corpus_in": 1005, "corpus_out": 1165, "corpus_delta": 160, "divergences": 0, "sanitizer_artifacts": 0, "cov_lines": 451, "wall_s": 296}
+  ]
+}

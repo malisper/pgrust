@@ -1068,6 +1068,30 @@ mod tests {
     }
 
     #[test]
+    fn float_corpus_replays_clean() {
+        // CI regression rail: every committed corpus input replays clean
+        // through its comparator (the float family's banked corpora).
+        for (dir, f) in [
+            ("/../corpus/float_in_diff", float_in_diff as fn(&[u8])),
+            ("/../corpus/float_out_diff", float_out_diff),
+            ("/../corpus/float_math_diff", float_math_diff),
+            ("/../corpus/float_math2_diff", float_math2_diff),
+            ("/../corpus/float_misc_diff", float_misc_diff),
+        ] {
+            let dir = format!("{}{}", env!("CARGO_MANIFEST_DIR"), dir);
+            let mut n = 0;
+            for e in std::fs::read_dir(&dir).expect("corpus dir missing") {
+                let p = e.unwrap().path();
+                if p.is_file() {
+                    f(&std::fs::read(&p).unwrap());
+                    n += 1;
+                }
+            }
+            assert!(n >= 30, "{dir}: expected >=30 seeds, found {n}");
+        }
+    }
+
+    #[test]
     fn float_misc_corpus() {
         let payload_nan = f64::from_bits(0xfff800000000dead);
         let mut vals = FLOAT_MATH_VAL_CORPUS.to_vec();

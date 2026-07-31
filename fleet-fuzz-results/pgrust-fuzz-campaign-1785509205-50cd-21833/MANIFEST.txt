@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  p1-lanead adt/float round-2: float_in_diff with new arms/seeds (nan-ncharseq live on glibc; transarray arms)
+
+job_name: pgrust-fuzz-campaign-1785509205-50cd-21833
+job_type: fuzz-campaign
+git_ref: 37aed2df7cfc0cecb88c528812e5420789647ec5
+repo_url: https://github.com/malisper/pgrust.git
+build_kind: fast
+sha: 37aed2df7cfc
+started_utc: 2026-07-31T14:48:01Z
+hostname: pgrust-fuzz-campaign-1785509205-50cd-21833-rgd94
