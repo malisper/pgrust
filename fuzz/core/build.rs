@@ -43,14 +43,15 @@ fn main() {
         // section of pg_multirangetypes_io.c's header for why including beats
         // re-vendoring or extern-promoting them.
         .file("csrc/pg_multirangetypes_io.c")
-        // COMPILE GATE (regexp_diff, scaffold.py): uncomment ONLY after every
-        // SCAFFOLD-TODO #error paste site in csrc/pg_regexp_io.c is filled
-        // with verbatim vendored C (README-TODO-regexp_diff.md step 1).
-        // .file("csrc/pg_regexp_io.c")
-        // COMPILE GATE (like_diff, scaffold.py): uncomment ONLY after every
-        // SCAFFOLD-TODO #error paste site in csrc/pg_like_io.c is filled
-        // with verbatim vendored C (README-TODO-like_diff.md step 1).
-        // .file("csrc/pg_like_io.c")
+        // regexp_diff oracle (p1-laneag): csrc/pg_regexp_io.c compiles in its
+        // OWN cc::Build below (pg_difffuzz_regexfam) together with the
+        // verbatim vendored Spencer engine under csrc/regexfam/ — it needs
+        // that family's shim include tree (regexfam postgres.h etc.), which
+        // must not leak into the files of THIS build. Gate satisfied
+        // 2026-07-31: every SCAFFOLD-TODO #error site is filled.
+        // like_diff oracle (p1-laneag): verbatim 18.3 like.c core with
+        // like_match.c pasted once per stamping (see pg_like_io.c header).
+        .file("csrc/pg_like_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).
@@ -504,6 +505,34 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .compile("pg_difffuzz_jsonpath");
+    // regexp_diff oracle (p1-laneag): the VERBATIM 18.3 Spencer regex engine
+    // (csrc/regexfam/, own shim include tree — regcomp.c/regexec.c #include
+    // their regc_*/rege_* siblings, so only the four top-level engine TUs
+    // compile) + the regexp.c/varlena.c wrapper oracle pg_regexp_io.c.
+    // Separate build so the regexfam shim postgres.h/mb tree never shadows
+    // the main oracle lib's csrc/shim headers (and vice versa). Cross-family
+    // mb-helper symbols carry a pg_regexfam_ prefix (see the shim headers) —
+    // the same isolation the CRYPTO_SHARED_SYMS renames provide above.
+    let mut regexfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        regexfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    regexfam
+        // glibc gates locale_t and the isw*_l family behind _GNU_SOURCE
+        // (regc_pg_locale.c references them in branches dead under the
+        // pinned C collation, but they must compile); no-op on macOS.
+        .define("_GNU_SOURCE", None)
+        .file("csrc/regexfam/regcomp.c")
+        .file("csrc/regexfam/regexec.c")
+        .file("csrc/regexfam/regerror.c")
+        .file("csrc/regexfam/regfree.c")
+        .file("csrc/regexfam/pg_regexfam_glue.c")
+        .file("csrc/pg_regexp_io.c")
+        .include("csrc/regexfam")
+        .include("csrc/regexfam/include")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .compile("pg_difffuzz_regexfam");
 
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");

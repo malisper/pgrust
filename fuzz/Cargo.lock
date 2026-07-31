@@ -1693,6 +1693,8 @@ dependencies = [
  "pgtz",
  "postgres_seams",
  "pqformat",
+ "regex_core",
+ "regexp_alt",
  "relpath",
  "relpath_seams",
  "ryu",
