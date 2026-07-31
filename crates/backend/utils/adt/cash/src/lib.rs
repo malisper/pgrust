@@ -434,7 +434,10 @@ pub fn cash_div_int64(c: Cash, i: i64) -> PgResult<Cash> {
     // (4f96281587) covered multiply and the float paths but not division,
     // so on aarch64 it silently returns Cash::MIN and on x86-64 it traps
     // into a "floating-point exception". int8div raises 22003 for the same
-    // arithmetic; mirror that (ruling 2026-07-29; bug reported upstream).
+    // arithmetic; mirror that (ruling 2026-07-29, RATIFIED 2026-07-31
+    // Michael option 1 — deliberate divergence from BOTH C behaviors on
+    // this input; bug reported upstream). Wording is cash.c's established
+    // money-overflow message ("money out of range"), not a new string.
     if i == -1 && c == Cash::MIN {
         return Err(money_out_of_range().into());
     }

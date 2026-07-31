@@ -1,0 +1,1 @@
+wave_sendtext::eq_booltext | green | release-gate | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bool.c --harness wave_sendtext::eq_booltext --exact

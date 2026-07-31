@@ -139,7 +139,12 @@ impl<'a> Scanner<'a> {
                         _ => break,
                     }
                 }
-                return Some(if negative { -value } else { value });
+                // C parity: sscanf's %x accumulates with unsigned wraparound and the
+                // sign apply is two's-complement wrap; plain `-value` panics on an
+                // accumulator of exactly i64::MIN under overflow-checked builds
+                // (found by mac_diff fuzzing 2026-07-30). Release wrapped already —
+                // wrapping_neg makes the C-parity semantics explicit in all profiles.
+                return Some(if negative { value.wrapping_neg() } else { value });
             }
             self.pos = save_pos;
             consumed = save_consumed;
@@ -161,7 +166,8 @@ impl<'a> Scanner<'a> {
         if !any {
             return None;
         }
-        Some(if negative { -value } else { value })
+        // Same wrapping_neg rationale as the wide-scan arm above (C sscanf parity).
+        Some(if negative { value.wrapping_neg() } else { value })
     }
 
     fn scan_literal(&mut self, expected: u8) -> bool {

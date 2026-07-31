@@ -241,6 +241,47 @@ pub fn wire_pqformat(data: &[u8]) {
 // float4in/float8in, float4out/float8out, point_out/on_ppath. See diff.rs.
 pub mod diff;
 pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff, geo_diff};
+pub mod diff_charbool;
+pub use diff_charbool::{bool_diff, char_diff};
+pub mod pseudo_diff;
+pub use pseudo_diff::pseudotypes_diff;
+pub mod lsn_diff;
+pub use lsn_diff::pg_lsn_diff;
+
+// p1-lanec string-family batch (common/{string,archive,percentrepl,relpath,
+// wait_error}) vs vendored 18.3 C. See strfam.rs.
+pub mod strfam;
+pub use strfam::strfam_diff;
+
+// Lane-0B differential targets (100%-coverage campaign, proofs/p1-lane0b):
+pub mod cash_diff;
+pub mod mac_diff;
+pub mod name_diff;
+pub mod uuid_diff;
+pub use cash_diff::cash_diff;
+pub use mac_diff::mac_diff;
+pub use name_diff::name_diff;
+pub use uuid_diff::uuid_diff;
+
+// hashenc_diff (p1-lanee): base64/md5/sha1/sha2/hmac/scram/to_ascii/crc
+// family vs vendored 18.3 C (csrc/hashenc/). See hashenc.rs.
+pub mod hashenc;
+pub use hashenc::hashenc_diff;
+
+// cryptofam_diff (p1-lanef crypto/hash family batch): md5/sha1/hmac/scram +
+// adt/cryptohashfuncs fmgr wrappers vs vendored 18.3 C. See cryptofam.rs.
+pub mod cryptofam;
+pub use cryptofam::cryptofam_diff;
+
+// tablesfam_diff (p1-lanef tables batch): keywords + unicode_category vs
+// vendored 18.3 C. See tablesfam.rs.
+pub mod tablesfam;
+pub use tablesfam::tablesfam_diff;
+
+// enc_tables_diff (p1-laneg batch): base64 / to_ascii / keywords vs
+// vendored 18.3 C. See enc_tables.rs.
+pub mod enc_tables;
+pub use enc_tables::enc_tables_diff;
 
 #[cfg(test)]
 mod tests {

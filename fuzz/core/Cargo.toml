@@ -26,9 +26,52 @@ wchar = { path = "../../crates/common/wchar" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+adt_char = { path = "../../crates/backend/utils/adt/char" }
+adt_bool = { path = "../../crates/backend/utils/adt/bool" }
+hashfn = { path = "../../crates/common/hashfn" }
+scalar_seams = { path = "../../crates/backend/utils/adt/scalar_seams" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+adt_pseudotypes = { path = "../../crates/backend/utils/adt/pseudotypes" }
+mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
+adt_pg_lsn = { path = "../../crates/backend/utils/adt/pg_lsn" }
+adt_numeric = { path = "../../crates/backend/utils/adt/numeric" }
+# hashenc_diff (p1-lanee batch):
+pg_b64 = { path = "../../crates/common/base64" }
+pg_md5 = { path = "../../crates/common/md5" }
+pg_sha1 = { path = "../../crates/common/sha1" }
+pg_sha2 = { path = "../../crates/common/sha2" }
+pg_hmac = { path = "../../crates/common/hmac" }
+scram_common = { path = "../../crates/common/scram_common" }
+adt_ascii = { path = "../../crates/backend/utils/adt/adt_ascii" }
+cryptohashfuncs = { path = "../../crates/backend/utils/adt/cryptohashfuncs" }
+postgres_seams = { path = "../../crates/backend/tcop/postgres_seams" }
 adt_encode = { path = "../../crates/backend/utils/adt/encode" }  # encode_diff (scaffold.py)
-datum = { path = "../../crates/_support/types/datum" }  # fc-wrapper plane (scaffold.py)
-types_fmgr = { path = "../../crates/_support/types/fmgr" }  # fc-wrapper plane (scaffold.py)
+# strfam_diff (p1-lanec string-family batch):
+pg_string = { path = "../../crates/common/string" }
+archive = { path = "../../crates/common/archive" }
+percentrepl = { path = "../../crates/common/percentrepl" }
+relpath = { path = "../../crates/common/relpath" }
+relpath_seams = { path = "../../crates/common/relpath_seams" }
+wait_error = { path = "../../crates/common/wait_error" }
+types_storage = { path = "../../crates/_support/types/types_storage" }
+libc = "0.2"
+# Lane-0B differential targets (100%-coverage campaign):
+adt_uuid = { path = "../../crates/backend/utils/adt/uuid" }
+adt_mac = { path = "../../crates/backend/utils/adt/mac" }
+adt_mac8 = { path = "../../crates/backend/utils/adt/mac8" }
+name = { path = "../../crates/backend/utils/adt/name" }
+adt_cash = { path = "../../crates/backend/utils/adt/cash" }
+# example-only (cash_numeric_sample) also uses adt_numeric (declared above)
+ryu = { path = "../../crates/common/ryu" }
+# fc-wrapper plane (builtins.rs coverage through LocalFcinfo, the proofs
+# wrapper-level pattern run natively):
+# cryptofam_diff (p1-lanef crypto/hash family batch):
+# tablesfam_diff (p1-lanef tables batch):
+keywords = { path = "../../crates/common/keywords" }
+unicode_category = { path = "../../crates/common/unicode_category" }
+# enc_tables_diff (p1-laneg encoding+tables batch):
 
 [build-dependencies]
 cc = "1"

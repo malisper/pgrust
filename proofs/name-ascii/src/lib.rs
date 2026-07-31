@@ -262,6 +262,63 @@ mod proofs {
     // admission is the same 4-arm if-chain (C returns -1 / Rust returns Err
     // for everything else), checked by unit tests, not by Kani.
 
+    // ---------- ascii_safe_strlcpy (p1-laneg, 2026-07-30) ----------
+
+    extern "C" {
+        fn pg_c_ascii_safe_strlcpy(dest: *mut u8, src: *const u8, destsiz: usize) -> i32;
+    }
+
+    /// Full symbolic bounded domain: src [u8; 8] (any bytes incl. interior
+    /// NULs), destsiz <= 8. The C side reads a NUL-terminated buffer: the
+    /// harness NUL-terminates a copy at index 8 so C's read stops exactly
+    /// where the Rust slice ends — the same coincidence contract the
+    /// enc_tables_diff fuzz driver uses. Whole dest images compared
+    /// (written prefix, NUL, untouched FILL tail).
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn eq_ascii_safe_strlcpy() {
+        let src: [u8; 8] = kani::any();
+        let destsiz: usize = kani::any();
+        kani::assume(destsiz <= 8);
+
+        let mut c_srcz = [0u8; 9];
+        let mut i = 0;
+        while i < 8 {
+            c_srcz[i] = src[i];
+            i += 1;
+        }
+
+        let mut c_dest = [0x5au8; 8];
+        let _ = unsafe { pg_c_ascii_safe_strlcpy(c_dest.as_mut_ptr(), c_srcz.as_ptr(), destsiz) };
+
+        let mut r_dest = [0x5au8; 8];
+        adt_ascii::ascii_safe_strlcpy(&mut r_dest[..destsiz], &src);
+
+        assert!(c_dest == r_dest, "ascii_safe_strlcpy: dest images diverge");
+    }
+
+    /// MUST FAIL: Rust fed a 3-byte prefix while C sees all 8 source
+    /// bytes (destsiz 8 consumes up to 7 of them). Guards the rig
+    /// against a vacuous stop-condition model. (First cut used src[..7],
+    /// which IS unobservable at destsiz 8 — it verified; 3-byte prefix
+    /// diverges whenever src[3] != 0.)
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn control_safe_strlcpy_shorter_src_must_fail() {
+        let src: [u8; 8] = kani::any();
+        let mut c_srcz = [0u8; 9];
+        let mut i = 0;
+        while i < 8 {
+            c_srcz[i] = src[i];
+            i += 1;
+        }
+        let mut c_dest = [0x5au8; 8];
+        let _ = unsafe { pg_c_ascii_safe_strlcpy(c_dest.as_mut_ptr(), c_srcz.as_ptr(), 8) };
+        let mut r_dest = [0x5au8; 8];
+        adt_ascii::ascii_safe_strlcpy(&mut r_dest, &src[..3]);
+        assert!(c_dest == r_dest, "expected: source-length mismatch diverges");
+    }
+
     // ---------- negative controls (MUST FAIL: rig non-vacuity) ----------
 
     /// Feeds C and Rust names that differ in byte 0 and asserts the equality

@@ -305,7 +305,9 @@ dependencies = [
 name = "proof_support"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "datum",
+ "mcx",
  "types_error",
  "types_fmgr",
 ]
@@ -407,8 +409,11 @@ name = "t5_mac"
 version = "0.1.0"
 dependencies = [
  "adt_mac",
+ "datum",
+ "mcx",
  "proof_support",
  "types_error",
+ "types_fmgr",
 ]
 
 [[package]]

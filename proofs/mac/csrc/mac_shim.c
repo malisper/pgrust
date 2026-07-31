@@ -532,3 +532,73 @@ pgc_macaddr_ne(const unsigned char *b1, const unsigned char *b2)
 
 	return (pgc_macaddr_cmp_internal(a1, a2) != 0);
 }
+
+/* =======================================================================
+ * macaddr_send (pg_proc oid 2445) — REL_18_STABLE src/backend/utils/adt/
+ * mac.c, fetched 2026-07-30.
+ *
+ * SHIMS for this section (wire plumbing only, the pg_uuid_send pattern —
+ * see proofs/uuid/c/pg_uuid.c shim U1; body's pq_* call sequence verbatim):
+ *  - fmgr unwrapping: PG_GETARG_MACADDR_P -> locally-built pgc_macaddr from
+ *    the 6 input bytes; PG_RETURN_BYTEA_P(pq_endtypsend(&buf)) -> the image
+ *    is written into a caller-provided out[10] buffer and the total varlena
+ *    length (10) is returned.
+ *  - pq_begintypsend/pq_sendbyte/pq_endtypsend (src/backend/libpq/
+ *    pqformat.c) -> pgc_pq_* over a (caller buffer, len) pair:
+ *    begintypsend reserves the 4-byte varlena header (len = 4), sendbyte
+ *    appends one byte, endtypsend performs SET_VARSIZE = little-endian
+ *    4-byte header total_len << 2 (the 2 low VARATT flag bits zero) and
+ *    returns the total length. Matches the shipped Rust pqformat
+ *    pq_begintypsend/pq_sendbyte/pq_endtypsend + varlena_result image.
+ * ======================================================================= */
+
+typedef struct pgc_typsend_buf
+{
+	unsigned char *data;
+	int			len;
+} pgc_typsend_buf;
+
+static void
+pgc_pq_begintypsend(pgc_typsend_buf *buf, unsigned char *out)
+{
+	buf->data = out;
+	buf->len = 4;				/* reserve VARHDRSZ for the varlena header */
+}
+
+static void
+pgc_pq_sendbyte(pgc_typsend_buf *buf, unsigned char byt)
+{
+	buf->data[buf->len++] = byt;
+}
+
+/* SET_VARSIZE: 4-byte little-endian header, total_len << 2 */
+static int
+pgc_pq_endtypsend(pgc_typsend_buf *buf)
+{
+	unsigned int hdr = ((unsigned int) buf->len) << 2;
+
+	buf->data[0] = (unsigned char) (hdr & 0xFF);
+	buf->data[1] = (unsigned char) ((hdr >> 8) & 0xFF);
+	buf->data[2] = (unsigned char) ((hdr >> 16) & 0xFF);
+	buf->data[3] = (unsigned char) ((hdr >> 24) & 0xFF);
+	return buf->len;
+}
+
+/* macaddr_send body verbatim under the pq_* shims; out must hold 10 bytes.
+ * Returns the total varlena length (always 10). */
+int
+pgc_macaddr_send(const unsigned char *bin, unsigned char *out /* [10] */ )
+{
+	pgc_macaddr addr_ = pgc_mac_from_bytes(bin);
+	pgc_macaddr *addr = &addr_;
+	pgc_typsend_buf buf;
+
+	pgc_pq_begintypsend(&buf, out);
+	pgc_pq_sendbyte(&buf, addr->a);
+	pgc_pq_sendbyte(&buf, addr->b);
+	pgc_pq_sendbyte(&buf, addr->c);
+	pgc_pq_sendbyte(&buf, addr->d);
+	pgc_pq_sendbyte(&buf, addr->e);
+	pgc_pq_sendbyte(&buf, addr->f);
+	return pgc_pq_endtypsend(&buf);
+}

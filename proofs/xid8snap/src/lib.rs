@@ -81,7 +81,8 @@
 //! excluded(state); pg_snapshot_xip = excluded(engine: SRF protocol);
 //! pg_snapshot_out = digit-emission over full u64 (result-image +
 //! /10-chain sloped wall) — kernels here prove the read side;
-//! pg_snapshot_recv/send = pqformat StringInfo rig, follow-up candidates.
+//! pg_snapshot_recv/send (oids 2941/5057, 2942/5058) = mod sendrecv
+//! below (pg_lsn/uuid wave-5 wire rig; see that module's doc).
 
 #[cfg(kani)]
 mod proofs {
@@ -553,5 +554,361 @@ mod proofs {
         let view = xid8funcs::SnapView::new(snap.vardata());
         let c = unsafe { pgc_snap_xmax(snap.as_ptr()) };
         assert!(c == view.xmin());
+    }
+}
+
+/// WAVE sendrecv: pg_snapshot_recv (2941/5057) / pg_snapshot_send
+/// (2942/5058) vs REL_18_STABLE pgc_pg_snapshot_recv/send (vendored in
+/// c/pg_xid8snap.c, shims [S8]-[S13] documented there).
+///
+/// RECV — Rust side runs the SHIPPED snapshot_recv(mcx, &mut StringInfo)
+/// pipeline (pqformat::pq_getmsgint/pq_getmsgint64 + snapshot_image) on a
+/// harness-built StringInfo (uuid/pg_lsn wave-5 rig), C side the vendored
+/// body on the identical bytes as a (data, dlen, cursor) triple; cursor
+/// starts at 0. Per the result-image law, every cell has a CONCRETE input
+/// length AND, wherever the xip-loop/allocation plane is reachable
+/// (dlen >= 20), a CONCRETE nxip written as LITERAL frame bytes (literal
+/// case cells prune; assume-pins do not — and a symbolic nxip makes the
+/// output image length data-dependent, the measured CNF wall class).
+/// Cells (frame cap 36 = 4 + 8 + 8 + 8*2, NXIP cap 2):
+///   d0/d1/d2/d3  partial nxip word            -> Err(08P01) only
+///   d4           nxip word exact              -> Err(08P01) + Err(22P03)
+///   d12          xmin exact, xmax short       -> both Err classes
+///   d19          xmax one byte short          -> both Err classes
+///   d20n0        nxip=0 exact frame           -> Ok + Err(22P03)
+///   d20n1        nxip=1, no xip bytes         -> Err(08P01) + Err(22P03)
+///   d28n1        nxip=1 exact                 -> Ok + both Err classes
+///   d36n0        nxip=0 + 16 trailing junk    -> Ok (cursor 20) — the
+///                function itself never calls pq_getmsgend (the fmgr recv
+///                CALLER does); claim scoped to the function
+///   d36n2        nxip=2 exact                 -> Ok + both Err classes,
+///                including the duplicate-xip plane (cur == last drops the
+///                dup: nxip 2 -> image nxip 1) — verified equivalent to
+///                C's `i--; nxip--; continue;` (net: i unchanged, nxip-1;
+///                both sides read exactly the original nxip int64s)
+/// Asserts: Ok -> C status 0, image length parity (Rust
+/// Varlena::as_bytes().len() vs C *outlen), FULL varlena image byte
+/// equality (both headers are LE len<<2, [S12]) and cursor parity;
+/// Err -> exact sqlstate class per the C sentinel (4 -> 08P01
+/// ERRCODE_PROTOCOL_VIOLATION, 22 -> 22P03
+/// ERRCODE_INVALID_BINARY_REPRESENTATION) + level ERROR. kani::cover on
+/// every reachable arm per cell. NOTE the dlen set is
+/// boundary-representative, NOT an exhaustive dlen<=36 split — the claim
+/// is scoped to the listed cells (no union-coverage harness applies).
+///
+/// SEND — input snapshot image built in-harness (ImgC, the SnapC layout
+/// twin with a live LE 4B-U header so the shipped arg_varlena_packed
+/// takes its inline arm; detoast out of scope, family SNAPSHOT MODEL
+/// fence). xmin/xmax/xips fully symbolic and UNFENCED — neither send
+/// validates anything (both just read fields; verified in both bodies).
+/// nxip = 0/1/2 as struct-field literals per cell. Rust runs the SHIPPED
+/// fc_pg_snapshot_send via LocalFcinfo (arg 0 = pointer datum), so datum
+/// unwrap + pq_begintypsend/pq_sendint32/pq_sendint64/pq_endtypsend are
+/// inside the theorem. Asserts image length (4B hdr + 4 + 8 + 8 + 8*nxip)
+/// and full byte equality.
+///
+/// Scaffolding (identical to this crate's parse cells): mcx-stubs +
+/// tiny-proof-heap recipe, "modulo static-buffer allocator model" —
+/// largest allocations are send's pq_begintypsend StringInfo (1024) and
+/// recv's harness StringInfo (38) + xips vec (<=16) + image (<=44), all
+/// within the 2 KiB proof heap; message text / Location out of proof
+/// (PgError::error + fmt stubs), shipped .with_sqlstate load-bearing ->
+/// sqlstate parity IS asserted.
+///
+/// Controls: control_snapshot_send_skew (C fed xmax^1) MUST FAIL with a
+/// decodable counterexample — run with the DEFAULT solver.
+/// cover_recv_family pins rig liveness: Ok and both Err classes each
+/// reached on a concrete witness frame.
+#[cfg(kani)]
+mod sendrecv {
+    use datum::{Datum, NullableDatum};
+    use proof_support::{mcx_stubs, stubs};
+    use std::os::raw::c_int;
+    use types_error::{
+        ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_PROTOCOL_VIOLATION, ERROR,
+    };
+    use types_fmgr::LocalFcinfo;
+
+    extern "C" {
+        fn pgc_pg_snapshot_recv(
+            data: *const u8,
+            dlen: i32,
+            cursor: *mut i32,
+            outbuf: *mut u8,
+            outlen: *mut i32,
+        ) -> c_int;
+        fn pgc_pg_snapshot_send(snapimg: *const u8, out: *mut u8) -> i32;
+        fn pgc_pg_snapshot_max_nxip() -> u64;
+    }
+
+    /// C recv status sentinels ([S9]/[S11] in c/pg_xid8snap.c).
+    const PGC_ERR_PROTOCOL: c_int = 4; // 08P01 insufficient data
+    const PGC_ERR_BADFORMAT: c_int = 22; // 22P03 invalid external pg_snapshot data
+
+    /// Token Mcx handle — same recipe + soundness note as the parse cells'
+    /// token_ctx above (with the full mcx stub set no path under proof
+    /// dereferences the context; a real bump context is a measured wall in
+    /// this family). Duplicated here because the sibling module is private.
+    fn token_ctx() -> &'static mcx::MemoryContext {
+        static CTX: [u8; 256] = [0u8; 256];
+        assert!(core::mem::size_of::<mcx::MemoryContext>() <= 256);
+        unsafe { &*(CTX.as_ptr() as *const mcx::MemoryContext) }
+    }
+
+    /// [S8] cross-check: the vendored C cap constant == the shipped Rust
+    /// cap constant (the nxip<=cap comparisons on both sides are verbatim
+    /// over these).
+    #[kani::proof]
+    fn eq_snapshot_max_nxip() {
+        let c = unsafe { pgc_pg_snapshot_max_nxip() };
+        assert!(c == xid8funcs::PG_SNAPSHOT_MAX_NXIP as u64);
+    }
+
+    /// Dual-run + parity asserts on one concrete-length frame (cursor 0).
+    /// Returns C's status so callers can cover/pin arms.
+    fn recv_parity(data: &[u8]) -> c_int {
+        let mut ccur: i32 = 0;
+        let mut cout = [0u8; 64]; // [S10]: >= 4 + 20 + 8*4; frame cap 36 writes <= 2 slots
+        let mut coutlen: i32 = 0;
+        let cst = unsafe {
+            pgc_pg_snapshot_recv(
+                data.as_ptr(),
+                data.len() as i32,
+                &mut ccur,
+                cout.as_mut_ptr(),
+                &mut coutlen,
+            )
+        };
+
+        let ctx = token_ctx();
+        let mut si = match stringinfo::StringInfo::with_capacity_in(ctx.mcx(), 38) {
+            Ok(s) => s,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("stub alloc failed")
+            }
+        };
+        if let Err(e) = si.append_bytes(data) {
+            core::mem::forget(e);
+            panic!("append within capacity failed");
+        }
+        match xid8funcs::snapshot_recv(ctx.mcx(), &mut si) {
+            Ok(v) => {
+                assert!(cst == 0);
+                let img = v.as_bytes();
+                assert!(img.len() == coutlen as usize);
+                let mut j = 0usize;
+                while j < img.len() {
+                    assert!(img[j] == cout[j]);
+                    j += 1;
+                }
+                assert!(si.cursor == ccur as usize);
+                core::mem::forget(v);
+            }
+            Err(e) => {
+                if cst == PGC_ERR_PROTOCOL {
+                    assert!(e.sqlstate == ERRCODE_PROTOCOL_VIOLATION);
+                } else {
+                    assert!(cst == PGC_ERR_BADFORMAT);
+                    assert!(e.sqlstate == ERRCODE_INVALID_BINARY_REPRESENTATION);
+                }
+                assert!(e.level == ERROR);
+                core::mem::forget(e);
+            }
+        }
+        core::mem::forget(si);
+        cst
+    }
+
+    /// One recv cell: concrete DLEN symbolic bytes; PIN >= 0 writes the
+    /// nxip word as LITERAL big-endian frame bytes (mandatory wherever the
+    /// xip-loop/allocation plane is reachable, i.e. DLEN >= 20).
+    fn recv_case<const DLEN: usize, const PIN: i64>() {
+        let mut data = [0u8; 36];
+        let live: [u8; DLEN] = kani::any();
+        let mut k = 0usize;
+        while k < DLEN {
+            data[k] = live[k];
+            k += 1;
+        }
+        if PIN >= 0 {
+            let be = (PIN as u32).to_be_bytes();
+            data[0] = be[0];
+            data[1] = be[1];
+            data[2] = be[2];
+            data[3] = be[3];
+        }
+        let cst = recv_parity(&data[..DLEN]);
+        // arm covers: per the cell table in the module doc
+        if DLEN < 20 || PIN == 1 && DLEN == 20 {
+            kani::cover!(cst == PGC_ERR_PROTOCOL); // short-read arm
+        }
+        if DLEN >= 4 && PIN < 0 || DLEN >= 20 {
+            kani::cover!(cst == PGC_ERR_BADFORMAT); // validation arm
+        }
+        if DLEN >= 20 && PIN >= 0 && (DLEN - 20) / 8 >= PIN as usize {
+            kani::cover!(cst == 0); // accept arm
+        }
+    }
+
+    macro_rules! recv_cell {
+        ($($name:ident: $dlen:literal, $pin:literal, $uw:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($uw)] // >= max(dlen, image len) + slack for the
+                                 // fill/copy/compare loops (tight per cell)
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            // grow/deallocate stubs LOAD-BEARING (vec_append_bytes'
+            // reachable try_reserve grow branch; family lesson)
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(mcx::vec_with_capacity_in, mcx_stubs::stub_vec_with_capacity_in)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $name() {
+                recv_case::<$dlen, $pin>();
+            }
+        )*};
+    }
+
+    recv_cell! {
+        eq_snapshot_recv_d0:    0, -1, 6;
+        eq_snapshot_recv_d1:    1, -1, 8;
+        eq_snapshot_recv_d2:    2, -1, 8;
+        eq_snapshot_recv_d3:    3, -1, 8;
+        eq_snapshot_recv_d4:    4, -1, 10;
+        eq_snapshot_recv_d12:  12, -1, 16;
+        eq_snapshot_recv_d19:  19, -1, 23;
+        eq_snapshot_recv_d20n0: 20, 0, 28;
+        eq_snapshot_recv_d20n1: 20, 1, 26;
+        eq_snapshot_recv_d28n1: 28, 1, 36;
+        eq_snapshot_recv_d36n0: 36, 0, 42;
+        eq_snapshot_recv_d36n2: 36, 2, 48;
+    }
+
+    /// Family rig-liveness cover: Ok and BOTH Err classes each reached on
+    /// a concrete witness frame (gate-blindness insurance for the split).
+    #[kani::proof]
+    #[kani::unwind(28)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(mcx::vec_with_capacity_in, mcx_stubs::stub_vec_with_capacity_in)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn cover_recv_family() {
+        // nxip=0, xmin=1, xmax=1: shortest accept
+        let ok_frame: [u8; 20] = [
+            0, 0, 0, 0, // nxip = 0
+            0, 0, 0, 0, 0, 0, 0, 1, // xmin = 1
+            0, 0, 0, 0, 0, 0, 0, 1, // xmax = 1
+        ];
+        let st = recv_parity(&ok_frame);
+        assert!(st == 0);
+        kani::cover!(st == 0, "recv Ok class reached");
+
+        // 3 bytes: nxip word short
+        let short_frame: [u8; 3] = [0, 0, 0];
+        let st = recv_parity(&short_frame);
+        assert!(st == PGC_ERR_PROTOCOL);
+        kani::cover!(st == PGC_ERR_PROTOCOL, "recv 08P01 class reached");
+
+        // nxip = -1: bad format
+        let bad_frame: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
+        let st = recv_parity(&bad_frame);
+        assert!(st == PGC_ERR_BADFORMAT);
+        kani::cover!(st == PGC_ERR_BADFORMAT, "recv 22P03 class reached");
+    }
+
+    // ---- send ----
+
+    /// pg_snapshot varlena image twin (SnapC layout + a LIVE header):
+    /// varsz carries the LE 4B-U header (len << 2, datum::set_varsize_4b
+    /// semantics) so the shipped arg_varlena_packed takes its inline arm.
+    #[repr(C)]
+    struct ImgC<const N: usize> {
+        varsz: u32,
+        nxip: u32,
+        xmin: u64,
+        xmax: u64,
+        xip: [u64; N],
+    }
+
+    /// Send cell: literal nxip = NX, fully symbolic UNFENCED fields (send
+    /// validates nothing on either side). `cskew` xors C's xmax (0 for the
+    /// equivalence cells; 1 for the must-fail control).
+    fn send_case<const NX: usize>(cskew: u64) {
+        let hdr = (((4 + 20 + 8 * NX) as u32) << 2) as u32; // LE 4B-U
+        let xmin: u64 = kani::any();
+        let xmax: u64 = kani::any();
+        let xip: [u64; NX] = kani::any();
+        let rimg = ImgC::<NX> { varsz: hdr, nxip: NX as u32, xmin, xmax, xip };
+        let cimg = ImgC::<NX> {
+            varsz: hdr,
+            nxip: NX as u32,
+            xmin,
+            xmax: xmax ^ cskew,
+            xip,
+        };
+
+        let mut cbuf = [0u8; 44]; // 4 + 4 + 8 + 8 + 8*2 max
+        let clen = unsafe {
+            pgc_pg_snapshot_send(&cimg as *const ImgC<NX> as *const u8, cbuf.as_mut_ptr())
+        };
+
+        let ctx = token_ctx();
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx is a static token; it outlives the call.
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_usize(
+            &rimg as *const ImgC<NX> as usize,
+        ));
+        let d = match xid8funcs::builtins::fc_pg_snapshot_send(None, &mut f) {
+            Ok(d) => d,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("pg_snapshot_send errored")
+            }
+        };
+        let expected = 4 + 4 + 8 + 8 + 8 * NX;
+        assert!(clen as usize == expected);
+        // SAFETY: varlena_result leaked the image; its first `expected`
+        // bytes are the full send image (header stamped by from_image).
+        let out = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, expected) };
+        let mut j = 0usize;
+        while j < expected {
+            assert!(out[j] == cbuf[j]);
+            j += 1;
+        }
+        kani::cover!(true, "send cell executed");
+    }
+
+    macro_rules! send_cell {
+        ($($name:ident: $nx:literal, $skew:literal, $uw:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($uw)] // image len + slack for the compare loop
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $name() {
+                send_case::<$nx>($skew);
+            }
+        )*};
+    }
+
+    send_cell! {
+        eq_snapshot_send_n0: 0, 0, 28;
+        eq_snapshot_send_n1: 1, 0, 36;
+        eq_snapshot_send_n2: 2, 0, 44;
+        // MUST FAIL (wire-section control): C is fed xmax^1 — the rig has
+        // to catch the mismatch in the xmax bytes. DEFAULT solver.
+        control_snapshot_send_skew: 1, 1, 36;
     }
 }
