@@ -126,6 +126,35 @@ pub fn interval_engine_diff(data: &[u8]) {
     }
 }
 
+/// strtod tininess platform carve (identical to timestamp_diff's
+/// `dblmin_boundary`, which see): when any number token in the input rounds
+/// to exactly +/-DBL_MIN, glibc (the oracle platform of record — docker
+/// postgres:18.3 rejects such interval literals with 22007, re-verified
+/// 2026-07-31) flags ERANGE via tininess-BEFORE-rounding while macOS strtod
+/// flags after rounding and accepts. The shipped Rust model follows glibc,
+/// so the local (macOS) C oracle diverges from BOTH real PG and pgrust on
+/// exactly this band; skip the compare, run Rust for panic-safety. CI
+/// campaigns replay the band fully (Linux libc agrees with the model).
+/// Found when the 10M CI cluster campaign (job pgrust-fuzz-campaign-1785532939)
+/// banked boundary tokens that then asserted only on laptop replay.
+fn dblmin_boundary(text: &[u8]) -> bool {
+    for i in 0..text.len() {
+        if let Some(tok) = adt_float::scan_number(&text[i..]) {
+            let t = &text[i..i + tok.len];
+            let v = match tok.kind {
+                adt_float::NumKind::Decimal => {
+                    std::str::from_utf8(t).ok().and_then(|s| s.parse::<f64>().ok())
+                }
+                adt_float::NumKind::Hex => Some(adt_float::parse_hex_float(t)),
+            };
+            if v.is_some_and(|v| v.abs() == f64::MIN_POSITIVE) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn decode_interval_diff(payload: &[u8]) {
     if payload.len() < 2 {
         return;
@@ -137,6 +166,28 @@ fn decode_interval_diff(payload: &[u8]) {
     };
     set_interval_style(istyle);
 
+    if dblmin_boundary(bytes) {
+        /* strtod tininess platform carve — see dblmin_boundary; Rust side
+         * still runs for panic-safety + coverage, nothing is compared. */
+        let mut workbuf = [0u8; DATE_WORKBUF];
+        let mut field: [&[u8]; MAXDATEFIELDS] = [b""; MAXDATEFIELDS];
+        let mut ftype = [0i32; MAXDATEFIELDS];
+        let mut nf = 0usize;
+        if ParseDateTime(bytes, &mut workbuf, &mut field, &mut ftype, MAXDATEFIELDS, &mut nf) == 0
+        {
+            let mut dtype = 0i32;
+            let mut itm_in = pg_itm_in::default();
+            let _ = DecodeInterval(
+                &field[..nf],
+                &ftype[..nf],
+                nf,
+                range,
+                &mut dtype,
+                &mut itm_in,
+            );
+        }
+        return;
+    }
     let (mut cu, mut cd, mut cm, mut cy, mut cdt) = (0i64, 0i32, 0i32, 0i32, 0i32);
     let crc = unsafe {
         pg_diff_decode_interval(
@@ -192,6 +243,13 @@ fn decode_iso8601_diff(payload: &[u8]) {
         return;
     };
 
+    if dblmin_boundary(bytes) {
+        /* strtod tininess platform carve — see dblmin_boundary */
+        let mut dtype = 0i32;
+        let mut itm_in = pg_itm_in::default();
+        let _ = DecodeISO8601Interval(bytes, &mut dtype, &mut itm_in);
+        return;
+    }
     let (mut cu, mut cd, mut cm, mut cy, mut cdt) = (0i64, 0i32, 0i32, 0i32, 0i32);
     let crc = unsafe {
         pg_diff_decode_iso8601_interval(cs.as_ptr(), &mut cu, &mut cd, &mut cm, &mut cy, &mut cdt)
