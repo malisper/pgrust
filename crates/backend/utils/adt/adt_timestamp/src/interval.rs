@@ -1758,7 +1758,12 @@ pub fn interval_part_common(
                 if interval.month >= 0 {
                     (tm.tm_mon / 3 + 1) as i64
                 } else {
-                    -((((-interval.month) % MONTHS_PER_YEAR) / 3 + 1) as i64)
+                    // C negates in plain int under -fwrapv: month = INT_MIN
+                    // wraps to itself and the %12/3+1 chain still yields 1
+                    // (extract(quarter from '-2147483648 months'::interval)
+                    // = 1 on real 18.3; fuzz witness p1-laney — this was a
+                    // SQL-reachable panic). wrapping_neg is C-exact.
+                    -(((interval.month.wrapping_neg() % MONTHS_PER_YEAR) / 3 + 1) as i64)
                 }
             }
             DTK_YEAR => tm.tm_year as i64,

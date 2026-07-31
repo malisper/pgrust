@@ -658,6 +658,81 @@ fn datum_interval<'a>(d: Datum) -> &'a Interval {
     unsafe { &*(d.as_usize() as *const Interval) }
 }
 
+/// Build a 4B-header text varlena image for wrapper text args (lives for
+/// the fc call; the wrapper only borrows it).
+fn text_varlena(b: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + b.len());
+    v.extend_from_slice(&(((4 + b.len()) as u32) << 2).to_le_bytes());
+    v.extend_from_slice(b);
+    v
+}
+
+/// Interval arg image (16B, native layout) for wrapper interval args.
+fn interval_arg_img(iv: &Interval) -> [u8; 16] {
+    let mut img = [0u8; 16];
+    img[..8].copy_from_slice(&iv.time.to_ne_bytes());
+    img[8..12].copy_from_slice(&iv.day.to_ne_bytes());
+    img[12..].copy_from_slice(&iv.month.to_ne_bytes());
+    img
+}
+
+/// Wrapper-plane check for Interval-returning fc wrappers against the
+/// already-C-checked core result.
+fn fc_check_interval(
+    arm: &str,
+    core: &types_error::PgResult<Interval>,
+    fc: (types_error::PgResult<Datum>, bool),
+) {
+    match (core, &fc.0) {
+        (Ok(cv), Ok(fv)) => {
+            let fv = datum_interval(*fv);
+            assert!(
+                (cv.time, cv.day, cv.month) == (fv.time, fv.day, fv.month),
+                "{arm} FC-PLANE interval value mismatch"
+            );
+        }
+        (Err(ce), Err(fe)) => {
+            assert!(ce.sqlstate == fe.sqlstate, "{arm} FC-PLANE sqlstate mismatch")
+        }
+        _ => panic!("{arm} FC-PLANE verdict mismatch"),
+    }
+}
+
+/// Wrapper-plane check for PartValue-returning fc wrappers.
+fn fc_check_part(
+    arm: &str,
+    core: &types_error::PgResult<PartValue>,
+    fc: (types_error::PgResult<Datum>, bool),
+) {
+    match (core, &fc.0) {
+        (Ok(PartValue::Null), Ok(_)) => assert!(fc.1, "{arm} FC-PLANE null mismatch"),
+        (Ok(PartValue::Float(cv)), Ok(fv)) => assert!(
+            cv.to_bits() == fv.as_f64().to_bits(),
+            "{arm} FC-PLANE float mismatch"
+        ),
+        (Ok(PartValue::Numeric(img)), Ok(fv)) => {
+            // wrapper returns a by-ref numeric varlena; compare payloads
+            // via the rendered text (same channel as the C plane).
+            // SAFETY: live varlena in the fc-call context.
+            let hdr = unsafe { std::slice::from_raw_parts(fv.as_usize() as *const u8, 4) };
+            let vlen = (u32::from_le_bytes(hdr.try_into().unwrap()) >> 2) as usize;
+            // SAFETY: payload follows the 4B header.
+            let payload =
+                unsafe { std::slice::from_raw_parts((fv.as_usize() + 4) as *const u8, vlen - 4) };
+            let mut out = Vec::new();
+            adt_numeric::io::numeric_out_into(adt_numeric::Num::from_payload(payload), &mut out);
+            assert!(
+                numeric_image_text(img) == String::from_utf8(out).unwrap(),
+                "{arm} FC-PLANE numeric mismatch"
+            );
+        }
+        (Err(ce), Err(fe)) => {
+            assert!(ce.sqlstate == fe.sqlstate, "{arm} FC-PLANE sqlstate mismatch")
+        }
+        _ => panic!("{arm} FC-PLANE verdict mismatch"),
+    }
+}
+
 /// One (errclass, value) verdict compare for i64-valued arms.
 fn check_i64(arm: &str, cerr: i32, cval: i64, rres: &types_error::PgResult<i64>) {
     match rres {
@@ -1035,6 +1110,12 @@ fn ts_trunc_arm(payload: &[u8]) {
         adt_timestamp::timestamp_trunc(units.as_bytes(), ts)
     };
     check_i64("timestamp_trunc", cerr, cval, &r);
+
+    // fc plane
+    let uv = text_varlena(units.as_bytes());
+    let f: PGFunction = if tz == 1 { tsb::fc_timestamptz_trunc } else { tsb::fc_timestamp_trunc };
+    let fc = fc_call(f, [Datum::from_usize(uv.as_ptr() as usize), Datum::from_i64(ts)]);
+    fc_check_i64("timestamp_trunc", &r, fc);
 }
 
 fn tstz_trunc_zone_arm(payload: &[u8]) {
@@ -1076,6 +1157,19 @@ fn tstz_trunc_zone_arm(payload: &[u8]) {
     }
     let r = adt_timestamp::timestamptz_trunc_zone(units.as_bytes(), ts, zone.as_bytes());
     check_i64("timestamptz_trunc_zone", cerr, cval, &r);
+
+    // fc plane
+    let uv = text_varlena(units.as_bytes());
+    let zv = text_varlena(zone.as_bytes());
+    let fc = fc_call(
+        tsb::fc_timestamptz_trunc_zone,
+        [
+            Datum::from_usize(uv.as_ptr() as usize),
+            Datum::from_i64(ts),
+            Datum::from_usize(zv.as_ptr() as usize),
+        ],
+    );
+    fc_check_i64("timestamptz_trunc_zone", &r, fc);
 }
 
 fn interval_trunc_arm(payload: &[u8]) {
@@ -1102,6 +1196,15 @@ fn interval_trunc_arm(payload: &[u8]) {
     };
     let r = tsiv::interval_trunc(units.as_bytes(), &iv);
     check_interval("interval_trunc", cerr, (ct, cd, cm), &r);
+
+    // fc plane
+    let uv = text_varlena(units.as_bytes());
+    let ii = interval_arg_img(&iv);
+    let fc = fc_call(
+        tsb::fc_interval_trunc,
+        [Datum::from_usize(uv.as_ptr() as usize), Datum::from_usize(ii.as_ptr() as usize)],
+    );
+    fc_check_interval("interval_trunc", &r, fc);
 }
 
 /// Shared part/extract compare tail for PartValue results.
@@ -1195,6 +1298,17 @@ fn ts_part_arm(payload: &[u8]) {
         adt_timestamp::timestamp_part_common(units.as_bytes(), ts, retnumeric)
     };
     check_part("ts_part", cerr, cfval, cisnull, cnval, cnlog10, cnumset, cnumchain, retnumeric, &r);
+
+    // fc plane
+    let uv = text_varlena(units.as_bytes());
+    let f: PGFunction = match (tz, retnumeric) {
+        (0, false) => tsb::fc_timestamp_part,
+        (0, true) => tsb::fc_extract_timestamp,
+        (_, false) => tsb::fc_timestamptz_part,
+        _ => tsb::fc_extract_timestamptz,
+    };
+    let fc = fc_call(f, [Datum::from_usize(uv.as_ptr() as usize), Datum::from_i64(ts)]);
+    fc_check_part("ts_part", &r, fc);
 }
 
 fn interval_part_arm(payload: &[u8]) {
@@ -1238,6 +1352,17 @@ fn interval_part_arm(payload: &[u8]) {
         retnumeric,
         &r,
     );
+
+    // fc plane
+    let uv = text_varlena(units.as_bytes());
+    let ii = interval_arg_img(&iv);
+    let f: PGFunction =
+        if retnumeric { tsb::fc_extract_interval } else { tsb::fc_interval_part };
+    let fc = fc_call(
+        f,
+        [Datum::from_usize(uv.as_ptr() as usize), Datum::from_usize(ii.as_ptr() as usize)],
+    );
+    fc_check_part("interval_part", &r, fc);
 }
 
 fn ts_age_arm(payload: &[u8]) {
@@ -1253,6 +1378,11 @@ fn ts_age_arm(payload: &[u8]) {
     let cerr = unsafe { pg_tsdiff_timestamp_age(a, b, tz, &mut ct, &mut cd, &mut cm) };
     let r = if tz == 1 { tsiv::timestamptz_age(a, b) } else { tsiv::timestamp_age(a, b) };
     check_interval("timestamp_age", cerr, (ct, cd, cm), &r);
+
+    // fc plane
+    let f: PGFunction = if tz == 1 { tsb::fc_timestamptz_age } else { tsb::fc_timestamp_age };
+    let fc = fc_call(f, [Datum::from_i64(a), Datum::from_i64(b)]);
+    fc_check_interval("timestamp_age", &r, fc);
 }
 
 fn make_ts_arm(payload: &[u8]) {
@@ -1276,6 +1406,21 @@ fn make_ts_arm(payload: &[u8]) {
         adt_timestamp::make_timestamp(y, mo, d, h, mi, sec)
     };
     check_i64("make_timestamp", cerr, cval, &r);
+
+    // fc plane
+    let f: PGFunction = if tz == 1 { tsb::fc_make_timestamptz } else { tsb::fc_make_timestamp };
+    let fc = fc_call(
+        f,
+        [
+            Datum::from_i32(y),
+            Datum::from_i32(mo),
+            Datum::from_i32(d),
+            Datum::from_i32(h),
+            Datum::from_i32(mi),
+            Datum::from_f64(sec),
+        ],
+    );
+    fc_check_i64("make_timestamp", &r, fc);
 }
 
 fn make_tstz_at_zone_arm(payload: &[u8]) {
@@ -1321,6 +1466,22 @@ fn make_tstz_at_zone_arm(payload: &[u8]) {
     }
     let r = adt_timestamp::make_timestamptz_at_timezone(y, mo, d, h, mi, sec, zone.as_bytes());
     check_i64("make_timestamptz_at_timezone", cerr, cval, &r);
+
+    // fc plane
+    let zv = text_varlena(zone.as_bytes());
+    let fc = fc_call(
+        tsb::fc_make_timestamptz_at_timezone,
+        [
+            Datum::from_i32(y),
+            Datum::from_i32(mo),
+            Datum::from_i32(d),
+            Datum::from_i32(h),
+            Datum::from_i32(mi),
+            Datum::from_f64(sec),
+            Datum::from_usize(zv.as_ptr() as usize),
+        ],
+    );
+    fc_check_i64("make_timestamptz_at_timezone", &r, fc);
 }
 
 fn make_interval_arm(payload: &[u8]) {
@@ -1341,6 +1502,21 @@ fn make_interval_arm(payload: &[u8]) {
         unsafe { pg_tsdiff_make_interval(y, mo, w, d, h, mi, sec, &mut ct, &mut cd, &mut cm) };
     let r = tsiv::make_interval(y, mo, w, d, h, mi, sec);
     check_interval("make_interval", cerr, (ct, cd, cm), &r);
+
+    // fc plane
+    let fc = fc_call(
+        tsb::fc_make_interval,
+        [
+            Datum::from_i32(y),
+            Datum::from_i32(mo),
+            Datum::from_i32(w),
+            Datum::from_i32(d),
+            Datum::from_i32(h),
+            Datum::from_i32(mi),
+            Datum::from_f64(sec),
+        ],
+    );
+    fc_check_interval("make_interval", &r, fc);
 }
 
 fn interval_muldiv_arm(payload: &[u8]) {
@@ -1416,6 +1592,32 @@ fn ts_plmi_interval_arm(payload: &[u8]) {
         _ => tsiv::timestamptz_mi_interval(ts, &iv),
     };
     check_i64("ts_plmi_interval", cerr, cval, &r);
+
+    // fc plane (tz variants; the non-tz wrappers ride adt_date's builtins).
+    if tz == 1 {
+        let ii = interval_arg_img(&iv);
+        let f: PGFunction =
+            if ismi == 1 { tsb::fc_timestamptz_mi_interval } else { tsb::fc_timestamptz_pl_interval };
+        let fc = fc_call(f, [Datum::from_i64(ts), Datum::from_usize(ii.as_ptr() as usize)]);
+        fc_check_i64("ts_plmi_interval", &r, fc);
+        // 3-arg at-zone form pinned to the session zone: same value by
+        // construction (proved 6222/6273 planes); drives the wrapper lines.
+        let zv = text_varlena(b"GMT");
+        let f: PGFunction = if ismi == 1 {
+            tsb::fc_timestamptz_mi_interval_at_zone
+        } else {
+            tsb::fc_timestamptz_pl_interval_at_zone
+        };
+        let fc = fc_call(
+            f,
+            [
+                Datum::from_i64(ts),
+                Datum::from_usize(ii.as_ptr() as usize),
+                Datum::from_usize(zv.as_ptr() as usize),
+            ],
+        );
+        fc_check_i64("ts_plmi_interval_at_zone", &r, fc);
+    }
 }
 
 fn justify_arm(payload: &[u8]) {
@@ -1614,6 +1816,39 @@ fn interval_agg_arm(payload: &[u8]) {
                     assert!(cerr == rc && cerr != 0, "interval_agg err: C {cerr} vs Rust {rc}");
                 }
             }
+
+            // fc plane: the transfn wrappers under a real agg frame,
+            // starting from a copy of the same state (in-place contract).
+            let mut agg =
+                types_fmgr::AggStateNode::new(mcx::MemoryContext::new_bump("tsdiff-aggacc"));
+            let mut st_copy = state0;
+            let ii = interval_arg_img(&nv);
+            let mut fci = LocalFcinfo::<2>::new(0);
+            fci.context = agg.fm_node_ptr();
+            fci.args[0] =
+                NullableDatum::value(Datum::from_usize(&mut st_copy as *mut _ as usize));
+            fci.args[1] = NullableDatum::value(Datum::from_usize(ii.as_ptr() as usize));
+            let f: PGFunction =
+                if op == 0 { tsb::fc_interval_avg_accum } else { tsb::fc_interval_avg_accum_inv };
+            let fr = f(None, &mut fci);
+            let mut state2 = state0;
+            let rr = if op == 0 {
+                tsiv::do_interval_accum(&mut state2, &nv)
+            } else {
+                tsiv::do_interval_discard(&mut state2, &nv)
+            };
+            match (&rr, &fr) {
+                (Ok(()), Ok(_)) => assert!(
+                    (st_copy.N, st_copy.sumX.time, st_copy.pInfcount, st_copy.nInfcount)
+                        == (state2.N, state2.sumX.time, state2.pInfcount, state2.nInfcount),
+                    "interval_agg FC-PLANE state mismatch"
+                ),
+                (Err(ce), Err(fe)) => {
+                    assert!(ce.sqlstate == fe.sqlstate, "interval_agg FC-PLANE sqlstate")
+                }
+                _ => panic!("interval_agg FC-PLANE verdict mismatch"),
+            }
+            agg.reset();
         }
         2 => {
             let issum = (payload[0] >> 3 & 1) as i32;
@@ -1640,6 +1875,24 @@ fn interval_agg_arm(payload: &[u8]) {
                     assert!(cerr == rc && cerr != 0, "agg_final err: C {cerr} vs Rust {rc}");
                 }
             }
+
+            // fc plane: finals over a pointer state
+            let f: PGFunction = if issum == 1 { tsb::fc_interval_sum } else { tsb::fc_interval_avg };
+            let fc = fc_call(f, [Datum::from_usize(&state0 as *const _ as usize)]);
+            match (&r, &fc.0) {
+                (Ok(None), Ok(_)) => assert!(fc.1, "agg_final FC-PLANE null mismatch"),
+                (Ok(Some(v)), Ok(fv)) => {
+                    let fv = datum_interval(*fv);
+                    assert!(
+                        (v.time, v.day, v.month) == (fv.time, fv.day, fv.month),
+                        "agg_final FC-PLANE value mismatch"
+                    );
+                }
+                (Err(ce), Err(fe)) => {
+                    assert!(ce.sqlstate == fe.sqlstate, "agg_final FC-PLANE sqlstate")
+                }
+                _ => panic!("agg_final FC-PLANE verdict mismatch"),
+            }
         }
         3 => {
             let n2 = rd_i64(payload, 41).rem_euclid(1 << 20);
@@ -1660,7 +1913,8 @@ fn interval_agg_arm(payload: &[u8]) {
                 nInfcount: ninf,
                 sumX: Interval { time: st2, day: sd, month: sm },
             };
-            match tsiv::interval_agg_combine(&mut s1, &s2) {
+            let rcomb = tsiv::interval_agg_combine(&mut s1, &s2);
+            match &rcomb {
                 Ok(()) => {
                     assert!(cerr == 0, "agg_combine verdict: C err={cerr} vs Rust Ok");
                     assert!(
@@ -1677,10 +1931,38 @@ fn interval_agg_arm(payload: &[u8]) {
                     );
                 }
                 Err(e) => {
-                    let rc = rust_err_class(&e);
+                    let rc = rust_err_class(e);
                     assert!(cerr == rc && cerr != 0, "agg_combine err: C {cerr} vs Rust {rc}");
                 }
             }
+
+            // fc plane under a real agg frame (state1 mutated in place)
+            let mut agg =
+                types_fmgr::AggStateNode::new(mcx::MemoryContext::new_bump("tsdiff-aggcmb"));
+            let mut fs1 = state0;
+            let fs2 = tsiv::IntervalAggState {
+                N: n2,
+                pInfcount: pinf,
+                nInfcount: ninf,
+                sumX: Interval { time: st2, day: sd, month: sm },
+            };
+            let mut fci = LocalFcinfo::<2>::new(0);
+            fci.context = agg.fm_node_ptr();
+            fci.args[0] = NullableDatum::value(Datum::from_usize(&mut fs1 as *mut _ as usize));
+            fci.args[1] = NullableDatum::value(Datum::from_usize(&fs2 as *const _ as usize));
+            let fr = tsb::fc_interval_avg_combine(None, &mut fci);
+            match (&rcomb, &fr) {
+                (Ok(()), Ok(_)) => assert!(
+                    (fs1.N, fs1.sumX.time, fs1.pInfcount, fs1.nInfcount)
+                        == (s1.N, s1.sumX.time, s1.pInfcount, s1.nInfcount),
+                    "agg_combine FC-PLANE state mismatch"
+                ),
+                (Err(ce), Err(fe)) => {
+                    assert!(ce.sqlstate == fe.sqlstate, "agg_combine FC-PLANE sqlstate")
+                }
+                _ => panic!("agg_combine FC-PLANE verdict mismatch"),
+            }
+            agg.reset();
         }
         _ => {
             // serialize image + deserialize roundtrip (fc wrappers)
