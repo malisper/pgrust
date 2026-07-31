@@ -649,14 +649,28 @@ size_t		pg_dt_strlcpy(char *dst, const char *src, size_t siz);
 /* ==== the verbatim vendored bodies ==== */
 
 /* datetime.c lookup caches + abbrev cache struct — VERBATIM
- * (src/backend/utils/adt/datetime.c) */
-static TimeZoneAbbrevTable *zoneabbrevtbl = NULL;
+ * (src/backend/utils/adt/datetime.c), except for the _Thread_local storage
+ * class, for the same reason as pg_dt_fcinfo_data and the per-exec arena
+ * below: in Postgres these are per-BACKEND (process-per-connection), so a
+ * process-global is faithful there, but the multi-threaded `cargo test`
+ * rails run several drivers in one process — and pg_dt_install_pinned_abbrevs
+ * is already per-thread ("install once per thread"), so every thread wrote
+ * these shared cells. DecodeTimezoneAbbrev's cache-hit arm matches on
+ * tzc->abbrev and then reads tzc->tz, while the fill publishes abbrev BEFORE
+ * tz (and InstallTimeZoneAbbrevs memsets the whole cache): a second thread
+ * can match a freshly-published name and read a stale or zeroed pg_tz*,
+ * which the DYNTZ path then dereferences. That SIGSEGVs on Linux aarch64 —
+ * the same publish-order hazard as pg_dt_fcinfo_data, and likewise invisible
+ * on macOS (6/6 clean locally, red on the CI cluster rail baseline).
+ * _Thread_local restores the one-backend-per-thread semantics the vendored
+ * bodies assume. Storage duration only; no computation is shimmed. */
+static _Thread_local TimeZoneAbbrevTable *zoneabbrevtbl = NULL;
 
 /* Caches of recent lookup results in the above tables */
 
-static const datetkn *datecache[MAXDATEFIELDS] = {NULL};
+static _Thread_local const datetkn *datecache[MAXDATEFIELDS] = {NULL};
 
-static const datetkn *deltacache[MAXDATEFIELDS] = {NULL};
+static _Thread_local const datetkn *deltacache[MAXDATEFIELDS] = {NULL};
 
 /* Cache for results of timezone abbreviation lookups */
 
@@ -668,7 +682,7 @@ typedef struct TzAbbrevCache
 	pg_tz	   *tz;				/* relevant zone, if variable-offset */
 } TzAbbrevCache;
 
-static TzAbbrevCache tzabbrevcache[MAXDATEFIELDS];
+static _Thread_local TzAbbrevCache tzabbrevcache[MAXDATEFIELDS];
 
 #include "pg_datetime_verbatim.inc"
 
