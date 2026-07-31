@@ -419,6 +419,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "numutils",
+ "pg_string",
  "pqformat",
  "stringinfo",
  "typcache",

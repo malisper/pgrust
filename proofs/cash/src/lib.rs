@@ -509,7 +509,18 @@ mod proofs {
     // 53-bit multiply/divide = wall class -> special-grid + zero-arm
     // treatment (float law). Runs need --no-overflow-checks (legal IEEE NaN
     // production trips Kani's default float checks, property noise not
-    // parity). The float8_mul underflow arm (result==0, both operands
+    // parity). Pinned mechanism (triage 2026-07-31, CI cluster re-sweep
+    // 4257c775bf): CBMC's "NaN on division" check flags ANY x / +-inf —
+    // its div NaN condition is (0/0 || isinf(divisor)), though x/inf is
+    // +-0.0, not NaN, for finite x (native probe: 7.0/inf FAILS the check,
+    // 7.0/NaN passes). F8_GRID contains +-inf, so eq_cash_div_flt{4,8}_grid
+    // FAIL without the flag while the mul grids happen to pass (CBMC's mult
+    // NaN condition doesn't misfire the same way). NOT a divergence: the
+    // same runs' equality/verdict assertions all pass, and EXHAUSTIVE-DIFF
+    // holds natively (all 2^32 f32 divisors x C_GRID for cash_div_flt4 =
+    // zero mismatches; f64 specials + 2e8 random for cash_div_flt8 = zero).
+    // SUITE rows for this family must carry --no-overflow-checks.
+    // The float8_mul underflow arm (result==0, both operands
     // nonzero) is UNREACHABLE from cash: |(float8) c| is 0 or >= 1, so no
     // product/quotient with a finite nonzero f64 rounds to 0 — no cover for
     // it (a cover would fail; noted in ledger instead).
