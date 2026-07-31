@@ -1613,6 +1613,7 @@ dependencies = [
  "adt_pg_lsn",
  "adt_pseudotypes",
  "adt_quote",
+ "adt_rangetypes",
  "adt_uuid",
  "archive",
  "cc",

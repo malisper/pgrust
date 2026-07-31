@@ -237,3 +237,11 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+# rangetypes_diff: scaffolded by fuzz/scaffold.py — see README-TODO-rangetypes_diff.md.
+[[bin]]
+name = "rangetypes_diff"
+path = "fuzz_targets/rangetypes_diff.rs"
+test = false
+doc = false
+bench = false
