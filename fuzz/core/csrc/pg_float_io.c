@@ -490,3 +490,459 @@ pg_diff_float4out(float num, char *buf32)
 	free(ascii);
 	return (int) n;
 }
+
+/* ======================================================================
+ * p1-lanead additions (2026-07-31): the extra_float_digits <= 0 output
+ * arm (pg_strfromd %.*g path), and the float4/8 recv/send wire images.
+ *
+ * Provenance (all bodies VERBATIM unless a shim is listed below):
+ *   - src/port/snprintf.c @ the same vendored ref: PrintfTarget (struct),
+ *     dostr, dopr_outch, pg_strfromd — verbatim.  flushbuffer is
+ *     unreachable here (every PrintfTarget has stream == NULL) and is
+ *     shimmed to abort(); Assert -> no-op; Min -> its c.h definition.
+ *   - src/backend/utils/adt/float.c float4out / float8out_internal:
+ *     the extra_float_digits <= 0 arm — verbatim bodies with
+ *     extra_float_digits plumbed as a parameter (the GUC read is
+ *     environment, not computation; mocked per the minimal-seaming rule).
+ *   - src/backend/libpq/pqformat.c pq_copymsgbytes, pq_getmsgint,
+ *     pq_getmsgint64, pq_getmsgfloat4, pq_getmsgfloat8, pq_sendfloat4,
+ *     pq_sendfloat8 — verbatim, over a minimal StringInfo {data,len,
+ *     cursor} shim (the three fields the bodies touch); pq_sendint32/64
+ *     -> pg_hton32/64 stores into a fixed buffer (their exact effect for
+ *     an 8-byte-headroom buffer); elog(ERROR,...) unreachable
+ *     (pq_getmsgint is only called with b == 4) -> abort().
+ *   - ereport(ERROR, ...) inside the pq functions -> record errcode +
+ *     longjmp (the pg_float_math.c convention; the io in-functions above
+ *     use soft ereturn and are untouched).
+ *   - errcode symbols extend the TU convention: 6 = 08P01
+ *     ERRCODE_PROTOCOL_VIOLATION.
+ * ====================================================================== */
+
+#include <setjmp.h>
+#include <stdint.h>
+
+#define ERRCODE_PROTOCOL_VIOLATION 6
+
+static _Thread_local jmp_buf pg_diff_io_jmp;
+
+/* ereport for the pq_* bodies only: record + longjmp (never returns). */
+#define pq_ereport(level, stuff) \
+	do { (void) (stuff); longjmp(pg_diff_io_jmp, 1); } while (0)
+
+#define Min(x, y) ((x) < (y) ? (x) : (y))
+#define Assert(condition) ((void) 0)
+
+/* ---- src/port/snprintf.c PrintfTarget — VERBATIM ---- */
+
+typedef struct
+{
+	char	   *bufptr;			/* next buffer output position */
+	char	   *bufstart;		/* first buffer element */
+	char	   *bufend;			/* last+1 buffer element, or NULL */
+	/* bufend == NULL is for sprintf, where we assume buf is big enough */
+	FILE	   *stream;			/* eventual output destination, or NULL */
+	int			nchars;			/* # chars sent to stream, or dropped */
+	bool		failed;			/* call is a failure; errno is set */
+} PrintfTarget;
+
+/* stream is always NULL in this TU: flushbuffer can never be reached. */
+static void
+flushbuffer(PrintfTarget *target)
+{
+	(void) target;
+	abort();
+}
+
+/* ---- src/port/snprintf.c dostr / dopr_outch — VERBATIM ---- */
+
+static void
+dopr_outch(int c, PrintfTarget *target)
+{
+	if (target->bufend != NULL && target->bufptr >= target->bufend)
+	{
+		/* buffer full, can we dump to stream? */
+		if (target->stream == NULL)
+		{
+			target->nchars++;	/* no, lose the data */
+			return;
+		}
+		flushbuffer(target);
+	}
+	*(target->bufptr++) = c;
+}
+
+static void
+dostr(const char *str, int slen, PrintfTarget *target)
+{
+	/* fast path for common case of slen == 1 */
+	if (slen == 1)
+	{
+		dopr_outch(*str, target);
+		return;
+	}
+
+	while (slen > 0)
+	{
+		int			avail;
+
+		if (target->bufend != NULL)
+			avail = target->bufend - target->bufptr;
+		else
+			avail = slen;
+		if (avail <= 0)
+		{
+			/* buffer full, can we dump to stream? */
+			if (target->stream == NULL)
+			{
+				target->nchars += slen; /* no, lose the data */
+				return;
+			}
+			flushbuffer(target);
+			continue;
+		}
+		avail = Min(avail, slen);
+		memmove(target->bufptr, str, avail);
+		target->bufptr += avail;
+		str += avail;
+		slen -= avail;
+	}
+}
+
+/* ---- src/port/snprintf.c pg_strfromd — VERBATIM ---- */
+
+/*
+ * Nonstandard entry point that can be used by applications that want to
+ * format a double with a given precision.  The general printf code can't
+ * handle this because it doesn't know the precision until run-time.  We
+ * assume here that the buffer is large enough for the result.
+ */
+int
+pg_strfromd(char *str, size_t count, int precision, double value)
+{
+	PrintfTarget target;
+	int			signvalue = 0;
+	int			vallen;
+	char		fmt[8];
+	char		convert[64];
+
+	/* Set up the target like pg_snprintf, but require nonempty buffer */
+	Assert(count > 0);
+	target.bufstart = target.bufptr = str;
+	target.bufend = str + count - 1;
+	target.stream = NULL;
+	target.nchars = 0;
+	target.failed = false;
+
+	/*
+	 * We bound precision to a reasonable range; the combination of this and
+	 * the knowledge that we're using "g" format without padding allows the
+	 * convert[] buffer to be reasonably small.
+	 */
+	if (precision < 1)
+		precision = 1;
+	else if (precision > 32)
+		precision = 32;
+
+	/*
+	 * The rest is just an inlined version of the fmtfloat() logic above,
+	 * simplified using the knowledge that no padding is wanted.
+	 */
+	if (isnan(value))
+	{
+		strcpy(convert, "NaN");
+		vallen = 3;
+	}
+	else
+	{
+		static const double dzero = 0.0;
+
+		if (value < 0.0 ||
+			(value == 0.0 &&
+			 memcmp(&value, &dzero, sizeof(double)) != 0))
+		{
+			signvalue = '-';
+			value = -value;
+		}
+
+		if (isinf(value))
+		{
+			strcpy(convert, "Infinity");
+			vallen = 8;
+		}
+		else
+		{
+			fmt[0] = '%';
+			fmt[1] = '.';
+			fmt[2] = '*';
+			fmt[3] = 'g';
+			fmt[4] = '\0';
+			vallen = snprintf(convert, sizeof(convert), fmt, precision, value);
+			if (vallen < 0)
+			{
+				target.failed = true;
+				goto fail;
+			}
+
+#ifdef WIN32
+			if (vallen >= 6 &&
+				convert[vallen - 5] == 'e' &&
+				convert[vallen - 3] == '0')
+			{
+				convert[vallen - 3] = convert[vallen - 2];
+				convert[vallen - 2] = convert[vallen - 1];
+				vallen--;
+			}
+#endif
+		}
+	}
+
+	if (signvalue)
+		dopr_outch(signvalue, &target);
+
+	dostr(convert, vallen, &target);
+
+fail:
+	*(target.bufptr) = '\0';
+	return target.failed ? -1 : (target.bufptr - target.bufstart
+								 + target.nchars);
+}
+
+/*
+ * float8out_internal / float4out, extra_float_digits <= 0 arm — VERBATIM
+ * bodies with extra_float_digits as a parameter (see header note).  The
+ * > 0 arm is the existing pg_diff_float8out/pg_diff_float4out above.
+ */
+static char *
+float8out_internal_efd(double num, int efd)
+{
+	char	   *ascii = (char *) palloc(32);
+	int			ndig = DBL_DIG + efd;
+
+	if (efd > 0)
+	{
+		double_to_shortest_decimal_buf(num, ascii);
+		return ascii;
+	}
+
+	(void) pg_strfromd(ascii, 32, ndig, num);
+	return ascii;
+}
+
+static char *
+float4out_efd(float num, int efd)
+{
+	char	   *ascii = (char *) palloc(32);
+	int			ndig = FLT_DIG + efd;
+
+	if (efd > 0)
+	{
+		float_to_shortest_decimal_buf(num, ascii);
+		return ascii;
+	}
+
+	(void) pg_strfromd(ascii, 32, ndig, num);
+	return ascii;
+}
+
+/* ---- src/backend/libpq/pqformat.c — VERBATIM over the StringInfo shim ---- */
+
+typedef struct
+{
+	char	   *data;
+	int			len;
+	int			cursor;
+}			pg_diff_stringinfo;
+
+typedef pg_diff_stringinfo *StringInfo;
+
+#define pg_ntoh16(x) ((uint16_t) ( \
+	(((uint16_t) (x) & 0x00ff) << 8) | (((uint16_t) (x) & 0xff00) >> 8)))
+#define pg_ntoh32(x) ((uint32_t) ( \
+	(((uint32_t) (x) & 0x000000ff) << 24) | \
+	(((uint32_t) (x) & 0x0000ff00) << 8) | \
+	(((uint32_t) (x) & 0x00ff0000) >> 8) | \
+	(((uint32_t) (x) & 0xff000000) >> 24)))
+#define pg_ntoh64(x) ((uint64_t) ( \
+	(((uint64_t) pg_ntoh32((uint32_t) ((x) & 0xffffffff))) << 32) | \
+	(uint64_t) pg_ntoh32((uint32_t) ((x) >> 32))))
+#define pg_hton32(x) pg_ntoh32(x)
+#define pg_hton64(x) pg_ntoh64(x)
+
+typedef uint16_t uint16;
+typedef uint32_t uint32;
+typedef uint64_t uint64;
+typedef int64_t int64;
+
+static void
+pq_copymsgbytes(StringInfo msg, void *buf, int datalen)
+{
+	if (datalen < 0 || datalen > (msg->len - msg->cursor))
+		pq_ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("insufficient data left in message")));
+	memcpy(buf, &msg->data[msg->cursor], datalen);
+	msg->cursor += datalen;
+}
+
+static unsigned int
+pq_getmsgint(StringInfo msg, int b)
+{
+	unsigned int result;
+	unsigned char n8;
+	uint16		n16;
+	uint32		n32;
+
+	switch (b)
+	{
+		case 1:
+			pq_copymsgbytes(msg, &n8, 1);
+			result = n8;
+			break;
+		case 2:
+			pq_copymsgbytes(msg, &n16, 2);
+			result = pg_ntoh16(n16);
+			break;
+		case 4:
+			pq_copymsgbytes(msg, &n32, 4);
+			result = pg_ntoh32(n32);
+			break;
+		default:
+			abort();			/* elog(ERROR, "unsupported integer size") */
+	}
+	return result;
+}
+
+static int64
+pq_getmsgint64(StringInfo msg)
+{
+	uint64		n64;
+
+	pq_copymsgbytes(msg, &n64, sizeof(n64));
+
+	return pg_ntoh64(n64);
+}
+
+static float4
+pq_getmsgfloat4(StringInfo msg)
+{
+	union
+	{
+		float4		f;
+		uint32		i;
+	}			swap;
+
+	swap.i = pq_getmsgint(msg, 4);
+	return swap.f;
+}
+
+static float8
+pq_getmsgfloat8(StringInfo msg)
+{
+	union
+	{
+		float8		f;
+		int64		i;
+	}			swap;
+
+	swap.i = pq_getmsgint64(msg);
+	return swap.f;
+}
+
+/* pq_sendint32/64 effect for a fixed headroom buffer (see header note). */
+static void
+pq_sendfloat4(char out[4], float4 f)
+{
+	union
+	{
+		float4		f;
+		uint32		i;
+	}			swap;
+	uint32		n;
+
+	swap.f = f;
+	n = pg_hton32(swap.i);
+	memcpy(out, &n, 4);
+}
+
+static void
+pq_sendfloat8(char out[8], float8 f)
+{
+	union
+	{
+		float8		f;
+		int64		i;
+	}			swap;
+	uint64		n;
+
+	swap.f = f;
+	n = pg_hton64((uint64) swap.i);
+	memcpy(out, &n, 8);
+}
+
+/* ---- fuzz-facing entry points (drivers, NOT Postgres code) ---- */
+
+/* Returns the NUL-terminated image length. efd = extra_float_digits. */
+int
+pg_diff_float8out_efd(double num, int efd, char *buf32)
+{
+	char	   *s = float8out_internal_efd(num, efd);
+	size_t		n = strlen(s);
+
+	memcpy(buf32, s, n + 1);
+	free(s);
+	return (int) n;
+}
+
+int
+pg_diff_float4out_efd(float num, int efd, char *buf32)
+{
+	char	   *s = float4out_efd(num, efd);
+	size_t		n = strlen(s);
+
+	memcpy(buf32, s, n + 1);
+	free(s);
+	return (int) n;
+}
+
+/* Returns 0 and writes *out on success, else the shimmed errcode class. */
+int
+pg_diff_float4recv(const char *data, int len, float *out)
+{
+	pg_diff_stringinfo si;
+
+	si.data = (char *) data;
+	si.len = len;
+	si.cursor = 0;
+	pg_diff_errcode = 0;
+	if (setjmp(pg_diff_io_jmp))
+		return pg_diff_errcode;
+	*out = pq_getmsgfloat4(&si);
+	return 0;
+}
+
+int
+pg_diff_float8recv(const char *data, int len, double *out)
+{
+	pg_diff_stringinfo si;
+
+	si.data = (char *) data;
+	si.len = len;
+	si.cursor = 0;
+	pg_diff_errcode = 0;
+	if (setjmp(pg_diff_io_jmp))
+		return pg_diff_errcode;
+	*out = pq_getmsgfloat8(&si);
+	return 0;
+}
+
+void
+pg_diff_float4send(float num, char *out4)
+{
+	pq_sendfloat4(out4, num);
+}
+
+void
+pg_diff_float8send(double num, char *out8)
+{
+	pq_sendfloat8(out8, num);
+}

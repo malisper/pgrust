@@ -30,6 +30,7 @@ fn main() {
         // .file("csrc/pg_encode_io.c")
         .file("csrc/pg_float_io.c")
         .file("csrc/pg_float_math.c")
+        .file("csrc/pg_float_agg_check.c")
         .file("csrc/pg_geo_io.c")
         .file("csrc/pg_strfam.c")
         .file("csrc/pg_uuid_io.c")

@@ -72,6 +72,7 @@ static _Thread_local jmp_buf pg_diff_fmath_jmp;
 #define ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE 2
 #define ERRCODE_INVALID_ARGUMENT_FOR_LOG 3
 #define ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION 4
+#define ERRCODE_DIVISION_BY_ZERO 5
 
 #define errcode(c) (pg_diff_fmath_errcode = (c))
 #define errmsg(...) 0
@@ -179,6 +180,50 @@ float_underflow_error(void)
 	ereport(ERROR,
 			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 			 errmsg("value out of range: underflow")));
+}
+
+/* ==== src/backend/utils/adt/float.c lines 101-108 — VERBATIM (p1-lanead:
+ * un-elided; reachable from the newly vendored float8_div path) ==== */
+
+pg_noinline void
+float_zero_divide_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_DIVISION_BY_ZERO),
+			 errmsg("division by zero")));
+}
+
+/* ==== src/include/utils/float.h float8_mul / float8_div — VERBATIM
+ * (p1-lanead: callees of the newly vendored degrees/radians) ==== */
+
+static inline float8
+float8_mul(const float8 val1, const float8 val2)
+{
+	float8		result;
+
+	result = val1 * val2;
+	if (unlikely(isinf(result)) && !isinf(val1) && !isinf(val2))
+		float_overflow_error();
+	if (unlikely(result == 0.0) && val1 != 0.0 && val2 != 0.0)
+		float_underflow_error();
+
+	return result;
+}
+
+static inline float8
+float8_div(const float8 val1, const float8 val2)
+{
+	float8		result;
+
+	if (unlikely(val2 == 0.0) && !isnan(val1))
+		float_zero_divide_error();
+	result = val1 / val2;
+	if (unlikely(isinf(result)) && !isinf(val1))
+		float_overflow_error();
+	if (unlikely(result == 0.0) && val1 != 0.0 && !isinf(val2))
+		float_underflow_error();
+
+	return result;
 }
 
 /* ==== src/backend/utils/adt/float.c lines 1465-2554 — VERBATIM ==== */
@@ -1559,6 +1604,137 @@ dlgamma(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(result);
 }
 
+/* ==== src/backend/utils/adt/float.c lines 1364-1463 — VERBATIM
+ * (p1-lanead: the "RANDOM FLOAT8 OPERATORS" rounding/sqrt family) ==== */
+
+/*
+ *		dround			- returns	ROUND(arg1)
+ */
+Datum
+dround(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+
+	PG_RETURN_FLOAT8(rint(arg1));
+}
+
+/*
+ *		dceil			- returns the smallest integer greater than or
+ *						  equal to the specified float
+ */
+Datum
+dceil(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+
+	PG_RETURN_FLOAT8(ceil(arg1));
+}
+
+/*
+ *		dfloor			- returns the largest integer lesser than or
+ *						  equal to the specified float
+ */
+Datum
+dfloor(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+
+	PG_RETURN_FLOAT8(floor(arg1));
+}
+
+/*
+ *		dsign			- returns -1 if the argument is less than 0, 0
+ *						  if the argument is equal to 0, and 1 if the
+ *						  argument is greater than zero.
+ */
+Datum
+dsign(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+	float8		result;
+
+	if (arg1 > 0)
+		result = 1.0;
+	else if (arg1 < 0)
+		result = -1.0;
+	else
+		result = 0.0;
+
+	PG_RETURN_FLOAT8(result);
+}
+
+/*
+ *		dtrunc			- returns truncation-towards-zero of arg1,
+ *						  arg1 >= 0 ... the greatest integer less
+ *										than or equal to arg1
+ *						  arg1 < 0	... the least integer greater
+ *										than or equal to arg1
+ */
+Datum
+dtrunc(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+	float8		result;
+
+	if (arg1 >= 0)
+		result = floor(arg1);
+	else
+		result = -floor(-arg1);
+
+	PG_RETURN_FLOAT8(result);
+}
+
+
+/*
+ *		dsqrt			- returns square root of arg1
+ */
+Datum
+dsqrt(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+	float8		result;
+
+	if (arg1 < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION),
+				 errmsg("cannot take square root of a negative number")));
+
+	result = sqrt(arg1);
+	if (unlikely(isinf(result)) && !isinf(arg1))
+		float_overflow_error();
+	if (unlikely(result == 0.0) && arg1 != 0.0)
+		float_underflow_error();
+
+	PG_RETURN_FLOAT8(result);
+}
+
+/* ==== src/backend/utils/adt/float.c lines 2556-2589 — VERBATIM
+ * (p1-lanead: degrees/radians, previously elided; dpi is a bare constant
+ * and stays elided) ==== */
+
+/*
+ *		degrees		- returns degrees converted from radians
+ */
+Datum
+degrees(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+
+	PG_RETURN_FLOAT8(float8_div(arg1, RADIANS_PER_DEGREE));
+}
+
+
+/*
+ *		radians		- returns radians converted from degrees
+ */
+Datum
+radians(PG_FUNCTION_ARGS)
+{
+	float8		arg1 = PG_GETARG_FLOAT8(0);
+
+	PG_RETURN_FLOAT8(float8_mul(arg1, RADIANS_PER_DEGREE));
+}
+
 /* ---- fuzz-facing entry point (driver, NOT Postgres code) ---- */
 
 /*
@@ -1601,6 +1777,16 @@ static const pg_diff_fmath_fn pg_diff_fmath_table[] = {
 	/* 28 */ datan2,
 	/* 29 */ datan2d,
 	/* 30 */ dpow,
+	/* p1-lanead appended block — ids 31.. are the rounding/sqrt/deg family;
+	 * APPEND-ONLY: never renumber 0..30 (corpus selectors depend on them). */
+	/* 31 */ degrees,
+	/* 32 */ radians,
+	/* 33 */ dsqrt,
+	/* 34 */ dsign,
+	/* 35 */ dtrunc,
+	/* 36 */ dround,
+	/* 37 */ dceil,
+	/* 38 */ dfloor,
 };
 
 /*
