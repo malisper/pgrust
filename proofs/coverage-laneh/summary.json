@@ -1,6 +1,6 @@
 {
- "generated": "2026-07-31T07:39:09+00:00",
- "head_sha": "b88ac55a0ac65a1bf25dc9aed694b4261d037a21",
+ "generated": "2026-07-31T13:00:11+00:00",
+ "head_sha": "83a8c4311206db9b08f959edcd6eaee5eceb8740",
  "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
  "sloc_rule_id": "v2+no-const-tables",
  "sloc_exclusions": {
