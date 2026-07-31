@@ -355,3 +355,30 @@ fn x_fc_max_length_full_i32() {
     }
     eprintln!("x_fc_max_length_full_i32: done (4294967296 calls)");
 }
+
+/// straggler planes: validity predicates (full band), db-encoding
+/// mb2wchar/wchar2mb wrappers, out-of-contract increment/islegal lengths,
+/// SetDatabaseEncoding error arm.
+#[test]
+fn q_stragglers() {
+    for enc in -100..100 {
+        check_encoding_predicates(enc);
+    }
+    check_encoding_predicates(i32::MIN);
+    check_encoding_predicates(i32::MAX);
+    let pats: &[&[u8]] = &[b"", b"abc", b"\xa1\xa1", b"\x8e\xa1", b"\xc3\xa9\x41", b"\xf0\x9f\x8e\x88"];
+    for enc in 0..35 {
+        for p in pats {
+            cmp_db_mb2wchar_roundtrip(enc, p);
+        }
+    }
+    // out-of-contract lengths: C switch default arms
+    for l in [0, 5, 6, -1] {
+        cmp_islegal_len(&[0xf0, 0x9f, 0x8e, 0x88], l);
+    }
+    for n in [5usize, 6, 8] {
+        cmp_utf8_increment(&vec![0x41u8; n]);
+    }
+    assert!(mbutils::SetDatabaseEncoding(99).is_err());
+    assert!(mbutils::SetDatabaseEncoding(-1).is_err());
+}

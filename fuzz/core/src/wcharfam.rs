@@ -885,6 +885,56 @@ pub fn cmp_fc_max_length(enc: i32, cx: &mcx::MemoryContext) {
     }
 }
 
+/// db-encoding mb2wchar/wchar2mb wrappers (caller sets encoding on both
+/// sides) — whole-image vs the C dispatch.
+pub fn cmp_db_mb2wchar_roundtrip(enc_be: i32, bytes: &[u8]) {
+    set_db_encoding_both(enc_be);
+    const SENT: u32 = 0xAAAA_AAAA;
+    let mut c_to = vec![SENT; bytes.len() + 1];
+    let c_n = unsafe {
+        wfam_x_mb2wchar_with_len(enc_be, bytes.as_ptr().cast(), c_to.as_mut_ptr(), bytes.len() as c_int)
+    };
+    let cx = mcx::MemoryContext::new("wcharfam_dbconv");
+    let r_vec = mbutils::pg_mb2wchar_with_len(cx.mcx(), bytes).unwrap();
+    assert!(
+        r_vec.len() == c_n.max(0) as usize && r_vec[..] == c_to[..r_vec.len()],
+        "pg_mb2wchar_with_len(db) DIVERGENCE enc={enc_be} {bytes:02x?}"
+    );
+    let mut wch: Vec<u32> = r_vec.to_vec();
+    wch.push(0);
+    let cap = wch.len() * 4 + 1;
+    let mut c_out = vec![0x5au8; cap];
+    let c_n2 = unsafe {
+        wfam_x_wchar2mb_with_len(enc_be, wch.as_ptr(), c_out.as_mut_ptr().cast(), (wch.len() - 1) as c_int)
+    };
+    let r_vec2 = mbutils::pg_wchar2mb_with_len(cx.mcx(), &wch[..wch.len() - 1]).unwrap();
+    assert!(
+        r_vec2.len() == c_n2.max(0) as usize && r_vec2[..] == c_out[..r_vec2.len()],
+        "pg_wchar2mb_with_len(db) DIVERGENCE enc={enc_be}"
+    );
+}
+
+/// validity predicates: rule-parity against the table constants (the C
+/// macros are compile-time; the exhaustive i32 sweep of pg_encoding_to_char
+/// oracles the same PG_VALID_ENCODING gate).
+pub fn check_encoding_predicates(enc: i32) {
+    use wchar::*;
+    assert_eq!(pg_valid_encoding(enc), (0.._PG_LAST_ENCODING_).contains(&enc));
+    assert_eq!(pg_valid_be_encoding(enc), (0..=PG_ENCODING_BE_LAST).contains(&enc));
+    assert_eq!(pg_valid_fe_encoding(enc), pg_valid_encoding(enc));
+    assert_eq!(
+        pg_encoding_is_client_only(enc),
+        enc > PG_ENCODING_BE_LAST && enc < _PG_LAST_ENCODING_
+    );
+}
+
+/// pg_utf8_islegal out-of-contract lengths (C switch default arm).
+pub fn cmp_islegal_len(b4: &[u8; 4], l: i32) {
+    let c = unsafe { wfam_x_utf8_islegal(b4.as_ptr(), l) } != 0;
+    let r = wchar::pg_utf8_islegal(b4, l);
+    assert!(c == r, "pg_utf8_islegal DIVERGENCE {b4:02x?} len={l}: C={c} Rust={r}");
+}
+
 #[cfg(test)]
 mod smoke {
     use super::*;
