@@ -576,6 +576,9 @@ fn array_in_diff(mcx: Mcx<'_>, esel: i32, payload: &[u8]) {
         }
         (Err(e), c) if c != 0 => {
             let rc = class_of(e);
+            // KNOWN-DIV-3 FIXED (fuzz/DIVERGENCE-NOTES-arrayfuncs.md):
+            // read_dimension_int now honors the strtol no-consume contract
+            // for a bare sign; strict class parity.
             assert!(
                 rc == c,
                 "array_in DIVERGENCE (errcode) esel={esel} input={text:?}: \
@@ -706,6 +709,9 @@ fn get_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     );
     if !risnull {
         if esel == 0 {
+            // KNOWN-DIV-2 FIXED (fuzz/DIVERGENCE-NOTES-arrayfuncs.md):
+            // foundation.rs fetch_att now sign-extends like C's
+            // Int32GetDatum; full Datum-word parity is asserted.
             assert!(
                 rd.as_usize() as u64 == cval,
                 "array_get_element DIVERGENCE (value) esel=0 payload={}: \
@@ -1039,6 +1045,7 @@ fn deconstruct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
                     continue;
                 }
                 if esel == 0 {
+                    // KNOWN-DIV-2 FIXED: full Datum-word parity (see notes file).
                     assert!(
                         relems[i].as_usize() as u64 == cv[i],
                         "deconstruct_array DIVERGENCE (elem[{i}]) esel=0 payload={}: \
@@ -1182,20 +1189,8 @@ fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
             );
         }
         (Err(e), c) if c != 0 => {
-            // KNOWN-DIV-1 (fuzz/DIVERGENCE-NOTES-arrayfuncs.md): ndims<0 —
-            // C raises 22023 (class 7), Rust's error carries no sqlstate
-            // (class 0). Pinned to EXACTLY that shape so the carve cannot
-            // hide new regressions.
-            if ndims < 0 {
-                assert!(
-                    c == 7 && class_of(&e) == 0,
-                    "construct_md_array KNOWN-DIV-1 shape changed esel={esel} \
-                     ndims={ndims}: C class {c} Rust class {} (sqlstate {:?})",
-                    class_of(&e),
-                    e.sqlstate(),
-                );
-                return;
-            }
+            // KNOWN-DIV-1 FIXED (fuzz/DIVERGENCE-NOTES-arrayfuncs.md):
+            // ndims<0 now carries 22023 on both sides; strict class parity.
             assert!(
                 class_of(&e) == c,
                 "construct_md_array DIVERGENCE (errcode) esel={esel} ndims={ndims} \

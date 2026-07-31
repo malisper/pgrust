@@ -38,3 +38,83 @@ seed committed in fuzz/corpus/arrayfuncs_diff/.
   the debug-assert-masking law anyway: release-effective assert where C has
   a compiled-out Assert is a ported-in constraint the crate owner may want
   to delete or keep deliberately.
+
+## KNOWN-DIV-2: byval int4 Datum word width (sign- vs zero-extension)
+
+- Arms: 2 (array_get_element) and 6 (deconstruct_array), esel=0 (int4).
+- Witness seed: fuzz/corpus/arrayfuncs_diff/seed-div-2 (the first smoke's
+  crash artifact; payload has a negative int4 element 0xf9f9f9f9).
+- C: fetch_att -> Int32GetDatum -> (Datum)(int32)x SIGN-EXTENDS the 32-bit
+  value into the 64-bit Datum word (elem[6] = 0xfffffffff9f9f9f9).
+- Rust: arrayfuncs::foundation::fetch_att ZERO-EXTENDS byval words
+  (0x00000000f9f9f9f9) — a DOCUMENTED deliberate convention
+  (foundation.rs:190 comment: "byval reads the element word
+  (zero-extended, consumers truncate)").
+- The int4 VALUE is identical; only the upper 32 bits of the Datum word
+  differ. Note the crate is two-faced about the convention:
+  Datum::from_i32 (datum/src/datum.rs:58, `value as DatumWord`)
+  sign-extends, so the same int4 value has two in-process word images
+  depending on whether it came from from_i32 or fetch_att. Consumers that
+  compare or hash RAW datum words for byval types would misfire; worth an
+  owner audit.
+- Driver handling: the value plane for byval int4 compares the TRUNCATED
+  i32 (the width the type defines) on both sides, and this word-level
+  deviation is carried here instead. The oracle is unweakened (it still
+  reports C's exact word).
+
+## SMOKE RESULT 2026-07-31
+
+- First 200k-run smoke found KNOWN-DIV-2 within seconds (crash artifact
+  above); after pinning, the full smoke completed clean (see final lane
+  report for exec rate).
+
+## KNOWN-DIV-3: array_in bare-sign dimension integer (errcode plane)
+
+- Arm: 0 (array_in), any elemsel. Witness input: `[1:-]={1,2,3}`
+  (seed: fuzz/corpus/arrayfuncs_diff/seed-div-3, the smoke-2 artifact).
+- C (ReadDimensionInt, arrayfuncs.c 519..558): strtol consumes NOTHING for
+  a bare sign with no digits (endptr = start), so the caller's p==q "no
+  digits" check fires -> "Missing array dimension value." under
+  ERRCODE_INVALID_TEXT_REPRESENTATION 22P02 (class 1).
+- Rust (io.rs read_dimension_int, 152..185): the sign branch ADVANCES pos
+  past '-' before checking for digits, so pos != before, the no-digits
+  check never fires, ub parses as 0, and the error surfaces later as
+  "upper bound cannot be less than lower bound" under
+  ERRCODE_ARRAY_SUBSCRIPT_ERROR 2202E (class 3).
+- Verdicts agree (both reject); errcode + message path diverge. Real
+  pgrust parser conformance bug: `SELECT '[1:-]={1,2,3}'::int[]` returns a
+  different SQLSTATE than PostgreSQL. Fix belongs to the crate owner:
+  don't advance pos when no digits follow the sign (strtol contract).
+- Driver handling: pinned NARROWLY — only for arm 0 inputs whose
+  dimension prefix (bytes before the first '{') contains a sign byte not
+  followed by a digit, and only for the exact class pair C=1/Rust=3.
+
+## RESOLUTIONS (p1-lanex, 2026-07-31) — all three divergences FIXED in-lane
+
+- KNOWN-DIV-1 FIXED: construct.rs ndims<0 now carries
+  ERRCODE_INVALID_PARAMETER_VALUE (22023). Driver pin tightened to strict
+  class parity. Regression test:
+  tests::p1_lanex_regressions::construct_md_array_negative_ndims_sqlstate.
+- KNOWN-DIV-2 FIXED (real cross-crate bug): foundation.rs fetch_att now
+  SIGN-EXTENDS byval words exactly like C's CharGetDatum/Int16GetDatum/
+  Int32GetDatum and like the executor's own
+  types_tuple::tupmacs::fetch_att and spgist's local copy. The
+  zero-extending version made array-fetched byval datums bit-unequal to
+  Datum::from_i32 datums of the same value; scalar::datum_ops::
+  datum_is_equal compares byval datums as FULL WORDS (v1 == v2), so a
+  negative int4 deconstructed from an array (e.g. MCV/stats stavalues)
+  never equaled the same heap-fetched value. Driver pins tightened to
+  full Datum-word parity. Regression test:
+  tests::p1_lanex_regressions::fetch_att_sign_extends_like_c.
+- KNOWN-DIV-3 FIXED (SQL-reachable): io.rs read_dimension_int no longer
+  consumes a bare sign (strtol endptr contract); '[1:-]={1,2,3}' now
+  fails with 22P02 "Missing array dimension value." as in C.
+  GROUND-TRUTHED on docker postgres:18.3 2026-07-31: ERROR malformed
+  array literal / DETAIL Missing array dimension value. / LOCATION
+  ReadArrayDimensions, arrayfuncs.c:452; '[-2:0]={1,2,3}' accepted.
+  Driver pin removed (strict parity). Regression test:
+  tests::p1_lanex_regressions::array_in_bare_sign_dimension_is_22p02.
+  Bonus hardening in the same function: acc growth now saturates once
+  past the overflow threshold (a >19-digit dimension previously
+  overflowed the i64 accumulator — debug-build panic; verdict plane
+  unchanged).
