@@ -552,3 +552,73 @@ mod bound_detoast {
         assert_eq!(&got[..], &want[..]);
     }
 }
+
+// P1 regression (fuzz-found 2026-07-31, lane p1-laneac): range_recv sized its
+// bound buffer from the UNVALIDATED wire length before pq_getmsgbytes ran.
+// bound_len == 0 produced a zero-capacity StringInfo whose unconditional NUL
+// write went through PgVec's dangling sentinel — release SEGV (a debug-only
+// debug_assert masked it). Ground-truthed on postgres:18.3: the same wire
+// raises 08P01 "insufficient data left in message" and the backend survives.
+// C validates first (pq_getmsgbytes), then takes a fixed-size initStringInfo.
+mod recv_wire {
+    use super::*;
+    use crate::io::{range_recv, RangeIOData};
+    use ::types_error::ERRCODE_PROTOCOL_VIOLATION;
+
+    /// int4recv stand-in: consumes exactly 4 network-order bytes.
+    fn fc_i32_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // SAFETY: receive_function_call passes a live StringInfo in arg 0.
+        let buf = unsafe { fcinfo.arg_stringinfo(0) };
+        Ok(Datum::from_i32(::pqformat::pq_getmsgint(buf, 4)? as i32))
+    }
+
+    fn io_data() -> RangeIOData {
+        RangeIOData {
+            ri: int4_ri(false),
+            typioproc: FmgrInfo::new(fc_i32_recv, 2406, 3, true, false),
+            typioparam: 23,
+        }
+    }
+
+    fn recv(mcx: ::mcx::Mcx<'_>, wire: &[u8]) -> PgResult<()> {
+        let mut buf = ::stringinfo::StringInfo::new_in(mcx)?;
+        buf.append_bytes(wire)?;
+        let mut cache = io_data();
+        range_recv(mcx, &mut cache, &mut buf, -1).map(|_| ())
+    }
+
+    #[test]
+    fn zero_length_bound_errors_and_does_not_crash() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        // flags = LB_INC|UB_INC (both bounds present), lower bound length 0.
+        let wire = [RANGE_LB_INC | RANGE_UB_INC, 0, 0, 0, 0];
+        let e = recv(mcx, &wire).expect_err("zero-length bound must be a protocol error");
+        assert_eq!(e.sqlstate, ERRCODE_PROTOCOL_VIOLATION);
+    }
+
+    #[test]
+    fn oversized_bound_length_errors_before_allocating() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        // A ~4 GiB bound length on a 5-byte message: C's pq_getmsgbytes
+        // rejects it before any allocation, so pgrust must too (never a
+        // multi-GiB reserve).
+        let wire = [RANGE_LB_INC | RANGE_UB_INC, 0xEB, 0xFF, 0xFF, 0xFF];
+        let e = recv(mcx, &wire).expect_err("oversized bound length must be a protocol error");
+        assert_eq!(e.sqlstate, ERRCODE_PROTOCOL_VIOLATION);
+    }
+
+    #[test]
+    fn well_formed_bounds_still_round_trip() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut wire = std::vec::Vec::new();
+        wire.push(RANGE_LB_INC);
+        wire.extend_from_slice(&4u32.to_be_bytes());
+        wire.extend_from_slice(&1i32.to_be_bytes());
+        wire.extend_from_slice(&4u32.to_be_bytes());
+        wire.extend_from_slice(&9i32.to_be_bytes());
+        recv(mcx, &wire).expect("well-formed [1,9) wire must receive");
+    }
+}

@@ -181,3 +181,78 @@ fn offsets_use_stride_items_past_four_ranges() {
         assert_eq!((lo.val.as_i32(), up.val.as_i32()), (a, b), "range {i}");
     }
 }
+
+// P1 sibling regression (fuzz-found 2026-07-31, lane p1-laneac): the same
+// unvalidated-wire-length-sized buffer defect as adt_rangetypes range_recv.
+// multirange_recv sized its per-element StringInfo from the wire range_len
+// before pq_getmsgbytes validated it, so range_len == 0 wrote through a
+// zero-capacity PgVec sentinel (release SEGV; debug_assert-masked) and a bogus
+// huge length requested a reserve C never attempts. C validates first
+// (pq_getmsgbytes), then resets a fixed-size initStringInfo buffer.
+mod recv_wire {
+    use super::*;
+    use crate::io::{multirange_recv, MultirangeIOData};
+    use ::types_error::ERRCODE_PROTOCOL_VIOLATION;
+
+    /// range_recv stand-in: consumes the whole element buffer and returns a
+    /// serialized int4range image, so the outer loop's wire handling is what
+    /// the test exercises.
+    fn fc_range_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // SAFETY: receive_function_call passes a live StringInfo in arg 0.
+        let buf = unsafe { fcinfo.arg_stringinfo(0) };
+        let _flags = ::pqformat::pq_getmsgbyte(buf)?;
+        let mcx = fcinfo.result_mcx();
+        let mut rng = int4_rng();
+        let v = mk(mcx, &mut rng, 1, 9);
+        Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+    }
+
+    fn io_data() -> MultirangeIOData {
+        MultirangeIOData {
+            mi: MultirangeInfo { pin: None, mltrngtypid: INT4MULTIRANGE, rng: int4_rng() },
+            typioproc: FmgrInfo::new(fc_range_recv, 3836, 3, true, false),
+            typioparam: INT4RANGE,
+        }
+    }
+
+    fn recv(mcx: ::mcx::Mcx<'_>, wire: &[u8]) -> PgResult<()> {
+        let mut buf = ::stringinfo::StringInfo::new_in(mcx)?;
+        buf.append_bytes(wire)?;
+        let mut cache = io_data();
+        multirange_recv(mcx, &mut cache, &mut buf, -1).map(|_| ())
+    }
+
+    #[test]
+    fn zero_length_range_errors_and_does_not_crash() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        // range_count = 1, then a zero-length range element.
+        let mut wire = std::vec::Vec::new();
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        wire.extend_from_slice(&0u32.to_be_bytes());
+        let e = recv(mcx, &wire).expect_err("zero-length range must be a protocol error");
+        assert_eq!(e.sqlstate, ERRCODE_PROTOCOL_VIOLATION);
+    }
+
+    #[test]
+    fn oversized_range_length_errors_before_allocating() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut wire = std::vec::Vec::new();
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        wire.extend_from_slice(&0xEBFFFFFFu32.to_be_bytes());
+        let e = recv(mcx, &wire).expect_err("oversized range length must be a protocol error");
+        assert_eq!(e.sqlstate, ERRCODE_PROTOCOL_VIOLATION);
+    }
+
+    #[test]
+    fn well_formed_element_still_round_trips() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut wire = std::vec::Vec::new();
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        wire.extend_from_slice(&1u32.to_be_bytes());
+        wire.push(::adt_rangetypes::RANGE_LB_INC);
+        recv(mcx, &wire).expect("well-formed one-element wire must receive");
+    }
+}
