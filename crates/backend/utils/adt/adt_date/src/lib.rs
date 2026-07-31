@@ -106,7 +106,13 @@ pub const fn IS_VALID_DATE(d: DateADT) -> bool {
 }
 
 pub type DateBuf = [u8; MAXDATELEN + 1];
-pub const DATE_WORKBUF: usize = MAXDATELEN + MAXDATEFIELDS;
+// C date.c sizes the ParseDateTime workbuf `MAXDATELEN + 1` in date_in /
+// time_in / timetz_in (timestamp.c uses the larger MAXDATELEN +
+// MAXDATEFIELDS — TS_WORKBUF). The size is part of the rejection envelope:
+// fields + their forced NUL terminators must fit, so a 129-byte buffer
+// rejects (22007) inputs a 153-byte one still parses. Found by
+// datetime_io_diff differential fuzz, confirmed against PostgreSQL 18.3.
+pub const DATE_WORKBUF: usize = MAXDATELEN + 1;
 
 pub const EARLY: &[u8] = b"-infinity";
 pub const LATE: &[u8] = b"infinity";
