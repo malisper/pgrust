@@ -187,5 +187,8 @@ superuser_seams = { path = "../../crates/backend/utils/misc/superuser_seams" }
 miscinit = { path = "../../crates/backend/utils/init/miscinit" }
 define = { path = "../../crates/backend/commands/define" }  # define_diff (scaffold.py)
 
+adt_tsvector_core = { path = "../../crates/backend/utils/adt/tsvector_core" }  # tsvector_core_diff (scaffold.py)
+adt_tsrank = { path = "../../crates/backend/utils/adt/tsrank" }  # tsrank_diff (scaffold.py)
+
 [build-dependencies]
 cc = "1"

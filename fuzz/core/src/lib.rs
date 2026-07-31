@@ -535,3 +535,11 @@ pub use define_diff::define_diff;
 // nodesfam_diff (p1-nodes): readfuncs/outfuncs/copyfuncs node walkers vs
 // vendored 18.3 C (read->out->copy->out round-trip, all planes).
 pub mod nodesfam_diff;
+
+// tsvector_core_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-tsvector_core_diff.md.
+pub mod tsvector_core_diff;
+pub use tsvector_core_diff::tsvector_core_diff;
+
+// tsrank_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-tsrank_diff.md.
+pub mod tsrank_diff;
+pub use tsrank_diff::tsrank_diff;

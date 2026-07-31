@@ -485,3 +485,19 @@ path = "fuzz_targets/nodesfam_diff.rs"
 test = false
 doc = false
 bench = false
+
+# tsvector_core_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsvector_core_diff.md.
+[[bin]]
+name = "tsvector_core_diff"
+path = "fuzz_targets/tsvector_core_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tsrank_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsrank_diff.md.
+[[bin]]
+name = "tsrank_diff"
+path = "fuzz_targets/tsrank_diff.rs"
+test = false
+doc = false
+bench = false

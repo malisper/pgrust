@@ -213,6 +213,14 @@ fn main() {
                 "-fno-strict-aliasing" // harmless repeat when not fuzzing
             },
         )
+        // COMPILE GATE (tsrank_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_tsrank_io.c is filled
+        // with verbatim vendored C (README-TODO-tsrank_diff.md step 1).
+        // .file("csrc/pg_tsrank_io.c")
+        // COMPILE GATE (tsvector_core_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_tsvector_core_io.c is filled
+        // with verbatim vendored C (README-TODO-tsvector_core_diff.md step 1).
+        // .file("csrc/pg_tsvector_core_io.c")
         .compile("pg_difffuzz_oracle");
 
     // wcharfam oracle (p1-laneah): verbatim 18.3 wchar.c + encnames.c +
