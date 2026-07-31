@@ -962,6 +962,7 @@ mod smoke {
     /// divergence or harness panic fails this test per-commit).
     #[test]
     fn wcharfam_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/wcharfam_diff");
         let mut n = 0usize;
         for entry in std::fs::read_dir(dir).expect("committed corpus present") {
@@ -976,6 +977,7 @@ mod smoke {
 
     #[test]
     fn wcharfam_diff_smoke() {
+        let _serial = crate::c_oracle_serial();
         let mut x: u64 = 0x243f_6a88_85a3_08d3;
         let mut buf = Vec::new();
         for i in 0..60_000u32 {

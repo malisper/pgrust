@@ -237,6 +237,7 @@ mod tests {
     /// values on every `cargo test` run (link + shim smoke).
     #[test]
     fn arm_sweep() {
+        let _serial = crate::c_oracle_serial();
         let states: [(u64, u64); 6] = [
             (0, 0),
             (1, 0),
@@ -264,6 +265,7 @@ mod tests {
     /// independently steer the (value, post-state) image.
     #[test]
     fn single_field_witness_pairs() {
+        let _serial = crate::c_oracle_serial();
         let base = (0x0102_0304_0506_0708u64, 0x1112_1314_1516_1718u64);
         let mut images = std::collections::HashSet::new();
         for (s0, s1) in [
@@ -288,6 +290,7 @@ mod tests {
     /// CI cluster campaign). Corpus is COMMITTED.
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/pg_prng_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/pg_prng_diff missing") {

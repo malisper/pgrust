@@ -257,6 +257,7 @@ mod tests {
     /// hash_bytes tail arms (len 0..=13) and a multi-round key.
     #[test]
     fn arm_sweep() {
+        let _serial = crate::c_oracle_serial();
         let long: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37)).collect();
         for sel in 0u8..12 {
             for al in 0u8..4 {
@@ -278,6 +279,7 @@ mod tests {
     /// and each packed half must independently steer the verdict.
     #[test]
     fn single_byte_witness_pairs() {
+        let _serial = crate::c_oracle_serial();
         for len in 1..=13usize {
             let base_key: Vec<u8> = (0..len as u8).map(|i| i.wrapping_add(1)).collect();
             let h0 = hashfn::hash_bytes(&base_key);
@@ -315,6 +317,7 @@ mod tests {
     /// string_hash truncation semantics against C, incl. keysize 0 wrap.
     #[test]
     fn string_hash_keysize_plane() {
+        let _serial = crate::c_oracle_serial();
         for (key, keysize) in [
             (&b"abc\0def"[..], 16usize),
             (&b"abcdef"[..], 4),
@@ -334,6 +337,7 @@ mod tests {
     /// Replay every checked-in seed. Corpus is COMMITTED.
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/hashfn_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/hashfn_diff missing") {

@@ -756,6 +756,17 @@ pub fn float_misc_diff(data: &[u8]) {
 mod tests {
     use super::*;
 
+    /// Serialize this module's tests against each other. The vendored float
+    /// C oracle carries process-global mutable statics with no C-side
+    /// synchronization (C Postgres is one-thread-per-backend); running these
+    /// tests concurrently at high `--test-threads` corrupts them — observed
+    /// as a deterministic spurious dcotd "divergence" (C returned -1.6e-303
+    /// for cotd(-1e308) whose true value is 0.4877…) at >=8 threads on the
+    /// wave-3 train, while every single-threaded and pairwise run is green.
+    /// A follow-up owns finding the actual racing writer; this lock makes
+    /// the CI signal deterministic without masking single-run divergences.
+    use crate::c_oracle_serial;
+
     pub const FLOAT_STR_CORPUS: &[&str] = &[
         "0", "-0", "0.0", "1", "1.5", "-1.5", " 1.5 ", "\t1e10\n", "1e-45", "1e309", "-1e309",
         "1e-309", "1e-323", "5e-324", "2.5e-324", "4.9e-324", "1e-400", "1e400",
@@ -771,6 +782,7 @@ mod tests {
 
     #[test]
     fn float_in_corpus() {
+        let _serial = c_oracle_serial();
         for s in FLOAT_STR_CORPUS {
             let mut d = vec![0u8];
             d.extend_from_slice(s.as_bytes());
@@ -804,6 +816,7 @@ mod tests {
 
     #[test]
     fn float_out_corpus() {
+        let _serial = c_oracle_serial();
         for &bits in F64_BITS_CORPUS {
             let mut d = vec![0u8];
             d.extend_from_slice(&bits.to_le_bytes());
@@ -828,6 +841,7 @@ mod tests {
     /// round-even shapes the shortest-repr edge arms need.
     #[test]
     fn ryu_buf_corpus() {
+        let _serial = c_oracle_serial();
         for &bits in F64_BITS_CORPUS {
             let mut d = vec![2u8];
             d.extend_from_slice(&bits.to_le_bytes());
@@ -866,6 +880,7 @@ mod tests {
     /// Rust matches the glibc/PG behavior; this test pins it.
     #[test]
     fn float8in_nan_ncharseq_matches_glibc_pg() {
+        let _serial = c_oracle_serial();
         let r = adt_float::float8in("nan(1\u{18})", None);
         assert_eq!(
             r.err().map(|e| rust_err_class(&e)),
@@ -887,6 +902,7 @@ mod tests {
     /// geo_diff carve for this divergence has been removed.
     #[test]
     fn on_ppath_overflow_divergence_witness() {
+        let _serial = c_oracle_serial();
         let pt = types_core::geo::Point { x: 0.0, y: 1e308 };
         let mut payload = Vec::new();
         payload.extend_from_slice(&2i32.to_ne_bytes());
@@ -909,6 +925,7 @@ mod tests {
 
     #[test]
     fn geo_corpus() {
+        let _serial = c_oracle_serial();
         let vals: &[f64] = &[
             0.0,
             -0.0,
@@ -1043,6 +1060,7 @@ mod tests {
     /// matched libm; baseline x86-64 PG builds cannot contract and match.
     #[test]
     fn dasind_fp_contraction_witness() {
+        let _serial = c_oracle_serial();
         let x = f64::from_bits(0xbfe000000000003f);
         let r = adt_float::dasind(x).unwrap();
         assert_eq!(r.to_bits(), 0xc03e000000000082, "pinned uncontracted result");
@@ -1054,6 +1072,7 @@ mod tests {
 
     #[test]
     fn float_math_corpus() {
+        let _serial = c_oracle_serial();
         let payload_nan = f64::from_bits(0xfff800000000dead);
         let mut vals = FLOAT_MATH_VAL_CORPUS.to_vec();
         vals.push(payload_nan);
@@ -1081,6 +1100,7 @@ mod tests {
 
     #[test]
     fn float_corpus_replays_clean() {
+        let _serial = c_oracle_serial();
         // CI regression rail: every committed corpus input replays clean
         // through its comparator (the float family's banked corpora).
         for (dir, f) in [
@@ -1105,6 +1125,7 @@ mod tests {
 
     #[test]
     fn float_misc_corpus() {
+        let _serial = c_oracle_serial();
         let payload_nan = f64::from_bits(0xfff800000000dead);
         let mut vals = FLOAT_MATH_VAL_CORPUS.to_vec();
         vals.push(payload_nan);

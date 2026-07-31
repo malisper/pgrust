@@ -188,7 +188,13 @@ pub(crate) fn init_session_env() {
     {
         use std::sync::Once;
         static SEAMS: Once = Once::new();
-        SEAMS.call_once(mbutils::init_seams);
+        // catch_unwind tolerates another lane's harness installing the
+        // mbutils seams first (double-install panics; all lanes share one
+        // test binary — arrayfuncs_diff::init_seams convention). Also keeps
+        // the Once unpoisoned for every later caller.
+        SEAMS.call_once(|| {
+            let _ = std::panic::catch_unwind(mbutils::init_seams);
+        });
     }
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).expect("PG_UTF8 is valid");
 }
@@ -499,6 +505,7 @@ mod tests {
 
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/jsonbio_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/jsonbio_diff missing") {
@@ -513,6 +520,7 @@ mod tests {
 
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // arm 0: parse+render, ok and error shapes
         jsonbio_diff(b"\x00{\"a\": [1, 2.5e2, true, null, \"x\\u00e9\"]}");
         jsonbio_diff(b"\x00{bad");

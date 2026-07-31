@@ -633,6 +633,7 @@ mod tests {
     /// high-bit singles, truncations) — quick contract check on stable.
     #[test]
     fn smoke_all_pairs() {
+        let _serial = crate::c_oracle_serial();
         for pair in PAIRS {
             let nsub = match pair.c {
                 COracle::Plain(_) => 1u8,
@@ -659,6 +660,7 @@ mod tests {
     /// no libfuzzer build needed.
     #[test]
     fn corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/mbconv_diff");
         let mut n = 0u32;
         for e in std::fs::read_dir(dir).expect("committed corpus dir") {
@@ -674,6 +676,7 @@ mod tests {
     /// Full 1-byte and 2-byte domains for every pair (fast: 84 x 65792 x 2).
     #[test]
     fn exhaustive_k1_k2_all_pairs() {
+        let _serial = crate::c_oracle_serial();
         for pair in PAIRS {
             exhaustive::sweep_full(pair, 1);
             exhaustive::sweep_full(pair, 2);
@@ -688,6 +691,7 @@ mod tests {
     /// domain at encoding granularity (len witnesses: -1, i32::MIN, 0).
     #[test]
     fn bad_args_all_pairs() {
+        let _serial = crate::c_oracle_serial();
         let encs: Vec<i32> = (-2..=42).collect(); // valid band 0..=41 + invalid edges
         for pair in PAIRS {
             for &s in &encs {
@@ -707,6 +711,7 @@ mod tests {
     /// vendored C engines over every invalid encoding id near the valid band.
     #[test]
     fn utf_engines_invalid_encoding() {
+        let _serial = crate::c_oracle_serial();
         let src = [0x41u8, 0x42];
         for enc in [-1000, -2, -1, 42, 43, 100, i32::MAX] {
             let mut cdst = [0xAAu8; 16];
@@ -756,6 +761,7 @@ mod tests {
     #[test]
     #[ignore = "exhaustive evidence run (minutes); run explicitly, bank the log"]
     fn exhaustive_combined_second_codepoint() {
+        let _serial = crate::c_oracle_serial();
         fn utf8_of(cp: u32) -> Option<Vec<u8>> {
             char::from_u32(cp).map(|c| c.to_string().into_bytes())
         }
@@ -796,6 +802,7 @@ mod tests {
     /// the clip-decision domain for each witness string).
     #[test]
     fn quoted_append_lattice() {
+        let _serial = crate::c_oracle_serial();
         let cases: [&str; 12] = [
             "",
             "'",
@@ -824,6 +831,7 @@ mod tests {
     #[test]
     #[ignore = "exhaustive evidence run (minutes); run explicitly, bank the log"]
     fn exhaustive_k3_all_pairs() {
+        let _serial = crate::c_oracle_serial();
         for pair in PAIRS {
             let t = std::time::Instant::now();
             exhaustive::EXECS.store(0, Ordering::Relaxed);
@@ -844,6 +852,7 @@ mod tests {
     #[test]
     #[ignore = "coverage-capture helper; run under -Cinstrument-coverage"]
     fn exhaustive_sampled_for_coverage() {
+        let _serial = crate::c_oracle_serial();
         const STRIDE: u32 = 509; // prime
         for pair in PAIRS {
             let nsub = match pair.c {
@@ -883,6 +892,7 @@ mod tests {
     #[test]
     #[ignore = "exhaustive evidence run (minutes-hours); run explicitly, bank the log"]
     fn exhaustive_k4_lead_constrained() {
+        let _serial = crate::c_oracle_serial();
         // (pair name, 4-byte lead bytes, b2 range)
         const UTF8_LEADS: &[u8] = &[0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7];
         const MIC_LEADS: &[u8] = &[0x9c, 0x9d]; // IS_LCPRV2 -> pg_mule_mblen 4

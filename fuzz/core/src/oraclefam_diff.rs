@@ -1016,6 +1016,7 @@ mod tests {
     /// Replay every checked-in seed (also the CI regression rail).
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/oraclefam_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/oraclefam_diff missing") {
@@ -1032,6 +1033,7 @@ mod tests {
     /// (ok + error planes both driven).
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         for enc_sel in 0u8..3 {
             for sel in 0u8..12 {
                 oraclefam_diff(&[sel, enc_sel]);
@@ -1175,6 +1177,7 @@ mod tests {
     /// planes — the fc wrapper adds no chr logic).
     #[test]
     fn chr_boundary_sweep() {
+        let _serial = crate::c_oracle_serial();
         for &enc in &ENCS4 {
             let mut arg: i64 = -2;
             while arg <= 0x12_0000 {
@@ -1199,6 +1202,7 @@ mod tests {
     /// Full-i32 chr sweep (CI-scale; ~2^32 x 3 cells): ORACLE_EXHAUSTIVE=1.
     #[test]
     fn chr_exhaustive_full_i32() {
+        let _serial = crate::c_oracle_serial();
         if std::env::var_os("ORACLE_EXHAUSTIVE").map_or(true, |v| v != "1") {
             eprintln!("chr_exhaustive_full_i32: skipped (set ORACLE_EXHAUSTIVE=1)");
             return;

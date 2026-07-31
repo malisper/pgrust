@@ -889,6 +889,7 @@ mod tests {
 
     #[test]
     fn cash_in_corpus() {
+        let _serial = crate::c_oracle_serial();
         for s in CASH_STR_CORPUS {
             drive(0, s.as_bytes());
         }
@@ -896,6 +897,7 @@ mod tests {
 
     #[test]
     fn cash_out_words_send_corpus() {
+        let _serial = crate::c_oracle_serial();
         for &v in CASH_VAL_CORPUS {
             drive(1, &v.to_le_bytes());
             drive(2, &v.to_le_bytes());
@@ -907,6 +909,7 @@ mod tests {
 
     #[test]
     fn cash_pair_arms_corpus() {
+        let _serial = crate::c_oracle_serial();
         for &a in CASH_VAL_CORPUS {
             for &b in CASH_VAL_CORPUS {
                 let mut p = a.to_le_bytes().to_vec();
@@ -924,6 +927,7 @@ mod tests {
 
     #[test]
     fn cash_float_arms_corpus() {
+        let _serial = crate::c_oracle_serial();
         let floats: &[f64] = &[
             0.0,
             -0.0,
@@ -961,6 +965,7 @@ mod tests {
 
     #[test]
     fn cash_recv_corpus() {
+        let _serial = crate::c_oracle_serial();
         drive(19, b"");
         drive(19, &[1, 2, 3]);
         drive(19, &[0; 7]); /* short -> 08P01 both sides */
@@ -974,6 +979,7 @@ mod tests {
     /// arg-order wrappers included.
     #[test]
     fn fc_wrapper_plane_smoke() {
+        let _serial = crate::c_oracle_serial();
         // fc_cash_in ok + 22P02
         drive(0, b"$1,234.56");
         drive(0, b"abc");
@@ -1012,6 +1018,7 @@ mod tests {
     /// raising 22003 (ledger rows 865/867/3345; C is platform-UB there).
     #[test]
     fn div_min_by_minus_one_carve_pinned() {
+        let _serial = crate::c_oracle_serial();
         let mut p = i64::MIN.to_le_bytes().to_vec();
         p.extend_from_slice(&(-1i64).to_le_bytes());
         drive(6, &p); /* exercises the carve branch, incl. its assert */

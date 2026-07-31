@@ -447,6 +447,7 @@ mod tests {
     /// any C/Rust divergence or harness panic fails this test per-commit).
     #[test]
     fn strfam_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/strfam_diff");
         let mut n = 0usize;
         for entry in std::fs::read_dir(dir).expect("committed corpus present") {
@@ -463,6 +464,7 @@ mod tests {
     /// hand-picked inputs covering both verdict planes of each member.
     #[test]
     fn strfam_smoke() {
+        let _serial = crate::c_oracle_serial();
         // strtoint10: accept, reject, ERANGE, whitespace, NUL-truncation.
         for s in [
             &b"0\x001"[..],

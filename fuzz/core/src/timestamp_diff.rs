@@ -2253,6 +2253,7 @@ mod tests {
 
     #[test]
     fn smoke_ts_in_iso() {
+        let _serial = crate::c_oracle_serial();
         arm(0, b"\x01\x00\x002024-01-02 03:04:05.6");
         arm(0, b"\x01\x00\x012024-01-02 03:04:05.6+07");
         arm(0, b"\x00\x00\x00infinity");
@@ -2261,16 +2262,19 @@ mod tests {
 
     #[test]
     fn smoke_ts_in_error() {
+        let _serial = crate::c_oracle_serial();
         arm(0, b"\x01\x00\x00nope");
     }
 
     #[test]
     fn smoke_ts_in_tz_carve() {
+        let _serial = crate::c_oracle_serial();
         arm(0, b"\x01\x00\x012024-01-02 03:04:05 America/New_York");
     }
 
     #[test]
     fn smoke_ts_out_styles() {
+        let _serial = crate::c_oracle_serial();
         for style in 0..15u8 {
             let mut p = vec![style, 0];
             p.extend_from_slice(&789_012_345_678i64.to_le_bytes());
@@ -2283,6 +2287,7 @@ mod tests {
 
     #[test]
     fn smoke_interval_io() {
+        let _serial = crate::c_oracle_serial();
         arm(2, b"\x00\x80\x001 year 2 mons 3 days 04:05:06.789");
         arm(2, b"\x03\x80\x00P1Y2M3DT4H5M6S");
         for is in 0..4u8 {
@@ -2296,6 +2301,7 @@ mod tests {
 
     #[test]
     fn smoke_wire() {
+        let _serial = crate::c_oracle_serial();
         let mut p = vec![0, 0];
         p.extend_from_slice(&42i64.to_be_bytes());
         arm(4, &p);
@@ -2313,6 +2319,7 @@ mod tests {
 
     #[test]
     fn smoke_trunc_part() {
+        let _serial = crate::c_oracle_serial();
         for (unit, ts) in [(&b"hour"[..], 1234567890123456i64), (b"week", -987654321i64)] {
             let mut p = vec![0];
             p.extend_from_slice(&ts.to_le_bytes());
@@ -2359,6 +2366,7 @@ mod tests {
 
     #[test]
     fn smoke_arith() {
+        let _serial = crate::c_oracle_serial();
         let mut p = Vec::new();
         p.extend_from_slice(&100_000_000i64.to_le_bytes());
         p.extend_from_slice(&200_000_000i64.to_le_bytes());
@@ -2413,6 +2421,7 @@ mod tests {
 
     #[test]
     fn smoke_scale() {
+        let _serial = crate::c_oracle_serial();
         for tm in 0..8u8 {
             let mut p = vec![tm];
             p.extend_from_slice(&1234567890123456i64.to_le_bytes());
@@ -2427,6 +2436,7 @@ mod tests {
 
     #[test]
     fn smoke_make() {
+        let _serial = crate::c_oracle_serial();
         let mut p = vec![0];
         for v in [2024i32, 2, 29, 12, 30] {
             p.extend_from_slice(&v.to_le_bytes());
@@ -2458,6 +2468,7 @@ mod tests {
 
     #[test]
     fn smoke_agg() {
+        let _serial = crate::c_oracle_serial();
         for op in 0..5u8 {
             let mut p = vec![op];
             p.extend_from_slice(&3i64.to_le_bytes());
@@ -2475,6 +2486,7 @@ mod tests {
 
     #[test]
     fn replay_committed_corpus() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/timestamp_diff");
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         let mut n = 0usize;

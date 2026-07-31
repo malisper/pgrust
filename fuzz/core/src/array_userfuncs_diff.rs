@@ -1594,6 +1594,7 @@ mod tests {
 
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // append int4, non-null array + elem
         let mut p = p_arr_int4(&[Some(1), Some(2)], 1);
         p.extend_from_slice(&7i32.to_le_bytes());
@@ -1647,6 +1648,7 @@ mod tests {
 
     #[test]
     fn text_arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // text 1-D array: mode=1, nelems=2, dim0 junk, lb, nulls byte, elems
         let mut p = vec![1u8, 2u8, 0u8];
         p.extend_from_slice(&1i32.to_le_bytes());
@@ -1666,6 +1668,7 @@ mod tests {
     /// input (asserts fire only on divergence).
     #[test]
     fn selector_soup() {
+        let _serial = crate::c_oracle_serial();
         for sel in 0u8..24 {
             for len in [0usize, 1, 2, 5, 16, 40, 120] {
                 let payload: Vec<u8> = (0..len)
@@ -1685,6 +1688,7 @@ mod tests {
     /// both argument orders (the mac/mac8 lesson).
     #[test]
     fn cat_witness_pairs() {
+        let _serial = crate::c_oracle_serial();
         // 2-D arrays: mode=2 => ndims=2; dims from bytes, elements follow.
         fn arr2(d0: u8, d1: u8, lb0: i32, lb1: i32) -> Vec<u8> {
             let n = (d0 % 4 + 1) as usize * (d1 % 4 + 1) as usize;

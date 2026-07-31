@@ -851,6 +851,7 @@ mod tests {
     #[test]
     #[ignore]
     fn timing_slow_unit_attribution() {
+        let _serial = crate::c_oracle_serial();
         let text: &[u8] =
             include_bytes!("../../testdata/jsonpath-slow/slow-unit-899856ad-text.bin");
         setup();
@@ -884,6 +885,7 @@ mod tests {
     #[test]
     #[ignore]
     fn timing_scaling_family() {
+        let _serial = crate::c_oracle_serial();
         setup();
         let ns: Vec<usize> = match std::env::var("JP_NS") {
             Ok(s) => s.split_whitespace().map(|t| t.parse().unwrap()).collect(),
@@ -936,6 +938,7 @@ mod tests {
     #[test]
     #[ignore]
     fn timing_grammar_only() {
+        let _serial = crate::c_oracle_serial();
         setup();
         let ns: Vec<usize> = match std::env::var("JP_NS") {
             Ok(s) => s.split_whitespace().map(|t| t.parse().unwrap()).collect(),
@@ -989,6 +992,7 @@ mod tests {
     #[test]
     #[ignore]
     fn timing_files() {
+        let _serial = crate::c_oracle_serial();
         let Ok(files) = std::env::var("JP_TIME_FILES") else {
             eprintln!("JP_TIME_FILES not set; skipping");
             return;
@@ -1018,6 +1022,7 @@ mod tests {
     /// nightly fuzz campaign).
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/jsonpath_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/jsonpath_diff missing") {
@@ -1034,6 +1039,7 @@ mod tests {
     /// (in + out, core + wrapper + C oracle), hard and soft modes.
     #[test]
     fn regress_ok_vectors_both_sides() {
+        let _serial = crate::c_oracle_serial();
         for (input, _) in JSONPATH_OK_VECTORS {
             arm0(input);
             arm0_soft(input);
@@ -1043,6 +1049,7 @@ mod tests {
     /// Error vectors: verdict + sqlstate parity in both modes.
     #[test]
     fn regress_err_vectors_both_sides() {
+        let _serial = crate::c_oracle_serial();
         for input in JSONPATH_ERR_INPUTS {
             arm0(input);
             arm0_soft(input);
@@ -1052,6 +1059,7 @@ mod tests {
     /// Scanner/unicode/numeric edges called out in the lane charter.
     #[test]
     fn edge_shapes() {
+        let _serial = crate::c_oracle_serial();
         for s in [
             "$.a[",
             "\"\\u00e9\"",
@@ -1096,6 +1104,7 @@ mod tests {
     /// empty, and a full send/recv round trip for every ok vector.
     #[test]
     fn recv_send_shapes() {
+        let _serial = crate::c_oracle_serial();
         for (input, _) in JSONPATH_OK_VECTORS.iter().take(60) {
             let mut wire = vec![1u8; 1];
             wire.extend_from_slice(input.as_bytes());
@@ -1123,6 +1132,7 @@ mod tests {
     /// datetime shapes and the prefix-colliding variable names.
     #[test]
     fn mutability_shapes() {
+        let _serial = crate::c_oracle_serial();
         let paths = [
             "$",
             "$.a",

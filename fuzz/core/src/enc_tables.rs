@@ -411,6 +411,7 @@ mod tests {
     /// cargo-fuzz) and the shape gen_seeds.sh banks for libFuzzer.
     #[test]
     fn enc_tables_corpus() {
+        let _serial = crate::c_oracle_serial();
         // base64 encode/decode: sizes 0..=9, shrink 0..=8, byte classes
         for fam in [0u8, 1] {
             for shrink in 0..=8u8 {
@@ -489,6 +490,7 @@ mod tests {
     /// CI replay rail: run every banked corpus unit through the driver.
     #[test]
     fn enc_tables_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/enc_tables_diff");
         let Ok(entries) = std::fs::read_dir(dir) else {
             return; /* corpus not banked yet */

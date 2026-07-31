@@ -916,6 +916,7 @@ mod slow_unit_probe {
     #[test]
     #[ignore = "triage probe: run explicitly with PGRUST_SLOW_UNIT set"]
     fn slow_unit_timing_probe() {
+        let _serial = crate::c_oracle_serial();
         let Ok(f) = std::env::var("PGRUST_SLOW_UNIT") else { return };
         let data = std::fs::read(f).expect("slow unit file");
         let t = std::time::Instant::now();

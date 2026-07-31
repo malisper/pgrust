@@ -1159,6 +1159,7 @@ mod tests {
     /// nightly fuzz campaign).
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/json_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/json_diff missing") {
@@ -1187,6 +1188,7 @@ mod tests {
     #[test]
     #[ignore = "a0 exhaustive sweep: run explicitly in release"]
     fn exhaustive_unicode_escape_domain() {
+        let _serial = crate::c_oracle_serial();
         const HEX: &[u8; 16] = b"0123456789abcdef";
         fn esc(cp: u32, out: &mut Vec<u8>) {
             out.extend_from_slice(b"\\u");
@@ -1246,6 +1248,7 @@ mod tests {
 
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // 0 json_in: valid + invalid + unicode escapes + surrogate pairs.
         json_diff(&arm(0, "{\"a\": [1,2,null], \"b\":\"xé😀\"}".as_bytes()));
         json_diff(&arm(0, b"{bad"));

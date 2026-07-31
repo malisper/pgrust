@@ -253,6 +253,7 @@ mod tests {
     /// Fixed sweep: every arm executes against the C oracle every test run.
     #[test]
     fn arm_sweep() {
+        let _serial = crate::c_oracle_serial();
         let payloads: [&[u8]; 4] = [
             &[],
             &[0xff; 96],
@@ -275,6 +276,7 @@ mod tests {
     /// array must independently steer the offset, small deltas, both orders.
     #[test]
     fn single_field_witness_pairs_offset() {
+        let _serial = crate::c_oracle_serial();
         let dim = [3i32, 4, 5, 2, 3, 2];
         let lb = [1i32, 1, 1, 1, 1, 1];
         let indx = [2i32, 3, 4, 1, 2, 1];
@@ -326,6 +328,7 @@ mod tests {
     /// The Rust-only corrupt-header arm: claimed ndim > provided dims.
     #[test]
     fn ndim_wider_than_slice_errors() {
+        let _serial = crate::c_oracle_serial();
         let e = array_get_n_items(3, &[2, 2]).unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
     }
@@ -333,6 +336,7 @@ mod tests {
     /// Replay every checked-in seed. Corpus is COMMITTED.
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/arrayutils_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/arrayutils_diff missing") {

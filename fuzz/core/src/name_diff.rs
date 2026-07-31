@@ -776,6 +776,7 @@ mod tests {
 
     #[test]
     fn namein_arm_corpus() {
+        let _serial = crate::c_oracle_serial();
         for id in ident_corpus() {
             drive(0, &id);
             drive(4, &id); // send/recv over the same shapes
@@ -785,6 +786,7 @@ mod tests {
 
     #[test]
     fn recv_length_edges_and_error_plane() {
+        let _serial = crate::c_oracle_serial();
         for n in [0usize, 1, 62, 63, 64, 65, 100, 300] {
             drive(4, &vec![b'n'; n]); // >=64 → 42622 on both sides
         }
@@ -797,6 +799,7 @@ mod tests {
 
     #[test]
     fn cmp_arm_corpus() {
+        let _serial = crate::c_oracle_serial();
         let mk = |a: &[u8], b: &[u8]| {
             let mut p = [0u8; 128];
             p[..a.len().min(64)].copy_from_slice(&a[..a.len().min(64)]);
@@ -822,6 +825,7 @@ mod tests {
 
     #[test]
     fn nametext_arm_corpus() {
+        let _serial = crate::c_oracle_serial();
         let mk = |name: &[u8], text: &[u8]| {
             let mut p = vec![name.len() as u8];
             p.extend_from_slice(name);
@@ -842,6 +846,7 @@ mod tests {
 
     #[test]
     fn concatoid_arm_corpus() {
+        let _serial = crate::c_oracle_serial();
         let mk = |oid: u32, name: &[u8]| {
             let mut p = oid.to_le_bytes().to_vec();
             p.extend_from_slice(name);
@@ -862,6 +867,7 @@ mod tests {
     /// driver): direct dispatch-grain check against the C oracle.
     #[test]
     fn namestrcmp_null_lattice() {
+        let _serial = crate::c_oracle_serial();
         setup();
         assert_eq!(name::namestrcmp(None, None), unsafe {
             pg_diff_namestrcmp(std::ptr::null(), std::ptr::null())
@@ -883,6 +889,7 @@ mod tests {
     /// the raw strncmp magnitude is SQL-visible through btnamecmp.
     #[test]
     fn btnamecmp_magnitude_pins() {
+        let _serial = crate::c_oracle_serial();
         setup();
         let a = name::namein(b"a");
         let c = name::namein(b"c");
@@ -901,6 +908,7 @@ mod tests {
     /// char boundary under UTF8 on BOTH sides (not 63).
     #[test]
     fn utf8_clip_lands_on_char_boundary() {
+        let _serial = crate::c_oracle_serial();
         setup();
         let s = "é".repeat(40);
         let r = name::namein(s.as_bytes());
@@ -919,6 +927,7 @@ mod tests {
     /// (fc_namerecv Ok + Err + fc_namesend), arm 5 (fc_text_name).
     #[test]
     fn fc_wrapper_plane_smoke() {
+        let _serial = crate::c_oracle_serial();
         for id in ident_corpus() {
             drive(0, &id);
             drive(4, &id);
@@ -949,6 +958,7 @@ mod tests {
     /// be panic-free on arbitrary input (asserts fire only on divergence).
     #[test]
     fn selector_soup() {
+        let _serial = crate::c_oracle_serial();
         for sel in 0u8..12 {
             for len in [0usize, 1, 3, 63, 64, 65, 128, 129, 200] {
                 let payload: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37).wrapping_add(sel)).collect();

@@ -495,6 +495,7 @@ mod tests {
     /// fuzz comparator, pinned here instead.
     #[test]
     fn stub_messages_match_c_templates() {
+        let _serial = crate::c_oracle_serial();
         for (e, want) in [
             (adt_pseudotypes::any_in().unwrap_err(), "cannot accept a value of type any"),
             (adt_pseudotypes::anyarray_in().unwrap_err(), "cannot accept a value of type anyarray"),
@@ -516,6 +517,7 @@ mod tests {
 
     #[test]
     fn recv_rejects_embedded_nul_both_sides_22021() {
+        let _serial = crate::c_oracle_serial();
         // [sel=2][cursor=0][payload "a\0b"]: SQL_ASCII verify rejects the NUL
         // on both sides with character_not_in_repertoire.
         pseudotypes_diff(&[2, 0, b'a', 0, b'b']);
@@ -530,6 +532,7 @@ mod tests {
     /// driver must not panic on any of these (a panic = divergence).
     #[test]
     fn selector_sweep_no_divergence() {
+        let _serial = crate::c_oracle_serial();
         let payloads: &[&[u8]] = &[
             b"",
             b"a",
@@ -555,6 +558,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "DIVERGENCE")]
     fn comparator_control_fires_on_skew() {
+        let _serial = crate::c_oracle_serial();
         compare_bytes("control", b"a", b"b");
     }
 
@@ -565,6 +569,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "cstring result needs a resolved FmgrInfo")]
     fn no_flinfo_arm_fires() {
+        let _serial = crate::c_oracle_serial();
         let mut fcinfo = LocalFcinfo::<1>::new(0);
         fcinfo.set_arg(0, Datum::from_usize(b"x\0".as_ptr() as usize));
         let _ = builtins::fc_cstring_out(None, &mut fcinfo);

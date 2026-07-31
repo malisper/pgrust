@@ -374,6 +374,7 @@ mod tests {
     /// differential on stable (the banked corpus is the regression suite).
     #[test]
     fn numutils_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/numutils_diff");
         let mut n = 0usize;
         for entry in std::fs::read_dir(dir).expect("committed corpus present") {
@@ -389,6 +390,7 @@ mod tests {
     /// Deterministic smoke: every selector, both verdict planes each.
     #[test]
     fn numutils_smoke() {
+        let _serial = crate::c_oracle_serial();
         let strings: &[&[u8]] = &[
             b"0", b"-0", b"+1", b" 42 ", b"0x7fff", b"0o777", b"0b1010", b"1_000", b"_1", b"1_",
             b"32767", b"32768", b"-32768", b"-32769", b"2147483647", b"2147483648",
@@ -430,6 +432,7 @@ mod tests {
     /// (canonical roundtrip).
     #[test]
     fn test_itoa_exhaustive_i16() {
+        let _serial = crate::c_oracle_serial();
         let mut r_buf = [0u8; EMIT_BUF];
         for v in i16::MIN..=i16::MAX {
             diff_itoa(v);
@@ -451,6 +454,7 @@ mod tests {
     /// go through strtoint16/strtoint64 too.
     #[test]
     fn test_strtoint_canonical_i32_sampled() {
+        let _serial = crate::c_oracle_serial();
         let mut vals: Vec<i64> = Vec::new();
         // stride sample of i32 (coprime stride => ~42k spread draws)
         let mut v = i32::MIN as i64;
@@ -515,6 +519,7 @@ mod tests {
     /// through the whole emit family (and zeropad minwidth 1..=12).
     #[test]
     fn test_ultoa_bands() {
+        let _serial = crate::c_oracle_serial();
         let mut u32s: Vec<u32> = vec![0, 1, u32::MAX, u32::MAX - 1];
         let mut p = 1u64;
         while p <= u32::MAX as u64 {
@@ -572,6 +577,7 @@ mod tests {
     /// (pg_ultostr rides the same emission core; see routes tsv).
     #[test]
     fn test_ultoa_exhaustive_u32() {
+        let _serial = crate::c_oracle_serial();
         if !exhaustive_gate("test_ultoa_exhaustive_u32") {
             return;
         }
@@ -593,6 +599,7 @@ mod tests {
     /// a0 EXHAUSTIVE-DIFF, CI-gated: full i32 domain through pg_ltoa.
     #[test]
     fn test_ltoa_exhaustive_i32() {
+        let _serial = crate::c_oracle_serial();
         if !exhaustive_gate("test_ltoa_exhaustive_i32") {
             return;
         }
@@ -616,6 +623,7 @@ mod tests {
     /// per-value cycling minwidth 1..=15 (every (len, minwidth) ordering).
     #[test]
     fn test_zeropad_exhaustive() {
+        let _serial = crate::c_oracle_serial();
         if !exhaustive_gate("test_zeropad_exhaustive") {
             return;
         }

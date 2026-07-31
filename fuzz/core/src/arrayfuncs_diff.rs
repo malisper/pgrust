@@ -1866,6 +1866,7 @@ mod tests {
     /// with ok- and error-shaped payloads.
     #[test]
     fn arm_sweep() {
+        let _serial = crate::c_oracle_serial();
         let payloads: [&[u8]; 5] = [
             &[],
             &[0xff; 128],
@@ -1888,6 +1889,7 @@ mod tests {
     /// consistency plane.
     #[test]
     fn array_in_smoke() {
+        let _serial = crate::c_oracle_serial();
         for esel in [0u8, 1] {
             for lit in [
                 "{1,2,3}",
@@ -1914,6 +1916,7 @@ mod tests {
     /// nightly fuzz campaign). Corpus is COMMITTED.
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/arrayfuncs_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/arrayfuncs_diff missing") {

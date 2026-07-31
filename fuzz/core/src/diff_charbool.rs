@@ -885,6 +885,7 @@ mod tests {
 
     #[test]
     fn bool_in_corpus() {
+        let _serial = crate::c_oracle_serial();
         for s in BOOL_STR_CORPUS {
             for sel in [0u8, 1] {
                 let mut d = vec![sel];
@@ -896,6 +897,7 @@ mod tests {
 
     #[test]
     fn bool_parse_raw_bytes() {
+        let _serial = crate::c_oracle_serial();
         // Non-UTF8 and interior-NUL shapes only reach the _with_len plane.
         for raw in [
             &b"t\xff"[..],
@@ -913,6 +915,7 @@ mod tests {
 
     #[test]
     fn bool_out_cmp_agg_sweep() {
+        let _serial = crate::c_oracle_serial();
         for b0 in [0u8, 1, 2, 255] {
             for b1 in [0u8, 1, 3] {
                 bool_diff(&[2, b0, b1]);
@@ -937,6 +940,7 @@ mod tests {
 
     #[test]
     fn char_corpus() {
+        let _serial = crate::c_oracle_serial();
         // charin text shapes.
         for s in [
             "", "a", "A", "\\", "\\0", "\\00", "\\000", "\\377", "\\400", "\\777", "\\778",
@@ -976,6 +980,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "charin DIVERGENCE")]
     fn char_comparator_must_fail_on_skew() {
+        let _serial = crate::c_oracle_serial();
         let payload = b"a";
         let cs = CString::new(&payload[..]).unwrap();
         let cval = unsafe { pg_diff_charin(cs.as_ptr()) } as i8;
@@ -991,6 +996,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "boolin DIVERGENCE")]
     fn bool_comparator_must_fail_on_skew() {
+        let _serial = crate::c_oracle_serial();
         let cs = CString::new("true").unwrap();
         let mut cres: i32 = 0;
         let cerr = unsafe { pg_diff_boolin(cs.as_ptr(), &mut cres) };

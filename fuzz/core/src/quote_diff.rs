@@ -263,6 +263,7 @@ mod tests {
     /// nightly fuzz campaign).
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/quote_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/quote_diff missing") {
@@ -279,6 +280,7 @@ mod tests {
     /// (any C-vs-Rust disagreement asserts inside).
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // ident: safe (plain), keyword (quoted), embedded quote, guc-forced.
         quote_diff(b"\x00\x00abc_1");
         quote_diff(b"\x00\x00select");
@@ -302,6 +304,7 @@ mod tests {
     /// the arm if the C table and Rust table ever drift).
     #[test]
     fn keyword_boundary() {
+        let _serial = crate::c_oracle_serial();
         // "abort" is UNRESERVED, "all" is RESERVED in 18.3 kwlist.h.
         quote_diff(b"\x00\x00abort");
         quote_diff(b"\x00\x00all");

@@ -164,6 +164,7 @@ mod tests {
     // Static-table parity: both sides must agree on the list geometry.
     #[test]
     fn table_geometry() {
+        let _serial = crate::c_oracle_serial();
         assert_eq!(
             keywords::SCANKEYWORDS_NUM_KEYWORDS as i32,
             // SAFETY: constant read.
@@ -177,6 +178,7 @@ mod tests {
     // Exhaustive: every keyword index — text, category, bare-label.
     #[test]
     fn all_keyword_indexes() {
+        let _serial = crate::c_oracle_serial();
         for n in 0..keywords::SCANKEYWORDS_NUM_KEYWORDS {
             diff_keyword_index(n);
         }
@@ -186,6 +188,7 @@ mod tests {
     // near-misses (one char changed / truncated / extended).
     #[test]
     fn all_keywords_lookup_and_near_misses() {
+        let _serial = crate::c_oracle_serial();
         for n in 0..keywords::SCANKEYWORDS_NUM_KEYWORDS {
             let kw = keywords::GetScanKeyword(n, &keywords::ScanKeywords).unwrap();
             let mut probes: Vec<Vec<u8>> = vec![
@@ -214,6 +217,7 @@ mod tests {
     // unassigned arm), both posix modes, category + all 18 predicates.
     #[test]
     fn unicode_full_codespace_sweep() {
+        let _serial = crate::c_oracle_serial();
         for code in 0..=0x110000u32 {
             let mut v = vec![2u8];
             v.extend_from_slice(&code.to_le_bytes());
@@ -235,6 +239,7 @@ mod tests {
 
     #[test]
     fn ops_smoke() {
+        let _serial = crate::c_oracle_serial();
         for op in 0u8..3 {
             tablesfam_diff(&[op]);
             let mut v = vec![op];
@@ -246,6 +251,7 @@ mod tests {
     // CI regression rail: replay the banked corpus.
     #[test]
     fn tablesfam_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/tablesfam_diff");
         let mut n = 0;
         if let Ok(rd) = std::fs::read_dir(dir) {

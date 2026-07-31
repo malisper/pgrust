@@ -546,6 +546,7 @@ mod tests {
     /// any C/Rust divergence or harness panic fails this test per-commit).
     #[test]
     fn hashenc_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/hashenc_diff");
         let mut n = 0usize;
         for entry in std::fs::read_dir(dir).expect("committed corpus present") {
@@ -562,6 +563,7 @@ mod tests {
     /// here is a real C/Rust divergence (or harness defect) on stable.
     #[test]
     fn hashenc_seeds() {
+        let _serial = crate::c_oracle_serial();
         hashenc_diff(b"");
         for sel in 0u8..=48 {
             hashenc_diff(&[sel]);

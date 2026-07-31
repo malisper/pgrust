@@ -239,6 +239,25 @@ pub fn wire_pqformat(data: &[u8]) {
 
 // Differential targets (shipped Rust vs vendored PostgreSQL C oracle):
 // float4in/float8in, float4out/float8out, point_out/on_ppath. See diff.rs.
+/// Serialize `cargo test` cases that drive the in-process C oracles.
+///
+/// The vendored C carries process-global mutable state with no C-side
+/// synchronization (C Postgres is one-thread-per-backend and never sees
+/// concurrency). On the wave-3 train, high `--test-threads` runs corrupt the
+/// float oracle's degree-constant statics — a deterministic spurious dcotd
+/// "divergence" (C returned -1.6e-303 for cotd(-1e308), true value 0.4877…)
+/// — with jsonbio_diff implicated (its oracle externs into pg_float_io.c);
+/// seam-env installs also TOCTOU-race across modules. Fuzz binaries are
+/// one-target-per-process and unaffected. A follow-up owns finding the
+/// racing writer; this lock makes the `cargo test` signal deterministic
+/// without masking single-run divergences. Poison-tolerant: a divergence
+/// panic in one test must not cascade "poisoned Mutex" noise into siblings.
+#[cfg(test)]
+pub(crate) fn c_oracle_serial() -> std::sync::MutexGuard<'static, ()> {
+    static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub mod diff;
 pub use diff::{
     float_in_diff, float_math2_diff, float_math_diff, float_misc_diff, float_out_diff, geo_diff,

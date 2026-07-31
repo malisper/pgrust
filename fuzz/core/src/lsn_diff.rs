@@ -589,6 +589,7 @@ mod tests {
 
     #[test]
     fn lsn_in_corpus() {
+        let _serial = crate::c_oracle_serial();
         for s in LSN_TEXT_CORPUS {
             let mut d = vec![0u8];
             d.extend_from_slice(s.as_bytes());
@@ -598,6 +599,7 @@ mod tests {
 
     #[test]
     fn lsn_out_cmp_mi_corpus() {
+        let _serial = crate::c_oracle_serial();
         for &a in LSN_VALS {
             let mut d = vec![1u8];
             d.extend_from_slice(&a.to_le_bytes());
@@ -615,6 +617,7 @@ mod tests {
 
     #[test]
     fn lsn_recv_send_corpus() {
+        let _serial = crate::c_oracle_serial();
         for len in 0..=12 {
             let mut d = vec![3u8];
             d.extend_from_slice(&vec![0xA5u8; len]);
@@ -629,6 +632,7 @@ mod tests {
 
     #[test]
     fn lsn_arith_corpus() {
+        let _serial = crate::c_oracle_serial();
         for &lsn in LSN_VALS {
             for n in NUM_TEXT_CORPUS {
                 for sel in [5u8, 6] {
@@ -652,6 +656,7 @@ mod tests {
     /// must-fail harnesses.
     #[test]
     fn comparator_fires_on_value_skew() {
+        let _serial = crate::c_oracle_serial();
         // value plane: C oracle vs a WRONG Rust value
         let mut cval = 0u64;
         let cs = CString::new("1/2").unwrap();
@@ -666,6 +671,7 @@ mod tests {
 
     #[test]
     fn comparator_fires_on_error_plane_skew() {
+        let _serial = crate::c_oracle_serial();
         // error plane: C rejects "junk"; asserting Rust ACCEPTS must fire
         let r = std::panic::catch_unwind(|| {
             let res = adt_pg_lsn::pg_lsn_in("junk", None);
@@ -676,6 +682,7 @@ mod tests {
 
     #[test]
     fn comparator_fires_on_image_skew() {
+        let _serial = crate::c_oracle_serial();
         // image plane: pg_lsn_mi image vs corrupted C image
         let mut cimg = [0u8; 1024];
         let mut clen: i32 = 0;
@@ -693,6 +700,7 @@ mod tests {
     /// tests): the oracle agrees with the real server on the record rows.
     #[test]
     fn oracle_matches_live_18_3_records() {
+        let _serial = crate::c_oracle_serial();
         let mut img = [0u8; 1024];
         let mut len = 0i32;
         // '1/2' - '0/FF' = 4294967043

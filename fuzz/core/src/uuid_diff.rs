@@ -680,6 +680,7 @@ mod tests {
     /// nightly fuzz campaign).
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/uuid_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/uuid_diff missing") {
@@ -694,6 +695,7 @@ mod tests {
 
     #[test]
     fn in_out_roundtrip_arms() {
+        let _serial = crate::c_oracle_serial();
         // Canonical, braced, hyphen-free, upper-case, mixed-hyphen forms.
         for s in [
             "11111111-1111-1111-1111-111111111111",
@@ -732,6 +734,7 @@ mod tests {
 
     #[test]
     fn binary_arms() {
+        let _serial = crate::c_oracle_serial();
         let a: PgUuid = [0x11; UUID_LEN];
         let b_: PgUuid = [0x22; UUID_LEN];
         let mut v7 = 0x017f22e279b0u64.to_le_bytes().to_vec();
@@ -765,6 +768,7 @@ mod tests {
     /// Version/timestamp extraction over the RFC 9562 variant lattice.
     #[test]
     fn extract_lattice() {
+        let _serial = crate::c_oracle_serial();
         for ver in 0u8..16 {
             for variant in [0x00u8, 0x40, 0x80, 0xc0] {
                 let mut u = [0x5au8; UUID_LEN];
@@ -784,6 +788,7 @@ mod tests {
     /// under `cargo test` on stable.
     #[test]
     fn fc_plane_smoke() {
+        let _serial = crate::c_oracle_serial();
         // Arm 0: fc_uuid_in Ok and Err shapes (hard + soft each).
         for s in [&b"01020304-0506-7008-800a-0b0c0d0e0f10"[..], b"bogus", b""] {
             let mut d = vec![0u8];
@@ -824,6 +829,7 @@ mod tests {
     /// into the magic byte.
     #[test]
     fn abbrev_heavy_mode() {
+        let _serial = crate::c_oracle_serial();
         let mut d = vec![7u8, 0xa5];
         d.extend_from_slice(&42u64.to_le_bytes());
         uuid_diff(&d);

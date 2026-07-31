@@ -969,6 +969,7 @@ mod tests {
 
     #[test]
     fn mac_in_corpus() {
+        let _serial = crate::c_oracle_serial();
         for s in MAC_TEXT_CORPUS {
             drive(0, s.as_bytes());
             drive(1, s.as_bytes()); /* every mac text through macaddr8_in too */
@@ -992,6 +993,7 @@ mod tests {
 
     #[test]
     fn mac_binary_arms_corpus() {
+        let _serial = crate::c_oracle_serial();
         for bytes in BYTES_CORPUS {
             for sel in 2u8..=20 {
                 drive(sel, bytes);
@@ -1020,6 +1022,7 @@ mod tests {
     /// error arm, and the mac8 6-byte stuffing recv arm.
     #[test]
     fn fc_plane_smoke() {
+        let _serial = crate::c_oracle_serial();
         // Arms 0/1: fc_macaddr_in Ok / 22P02 / 22003, fc_macaddr8_in Ok / err.
         for s in ["08:00:2b:01:02:03", "not a mac", "1ff:2:3:4:5:6"] {
             drive(0, s.as_bytes());
@@ -1047,6 +1050,7 @@ mod tests {
     /// 9-digit fields are carved.
     #[test]
     fn row436_carve_boundary() {
+        let _serial = crate::c_oracle_serial();
         assert!(!carve_row436(b"ffffffff:0:0:0:0:0"));
         assert!(!carve_row436(b"08:00:2b:01:02:03"));
         assert!(!carve_row436(b"08002b010203")); /* 12-digit bare run: %2x style, no carve */
@@ -1074,6 +1078,7 @@ mod tests {
     /// the row-436 >8-digit-field class anyway.
     #[test]
     fn negation_overflow_finding_witness() {
+        let _serial = crate::c_oracle_serial();
         assert!(negation_overflow_guard(b"-8000000000000000"));
         assert!(negation_overflow_guard(b"-0x8000000000000000:1:2:3:4:5"));
         assert!(!negation_overflow_guard(b"-fffffffffffffff:0:0:0:0:0")); /* 15 digits */

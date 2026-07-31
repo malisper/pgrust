@@ -460,6 +460,7 @@ mod tests {
 
     #[test]
     fn all_ops_smoke() {
+        let _serial = crate::c_oracle_serial();
         for op in 0u8..7 {
             let mut v = vec![op, 3, 5];
             v.extend_from_slice(b"the quick brown fox jumps over the lazy dog");
@@ -469,6 +470,7 @@ mod tests {
 
     #[test]
     fn empty_and_boundary_lengths() {
+        let _serial = crate::c_oracle_serial();
         for op in 0u8..7 {
             cryptofam_diff(&[op]);
             for n in [55usize, 56, 63, 64, 65, 127, 128, 129, 200] {
@@ -483,6 +485,7 @@ mod tests {
     // so pin it here once against the C oracle (spot check, slow-ish).
     #[test]
     fn scram_default_iterations_spot() {
+        let _serial = crate::c_oracle_serial();
         init_seams();
         let passwd = b"pencil";
         let salt: &[u8] = &[0x41, 0x25, 0xc2, 0x47, 0xe4, 0x3a, 0xb1, 0xe9, 0x3c, 0x6d, 0xff, 0x76];
@@ -508,6 +511,7 @@ mod tests {
     // survivors + seeds) through the full comparator on every test run.
     #[test]
     fn cryptofam_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/cryptofam_diff");
         let mut n = 0;
         if let Ok(rd) = std::fs::read_dir(dir) {
@@ -523,6 +527,7 @@ mod tests {
 
     #[test]
     fn password_nul_truncation_carve_is_symmetric() {
+        let _serial = crate::c_oracle_serial();
         // Interior NUL: both sides must see "ab".
         let mut v = vec![1u8, 5]; // op=1 md5_encrypt, passwd_len=5
         v.extend_from_slice(b"ab\0cd");

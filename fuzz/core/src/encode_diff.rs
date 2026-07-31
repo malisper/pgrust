@@ -159,6 +159,7 @@ mod tests {
     #[test]
     #[ignore = "scaffold(encode_diff): arms not implemented yet"]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/encode_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/encode_diff missing") {
@@ -177,6 +178,7 @@ mod tests {
     #[test]
     #[ignore = "scaffold(encode_diff): arms not implemented yet"]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // Arm 0 example: selector byte 0, then a payload for binary_encode.
         encode_diff(&[0u8]);
     }

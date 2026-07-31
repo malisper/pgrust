@@ -496,6 +496,7 @@ mod tests {
 
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/geo_io_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/geo_io_diff missing") {
@@ -510,6 +511,7 @@ mod tests {
 
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // text-in ok + error shapes per type.
         geo_io_diff(b"\x00\x00(1,2)"); // point ok
         geo_io_diff(b"\x00\x00(1,2,3)"); // point err

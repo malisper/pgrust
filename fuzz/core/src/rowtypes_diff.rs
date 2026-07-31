@@ -1543,6 +1543,7 @@ mod tests {
     /// nightly fuzz campaign).
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/rowtypes_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/rowtypes_diff missing") {
@@ -1564,6 +1565,7 @@ mod tests {
 
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // record_in, hard mode, desc 0: ok + each malformed class
         for lit in [
             &b"(a,b)"[..], b"(,)", b"(\"a\"\"b\",c)", b" \x0b\x0c(a,b) \x0b",
@@ -1634,6 +1636,7 @@ mod tests {
     /// byval-width descriptors 5/6, anonymous typmod, new-codec literals.
     #[test]
     fn arms_smoke_extended() {
+        let _serial = crate::c_oracle_serial();
         // record_eq/ne/lt/gt/le/ge/btrecordcmp over (text,text) + (int4,text)
         for arm in 10u8..=16 {
             run(&[arm, 0, 0, 1, 1, b'a', 1, 1, b'b', 1, 1, b'a', 1, 1, b'c']);
@@ -1698,6 +1701,7 @@ mod tests {
     /// through cmp, eq, larger/smaller, and hash.
     #[test]
     fn single_field_witness_pairs() {
+        let _serial = crate::c_oracle_serial();
         let base: &[u8] = &[1, 1, b'a', 1, 1, b'b']; // desc 0: ("a","b")
         let variants: &[&[u8]] = &[
             &[1, 1, b'c', 1, 1, b'b'],       // col1 differs
