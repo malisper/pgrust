@@ -2487,45 +2487,12 @@ pub fn DecodeInterval(
 }
 
 /// C strtod prefix parse: value and byte offset just past the parsed number.
-fn strtod_prefix(s: &[u8]) -> Option<(f64, usize)> {
-    let mut i = 0usize;
-    while i < s.len() && is_space(s[i]) {
-        i += 1;
-    }
-    let start = i;
-    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
-        i += 1;
-    }
-    let mut saw_digit = false;
-    while i < s.len() && is_digit(s[i]) {
-        i += 1;
-        saw_digit = true;
-    }
-    if i < s.len() && s[i] == b'.' {
-        i += 1;
-        while i < s.len() && is_digit(s[i]) {
-            i += 1;
-            saw_digit = true;
-        }
-    }
-    if saw_digit && i < s.len() && (s[i] == b'e' || s[i] == b'E') {
-        let mut j = i + 1;
-        if j < s.len() && (s[j] == b'+' || s[j] == b'-') {
-            j += 1;
-        }
-        let exp_start = j;
-        while j < s.len() && is_digit(s[j]) {
-            j += 1;
-        }
-        if j > exp_start {
-            i = j;
-        }
-    }
-    if !saw_digit {
-        return None;
-    }
-    let parsed = core::str::from_utf8(&s[start..i]).ok()?;
-    parsed.parse::<f64>().ok().map(|v| (v, i))
+// C strtod via the float crate's exact model (decimal + C99 hex floats +
+// inf/nan words + glibc ERANGE semantics). The previous hand-rolled decimal
+// scan silently rejected hex forms ("P0X1DT1H" is 29 years in C) — found by
+// interval_engine_diff differential fuzz, confirmed against PostgreSQL 18.3.
+fn strtod_prefix(s: &[u8]) -> Option<(f64, usize, bool)> {
+    adt_float::io::strtod_c(s)
 }
 
 fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f64) -> i32 {
@@ -2535,10 +2502,11 @@ fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f6
     {
         return DTERR_BAD_FORMAT;
     }
-    let Some((val, e)) = strtod_prefix(s) else {
+    let Some((val, e, range_err)) = strtod_prefix(s) else {
         return DTERR_BAD_FORMAT;
     };
-    if e == 0 {
+    // C checks errno != 0 (ERANGE) before the value-range fence
+    if e == 0 || range_err {
         return DTERR_BAD_FORMAT;
     }
     *end = e;

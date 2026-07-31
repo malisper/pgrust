@@ -5,5 +5,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    decoder_fuzz::interval_engine_diff(data);
+    decoder_fuzz::interval_engine_diff::interval_engine_diff(data);
 });

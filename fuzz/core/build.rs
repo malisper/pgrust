@@ -3,7 +3,17 @@
 // pattern as proofs/brin-minmax/build.rs — plain native compile; there is
 // no Kani arm here (the fuzz workspace never builds under cargo-kani).
 fn main() {
-    cc::Build::new()
+    let mut b = cc::Build::new();
+    // NEZHA union coverage: under cargo-fuzz (RUSTFLAGS --cfg fuzzing, which
+    // cargo re-exports to build scripts as CARGO_CFG_FUZZING) instrument the
+    // vendored C oracles with libFuzzer sancov too, so corpus retention is
+    // driven by C-side-only coverage as well — Rust-side-only feedback
+    // discards exactly the inputs likeliest to diverge. Plain cargo
+    // check/test builds stay uninstrumented (no libFuzzer runtime linked).
+    if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
+        b.flag_if_supported("-fsanitize=fuzzer-no-link");
+    }
+    b
         // datetime_io_diff oracle (gate cleared: all paste sites filled, see
         // csrc/pg_datetime_io_io.c header for provenance + pinned environment).
 

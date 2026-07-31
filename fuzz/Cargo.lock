@@ -124,6 +124,7 @@ dependencies = [
 name = "adt_datetime"
 version = "0.1.0"
 dependencies = [
+ "adt_float",
  "init_small",
  "localtime",
  "numutils",

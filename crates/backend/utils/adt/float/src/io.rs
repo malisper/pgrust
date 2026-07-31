@@ -324,6 +324,37 @@ fn out_of_range(errnumber: &str, fixed_type: &str) -> PgError {
 
 // endptr_consumed mirrors C's endptr_p: Some => report the stop offset (past
 // trailing whitespace) and leave trailing junk to the caller; None => error.
+/// strtod(3) model over the shared token machinery: parse the longest
+/// leading number token (after optional C-locale whitespace, exactly as
+/// strtod skips), returning (value, bytes_consumed, range_error).
+/// `range_error` mirrors glibc errno==ERANGE — decimal/hex overflow to
+/// +-inf, or nonzero digits rounding to zero — while the inf/nan WORDS
+/// parse with no errno. None = no token (strtod endptr == str).
+/// Consumers needing C parse cascades verbatim (datetime.c
+/// ParseISO8601Number) call this instead of re-modeling strtod.
+pub fn strtod_c(s: &[u8]) -> Option<(f64, usize, bool)> {
+    let mut start = 0usize;
+    while start < s.len() && c_isspace(s[start]) {
+        start += 1;
+    }
+    let rest = &s[start..];
+    match scan_number(rest) {
+        Some(tok) => {
+            let token = &rest[..tok.len];
+            let parsed: f64 = match tok.kind {
+                NumKind::Decimal => std::str::from_utf8(token)
+                    .expect("ascii token")
+                    .parse()
+                    .expect("scan_number yields a parseable decimal token"),
+                NumKind::Hex => parse_hex_float(token),
+            };
+            let range = parsed.is_infinite() || (parsed == 0.0 && tok.nonzero);
+            Some((parsed, start + tok.len, range))
+        }
+        None => special_float8(rest).map(|(v, n)| (v, start + n, false)),
+    }
+}
+
 pub fn float8in_internal(
     num: &str,
     endptr_consumed: Option<&mut usize>,
