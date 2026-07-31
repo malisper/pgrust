@@ -76,7 +76,8 @@
  *      errhint/errcontext are variadic sinks; message text never crosses
  *      the comparator. Errcode classes (mirrored by the Rust driver):
  *        1=22003 2=22P02 3=08P01 4=22000 5=42883 6=22008 7=22P03
- *        8=0A000 9=42601 10=42804 99=elog/internal
+ *        8=0A000 9=42601 10=42804 11=22023 12=54000 97=SQL NULL
+ *        99=elog/internal
  *   3. fmgr: minimal FmgrInfo/FunctionCallInfo structs with the same call
  *      semantics; PG_GETARG_RANGE_P / PG_GETARG_NUMERIC read pre-detoasted
  *      flat pointers (never-toasted caller contract, bytea-cmp precedent);
@@ -738,7 +739,34 @@ pg_diff_direct_call2(PGFunction func, Datum arg1, Datum arg2)
 /* get_fn_expr_rettype: shim FmgrInfo carrier (shim 3) */
 #define get_fn_expr_rettype(flinfo) ((flinfo)->fn_rettype)
 
-/* ---------------- StringInfo + pqformat (shim 5) ---------------- */
+/* ---------------- StringInfo + pqformat ----------------
+ * The struct + prototypes only; every BODY is extracted VERBATIM by the
+ * assembler from src/common/stringinfo.c, src/backend/libpq/pqformat.c and
+ * src/include/libpq/pqformat.h (same never-fabricate rule as the int.h
+ * helpers). A hand-written enlargeStringInfo had NO MaxAllocSize cap while
+ * the shipped Rust StringInfo raises 54000 program_limit_exceeded there — a
+ * false divergence this vendoring removes rather than waits to discover.
+ */
+
+#define MaxAllocSize ((Size) 0x3fffffff)	/* 1 gigabyte - 1, from memutils.h */
+#define pg_restrict __restrict
+#define STRINGINFO_DEFAULT_SIZE 1024	/* stringinfo.h */
+#define ERRCODE_PROGRAM_LIMIT_EXCEEDED 12	/* 54000 — see the header table */
+#define appendStringInfoCharMacro(str, ch) appendStringInfoChar(str, ch)
+
+/* c.h byte-order wrappers over the host's (LP64 little-endian) */
+#include <arpa/inet.h>
+#define pg_hton16(x) htons(x)
+#define pg_hton32(x) htonl(x)
+#define pg_ntoh16(x) ntohs(x)
+#define pg_ntoh32(x) ntohl(x)
+static inline uint64
+pg_hton64(uint64 x)
+{
+	return ((uint64) pg_hton32((uint32) (x & 0xFFFFFFFF)) << 32) |
+		pg_hton32((uint32) (x >> 32));
+}
+#define pg_ntoh64(x) pg_hton64(x)
 
 typedef struct StringInfoData
 {
@@ -748,200 +776,6 @@ typedef struct StringInfoData
 	int			cursor;
 } StringInfoData;
 typedef StringInfoData *StringInfo;
-
-static void
-enlargeStringInfo(StringInfo str, int needed)
-{
-	int			newlen;
-
-	needed += str->len + 1;
-	if (needed <= str->maxlen)
-		return;
-	newlen = 2 * str->maxlen;
-	while (needed > newlen)
-		newlen = 2 * newlen;
-	str->data = repalloc(str->data, newlen);
-	str->maxlen = newlen;
-}
-
-static void
-initStringInfo(StringInfo str)
-{
-	int			size = 1024;
-
-	str->data = palloc(size);
-	str->maxlen = size;
-	str->len = 0;
-	str->data[0] = '\0';
-	str->cursor = 0;
-}
-
-static StringInfo
-makeStringInfo(void)
-{
-	StringInfo	res = palloc(sizeof(StringInfoData));
-
-	initStringInfo(res);
-	return res;
-}
-
-static void
-appendBinaryStringInfo(StringInfo str, const void *data, int datalen)
-{
-	enlargeStringInfo(str, datalen);
-	memcpy(str->data + str->len, data, datalen);
-	str->len += datalen;
-	str->data[str->len] = '\0';
-}
-
-static void
-appendStringInfoString(StringInfo str, const char *s)
-{
-	appendBinaryStringInfo(str, s, (int) strlen(s));
-}
-
-static void
-appendStringInfoChar(StringInfo str, char ch)
-{
-	enlargeStringInfo(str, 1);
-	str->data[str->len] = ch;
-	str->len++;
-	str->data[str->len] = '\0';
-}
-
-/* pqformat: getmsg side (insufficient data -> class 3, as pqformat.c) */
-static const char *
-pq_getmsgbytes(StringInfo msg, int datalen)
-{
-	const char *result;
-
-	if (datalen < 0 || datalen > (msg->len - msg->cursor))
-		ereport(ERROR,
-				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("insufficient data left in message")));
-	result = &msg->data[msg->cursor];
-	msg->cursor += datalen;
-	return result;
-}
-
-static int
-pq_getmsgbyte(StringInfo msg)
-{
-	if (msg->cursor >= msg->len)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("no data left in message")));
-	return (unsigned char) msg->data[msg->cursor++];
-}
-
-static uint32
-pq_getmsgint(StringInfo msg, int b)
-{
-	uint32		result;
-	const unsigned char *p;
-
-	switch (b)
-	{
-		case 1:
-			result = (uint8) pq_getmsgbyte(msg);
-			break;
-		case 2:
-			p = (const unsigned char *) pq_getmsgbytes(msg, 2);
-			result = ((uint32) p[0] << 8) | p[1];
-			break;
-		case 4:
-			p = (const unsigned char *) pq_getmsgbytes(msg, 4);
-			result = ((uint32) p[0] << 24) | ((uint32) p[1] << 16) |
-				((uint32) p[2] << 8) | p[3];
-			break;
-		default:
-			elog(ERROR, "unsupported integer size");
-	}
-	return result;
-}
-
-static int64
-pq_getmsgint64(StringInfo msg)
-{
-	const unsigned char *p = (const unsigned char *) pq_getmsgbytes(msg, 8);
-	uint64		result = 0;
-	int			i;
-
-	for (i = 0; i < 8; i++)
-		result = (result << 8) | p[i];
-	return (int64) result;
-}
-
-static void
-pq_getmsgend(StringInfo msg)
-{
-	if (msg->cursor != msg->len)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("invalid message format")));
-}
-
-/* pqformat: send side */
-static void
-pq_begintypsend(StringInfo buf)
-{
-	initStringInfo(buf);
-	/* reserve four bytes for the bytea length word */
-	appendStringInfoChar(buf, '\0');
-	appendStringInfoChar(buf, '\0');
-	appendStringInfoChar(buf, '\0');
-	appendStringInfoChar(buf, '\0');
-}
-
-static bytea *
-pq_endtypsend(StringInfo buf)
-{
-	bytea	   *result = (bytea *) buf->data;
-
-	Assert(buf->len >= VARHDRSZ);
-	SET_VARSIZE(result, buf->len);
-	return result;
-}
-
-static void
-pq_sendbyte(StringInfo buf, uint8 byt)
-{
-	appendBinaryStringInfo(buf, &byt, 1);
-}
-
-static void
-pq_sendbytes(StringInfo buf, const void *data, int datalen)
-{
-	appendBinaryStringInfo(buf, data, datalen);
-}
-
-static void
-pq_sendint16(StringInfo buf, uint16 i)
-{
-	unsigned char b[2] = {(unsigned char) (i >> 8), (unsigned char) i};
-
-	appendBinaryStringInfo(buf, b, 2);
-}
-
-static void
-pq_sendint32(StringInfo buf, uint32 i)
-{
-	unsigned char b[4] = {(unsigned char) (i >> 24), (unsigned char) (i >> 16),
-	(unsigned char) (i >> 8), (unsigned char) i};
-
-	appendBinaryStringInfo(buf, b, 4);
-}
-
-static void
-pq_sendint64(StringInfo buf, uint64 i)
-{
-	unsigned char b[8];
-	int			j;
-
-	for (j = 0; j < 8; j++)
-		b[j] = (unsigned char) (i >> (56 - 8 * j));
-	appendBinaryStringInfo(buf, b, 8);
-}
 
 /* ---------------- type/domain constants ---------------- */
 
@@ -1832,6 +1666,33 @@ static inline bool pg_add_u64_overflow(uint64 a, uint64 b, uint64 *result);
 static inline int pg_leftmost_one_pos32(uint32 word);
 static inline int pg_leftmost_one_pos64(uint64 word);
 static inline uint32 pg_rotate_left32(uint32 word, int n);
+static inline void initStringInfoInternal(StringInfo str, int initsize);
+static inline StringInfo makeStringInfoInternal(int initsize);
+static void resetStringInfo(StringInfo str);
+static void initStringInfo(StringInfo str);
+static StringInfo makeStringInfo(void);
+static void enlargeStringInfo(StringInfo str, int needed);
+static void appendBinaryStringInfo(StringInfo str, const void *data, int datalen);
+static void appendStringInfoChar(StringInfo str, char ch);
+static void appendStringInfoString(StringInfo str, const char *s);
+static inline void pq_sendbyte(StringInfo buf, uint8 byt);
+static inline void pq_writeint8(StringInfoData *pg_restrict buf, uint8 i);
+static inline void pq_writeint16(StringInfoData *pg_restrict buf, uint16 i);
+static inline void pq_writeint32(StringInfoData *pg_restrict buf, uint32 i);
+static inline void pq_writeint64(StringInfoData *pg_restrict buf, uint64 i);
+static inline void pq_sendint8(StringInfo buf, uint8 i);
+static inline void pq_sendint16(StringInfo buf, uint16 i);
+static inline void pq_sendint32(StringInfo buf, uint32 i);
+static inline void pq_sendint64(StringInfo buf, uint64 i);
+static void pq_sendbytes(StringInfo buf, const void *data, int datalen);
+static void pq_begintypsend(StringInfo buf);
+static bytea * pq_endtypsend(StringInfo buf);
+static int pq_getmsgbyte(StringInfo msg);
+static unsigned int pq_getmsgint(StringInfo msg, int b);
+static int64 pq_getmsgint64(StringInfo msg);
+static const char * pq_getmsgbytes(StringInfo msg, int datalen);
+static void pq_copymsgbytes(StringInfo msg, void *buf, int datalen);
+static void pq_getmsgend(StringInfo msg);
 static uint32 hash_bytes(const unsigned char *k, int keylen);
 static uint64 hash_bytes_extended(const unsigned char *k, int keylen, uint64 seed);
 static uint32 hash_bytes_uint32(uint32 k);
@@ -2304,6 +2165,341 @@ static inline uint32
 pg_rotate_left32(uint32 word, int n)
 {
 	return (word << n) | (word >> (32 - n));
+}
+
+static inline void
+initStringInfoInternal(StringInfo str, int initsize)
+{
+	Assert(initsize >= 1 && initsize <= MaxAllocSize);
+
+	str->data = (char *) palloc(initsize);
+	str->maxlen = initsize;
+	resetStringInfo(str);
+}
+
+static inline StringInfo
+makeStringInfoInternal(int initsize)
+{
+	StringInfo	res = (StringInfo) palloc(sizeof(StringInfoData));
+
+	initStringInfoInternal(res, initsize);
+	return res;
+}
+
+static void
+resetStringInfo(StringInfo str)
+{
+	/* don't allow resets of read-only StringInfos */
+	Assert(str->maxlen != 0);
+
+	str->data[0] = '\0';
+	str->len = 0;
+	str->cursor = 0;
+}
+
+static void
+initStringInfo(StringInfo str)
+{
+	initStringInfoInternal(str, STRINGINFO_DEFAULT_SIZE);
+}
+
+static StringInfo
+makeStringInfo(void)
+{
+	return makeStringInfoInternal(STRINGINFO_DEFAULT_SIZE);
+}
+
+static void
+enlargeStringInfo(StringInfo str, int needed)
+{
+	int			newlen;
+
+	/* validate this is not a read-only StringInfo */
+	Assert(str->maxlen != 0);
+
+	/*
+	 * Guard against out-of-range "needed" values.  Without this, we can get
+	 * an overflow or infinite loop in the following.
+	 */
+	if (needed < 0)				/* should not happen */
+	{
+#ifndef FRONTEND
+		elog(ERROR, "invalid string enlargement request size: %d", needed);
+#else
+		fprintf(stderr, "invalid string enlargement request size: %d\n", needed);
+		exit(EXIT_FAILURE);
+#endif
+	}
+	if (((Size) needed) >= (MaxAllocSize - (Size) str->len))
+	{
+#ifndef FRONTEND
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("string buffer exceeds maximum allowed length (%zu bytes)", MaxAllocSize),
+				 errdetail("Cannot enlarge string buffer containing %d bytes by %d more bytes.",
+						   str->len, needed)));
+#else
+		fprintf(stderr,
+				_("string buffer exceeds maximum allowed length (%zu bytes)\n\nCannot enlarge string buffer containing %d bytes by %d more bytes.\n"),
+				MaxAllocSize, str->len, needed);
+		exit(EXIT_FAILURE);
+#endif
+	}
+
+	needed += str->len + 1;		/* total space required now */
+
+	/* Because of the above test, we now have needed <= MaxAllocSize */
+
+	if (needed <= str->maxlen)
+		return;					/* got enough space already */
+
+	/*
+	 * We don't want to allocate just a little more space with each append;
+	 * for efficiency, double the buffer size each time it overflows.
+	 * Actually, we might need to more than double it if 'needed' is big...
+	 */
+	newlen = 2 * str->maxlen;
+	while (needed > newlen)
+		newlen = 2 * newlen;
+
+	/*
+	 * Clamp to MaxAllocSize in case we went past it.  Note we are assuming
+	 * here that MaxAllocSize <= INT_MAX/2, else the above loop could
+	 * overflow.  We will still have newlen >= needed.
+	 */
+	if (newlen > (int) MaxAllocSize)
+		newlen = (int) MaxAllocSize;
+
+	str->data = (char *) repalloc(str->data, newlen);
+
+	str->maxlen = newlen;
+}
+
+static void
+appendBinaryStringInfo(StringInfo str, const void *data, int datalen)
+{
+	Assert(str != NULL);
+
+	/* Make more room if needed */
+	enlargeStringInfo(str, datalen);
+
+	/* OK, append the data */
+	memcpy(str->data + str->len, data, datalen);
+	str->len += datalen;
+
+	/*
+	 * Keep a trailing null in place, even though it's probably useless for
+	 * binary data.  (Some callers are dealing with text but call this because
+	 * their input isn't null-terminated.)
+	 */
+	str->data[str->len] = '\0';
+}
+
+static void
+appendStringInfoChar(StringInfo str, char ch)
+{
+	/* Make more room if needed */
+	if (str->len + 1 >= str->maxlen)
+		enlargeStringInfo(str, 1);
+
+	/* OK, append the character */
+	str->data[str->len] = ch;
+	str->len++;
+	str->data[str->len] = '\0';
+}
+
+static void
+appendStringInfoString(StringInfo str, const char *s)
+{
+	appendBinaryStringInfo(str, s, strlen(s));
+}
+
+static inline void
+pq_sendbyte(StringInfo buf, uint8 byt)
+{
+	pq_sendint8(buf, byt);
+}
+
+static inline void
+pq_writeint8(StringInfoData *pg_restrict buf, uint8 i)
+{
+	uint8		ni = i;
+
+	Assert(buf->len + (int) sizeof(uint8) <= buf->maxlen);
+	memcpy((char *pg_restrict) (buf->data + buf->len), &ni, sizeof(uint8));
+	buf->len += sizeof(uint8);
+}
+
+static inline void
+pq_writeint16(StringInfoData *pg_restrict buf, uint16 i)
+{
+	uint16		ni = pg_hton16(i);
+
+	Assert(buf->len + (int) sizeof(uint16) <= buf->maxlen);
+	memcpy((char *pg_restrict) (buf->data + buf->len), &ni, sizeof(uint16));
+	buf->len += sizeof(uint16);
+}
+
+static inline void
+pq_writeint32(StringInfoData *pg_restrict buf, uint32 i)
+{
+	uint32		ni = pg_hton32(i);
+
+	Assert(buf->len + (int) sizeof(uint32) <= buf->maxlen);
+	memcpy((char *pg_restrict) (buf->data + buf->len), &ni, sizeof(uint32));
+	buf->len += sizeof(uint32);
+}
+
+static inline void
+pq_writeint64(StringInfoData *pg_restrict buf, uint64 i)
+{
+	uint64		ni = pg_hton64(i);
+
+	Assert(buf->len + (int) sizeof(uint64) <= buf->maxlen);
+	memcpy((char *pg_restrict) (buf->data + buf->len), &ni, sizeof(uint64));
+	buf->len += sizeof(uint64);
+}
+
+static inline void
+pq_sendint8(StringInfo buf, uint8 i)
+{
+	enlargeStringInfo(buf, sizeof(uint8));
+	pq_writeint8(buf, i);
+}
+
+static inline void
+pq_sendint16(StringInfo buf, uint16 i)
+{
+	enlargeStringInfo(buf, sizeof(uint16));
+	pq_writeint16(buf, i);
+}
+
+static inline void
+pq_sendint32(StringInfo buf, uint32 i)
+{
+	enlargeStringInfo(buf, sizeof(uint32));
+	pq_writeint32(buf, i);
+}
+
+static inline void
+pq_sendint64(StringInfo buf, uint64 i)
+{
+	enlargeStringInfo(buf, sizeof(uint64));
+	pq_writeint64(buf, i);
+}
+
+static void
+pq_sendbytes(StringInfo buf, const void *data, int datalen)
+{
+	/* use variant that maintains a trailing null-byte, out of caution */
+	appendBinaryStringInfo(buf, data, datalen);
+}
+
+static void
+pq_begintypsend(StringInfo buf)
+{
+	initStringInfo(buf);
+	/* Reserve four bytes for the bytea length word */
+	appendStringInfoCharMacro(buf, '\0');
+	appendStringInfoCharMacro(buf, '\0');
+	appendStringInfoCharMacro(buf, '\0');
+	appendStringInfoCharMacro(buf, '\0');
+}
+
+static bytea *
+pq_endtypsend(StringInfo buf)
+{
+	bytea	   *result = (bytea *) buf->data;
+
+	/* Insert correct length into bytea length word */
+	Assert(buf->len >= VARHDRSZ);
+	SET_VARSIZE(result, buf->len);
+
+	return result;
+}
+
+static int
+pq_getmsgbyte(StringInfo msg)
+{
+	if (msg->cursor >= msg->len)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("no data left in message")));
+	return (unsigned char) msg->data[msg->cursor++];
+}
+
+static unsigned int
+pq_getmsgint(StringInfo msg, int b)
+{
+	unsigned int result;
+	unsigned char n8;
+	uint16		n16;
+	uint32		n32;
+
+	switch (b)
+	{
+		case 1:
+			pq_copymsgbytes(msg, &n8, 1);
+			result = n8;
+			break;
+		case 2:
+			pq_copymsgbytes(msg, &n16, 2);
+			result = pg_ntoh16(n16);
+			break;
+		case 4:
+			pq_copymsgbytes(msg, &n32, 4);
+			result = pg_ntoh32(n32);
+			break;
+		default:
+			elog(ERROR, "unsupported integer size %d", b);
+			result = 0;			/* keep compiler quiet */
+			break;
+	}
+	return result;
+}
+
+static int64
+pq_getmsgint64(StringInfo msg)
+{
+	uint64		n64;
+
+	pq_copymsgbytes(msg, &n64, sizeof(n64));
+
+	return pg_ntoh64(n64);
+}
+
+static const char *
+pq_getmsgbytes(StringInfo msg, int datalen)
+{
+	const char *result;
+
+	if (datalen < 0 || datalen > (msg->len - msg->cursor))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("insufficient data left in message")));
+	result = &msg->data[msg->cursor];
+	msg->cursor += datalen;
+	return result;
+}
+
+static void
+pq_copymsgbytes(StringInfo msg, void *buf, int datalen)
+{
+	if (datalen < 0 || datalen > (msg->len - msg->cursor))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("insufficient data left in message")));
+	memcpy(buf, &msg->data[msg->cursor], datalen);
+	msg->cursor += datalen;
+}
+
+static void
+pq_getmsgend(StringInfo msg)
+{
+	if (msg->cursor != msg->len)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("invalid message format")));
 }
 
 static uint32

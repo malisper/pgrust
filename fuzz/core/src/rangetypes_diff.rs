@@ -215,6 +215,10 @@ fn err_class(e: &PgError) -> i32 {
         10
     } else if e.sqlstate == te::ERRCODE_INVALID_PARAMETER_VALUE {
         11
+    } else if e.sqlstate == te::ERRCODE_PROGRAM_LIMIT_EXCEEDED {
+        // StringInfo's MaxAllocSize ceiling: reachable from numrange text io,
+        // where a bound with a huge exponent prints past 1 GiB.
+        12
     } else {
         98
     }
