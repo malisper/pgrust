@@ -185,3 +185,248 @@ mod proofs {
         core::mem::forget(ctx);
     }
 }
+
+// ===========================================================================
+// WAVE (2026-07-30): charrecv (2434) / charsend (2435).
+// C side: csrc/char_wire.c (vendored REL_18_STABLE char.c charrecv/charsend
+// + pqformat.c pq_getmsgbyte; shims R1/R2/S1 documented there). Runs need
+// BOTH C files: --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c.
+//
+//   - charrecv: CORE-level (adt_char::charrecv on a harness-built
+//     StringInfo, pg_lsn eq_pg_lsn_recv_core pattern, CAP = 4).  The
+//     shipped fc_charrecv wrapper takes arg0 as a POINTER DATUM to a live
+//     StringInfo (recv ABI) — that datum round-trip is out of scope (the
+//     int-arith recv lesson); core-level is the proven tier.  Full symbolic
+//     bytes + symbolic dlen/cursor; value + cursor + verdict + sqlstate
+//     08P01/level parity.  Value compared at 8 bits (shim int-widening is
+//     char-signedness platform-split; see ADJUDICATION-CHAR-SIGNEDNESS.md).
+//   - charsend: WRAPPER-level at the shipped fmgr entry point
+//     (adt_char::builtins::fc_charsend) over a real result-mcx LocalFcinfo
+//     frame (pg_lsn_send precedent; mcx-stubs recipe, theorem "modulo
+//     static-buffer allocator model"); symbolic i8 input, full 5-byte wire
+//     image (4B LE varlena header + payload byte) + length compared.
+//   - control_charsend_skew: MUST FAIL (C fed ch with bit 0 flipped) —
+//     non-vacuity witness for the send-image comparison. DEFAULT solver.
+// ===========================================================================
+
+#[cfg(kani)]
+mod wave5 {
+    use datum::{Datum, NullableDatum};
+    use proof_support::{mcx_stubs, stubs};
+    use types_error::{ERRCODE_PROTOCOL_VIOLATION, ERROR};
+    use types_fmgr::LocalFcinfo;
+
+    extern "C" {
+        fn pgc_charrecv(
+            data: *const u8,
+            len: i32,
+            cursor: *mut i32,
+            out: *mut core::ffi::c_int,
+        ) -> core::ffi::c_int;
+        fn pgc_charsend(ch_i: core::ffi::c_int, out: *mut u8) -> i32;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)] // copy loops <= CAP+1
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    // RVR lesson: grow/deallocate stubs mandatory whenever the core can
+    // reach vec_append_bytes' try_reserve/grow branch (si.append_bytes).
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_charrecv_core() {
+        const CAP: usize = 4;
+        let data: [u8; CAP] = kani::any();
+        let dlen: usize = kani::any();
+        kani::assume(dlen <= CAP);
+        let cur: usize = kani::any();
+        kani::assume(cur <= CAP);
+
+        let mut ccur: i32 = cur as i32;
+        let mut cout: core::ffi::c_int = 0x7777;
+        let cst = unsafe { pgc_charrecv(data.as_ptr(), dlen as i32, &mut ccur, &mut cout) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-char-recv");
+        let mut si = match stringinfo::StringInfo::with_capacity_in(ctx.mcx(), CAP + 2) {
+            Ok(s) => s,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("stub alloc failed")
+            }
+        };
+        if let Err(e) = si.append_bytes(&data[..dlen]) {
+            core::mem::forget(e);
+            panic!("append within capacity failed");
+        }
+        si.cursor = cur;
+        match adt_char::charrecv(&mut si) {
+            Ok(v) => {
+                assert!(cst == 0);
+                // 8-bit datum-value parity (shim int-widening is
+                // char-signedness platform-split).
+                assert!(v as u8 == cout as u8);
+                assert!(si.cursor == ccur as usize);
+                kani::cover!(true, "charrecv Ok arm reachable");
+            }
+            Err(e) => {
+                assert!(cst == 4);
+                assert!(e.sqlstate == ERRCODE_PROTOCOL_VIOLATION);
+                assert!(e.level == ERROR);
+                core::mem::forget(e);
+                kani::cover!(true, "charrecv Err arm reachable");
+            }
+        }
+        core::mem::forget(si);
+        core::mem::forget(ctx);
+    }
+
+    /// Per-dlen cells for the recv core. The symbolic-dlen harness above
+    /// walls in the CNF phase (CI cluster 2026-07-30: symex completes, 21123
+    /// VCCs, rss-kill at 40GB in Convert SSA/propositional reduction, jobs
+    /// -32917 and -42528) — same width-wall class as uuid/pg_lsn symbolic
+    /// recv. Literal dlen prunes (literal-cells law); cells d0..d4
+    /// enumerate dlen<=CAP exhaustively; symbolic bytes + symbolic cursor
+    /// stay in-theorem.
+    macro_rules! charrecv_cell {
+        ($($name:ident: $dlen:expr;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(8)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $name() {
+                const CAP: usize = 4;
+                let data: [u8; CAP] = kani::any();
+                let dlen: usize = $dlen;
+                let cur: usize = kani::any();
+                kani::assume(cur <= CAP);
+
+                let mut ccur: i32 = cur as i32;
+                let mut cout: core::ffi::c_int = 0x7777;
+                let cst = unsafe { pgc_charrecv(data.as_ptr(), dlen as i32, &mut ccur, &mut cout) };
+
+                let ctx = mcx::MemoryContext::new_bump("kani-char-recv");
+                let mut si = match stringinfo::StringInfo::with_capacity_in(ctx.mcx(), CAP + 2) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        core::mem::forget(e);
+                        panic!("stub alloc failed")
+                    }
+                };
+                if let Err(e) = si.append_bytes(&data[..dlen]) {
+                    core::mem::forget(e);
+                    panic!("append within capacity failed");
+                }
+                si.cursor = cur;
+                match adt_char::charrecv(&mut si) {
+                    Ok(v) => {
+                        assert!(cst == 0);
+                        assert!(v as u8 == cout as u8);
+                        assert!(si.cursor == ccur as usize);
+                        kani::cover!(true, "cell Ok arm reachable");
+                    }
+                    Err(e) => {
+                        assert!(cst == 4);
+                        assert!(e.sqlstate == ERRCODE_PROTOCOL_VIOLATION);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                        kani::cover!(true, "cell Err arm reachable");
+                    }
+                }
+                core::mem::forget(si);
+                core::mem::forget(ctx);
+            }
+        )*};
+    }
+
+    charrecv_cell! {
+        eq_charrecv_core_d0: 0;
+        eq_charrecv_core_d1: 1;
+        eq_charrecv_core_d2: 2;
+        eq_charrecv_core_d3: 3;
+        eq_charrecv_core_d4: 4;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_charsend() {
+        let ch: i8 = kani::any();
+        let mut cbuf = [0u8; 5];
+        let clen = unsafe { pgc_charsend(ch as core::ffi::c_int, cbuf.as_mut_ptr()) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-char-send");
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call (forgotten, never freed).
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_char(ch));
+        let d = match adt_char::builtins::fc_charsend(None, &mut f) {
+            Ok(d) => {
+                kani::cover!(true, "charsend Ok arm reachable");
+                d
+            }
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("charsend errored")
+            }
+        };
+        let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 5) };
+        assert!(clen == 5);
+        let mut i = 0;
+        while i < 5 {
+            assert!(img[i] == cbuf[i]);
+            i += 1;
+        }
+        core::mem::forget(ctx);
+    }
+
+    /// MUST FAIL (wire-section control): C is fed ch with bit 0 flipped.
+    /// DEFAULT solver (controls validate by counterexample; kissat does not
+    /// terminate usefully on failing harnesses).
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn control_charsend_skew() {
+        let ch: i8 = kani::any();
+        let skewed = (ch as u8 ^ 1) as i8;
+        let mut cbuf = [0u8; 5];
+        let _ = unsafe { pgc_charsend(skewed as core::ffi::c_int, cbuf.as_mut_ptr()) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-char-send-ctl");
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_char(ch));
+        let d = match adt_char::builtins::fc_charsend(None, &mut f) {
+            Ok(d) => d,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("charsend errored")
+            }
+        };
+        let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 5) };
+        let mut i = 0;
+        while i < 5 {
+            assert!(img[i] == cbuf[i]); // expected failure at the payload byte
+            i += 1;
+        }
+        core::mem::forget(ctx);
+    }
+}

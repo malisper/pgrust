@@ -1,0 +1,17 @@
+# pseudotypes_diff: not parser-shaped — selector bytes + a few payload tokens.
+# Selectors (first input byte, mod 8): 0..7 pick the op family.
+"\x00"
+"\x01"
+"\x02"
+"\x03"
+"\x04"
+"\x05"
+"\x06"
+"\x07"
+# Embedded NUL (cstring truncation / SQL_ASCII 22021 reject on recv)
+"\x00a"
+"a\x00b"
+# High-bit bytes (legal SQL_ASCII)
+"\xff\x80"
+# A node-tree-ish text payload
+"{QUERY :junk 1}"

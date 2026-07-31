@@ -241,6 +241,12 @@ pub fn wire_pqformat(data: &[u8]) {
 // float4in/float8in, float4out/float8out, point_out/on_ppath. See diff.rs.
 pub mod diff;
 pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff, geo_diff};
+pub mod diff_charbool;
+pub use diff_charbool::{bool_diff, char_diff};
+pub mod pseudo_diff;
+pub use pseudo_diff::pseudotypes_diff;
+pub mod lsn_diff;
+pub use lsn_diff::pg_lsn_diff;
 
 #[cfg(test)]
 mod tests {

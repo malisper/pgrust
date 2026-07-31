@@ -424,3 +424,259 @@ pgc_parse_snapshot(const char *str, void *outbuf, int *err)
 {
 	return parse_snapshot(str, (pg_snapshot *) outbuf, err) != NULL ? 1 : 0;
 }
+
+/* ==================================================================== */
+/* WAVE sendrecv (2026-07-30): pg_snapshot_recv (oids 2941/5057) and    */
+/* pg_snapshot_send (oids 2942/5058).                                   */
+/*                                                                      */
+/* PROVENANCE: src/backend/utils/adt/xid8funcs.c, REL_18_STABLE, same   */
+/* 2026-07-30 fetch as the rest of this file (verbatim copy alongside   */
+/* in xid8funcs_upstream.c: pg_snapshot_recv lines 461-524,             */
+/* pg_snapshot_send lines 527-547). pqformat wire conventions copied    */
+/* from proofs/pg_lsn/c/pg_pg_lsn.c (its wave-5 section, REL_18_STABLE  */
+/* src/backend/libpq/pqformat.c provenance).                            */
+/*                                                                      */
+/* SHIM MANIFEST (this section only) — every deviation from upstream:   */
+/*  [S8]  MaxAllocSize inlined verbatim from utils/memutils.h           */
+/*        (#define MaxAllocSize ((Size) 0x3fffffff)).                   */
+/*        PG_SNAPSHOT_MAX_NXIP is the verbatim xid8funcs.c:72-73 macro  */
+/*        over it (== (0x3fffffff - 24) / 8 = 134217724). The shipped   */
+/*        Rust crate computes the same value                            */
+/*        (xid8funcs::PG_SNAPSHOT_MAX_NXIP, checked by harness          */
+/*        eq_snapshot_max_nxip); the `nxip > PG_SNAPSHOT_MAX_NXIP`      */
+/*        comparison below stays verbatim (int vs size_t promotion      */
+/*        included — the nxip < 0 arm short-circuits first, as          */
+/*        upstream).                                                    */
+/*  [S9]  StringInfo -> (data, len, cursor out-param) triple.           */
+/*        pq_getmsgint(buf, 4) / pq_getmsgint64(buf) ->                 */
+/*        pgrecv_getmsgint32 / pgrecv_getmsgint64: pq_copymsgbytes'     */
+/*        bounds check + memcpy + the pg_ntoh big-endian fold written   */
+/*        as explicit shifts (no libc/CBMC model for the intrinsics).   */
+/*        Insufficient data -> status PGC_ERR_PROTOCOL returned at the  */
+/*        exact program point where C's pq_copymsgbytes ereports        */
+/*        ERRCODE_PROTOCOL_VIOLATION "insufficient data left in         */
+/*        message" (control flow aborts there on both sides; the        */
+/*        harness asserts that sqlstate class on the Rust Err arm).     */
+/*  [S10] palloc(PG_SNAPSHOT_SIZE(nxip)) -> caller-provided fixed       */
+/*        buffer (allowed plumbing shim; allocation strategy leaves     */
+/*        the claim). HARNESS CONTRACT: the input frame is <= 36 bytes, */
+/*        so at most 2 xip slots are ever written before the message    */
+/*        reads run dry; the harness provides a 64-byte buffer (room    */
+/*        for 4 slots). A real palloc of a huge in-cap nxip succeeds    */
+/*        upstream and then fails the next read — same observable       */
+/*        error class; the buffer size itself is out of the claim.      */
+/*  [S11] ereport(ERROR, errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),*/
+/*        errmsg("invalid external pg_snapshot data")) at bad_format -> */
+/*        status PGC_ERR_BADFORMAT returned at the same program point   */
+/*        (distinct sentinel per errcode, per the PROOF_EREPORT_FLAG    */
+/*        convention note in pg_proof_shim.h; message text out of       */
+/*        proof).                                                       */
+/*  [S12] SET_VARSIZE(snap, PG_SNAPSHOT_SIZE(nxip)) ->                  */
+/*        pgc_set_varsize_le: little-endian 4B-uncompressed varlena     */
+/*        header stamp (len << 2), byte-identical to the shipped        */
+/*        datum::set_varsize_4b on this little-endian target, so the    */
+/*        harness asserts FULL-IMAGE byte equality (header included).   */
+/*        *outlen carries C's image size.                               */
+/*  [S13] send: StringInfoData + pq_begintypsend / pq_sendint32 /       */
+/*        pq_sendint64 / pq_endtypsend -> a fixed caller buffer with a  */
+/*        running length (pgsend_int32/pgsend_int64 emit the pg_hton    */
+/*        big-endian bytes as explicit shifts; pq_begintypsend's        */
+/*        4-byte reservation and pq_endtypsend's SET_VARSIZE(result,    */
+/*        buf->len) kept at the same program points, header per [S12]). */
+/*        PG_GETARG_VARLENA_P(0)'s detoast is fmgr plumbing outside     */
+/*        the claim: the harness passes an inline 4B-U image (same      */
+/*        fence as the family's SNAPSHOT MODEL note / the shipped       */
+/*        arg_varlena_packed inline arm).                               */
+/*  Everything between the shims — nxip/xmin/xmax validation, the xip   */
+/*  read loop with its order check and duplicate skip (i--; nxip--;     */
+/*  continue), snap->nxip = nxip, and send's field emission order — is  */
+/*  verbatim upstream.                                                  */
+/* ==================================================================== */
+
+#include <string.h>
+
+/* [S8] utils/memutils.h:40 — verbatim */
+#define MaxAllocSize	((Size) 0x3fffffff) /* 1 gigabyte - 1 */
+
+/* xid8funcs.c:72-73 — verbatim */
+#define PG_SNAPSHOT_MAX_NXIP \
+	((MaxAllocSize - offsetof(pg_snapshot, xip)) / sizeof(FullTransactionId))
+
+/* recv/send status sentinels ([S9]/[S11]) */
+#define PGC_ERR_PROTOCOL	4	/* 08P01 insufficient data left in message */
+#define PGC_ERR_BADFORMAT	22	/* 22P03 invalid external pg_snapshot data */
+
+/* [S9] pq_getmsgint(buf, 4): pq_copymsgbytes + pg_ntoh32 */
+static int
+pgrecv_getmsgint32(const unsigned char *data, int32 len, int32 *cursor,
+				   uint32 *out)
+{
+	unsigned char b[4];
+	uint32		v = 0;
+	int			i;
+
+	if (4 > (len - *cursor))
+		return PGC_ERR_PROTOCOL;
+	memcpy(b, data + *cursor, 4);
+	*cursor += 4;
+	for (i = 0; i < 4; i++)
+		v = (v << 8) | (uint32) b[i];
+	*out = v;
+	return 0;
+}
+
+/* [S9] pq_getmsgint64(buf): pq_copymsgbytes + pg_ntoh64 */
+static int
+pgrecv_getmsgint64(const unsigned char *data, int32 len, int32 *cursor,
+				   uint64 *out)
+{
+	unsigned char b[8];
+	uint64		v = 0;
+	int			i;
+
+	if (8 > (len - *cursor))
+		return PGC_ERR_PROTOCOL;
+	memcpy(b, data + *cursor, 8);
+	*cursor += 8;
+	for (i = 0; i < 8; i++)
+		v = (v << 8) | (uint64) b[i];
+	*out = v;
+	return 0;
+}
+
+/* [S12] SET_VARSIZE: little-endian 4B-U header, len << 2 */
+static void
+pgc_set_varsize_le(unsigned char *p, uint32 size)
+{
+	uint32		hdr = size << 2;
+
+	p[0] = (unsigned char) (hdr & 0xFF);
+	p[1] = (unsigned char) ((hdr >> 8) & 0xFF);
+	p[2] = (unsigned char) ((hdr >> 16) & 0xFF);
+	p[3] = (unsigned char) ((hdr >> 24) & 0xFF);
+}
+
+/* [S8] cross-check export for harness eq_snapshot_max_nxip */
+uint64
+pgc_pg_snapshot_max_nxip(void)
+{
+	return (uint64) PG_SNAPSHOT_MAX_NXIP;
+}
+
+/*
+ * xid8funcs.c:461-524 pg_snapshot_recv — body verbatim per [S9]-[S12].
+ * Returns 0 = OK (*outlen = image size, outbuf = full varlena image),
+ * PGC_ERR_PROTOCOL, or PGC_ERR_BADFORMAT.
+ */
+int
+pgc_pg_snapshot_recv(const unsigned char *data, int32 dlen, int32 *cursor,
+					 unsigned char *outbuf, int32 *outlen)
+{
+	pg_snapshot *snap;
+	FullTransactionId last = InvalidFullTransactionId;
+	int			nxip;
+	int			i;
+	FullTransactionId xmin;
+	FullTransactionId xmax;
+	uint32		u32tmp;
+	uint64		u64tmp;
+
+	/* load and validate nxip */
+	if (pgrecv_getmsgint32(data, dlen, cursor, &u32tmp) != 0)	/* [S9] */
+		return PGC_ERR_PROTOCOL;
+	nxip = (int) u32tmp;
+	if (nxip < 0 || nxip > PG_SNAPSHOT_MAX_NXIP)
+		goto bad_format;
+
+	if (pgrecv_getmsgint64(data, dlen, cursor, &u64tmp) != 0)	/* [S9] */
+		return PGC_ERR_PROTOCOL;
+	xmin = FullTransactionIdFromU64(u64tmp);
+	if (pgrecv_getmsgint64(data, dlen, cursor, &u64tmp) != 0)	/* [S9] */
+		return PGC_ERR_PROTOCOL;
+	xmax = FullTransactionIdFromU64(u64tmp);
+	if (!FullTransactionIdIsValid(xmin) ||
+		!FullTransactionIdIsValid(xmax) ||
+		FullTransactionIdPrecedes(xmax, xmin))
+		goto bad_format;
+
+	snap = (pg_snapshot *) outbuf;	/* [S10] palloc -> caller buffer */
+	snap->xmin = xmin;
+	snap->xmax = xmax;
+
+	for (i = 0; i < nxip; i++)
+	{
+		FullTransactionId cur;
+
+		if (pgrecv_getmsgint64(data, dlen, cursor, &u64tmp) != 0)	/* [S9] */
+			return PGC_ERR_PROTOCOL;
+		cur = FullTransactionIdFromU64(u64tmp);
+
+		if (FullTransactionIdPrecedes(cur, last) ||
+			FullTransactionIdPrecedes(cur, xmin) ||
+			FullTransactionIdPrecedes(xmax, cur))
+			goto bad_format;
+
+		/* skip duplicate xips */
+		if (FullTransactionIdEquals(cur, last))
+		{
+			i--;
+			nxip--;
+			continue;
+		}
+
+		snap->xip[i] = cur;
+		last = cur;
+	}
+	snap->nxip = nxip;
+	pgc_set_varsize_le(outbuf, (uint32) PG_SNAPSHOT_SIZE(nxip));	/* [S12] */
+	*outlen = (int32) PG_SNAPSHOT_SIZE(nxip);
+	return 0;
+
+bad_format:
+	return PGC_ERR_BADFORMAT;	/* [S11] ereport(22P03 ...) */
+}
+
+/* [S13] pq_sendint32: big-endian emission at the running length */
+static void
+pgsend_int32(unsigned char *out, int32 *len, uint32 v)
+{
+	int			i;
+
+	for (i = 0; i < 4; i++)
+		out[*len + i] = (unsigned char) ((v >> (8 * (3 - i))) & 0xFF);
+	*len += 4;
+}
+
+/* [S13] pq_sendint64: big-endian emission at the running length */
+static void
+pgsend_int64(unsigned char *out, int32 *len, uint64 v)
+{
+	int			i;
+
+	for (i = 0; i < 8; i++)
+		out[*len + i] = (unsigned char) ((v >> (8 * (7 - i))) & 0xFF);
+	*len += 8;
+}
+
+/*
+ * xid8funcs.c:527-547 pg_snapshot_send — body verbatim per [S13].
+ * snapimg points at an inline 4B-U pg_snapshot varlena image; out must
+ * hold 4 + 4 + 8 + 8 + 8 * snap->nxip bytes. Returns the image length.
+ */
+int32
+pgc_pg_snapshot_send(const void *snapimg, unsigned char *out)
+{
+	const pg_snapshot *snap = (const pg_snapshot *) snapimg;
+	int32		len;
+	uint32		i;
+
+	len = (int32) VARHDRSZ;		/* pq_begintypsend: reserve the length word */
+	pgsend_int32(out, &len, snap->nxip);
+	pgsend_int64(out, &len, U64FromFullTransactionId(snap->xmin));
+	pgsend_int64(out, &len, U64FromFullTransactionId(snap->xmax));
+	for (i = 0; i < snap->nxip; i++)
+		pgsend_int64(out, &len, U64FromFullTransactionId(snap->xip[i]));
+	/* pq_endtypsend: SET_VARSIZE(result, buf->len) [S12] */
+	pgc_set_varsize_le(out, (uint32) len);
+	return len;
+}

@@ -86,6 +86,22 @@ bench = false
 # docker returns a third value again — glibc acos ulp drift), carved by
 # pinning -ffp-contract=off in core/build.rs; see diff.rs
 # tests::dasind_fp_contraction_witness. Zero wrapper-logic divergences.
+# char/bool differential targets (phase-1 100%-coverage campaign,
+# proofs/p1-lane0a): cores + fc_* fmgr wrappers vs vendored 18.3 C.
+[[bin]]
+name = "char_diff"
+path = "fuzz_targets/char_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bool_diff"
+path = "fuzz_targets/bool_diff.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "float_math_diff"
 path = "fuzz_targets/float_math_diff.rs"
@@ -100,6 +116,30 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "pseudotypes_diff"
+path = "fuzz_targets/pseudotypes_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pg_lsn_diff"
+path = "fuzz_targets/pg_lsn_diff.rs"
+test = false
+doc = false
+bench = false
+
+# pg_lsn_diff (Lane-0A p1 campaign, 2026-07-30): composite pg_lsn family
+# target — in/out/roundtrip/cmp-family/recv/send + the four DigitBuf-blocked
+# arithmetic rows (pg_lsn_mi/pli/mii, numeric_pg_lsn) run against verbatim
+# vendored 18.3 numeric.c (set_var_from_str -> add_var/sub_var ->
+# numericvar_to_uint64 / make_result, csrc/pg_lsn_oracle.c). First campaign
+# (macOS host, C-side sancov ON): 10.3M logged execs (0.3M + 3M + 7M legs)
+# + ~20M more in an unlogged 900 s leg, cov 1548 edges, ZERO divergences;
+# one crash artifact triaged = oracle-arena undersizing (fixed, not a
+# divergence). fc_* fmgr wrappers driven via LocalFcinfo for builtins.rs
+# line coverage. Carves in core/src/lsn_diff.rs module doc.
 # encode_diff: scaffolded by fuzz/scaffold.py — see README-TODO-encode_diff.md.
 [[bin]]
 name = "encode_diff"

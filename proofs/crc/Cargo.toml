@@ -1,0 +1,15 @@
+[package]
+name = "proof_crc"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# shipped fc_ wrappers under proof (never copied)
+cryptohashfuncs = { path = "../../crates/backend/utils/adt/cryptohashfuncs" }
+# shipped CRC kernels + the #[kani::stub] target/replacement paths
+crc32c = { path = "../../crates/port/crc32c" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }

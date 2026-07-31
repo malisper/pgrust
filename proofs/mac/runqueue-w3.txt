@@ -1,0 +1,3 @@
+# w3-sendrecv lane runqueue: mac row 2495 macaddr_send
+w3_send::eq_macaddr_send | green | release-gate | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/mac_shim.c --harness w3_send::eq_macaddr_send --exact
+w3_send::control_macaddr_send_skew | must-fail | control | timeout 600 cargo kani -Z c-ffi -Z stubbing --c-lib csrc/mac_shim.c --harness w3_send::control_macaddr_send_skew --exact

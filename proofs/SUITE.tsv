@@ -3108,3 +3108,77 @@ jsonb-probe	proofs::eq_jsonb_int8_scalar_kinds	-Z c-ffi -Z stubbing --c-lib c/pg
 jsonb-probe	proofs::control_cast_weight_skew	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --c-lib c/pg_jsonb_casts.c --exact	must-fail	defect-witness	40.82665	w2 cast rig negative control (DEFAULT solver); FAILED-as-required on out==v (verified check name)
 jsonb-probe	proofs::eq_build_array_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb_build.c --exact --solver kissat	unmeasured	unmeasured	?	FLEET-BOUND (local timeout-450s): w2 3272 constant empty-array image (queued)
 jsonb-probe	proofs::eq_build_object_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb_build.c --exact --solver kissat	unmeasured	unmeasured	?	w2 3274 constant empty-object image (queued)
+bool	wave_sendtext::eq_boolsend	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	green	release-gate	80	ledger 2437; w3-sendrecv 2026-07-30; c8g.16xl CI cluster conc17 (job -32917/-42528); DEFAULT solver (kissat loops on many-property harnesses)
+bool	wave_sendtext::eq_booltext_true	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	green	release-gate	66	ledger 2971; local load 9.5
+bool	wave_sendtext::eq_booltext_false	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	green	release-gate	72	local load 8.8
+bool	wave_sendtext::eq_booltext	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	wall-recorded	calibration	340	symbolic-bool image harness: CNF wall (rss-kill at 40GB cap on CI cluster); literal cells above are the gate
+bool	wave_sendtext::control_boolsend_negate	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	must-fail	defect-witness	80	
+char	wave5::eq_charrecv_core_d0	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	40	ledger 2434; local load ~9
+char	wave5::eq_charrecv_core_d1	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	45	
+char	wave5::eq_charrecv_core_d2	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	47	
+char	wave5::eq_charrecv_core_d3	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	46	
+char	wave5::eq_charrecv_core_d4	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	47	
+char	wave5::eq_charrecv_core	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	wall-recorded	calibration	231	symbolic-dlen CNF wall (rss-kill 40GB CI cluster); cells d0-d4 are the gate
+char	wave5::eq_charsend	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	80	ledger 2435
+char	wave5::control_charsend_skew	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	must-fail	defect-witness	80	
+mac	w3_send::eq_macaddr_send	-Z c-ffi -Z stubbing --c-lib csrc/mac_shim.c	green	release-gate	100	ledger 2495; w3-sendrecv 2026-07-30; c8g.16xl CI cluster conc17 (job -32917/-42528); DEFAULT solver (kissat loops on many-property harnesses)
+mac	w3_send::control_macaddr_send_skew	-Z c-ffi -Z stubbing --c-lib csrc/mac_shim.c	must-fail	defect-witness	100	
+mac8	w3_send::eq_macaddr8_send	-Z c-ffi -Z stubbing --c-lib csrc/mac8_shim.c	green	release-gate	100	ledger 3447
+mac8	w3_send::control_macaddr8_send_skew	-Z c-ffi -Z stubbing --c-lib csrc/mac8_shim.c	must-fail	defect-witness	110	
+xid8snap	sendrecv::eq_snapshot_max_nxip	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	per-commit	30	ledger 2941/5057; C-vs-Rust nxip cap constant x-check
+xid8snap	sendrecv::eq_snapshot_recv_d0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	20	
+xid8snap	sendrecv::eq_snapshot_recv_d2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d3	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	
+xid8snap	sendrecv::eq_snapshot_recv_d4	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d12	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	
+xid8snap	sendrecv::eq_snapshot_recv_d19	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d20n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	210	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d20n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	210	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d28n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	180	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d36n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	190	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d36n2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	210	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::cover_recv_family	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	Ok + both Err classes cover
+xid8snap	sendrecv::eq_snapshot_send_n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	ledger 2942/5058
+xid8snap	sendrecv::eq_snapshot_send_n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	
+xid8snap	sendrecv::eq_snapshot_send_n2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::control_snapshot_send_skew	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	must-fail	defect-witness	20	
+crc	proofs::eq_crc32_len0	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	20	ledger 6364
+crc	proofs::eq_crc32_len1	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	20	
+crc	proofs::eq_crc32_len2	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32_len3	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	101	
+crc	proofs::eq_crc32_len4	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	40	
+crc	proofs::eq_crc32_len6	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	51	
+crc	proofs::eq_crc32_len7	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32_len8	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	81	
+crc	proofs::eq_crc32_short_hdr_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	40	
+crc	proofs::eq_crc32c_len0	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	20	ledger 6365
+crc	proofs::eq_crc32c_len1	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32c_len2	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	51	
+crc	proofs::eq_crc32c_len3	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	183	ledger 6365; default-solver pathological instance (CI cluster timeout 600/1800s); kissat 183s local load 9.2 — use --solver kissat for this cell
+crc	proofs::eq_crc32c_len4	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	151	
+crc	proofs::eq_crc32c_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	101	
+crc	proofs::eq_crc32c_len6	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	121	
+crc	proofs::eq_crc32c_len7	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	111	
+crc	proofs::eq_crc32c_len8	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	151	
+crc	proofs::eq_crc32c_short_hdr_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	71	
+crc	proofs::eq_crc32c_sb8_kernel_len16_aligned	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	release-gate	81	sw sb8 kernel; HW-CRC intrinsic arm out of scope
+crc	proofs::eq_crc32c_sb8_kernel_len13_off1	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	release-gate	61	
+crc	proofs::control_crc32_skewed_byte	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	must-fail	defect-witness	10	
+bool	wrapper_fc::eq_fc_booleq	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.8	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolne	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.9	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boollt	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	2.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolgt	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.6	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolle	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.5	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolge	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.6	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_booland_statefunc	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.5	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolor_statefunc	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.5	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::control_fc_booleq_vs_c_boolne_must_fail	-Z c-ffi --c-lib c/pg_bool.c --exact	must-fail	defect-witness	2	fails on exactly '(c != 0) == drive(...fc_booleq...)'; DEFAULT solver
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_eq	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.2	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_ne	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_lt	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_gt	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_le	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.2	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_ge	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::control_fc_pg_lsn_lt_vs_c_le_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --exact	must-fail	defect-witness	2	fails on exactly '(c != 0) == drive(...fc_pg_lsn_lt...)'; DEFAULT solver
