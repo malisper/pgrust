@@ -1,0 +1,22 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace SetMessageEncoding with ()
+@@ -922,18 +922,17 @@
+             "invalid database encoding: {encoding}"
+         )));
+     }
+     DATABASE_ENCODING.with(|e| e.set(encoding));
+     Ok(())
+ }
+ 
+ pub fn SetMessageEncoding(encoding: pg_enc) {
+-    debug_assert!(pg_valid_encoding(encoding));
+-    MESSAGE_ENCODING.with(|e| e.set(encoding));
++    () /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn GetDatabaseEncoding() -> pg_enc {
+     database_encoding()
+ }
+ 
+ pub fn GetDatabaseEncodingName() -> &'static str {
+     enc_name(database_encoding())

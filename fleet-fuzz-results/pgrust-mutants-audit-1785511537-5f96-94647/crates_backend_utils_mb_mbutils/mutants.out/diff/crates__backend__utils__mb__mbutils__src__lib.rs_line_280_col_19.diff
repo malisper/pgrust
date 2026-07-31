@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ delete - in PrepareClientEncoding
+@@ -272,17 +272,17 @@
+     let finfo = fmgr_seams::fmgr_info::call(proc)?;
+     Ok(ResolvedConvProc {
+         fn_addr: finfo.fn_addr,
+     })
+ }
+ 
+ pub fn PrepareClientEncoding(encoding: pg_enc) -> PgResult<i32> {
+     if !pg_valid_fe_encoding(encoding) {
+-        return Ok(-1);
++        return Ok( /* ~ changed by cargo-mutants ~ */1);
+     }
+     if !BACKEND_STARTUP_COMPLETE.with(|c| c.get()) {
+         return Ok(0);
+     }
+     let current_server_encoding = database_encoding();
+     if current_server_encoding == encoding
+         || current_server_encoding == PG_SQL_ASCII
+         || encoding == PG_SQL_ASCII

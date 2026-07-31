@@ -1,0 +1,29 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace byte_sequence -> String with String::new()
+@@ -1215,25 +1215,17 @@
+         .with_sqlstate(ERRCODE_UNTRANSLATABLE_CHARACTER),
+     )
+ }
+ 
+ /// The leading `min(mblen, len, 8)` bytes as space-separated `0xNN`.
+ // pub for proofs/text-slice (Kani stubs the message-text construction;
+ // visibility-only change per the 2026-07-28 shipped-edits ruling).
+ pub fn byte_sequence(mbstr: &[u8], mblen: i32, len: i32) -> String {
+-    let jlimit = (mblen.min(len).max(0) as usize).min(8).min(mbstr.len());
+-    let mut p = String::with_capacity(jlimit * 5);
+-    for (j, b) in mbstr[..jlimit].iter().enumerate() {
+-        if j > 0 {
+-            p.push(' ');
+-        }
+-        p.push_str(&format!("0x{b:02x}"));
+-    }
+-    p
++    String::new() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn c_string_len(bytes: &[u8]) -> usize {
+     bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())
+ }
+ 
+ #[track_caller]
+ #[cold]

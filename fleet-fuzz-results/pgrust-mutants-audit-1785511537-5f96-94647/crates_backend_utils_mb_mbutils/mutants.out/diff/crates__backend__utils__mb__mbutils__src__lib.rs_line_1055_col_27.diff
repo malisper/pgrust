@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace < with == in pg_eucjp_increment
+@@ -1047,17 +1047,17 @@
+         }
+         _ => {
+             if c1 & 0x80 != 0 {
+                 if length != 2 {
+                     return false;
+                 }
+                 for i in (0..=1).rev() {
+                     let c2 = charptr[i];
+-                    if c2 < 0xa1 {
++                    if c2 == /* ~ changed by cargo-mutants ~ */ 0xa1 {
+                         charptr[i] = 0xa1;
+                         return true;
+                     } else if c2 < 0xfe {
+                         charptr[i] += 1;
+                         return true;
+                     }
+                 }
+                 false

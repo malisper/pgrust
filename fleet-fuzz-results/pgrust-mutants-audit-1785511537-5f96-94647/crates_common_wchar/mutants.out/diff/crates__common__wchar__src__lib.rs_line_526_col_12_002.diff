@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace < with <= in ucs_wcwidth
+@@ -518,17 +518,17 @@
+     false
+ }
+ 
+ // pub (visibility only) for the proofs/utf8 Kani equivalence harnesses.
+ pub fn ucs_wcwidth(ucs: pg_wchar) -> i32 {
+     if ucs == 0 {
+         return 0;
+     }
+-    if ucs < 0x20 || (0x7f..0xa0).contains(&ucs) || ucs > 0x10ffff {
++    if ucs <= /* ~ changed by cargo-mutants ~ */ 0x20 || (0x7f..0xa0).contains(&ucs) || ucs > 0x10ffff {
+         return -1;
+     }
+     if mbbisearch(ucs, &NONSPACING) {
+         return 0;
+     }
+     if mbbisearch(ucs, &EAST_ASIAN_FW) {
+         return 2;
+     }

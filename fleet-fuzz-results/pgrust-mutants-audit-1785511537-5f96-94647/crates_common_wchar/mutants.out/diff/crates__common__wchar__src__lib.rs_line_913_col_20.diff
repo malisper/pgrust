@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete - in pg_euctw_verifychar
+@@ -905,17 +905,17 @@
+     if c1 == SS2 {
+         if len < 4 {
+             return -1;
+         }
+         if !(0xa1..=0xa7).contains(&s[1]) {
+             return -1;
+         }
+         if !is_euc_range_valid(s[2]) || !is_euc_range_valid(s[3]) {
+-            return -1;
++            return  /* ~ changed by cargo-mutants ~ */1;
+         }
+         4
+     } else if c1 == SS3 {
+         -1
+     } else if is_highbit_set(c1) {
+         if len < 2 {
+             return -1;
+         }

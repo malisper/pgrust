@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace - with + in verify_str
+@@ -1131,17 +1131,17 @@
+             continue;
+         }
+         let l = verifychar(rest);
+         if l == -1 {
+             break;
+         }
+         rest = &rest[l as usize..];
+     }
+-    (s.len() - rest.len()) as i32
++    (s.len() + /* ~ changed by cargo-mutants ~ */ rest.len()) as i32
+ }
+ 
+ const STRIDE_LENGTH: usize = 32;
+ 
+ #[cfg(target_arch = "aarch64")]
+ #[inline(always)]
+ fn is_valid_ascii(chunk: &[u8; STRIDE_LENGTH]) -> bool {
+     use core::arch::aarch64::*;

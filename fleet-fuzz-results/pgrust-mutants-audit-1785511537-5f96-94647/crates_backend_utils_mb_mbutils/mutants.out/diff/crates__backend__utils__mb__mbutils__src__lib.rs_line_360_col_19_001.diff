@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace += with *= in SetClientEncoding
+@@ -352,17 +352,17 @@
+                     TO_SERVER_CONV_PROC.with(|p| p.set(Some(info.to_server)));
+                     TO_CLIENT_CONV_PROC.with(|p| p.set(Some(info.to_client)));
+                     found = true;
+                     i += 1;
+                 } else {
+                     list.remove(i);
+                 }
+             } else {
+-                i += 1;
++                i *= /* ~ changed by cargo-mutants ~ */ 1;
+             }
+         }
+     });
+     Ok(if found { 0 } else { -1 })
+ }
+ 
+ pub fn InitializeClientEncoding() -> PgResult<()> {
+     debug_assert!(!BACKEND_STARTUP_COMPLETE.with(|c| c.get()));

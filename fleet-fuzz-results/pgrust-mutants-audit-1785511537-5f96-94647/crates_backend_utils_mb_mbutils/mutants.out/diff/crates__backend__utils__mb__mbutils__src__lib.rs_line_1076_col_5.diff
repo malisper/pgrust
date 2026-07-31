@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_verifymbstr -> PgResult<bool> with PgResult::new()
+@@ -1068,17 +1068,17 @@
+                 charptr[0] += 1;
+                 true
+             }
+         }
+     }
+ }
+ 
+ pub fn pg_verifymbstr(mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+-    pg_verify_mbstr(database_encoding(), mbstr, no_error)
++    PgResult::new() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_verify_mbstr(encoding: pg_enc, mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+     debug_assert!(pg_valid_encoding(encoding));
+     let oklen = pg_encoding_verifymbstr(encoding, mbstr) as usize;
+     if oklen != mbstr.len() {
+         if no_error {
+             return Ok(false);

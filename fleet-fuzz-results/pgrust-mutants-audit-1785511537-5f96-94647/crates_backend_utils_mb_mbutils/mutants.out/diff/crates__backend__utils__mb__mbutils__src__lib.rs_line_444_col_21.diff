@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in pg_do_encoding_conversion
+@@ -436,17 +436,17 @@
+     mcx: Mcx<'mcx>,
+     src: &[u8],
+     src_encoding: pg_enc,
+     dest_encoding: pg_enc,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+     if src.is_empty() {
+         return Ok(None);
+     }
+-    if src_encoding == dest_encoding {
++    if src_encoding != /* ~ changed by cargo-mutants ~ */ dest_encoding {
+         return Ok(None);
+     }
+     if dest_encoding == PG_SQL_ASCII {
+         return Ok(None);
+     }
+     if src_encoding == PG_SQL_ASCII {
+         pg_verify_mbstr(dest_encoding, src, false)?;
+         return Ok(None);

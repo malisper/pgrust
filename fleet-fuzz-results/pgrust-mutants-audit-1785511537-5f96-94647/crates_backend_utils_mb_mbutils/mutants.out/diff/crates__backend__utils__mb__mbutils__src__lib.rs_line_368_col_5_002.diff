@@ -1,0 +1,38 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace InitializeClientEncoding -> PgResult<()> with PgResult::new(())
+@@ -360,34 +360,17 @@
+                 i += 1;
+             }
+         }
+     });
+     Ok(if found { 0 } else { -1 })
+ }
+ 
+ pub fn InitializeClientEncoding() -> PgResult<()> {
+-    debug_assert!(!BACKEND_STARTUP_COMPLETE.with(|c| c.get()));
+-    BACKEND_STARTUP_COMPLETE.with(|c| c.set(true));
+-
+-    let pending = PENDING_CLIENT_ENCODING.with(|c| c.get());
+-    if PrepareClientEncoding(pending)? < 0 || SetClientEncoding(pending)? < 0 {
+-        return Err(conversion_not_supported_fatal(pending));
+-    }
+-
+-    let current_server_encoding = database_encoding();
+-    if current_server_encoding != PG_UTF8 && current_server_encoding != PG_SQL_ASCII {
+-        let utf8_to_server_proc =
+-            namespace_seams::find_default_conversion_proc::call(PG_UTF8, current_server_encoding)?;
+-        if utf8_to_server_proc != InvalidOid {
+-            let resolved = resolve_conv_proc(utf8_to_server_proc)?;
+-            UTF8_TO_SERVER_CONV_PROC.with(|p| p.set(Some(resolved)));
+-        }
+-    }
+-    Ok(())
++    PgResult::new(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_get_client_encoding() -> pg_enc {
+     client_encoding()
+ }
+ 
+ pub fn pg_get_client_encoding_name() -> &'static str {
+     enc_name(client_encoding())

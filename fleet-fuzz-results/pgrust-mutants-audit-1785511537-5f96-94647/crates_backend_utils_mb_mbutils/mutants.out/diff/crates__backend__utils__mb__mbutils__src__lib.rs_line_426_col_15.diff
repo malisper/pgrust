@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace += with -= in convert_with_proc
+@@ -418,17 +418,17 @@
+     )?;
+     // SAFETY: the conversion-proc contract (mbutils.c): at most
+     // src.len() * MAX_CONVERSION_GROWTH output bytes plus a NUL were written
+     // into `dest`; every byte up to and including that NUL is initialized.
+     let n = unsafe {
+         let ptr = dest.as_ptr();
+         let mut n = 0usize;
+         while *ptr.add(n) != 0 {
+-            n += 1;
++            n -= /* ~ changed by cargo-mutants ~ */ 1;
+         }
+         dest.set_len(n);
+         n
+     };
+     debug_assert!(n < cap);
+     Ok((consumed.as_i32(), dest))
+ }
+ 

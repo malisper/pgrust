@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/builtins.rs
++++ replace + with - in convert_common
+@@ -38,17 +38,17 @@
+ ) -> PgResult<Datum> {
+     let string = unsafe { fcinfo.arg_varlena_packed(string_arg)? };
+     let src = string.data();
+     crate::pg_verify_mbstr(src_encoding, src, false)?;
+     let mcx = fcinfo.result_mcx();
+     match crate::pg_do_encoding_conversion(mcx, src, src_encoding, dest_encoding)? {
+         None => Ok(fcinfo.arg(string_arg)),
+         Some(out) => {
+-            let mut image = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ + out.len())?;
++            let mut image = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ - /* ~ changed by cargo-mutants ~ */ out.len())?;
+             ::mcx::vec_append_bytes(&mut image, &[0u8; VARHDRSZ])?;
+             ::mcx::vec_append_bytes(&mut image, &out)?;
+             Ok(varlena_result(Varlena::from_image(image)))
+         }
+     }
+ }
+ 
+ // BYTEA convert(BYTEA string, NAME src_encoding_name, NAME dest_encoding_name)

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_latin1_mblen -> i32 with 0
+@@ -729,17 +729,17 @@
+         ti += 1;
+         len -= 1;
+     }
+     to[ti] = 0;
+     ti as i32
+ }
+ 
+ fn pg_latin1_mblen(_s: &[u8]) -> i32 {
+-    1
++    0 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_latin1_dsplen(s: &[u8]) -> i32 {
+     pg_ascii_dsplen(s)
+ }
+ 
+ fn pg_sjis_mblen(s: &[u8]) -> i32 {
+     if (0xa1..=0xdf).contains(&s[0]) {

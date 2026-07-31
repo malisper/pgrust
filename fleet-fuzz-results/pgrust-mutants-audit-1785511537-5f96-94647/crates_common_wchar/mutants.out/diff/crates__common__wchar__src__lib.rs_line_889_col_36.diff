@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace || with && in pg_euckr_verifychar
+@@ -881,17 +881,17 @@
+ }
+ 
+ fn pg_euckr_verifychar(s: &[u8]) -> i32 {
+     let c1 = s[0];
+     if is_highbit_set(c1) {
+         if s.len() < 2 {
+             return -1;
+         }
+-        if !is_euc_range_valid(c1) || !is_euc_range_valid(s[1]) {
++        if !is_euc_range_valid(c1) && /* ~ changed by cargo-mutants ~ */ !is_euc_range_valid(s[1]) {
+             return -1;
+         }
+         2
+     } else {
+         1
+     }
+ }
+ 

@@ -1,0 +1,22 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace report_invalid_encoding -> Box<PgError> with Box::new(Default::default())
+@@ -1165,18 +1165,17 @@
+             "encoding conversion length must not be negative",
+         ));
+     }
+     Ok(())
+ }
+ 
+ #[cold]
+ pub fn report_invalid_encoding(encoding: pg_enc, mbstr: &[u8]) -> Box<PgError> {
+-    let l = pg_encoding_mblen_or_incomplete(encoding, mbstr);
+-    report_invalid_encoding_int(encoding, mbstr, l, mbstr.len() as i32)
++    Box::new(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[track_caller]
+ #[cold]
+ fn report_invalid_encoding_int(
+     encoding: pg_enc,
+     mbstr: &[u8],
+     mblen: i32,

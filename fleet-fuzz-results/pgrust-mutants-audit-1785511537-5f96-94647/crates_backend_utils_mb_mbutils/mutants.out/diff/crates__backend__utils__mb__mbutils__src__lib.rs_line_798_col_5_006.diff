@@ -1,0 +1,48 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_encoding_mbstrlen_with_len -> PgResult<i32> with PgResult::from(1)
+@@ -790,44 +790,17 @@
+ /// character's claimed length overruns the slice.
+ pub fn pg_mbstrlen_with_len(mbstr: &[u8]) -> PgResult<i32> {
+     pg_encoding_mbstrlen_with_len(database_encoding(), mbstr)
+ }
+ 
+ /// [`pg_mbstrlen_with_len`] parameterized by encoding (parser callers thread
+ /// the server encoding explicitly).
+ pub fn pg_encoding_mbstrlen_with_len(encoding: pg_enc, mbstr: &[u8]) -> PgResult<i32> {
+-    if pg_encoding_max_length(encoding) == 1 {
+-        return Ok(mbstr.len() as i32);
+-    }
+-    let mut len = 0;
+-    let mut pos = 0usize;
+-    let mut limit = mbstr.len() as i32;
+-    while limit > 0 && mbstr[pos] != 0 {
+-        // ASCII bytes are mblen 1 in UTF-8; count a run in one SWAR sweep.
+-        // The `< 0x80` peek keeps the fast path OFF multibyte lead bytes
+-        // (ascii_run would return 0 there) — one already-loaded byte compare,
+-        // so a fully-multibyte string pays no fast-path tax. NUL is excluded
+-        // by the while guard. Every input scores identically to the plain
+-        // per-char loop; the run is pure acceleration.
+-        if encoding == PG_UTF8 && mbstr[pos] < 0x80 {
+-            let run = ascii_run(&mbstr[pos..]);
+-            pos += run;
+-            limit -= run as i32;
+-            len += run as i32;
+-            if limit <= 0 || mbstr[pos] == 0 {
+-                break;
+-            }
+-        }
+-        let l = pg_encoding_mblen_with_len(encoding, &mbstr[pos..], limit)?;
+-        limit -= l;
+-        pos += l as usize;
+-        len += 1;
+-    }
+-    Ok(len)
++    PgResult::from(1) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Length of the leading run of bytes in 0x01..=0x7F.
+ #[inline]
+ fn ascii_run(s: &[u8]) -> usize {
+     const LO: u64 = 0x0101_0101_0101_0101;
+     const HI: u64 = 0x8080_8080_8080_8080;
+     let stop = |w: u64| ((w.wrapping_sub(LO) & !w) | w) & HI;

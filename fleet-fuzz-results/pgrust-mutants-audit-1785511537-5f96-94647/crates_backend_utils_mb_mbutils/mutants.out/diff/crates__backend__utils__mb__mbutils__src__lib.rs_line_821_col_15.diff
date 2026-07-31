@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace -= with += in pg_encoding_mbstrlen_with_len
+@@ -813,17 +813,17 @@
+             pos += run;
+             limit -= run as i32;
+             len += run as i32;
+             if limit <= 0 || mbstr[pos] == 0 {
+                 break;
+             }
+         }
+         let l = pg_encoding_mblen_with_len(encoding, &mbstr[pos..], limit)?;
+-        limit -= l;
++        limit += /* ~ changed by cargo-mutants ~ */ l;
+         pos += l as usize;
+         len += 1;
+     }
+     Ok(len)
+ }
+ 
+ /// Length of the leading run of bytes in 0x01..=0x7F.
+ #[inline]

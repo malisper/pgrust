@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace + with - in ascii_run
+@@ -828,17 +828,17 @@
+ /// Length of the leading run of bytes in 0x01..=0x7F.
+ #[inline]
+ fn ascii_run(s: &[u8]) -> usize {
+     const LO: u64 = 0x0101_0101_0101_0101;
+     const HI: u64 = 0x8080_8080_8080_8080;
+     let stop = |w: u64| ((w.wrapping_sub(LO) & !w) | w) & HI;
+     let mut i = 0usize;
+     while i + 16 <= s.len() {
+-        let sa = stop(u64::from_le_bytes(s[i..i + 8].try_into().unwrap()));
++        let sa = stop(u64::from_le_bytes(s[i..i - /* ~ changed by cargo-mutants ~ */ 8].try_into().unwrap()));
+         let sb = stop(u64::from_le_bytes(s[i + 8..i + 16].try_into().unwrap()));
+         if sa | sb != 0 {
+             return if sa != 0 {
+                 i + (sa.trailing_zeros() / 8) as usize
+             } else {
+                 i + 8 + (sb.trailing_zeros() / 8) as usize
+             };
+         }

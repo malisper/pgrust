@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace <= with > in is_valid_ascii
+@@ -1147,17 +1147,17 @@
+     use core::arch::aarch64::*;
+     // SAFETY: NEON is baseline on aarch64; both 16-byte loads are within `chunk`.
+     unsafe {
+         let zero = vdupq_n_u8(0);
+         let v0 = vld1q_u8(chunk.as_ptr());
+         let v1 = vld1q_u8(chunk.as_ptr().add(16));
+         let mut cum = vorrq_u8(v0, vceqq_u8(v0, zero));
+         cum = vorrq_u8(cum, vorrq_u8(v1, vceqq_u8(v1, zero)));
+-        vmaxvq_u8(cum) <= 0x7f
++        vmaxvq_u8(cum) > /* ~ changed by cargo-mutants ~ */ 0x7f
+     }
+ }
+ 
+ #[cfg(target_arch = "x86_64")]
+ #[inline(always)]
+ fn is_valid_ascii(chunk: &[u8; STRIDE_LENGTH]) -> bool {
+     use core::arch::x86_64::*;
+     // SAFETY: SSE2 is baseline on x86_64; both 16-byte loads are within `chunk`.

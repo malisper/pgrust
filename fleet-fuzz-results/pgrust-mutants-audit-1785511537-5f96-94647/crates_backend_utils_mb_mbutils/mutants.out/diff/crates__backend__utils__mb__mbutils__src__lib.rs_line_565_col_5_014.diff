@@ -1,0 +1,36 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_server_to_any -> PgResult<Option<PgVec<'mcx, u8>>> with PgResult::new(Some(PgVec::from(0)))
+@@ -557,32 +557,17 @@
+     pg_server_to_any(mcx, s, client_encoding())
+ }
+ 
+ pub fn pg_server_to_any<'mcx>(
+     mcx: Mcx<'mcx>,
+     s: &[u8],
+     encoding: pg_enc,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+-    if s.is_empty() {
+-        return Ok(None);
+-    }
+-    let db_encoding = database_encoding();
+-
+-    if encoding == db_encoding || encoding == PG_SQL_ASCII {
+-        return Ok(None);
+-    }
+-    if db_encoding == PG_SQL_ASCII {
+-        pg_verify_mbstr(encoding, s, false)?;
+-        return Ok(None);
+-    }
+-    if encoding == client_encoding() {
+-        return perform_default_encoding_conversion(mcx, s, false);
+-    }
+-    pg_do_encoding_conversion(mcx, s, db_encoding, encoding)
++    PgResult::new(Some(PgVec::from(0))) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// The hoistable per-message test: `pg_server_to_client` is a guaranteed
+ /// no-op iff the client encoding is the server encoding or SQL_ASCII
+ /// (printtup resolves this once per result set — strategy lever 2).
+ pub fn server_to_client_conversion_needed() -> bool {
+     let client = client_encoding();
+     client != database_encoding() && client != PG_SQL_ASCII

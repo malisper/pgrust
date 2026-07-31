@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ delete - in pg_char_to_encoding_bytes
+@@ -192,17 +192,17 @@
+     if name.is_empty() || name.len() >= NAMEDATALEN {
+         return -1;
+     }
+     let mut buf = [0u8; NAMEDATALEN];
+     let n = clean_encoding_name(name, &mut buf);
+     let key = &buf[..n];
+     match PG_ENCNAME.binary_search_by(|(nm, _)| nm.as_bytes().cmp(key)) {
+         Ok(idx) => PG_ENCNAME[idx].1,
+-        Err(_) => -1,
++        Err(_) =>  /* ~ changed by cargo-mutants ~ */1,
+     }
+ }
+ 
+ pub fn pg_char_to_encoding(name: &str) -> pg_enc {
+     pg_char_to_encoding_bytes(name.as_bytes())
+ }
+ 
+ pub fn pg_valid_client_encoding(name: &str) -> pg_enc {

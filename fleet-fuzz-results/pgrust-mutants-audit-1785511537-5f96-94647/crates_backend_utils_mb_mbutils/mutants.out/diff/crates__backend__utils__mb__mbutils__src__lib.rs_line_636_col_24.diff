@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in pg_unicode_to_server
+@@ -628,17 +628,17 @@
+ pub fn pg_unicode_to_server<'mcx>(mcx: Mcx<'mcx>, c: pg_wchar) -> PgResult<PgVec<'mcx, u8>> {
+     if !is_valid_unicode_codepoint(c) {
+         return Err(invalid_codepoint_error());
+     }
+     if c <= 0x7F {
+         return slice_in(mcx, &[c as u8]);
+     }
+     let server_encoding = database_encoding();
+-    if server_encoding == PG_UTF8 {
++    if server_encoding != /* ~ changed by cargo-mutants ~ */ PG_UTF8 {
+         let mut buf = [0u8; MAX_MULTIBYTE_CHAR_LEN];
+         unicode_to_utf8(c, &mut buf);
+         let n = pg_utf_mblen(&buf) as usize;
+         return slice_in(mcx, &buf[..n]);
+     }
+ 
+     let Some(proc) = UTF8_TO_SERVER_CONV_PROC.with(|p| p.get()) else {
+         return Err(conversion_not_supported_error(PG_UTF8, server_encoding));

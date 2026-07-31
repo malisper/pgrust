@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete ! in pg_utf8_islegal
+@@ -1272,17 +1272,17 @@
+         rest = &rest[l as usize..];
+     }
+     (len - rest.len()) as i32
+ }
+ 
+ pub fn pg_utf8_islegal(source: &[u8], length: i32) -> bool {
+     match length {
+         4 => {
+-            if !(0x80..=0xbf).contains(&source[3]) {
++            if  /* ~ changed by cargo-mutants ~ */(0x80..=0xbf).contains(&source[3]) {
+                 return false;
+             }
+             if !(0x80..=0xbf).contains(&source[2]) {
+                 return false;
+             }
+             if !utf8_second_byte_legal(source[0], source[1]) {
+                 return false;
+             }

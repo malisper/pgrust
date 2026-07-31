@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_utf_dsplen -> i32 with -1
+@@ -531,17 +531,17 @@
+     }
+     if mbbisearch(ucs, &EAST_ASIAN_FW) {
+         return 2;
+     }
+     1
+ }
+ 
+ fn pg_utf_dsplen(s: &[u8]) -> i32 {
+-    ucs_wcwidth(utf8_to_unicode(s))
++    -1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_mule2wchar_with_len(from: &[u8], to: &mut [pg_wchar]) -> i32 {
+     let mut len = from.len();
+     let mut fi = 0;
+     let mut ti = 0;
+     while len > 0 && from[fi] != 0 {
+         let b = from[fi];

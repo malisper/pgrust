@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete - in pg_euctw_verifychar
+@@ -899,17 +899,17 @@
+     verify_str(s, pg_euckr_verifychar)
+ }
+ 
+ fn pg_euctw_verifychar(s: &[u8]) -> i32 {
+     let len = s.len();
+     let c1 = s[0];
+     if c1 == SS2 {
+         if len < 4 {
+-            return -1;
++            return  /* ~ changed by cargo-mutants ~ */1;
+         }
+         if !(0xa1..=0xa7).contains(&s[1]) {
+             return -1;
+         }
+         if !is_euc_range_valid(s[2]) || !is_euc_range_valid(s[3]) {
+             return -1;
+         }
+         4

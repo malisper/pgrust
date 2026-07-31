@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace == with != in verify_str
+@@ -1119,17 +1119,17 @@
+ 
+ /// Shared body of every non-UTF8 `*_verifystr` in wchar.c, monomorphized per
+ /// character verifier.
+ #[inline]
+ fn verify_str(s: &[u8], verifychar: impl Fn(&[u8]) -> i32) -> i32 {
+     let mut rest = s;
+     while let Some((&b, tail)) = rest.split_first() {
+         if !is_highbit_set(b) {
+-            if b == 0 {
++            if b != /* ~ changed by cargo-mutants ~ */ 0 {
+                 break;
+             }
+             rest = tail;
+             continue;
+         }
+         let l = verifychar(rest);
+         if l == -1 {
+             break;

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace == with != in pg_euc2wchar_with_len
+@@ -143,17 +143,17 @@
+     }
+ }
+ 
+ fn pg_euc2wchar_with_len(from: &[u8], to: &mut [pg_wchar]) -> i32 {
+     let mut len = from.len();
+     let mut fi = 0;
+     let mut ti = 0;
+     while len > 0 && from[fi] != 0 {
+-        if from[fi] == SS2 {
++        if from[fi] != /* ~ changed by cargo-mutants ~ */ SS2 {
+             if len < 2 {
+                 break;
+             }
+             fi += 1;
+             to[ti] = ((SS2 as u32) << 8) | from[fi] as u32;
+             fi += 1;
+             len -= 2;
+         } else if from[fi] == SS3 {

@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in pg_server_to_any
+@@ -562,17 +562,17 @@
+     s: &[u8],
+     encoding: pg_enc,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+     if s.is_empty() {
+         return Ok(None);
+     }
+     let db_encoding = database_encoding();
+ 
+-    if encoding == db_encoding || encoding == PG_SQL_ASCII {
++    if encoding == db_encoding || encoding != /* ~ changed by cargo-mutants ~ */ PG_SQL_ASCII {
+         return Ok(None);
+     }
+     if db_encoding == PG_SQL_ASCII {
+         pg_verify_mbstr(encoding, s, false)?;
+         return Ok(None);
+     }
+     if encoding == client_encoding() {
+         return perform_default_encoding_conversion(mcx, s, false);

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace != with == in is_highbit_set
+@@ -80,17 +80,17 @@
+ const LCPRV1_B: u8 = 0x9b;
+ const LCPRV2_A: u8 = 0x9c;
+ const LCPRV2_B: u8 = 0x9d;
+ const NONUTF8_INVALID_BYTE0: u8 = 0x8d;
+ const NONUTF8_INVALID_BYTE1: u8 = b' ';
+ 
+ #[inline(always)]
+ fn is_highbit_set(b: u8) -> bool {
+-    b & HIGHBIT != 0
++    b & HIGHBIT == /* ~ changed by cargo-mutants ~ */ 0
+ }
+ 
+ #[inline(always)]
+ fn is_euc_range_valid(c: u8) -> bool {
+     (0xa1..=0xfe).contains(&c)
+ }
+ 
+ pub type Mb2WcharConverter = fn(from: &[u8], to: &mut [pg_wchar]) -> i32;

@@ -1,0 +1,33 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_johab_verifychar -> i32 with 0
+@@ -928,29 +928,17 @@
+     }
+ }
+ 
+ fn pg_euctw_verifystr(s: &[u8]) -> i32 {
+     verify_str(s, pg_euctw_verifychar)
+ }
+ 
+ fn pg_johab_verifychar(s: &[u8]) -> i32 {
+-    let mbl = pg_johab_mblen(s);
+-    if (s.len() as i32) < mbl {
+-        return -1;
+-    }
+-    if !is_highbit_set(s[0]) {
+-        return mbl;
+-    }
+-    for i in 1..mbl as usize {
+-        if !is_euc_range_valid(s[i]) {
+-            return -1;
+-        }
+-    }
+-    mbl
++    0 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_johab_verifystr(s: &[u8]) -> i32 {
+     verify_str(s, pg_johab_verifychar)
+ }
+ 
+ fn pg_mule_verifychar(s: &[u8]) -> i32 {
+     let mbl = pg_mule_mblen(s);

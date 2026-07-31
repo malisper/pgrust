@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace += with -= in SetClientEncoding
+@@ -347,17 +347,17 @@
+         while i < list.len() {
+             let info = list[i];
+             if info.s_encoding == current_server_encoding && info.c_encoding == encoding {
+                 if !found {
+                     CLIENT_ENCODING.with(|c| c.set(encoding));
+                     TO_SERVER_CONV_PROC.with(|p| p.set(Some(info.to_server)));
+                     TO_CLIENT_CONV_PROC.with(|p| p.set(Some(info.to_client)));
+                     found = true;
+-                    i += 1;
++                    i -= /* ~ changed by cargo-mutants ~ */ 1;
+                 } else {
+                     list.remove(i);
+                 }
+             } else {
+                 i += 1;
+             }
+         }
+     });

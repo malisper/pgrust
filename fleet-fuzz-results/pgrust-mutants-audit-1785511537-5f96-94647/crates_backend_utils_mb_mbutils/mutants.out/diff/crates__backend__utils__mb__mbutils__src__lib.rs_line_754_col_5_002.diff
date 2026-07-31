@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_mblen -> i32 with -1
+@@ -746,17 +746,17 @@
+     if length > limit {
+         return Err(report_invalid_encoding_int(encoding, mbstr, length, limit));
+     }
+     Ok(length)
+ }
+ 
+ /// No bounds check; only safe on already-verified strings (C `pg_mblen`).
+ pub fn pg_mblen(mbstr: &[u8]) -> i32 {
+-    pg_encoding_mblen(database_encoding(), mbstr)
++    -1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_dsplen(mbstr: &[u8]) -> i32 {
+     pg_encoding_dsplen(database_encoding(), mbstr)
+ }
+ 
+ /// Character count of a NUL- or slice-terminated string (C `pg_mbstrlen`).
+ /// The slice end stands in for C's NUL terminator: like C's `pg_mblen_cstr`,

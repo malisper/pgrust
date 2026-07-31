@@ -1,0 +1,140 @@
+
+*** crates/common/wchar/src/lib.rs:88:7: replace & with | in is_highbit_set
+
+*** mutation diff:
+--- crates/common/wchar/src/lib.rs
++++ replace & with | in is_highbit_set
+@@ -80,17 +80,17 @@
+ const LCPRV1_B: u8 = 0x9b;
+ const LCPRV2_A: u8 = 0x9c;
+ const LCPRV2_B: u8 = 0x9d;
+ const NONUTF8_INVALID_BYTE0: u8 = 0x8d;
+ const NONUTF8_INVALID_BYTE1: u8 = b' ';
+ 
+ #[inline(always)]
+ fn is_highbit_set(b: u8) -> bool {
+-    b & HIGHBIT != 0
++    b | /* ~ changed by cargo-mutants ~ */ HIGHBIT != 0
+ }
+ 
+ #[inline(always)]
+ fn is_euc_range_valid(c: u8) -> bool {
+     (0xa1..=0xfe).contains(&c)
+ }
+ 
+ pub type Mb2WcharConverter = fn(from: &[u8], to: &mut [pg_wchar]) -> i32;
+
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=wchar@0.1.0
+       Dirty wchar v0.1.0 (/tmp/cargo-mutants-src-Y5OD1s.tmp/crates/common/wchar): the file `crates/common/wchar/src/lib.rs` has changed (1785515247.066772781s, 5s after last build at 1785515242.776882155s)
+   Compiling wchar v0.1.0 (/tmp/cargo-mutants-src-Y5OD1s.tmp/crates/common/wchar)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=5294be34661295e2 -C extra-filename=-c691244d690e1ac7 --out-dir /tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4141646ee6216aa6 -C extra-filename=-da99c5603b4b462e --out-dir /tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name c_parity --edition=2021 crates/common/wchar/tests/c_parity.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=71d3f6dfc674836d -C extra-filename=-b3177abeab3580a9 --out-dir /tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps --extern wchar=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/libwchar-da99c5603b4b462e.rlib`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.13s
+  Executable `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/wchar-c691244d690e1ac7`
+  Executable `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/c_parity-b3177abeab3580a9`
+
+*** result: Success
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --verbose --package=wchar@0.1.0
+       Fresh wchar v0.1.0 (/tmp/cargo-mutants-src-Y5OD1s.tmp/crates/common/wchar)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/wchar-c691244d690e1ac7`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/c_parity-b3177abeab3580a9`
+
+running 13 tests
+test max_length_matches_c ... ok
+test dsplen_tables_match_c ... FAILED
+test mblen_tables_match_c ... FAILED
+test or_incomplete_edge_cases ... FAILED
+test set_invalid_matches_c ... ok
+test verifystr_corpora_match_c ... FAILED
+test mb2wchar_matches_c ... FAILED
+test verifychar_pairs_match_c ... FAILED
+test wchar2mb_matches_c ... ok
+test verify_quads_match_c ... FAILED
+test verify_triples_match_c ... FAILED
+test utf8_codepoint_walk_matches_c ... ok
+test utf8_verify_3byte_exhaustive_matches_c ... ok
+
+failures:
+
+---- dsplen_tables_match_c stdout ----
+
+thread 'dsplen_tables_match_c' (1749) panicked at crates/common/wchar/tests/c_parity.rs:60:13:
+assertion `left == right` failed: enc 1 b 0
+  left: 2
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- mblen_tables_match_c stdout ----
+
+thread 'mblen_tables_match_c' (1752) panicked at crates/common/wchar/tests/c_parity.rs:35:13:
+assertion `left == right` failed: enc 1 b 0
+  left: 2
+ right: 1
+
+---- or_incomplete_edge_cases stdout ----
+
+thread 'or_incomplete_edge_cases' (1753) panicked at crates/common/wchar/tests/c_parity.rs:241:5:
+assertion `left == right` failed
+  left: 2147483647
+ right: 1
+
+---- verifystr_corpora_match_c stdout ----
+
+thread 'verifystr_corpora_match_c' (1760) panicked at crates/common/wchar/tests/c_parity.rs:162:13:
+assertion `left == right` failed: corpus 0 enc 1
+  left: 0
+ right: 1
+
+---- mb2wchar_matches_c stdout ----
+
+thread 'mb2wchar_matches_c' (1751) panicked at crates/common/wchar/tests/c_parity.rs:184:9:
+assertion `left == right` failed: enc 1
+  left: 16199217367794953908
+ right: 8301471130329289311
+
+---- verifychar_pairs_match_c stdout ----
+
+thread 'verifychar_pairs_match_c' (1759) panicked at crates/common/wchar/tests/c_parity.rs:80:9:
+assertion `left == right` failed: enc 1
+  left: 4296255571970736083
+ right: 16530433274840858579
+
+---- verify_quads_match_c stdout ----
+
+thread 'verify_quads_match_c' (1757) panicked at crates/common/wchar/tests/c_parity.rs:124:9:
+assertion `left == right` failed: enc 1
+  left: 13660537009798547749
+ right: 1981323959443683474
+
+---- verify_triples_match_c stdout ----
+
+thread 'verify_triples_match_c' (1758) panicked at crates/common/wchar/tests/c_parity.rs:102:9:
+assertion `left == right` failed: enc 1
+  left: 15066513172263236677
+ right: 2498594579922710343
+
+
+failures:
+    dsplen_tables_match_c
+    mb2wchar_matches_c
+    mblen_tables_match_c
+    or_incomplete_edge_cases
+    verify_quads_match_c
+    verify_triples_match_c
+    verifychar_pairs_match_c
+    verifystr_corpora_match_c
+
+test result: FAILED. 5 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.64s
+
+error: test failed, to rerun pass `-p wchar --test c_parity`
+
+*** result: Failure(101)

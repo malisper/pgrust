@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ delete ! in pg_unicode_to_server_noerror
+@@ -650,17 +650,17 @@
+     Ok(out)
+ }
+ 
+ /// Like [`pg_unicode_to_server`], but conversion failure is `Ok(None)`.
+ pub fn pg_unicode_to_server_noerror<'mcx>(
+     mcx: Mcx<'mcx>,
+     c: pg_wchar,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+-    if !is_valid_unicode_codepoint(c) {
++    if  /* ~ changed by cargo-mutants ~ */is_valid_unicode_codepoint(c) {
+         return Ok(None);
+     }
+     if c <= 0x7F {
+         return Ok(Some(slice_in(mcx, &[c as u8])?));
+     }
+     let server_encoding = database_encoding();
+     if server_encoding == PG_UTF8 {
+         let mut buf = [0u8; MAX_MULTIBYTE_CHAR_LEN];

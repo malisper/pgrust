@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace -= with /= in pg_utf2wchar_with_len
+@@ -448,17 +448,17 @@
+             let c3 = (from[fi + 2] & 0x3f) as u32;
+             let c4 = (from[fi + 3] & 0x3f) as u32;
+             to[ti] = (c1 << 18) | (c2 << 12) | (c3 << 6) | c4;
+             fi += 4;
+             len -= 4;
+         } else {
+             to[ti] = b as pg_wchar;
+             fi += 1;
+-            len -= 1;
++            len /= /* ~ changed by cargo-mutants ~ */ 1;
+         }
+         ti += 1;
+     }
+     to[ti] = 0;
+     ti as i32
+ }
+ 
+ fn pg_wchar2utf_with_len(from: &[pg_wchar], to: &mut [u8]) -> i32 {

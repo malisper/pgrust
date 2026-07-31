@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete match arm 0xf0 in utf8_second_byte_legal
+@@ -1316,17 +1316,17 @@
+     true
+ }
+ 
+ #[inline(always)]
+ fn utf8_second_byte_legal(b0: u8, a: u8) -> bool {
+     match b0 {
+         0xe0 => (0xa0..=0xbf).contains(&a),
+         0xed => (0x80..=0x9f).contains(&a),
+-        0xf0 => (0x90..=0xbf).contains(&a),
++         /* ~ changed by cargo-mutants ~ */
+         0xf4 => (0x80..=0x8f).contains(&a),
+         _ => (0x80..=0xbf).contains(&a),
+     }
+ }
+ 
+ /// Writes the two-byte "invalid character" marker; `dst` must hold two bytes
+ /// and `encoding` must be multibyte (C asserts).
+ pub fn pg_encoding_set_invalid(encoding: i32, dst: &mut [u8]) {

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete - in pg_utf8_verifychar
+@@ -1107,17 +1107,17 @@
+         l = 4;
+     } else {
+         l = 1;
+     }
+     if l as usize > s.len() {
+         return -1;
+     }
+     if !pg_utf8_islegal(s, l) {
+-        return -1;
++        return  /* ~ changed by cargo-mutants ~ */1;
+     }
+     l
+ }
+ 
+ /// Shared body of every non-UTF8 `*_verifystr` in wchar.c, monomorphized per
+ /// character verifier.
+ #[inline]
+ fn verify_str(s: &[u8], verifychar: impl Fn(&[u8]) -> i32) -> i32 {

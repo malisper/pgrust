@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace > with >= in pg_euccn2wchar_with_len
+@@ -239,17 +239,17 @@
+ fn pg_euckr_dsplen(s: &[u8]) -> i32 {
+     pg_euc_dsplen(s)
+ }
+ 
+ fn pg_euccn2wchar_with_len(from: &[u8], to: &mut [pg_wchar]) -> i32 {
+     let mut len = from.len();
+     let mut fi = 0;
+     let mut ti = 0;
+-    while len > 0 && from[fi] != 0 {
++    while len >= /* ~ changed by cargo-mutants ~ */ 0 && from[fi] != 0 {
+         if from[fi] == SS2 || from[fi] == SS3 {
+             let lead = from[fi] as u32;
+             if len < 3 {
+                 break;
+             }
+             fi += 1;
+             to[ti] = (lead << 16) | ((from[fi] as u32) << 8);
+             fi += 1;

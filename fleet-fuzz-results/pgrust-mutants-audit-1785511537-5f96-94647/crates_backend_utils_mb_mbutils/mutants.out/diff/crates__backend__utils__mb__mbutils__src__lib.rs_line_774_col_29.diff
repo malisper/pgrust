@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace && with || in pg_mbstrlen
+@@ -766,17 +766,17 @@
+ /// silently stepped OVER a NUL embedded inside an invalid multibyte
+ /// character where C's pg_mblen_cstr NUL-scan errors.
+ pub fn pg_mbstrlen(mbstr: &[u8]) -> PgResult<i32> {
+     if pg_database_encoding_max_length() == 1 {
+         return Ok(c_string_len(mbstr) as i32);
+     }
+     let mut len = 0;
+     let mut pos = 0usize;
+-    while pos < mbstr.len() && mbstr[pos] != 0 {
++    while pos < mbstr.len() || /* ~ changed by cargo-mutants ~ */ mbstr[pos] != 0 {
+         // C pg_mblen_cstr: scan bytes 1..length for the terminator.
+         let length = pg_mblen(&mbstr[pos..]);
+         for i in 1..length as usize {
+             if mbstr.get(pos + i).copied().unwrap_or(0) == 0 {
+                 return Err(report_invalid_encoding_db(&mbstr[pos..], length, i as i32));
+             }
+         }
+         pos += length as usize;

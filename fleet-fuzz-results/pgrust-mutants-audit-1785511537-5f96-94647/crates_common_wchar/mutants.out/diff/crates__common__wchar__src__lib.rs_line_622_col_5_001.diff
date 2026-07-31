@@ -1,0 +1,74 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_wchar2mule_with_len -> i32 with 1
+@@ -614,70 +614,17 @@
+ }
+ 
+ #[inline(always)]
+ fn is_lcprv2(b: u8) -> bool {
+     b == LCPRV2_A || b == LCPRV2_B
+ }
+ 
+ fn pg_wchar2mule_with_len(from: &[pg_wchar], to: &mut [u8]) -> i32 {
+-    let mut len = from.len();
+-    let mut fi = 0;
+-    let mut ti = 0;
+-    let mut cnt = 0i32;
+-    while len > 0 && from[fi] != 0 {
+-        let w = from[fi];
+-        let lb = (w >> 16) as u8;
+-        if is_lc1(lb) {
+-            to[ti] = lb;
+-            to[ti + 1] = w as u8;
+-            ti += 2;
+-            cnt += 2;
+-        } else if is_lc2(lb) {
+-            to[ti] = lb;
+-            to[ti + 1] = (w >> 8) as u8;
+-            to[ti + 2] = w as u8;
+-            ti += 3;
+-            cnt += 3;
+-        } else if (0xa0..=0xdf).contains(&lb) {
+-            to[ti] = LCPRV1_A;
+-            to[ti + 1] = lb;
+-            to[ti + 2] = w as u8;
+-            ti += 3;
+-            cnt += 3;
+-        } else if (0xe0..=0xef).contains(&lb) {
+-            to[ti] = LCPRV1_B;
+-            to[ti + 1] = lb;
+-            to[ti + 2] = w as u8;
+-            ti += 3;
+-            cnt += 3;
+-        } else if (0xf0..=0xf4).contains(&lb) {
+-            to[ti] = LCPRV2_A;
+-            to[ti + 1] = lb;
+-            to[ti + 2] = (w >> 8) as u8;
+-            to[ti + 3] = w as u8;
+-            ti += 4;
+-            cnt += 4;
+-        } else if (0xf5..=0xfe).contains(&lb) {
+-            to[ti] = LCPRV2_B;
+-            to[ti + 1] = lb;
+-            to[ti + 2] = (w >> 8) as u8;
+-            to[ti + 3] = w as u8;
+-            ti += 4;
+-            cnt += 4;
+-        } else {
+-            to[ti] = w as u8;
+-            ti += 1;
+-            cnt += 1;
+-        }
+-        fi += 1;
+-        len -= 1;
+-    }
+-    to[ti] = 0;
+-    cnt
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_mule_mblen(s: &[u8]) -> i32 {
+     let b = s[0];
+     if is_lc1(b) {
+         2
+     } else if is_lcprv1(b) {
+         3

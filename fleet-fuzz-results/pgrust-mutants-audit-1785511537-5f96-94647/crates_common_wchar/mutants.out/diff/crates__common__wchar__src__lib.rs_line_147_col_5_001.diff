@@ -1,0 +1,60 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_euc2wchar_with_len -> i32 with 1
+@@ -139,56 +139,17 @@
+     } else if c < 0x20 || c == 0x7f {
+         -1
+     } else {
+         1
+     }
+ }
+ 
+ fn pg_euc2wchar_with_len(from: &[u8], to: &mut [pg_wchar]) -> i32 {
+-    let mut len = from.len();
+-    let mut fi = 0;
+-    let mut ti = 0;
+-    while len > 0 && from[fi] != 0 {
+-        if from[fi] == SS2 {
+-            if len < 2 {
+-                break;
+-            }
+-            fi += 1;
+-            to[ti] = ((SS2 as u32) << 8) | from[fi] as u32;
+-            fi += 1;
+-            len -= 2;
+-        } else if from[fi] == SS3 {
+-            if len < 3 {
+-                break;
+-            }
+-            fi += 1;
+-            to[ti] = ((SS3 as u32) << 16) | ((from[fi] as u32) << 8);
+-            fi += 1;
+-            to[ti] |= from[fi] as u32;
+-            fi += 1;
+-            len -= 3;
+-        } else if is_highbit_set(from[fi]) {
+-            if len < 2 {
+-                break;
+-            }
+-            to[ti] = (from[fi] as u32) << 8;
+-            fi += 1;
+-            to[ti] |= from[fi] as u32;
+-            fi += 1;
+-            len -= 2;
+-        } else {
+-            to[ti] = from[fi] as pg_wchar;
+-            fi += 1;
+-            len -= 1;
+-        }
+-        ti += 1;
+-    }
+-    to[ti] = 0;
+-    ti as i32
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[inline]
+ fn pg_euc_mblen(s: &[u8]) -> i32 {
+     if s[0] == SS2 {
+         2
+     } else if s[0] == SS3 {
+         3

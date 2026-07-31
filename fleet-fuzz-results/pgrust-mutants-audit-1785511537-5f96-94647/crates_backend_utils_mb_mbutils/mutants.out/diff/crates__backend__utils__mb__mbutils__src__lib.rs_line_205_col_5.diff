@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_char_to_encoding -> pg_enc with Default::default()
+@@ -197,17 +197,17 @@
+     let key = &buf[..n];
+     match PG_ENCNAME.binary_search_by(|(nm, _)| nm.as_bytes().cmp(key)) {
+         Ok(idx) => PG_ENCNAME[idx].1,
+         Err(_) => -1,
+     }
+ }
+ 
+ pub fn pg_char_to_encoding(name: &str) -> pg_enc {
+-    pg_char_to_encoding_bytes(name.as_bytes())
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_valid_client_encoding(name: &str) -> pg_enc {
+     let enc = pg_char_to_encoding(name);
+     if enc < 0 || !pg_valid_fe_encoding(enc) {
+         return -1;
+     }
+     enc

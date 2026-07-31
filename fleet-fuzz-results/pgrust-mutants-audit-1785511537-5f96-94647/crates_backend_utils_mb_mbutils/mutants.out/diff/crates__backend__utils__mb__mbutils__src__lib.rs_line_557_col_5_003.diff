@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_server_to_client -> PgResult<Option<PgVec<'mcx, u8>>> with PgResult::from(None)
+@@ -549,17 +549,17 @@
+     if encoding == client_encoding() {
+         return perform_default_encoding_conversion(mcx, s, true);
+     }
+ 
+     pg_do_encoding_conversion(mcx, s, encoding, db_encoding)
+ }
+ 
+ pub fn pg_server_to_client<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+-    pg_server_to_any(mcx, s, client_encoding())
++    PgResult::from(None) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_server_to_any<'mcx>(
+     mcx: Mcx<'mcx>,
+     s: &[u8],
+     encoding: pg_enc,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+     if s.is_empty() {

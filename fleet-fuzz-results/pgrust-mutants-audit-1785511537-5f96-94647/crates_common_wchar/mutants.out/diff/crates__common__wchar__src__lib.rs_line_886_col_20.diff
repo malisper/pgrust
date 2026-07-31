@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace < with == in pg_euckr_verifychar
+@@ -878,17 +878,17 @@
+ 
+ fn pg_eucjp_verifystr(s: &[u8]) -> i32 {
+     verify_str(s, pg_eucjp_verifychar)
+ }
+ 
+ fn pg_euckr_verifychar(s: &[u8]) -> i32 {
+     let c1 = s[0];
+     if is_highbit_set(c1) {
+-        if s.len() < 2 {
++        if s.len() == /* ~ changed by cargo-mutants ~ */ 2 {
+             return -1;
+         }
+         if !is_euc_range_valid(c1) || !is_euc_range_valid(s[1]) {
+             return -1;
+         }
+         2
+     } else {
+         1

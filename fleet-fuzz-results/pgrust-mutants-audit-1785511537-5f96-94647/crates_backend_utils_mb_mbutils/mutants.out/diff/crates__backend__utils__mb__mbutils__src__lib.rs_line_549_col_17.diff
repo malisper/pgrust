@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in pg_any_to_server
+@@ -541,17 +541,17 @@
+                 if b == 0 || (b & 0x80) != 0 {
+                     return Err(invalid_byte_value_error(b));
+                 }
+             }
+         }
+         return Ok(None);
+     }
+ 
+-    if encoding == client_encoding() {
++    if encoding != /* ~ changed by cargo-mutants ~ */ client_encoding() {
+         return perform_default_encoding_conversion(mcx, s, true);
+     }
+ 
+     pg_do_encoding_conversion(mcx, s, encoding, db_encoding)
+ }
+ 
+ pub fn pg_server_to_client<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+     pg_server_to_any(mcx, s, client_encoding())

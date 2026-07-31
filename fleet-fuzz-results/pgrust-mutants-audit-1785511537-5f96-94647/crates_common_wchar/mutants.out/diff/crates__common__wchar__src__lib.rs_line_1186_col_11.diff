@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace += with -= in is_valid_ascii
+@@ -1178,17 +1178,17 @@
+     // set; high-bit inputs are caught by highbit_cum (C's USE_NO_SIMD path).
+     let mut highbit_cum: u64 = 0;
+     let mut zero_cum: u64 = 0x8080_8080_8080_8080;
+     let mut i = 0;
+     while i < STRIDE_LENGTH {
+         let w = u64::from_ne_bytes(chunk[i..i + 8].try_into().unwrap());
+         zero_cum &= w.wrapping_add(0x7f7f_7f7f_7f7f_7f7f);
+         highbit_cum |= w;
+-        i += 8;
++        i -= /* ~ changed by cargo-mutants ~ */ 8;
+     }
+     highbit_cum & 0x8080_8080_8080_8080 == 0 && zero_cum == 0x8080_8080_8080_8080
+ }
+ 
+ const ERR: u32 = 0;
+ const BGN: u32 = 11;
+ const CS1: u32 = 16;
+ const CS2: u32 = 1;

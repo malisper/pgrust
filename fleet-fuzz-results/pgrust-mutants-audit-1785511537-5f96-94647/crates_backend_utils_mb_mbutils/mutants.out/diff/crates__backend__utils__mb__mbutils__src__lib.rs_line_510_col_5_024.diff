@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_client_to_server -> PgResult<Option<PgVec<'mcx, u8>>> with PgResult::from(Some(PgVec::from(1)))
+@@ -502,17 +502,17 @@
+         no_error,
+     )
+ }
+ 
+ // C returns the source pointer in a register; the Option<PgVec> analog is
+ // >16B (sret through memory) unless the identity arm inlines into the caller.
+ #[inline]
+ pub fn pg_client_to_server<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+-    pg_any_to_server(mcx, s, client_encoding())
++    PgResult::from(Some(PgVec::from(1))) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Always validates, even when no conversion is needed: the input comes from
+ /// outside the database.
+ // inline(always): the identity arm must fold into the caller or the
+ // >16B return is materialized through memory (sret), the per-call constant
+ // behind the mb_client_to_server_8 FAIL (docs/benchmarks/mbutils.md).
+ #[inline(always)]

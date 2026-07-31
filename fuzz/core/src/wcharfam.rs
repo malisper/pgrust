@@ -413,6 +413,23 @@ fn dbwalk_case(payload: &[u8]) {
     let r = mbutils::pg_mbstrlen_with_len(&p);
     cmp_result("pg_mbstrlen_with_len", enc_be, bytes, c_ret, c_err, &r);
 
+    // UNPADDED plane (mutants-audit finding: the pad hid the loop-guard
+    // boundary where the walk reaches the slice end exactly): limit = the
+    // true payload length on both sides. BE-encoding mblen kernels read
+    // only byte 0, so the unpadded Rust slice is in-contract.
+    if !bytes.is_empty() {
+        let mut c_err = 0;
+        let c_ret = unsafe {
+            wfam_x_mbstrlen_with_len_db(c_buf.as_ptr().cast(), bytes.len() as c_int, &mut c_err)
+        };
+        let r = mbutils::pg_mbstrlen_with_len(bytes);
+        cmp_result("pg_mbstrlen_with_len(unpadded)", enc_be, bytes, c_ret, c_err, &r);
+        let mut c_err = 0;
+        let c_ret = unsafe { wfam_x_mbstrlen_db(c_buf.as_ptr().cast(), &mut c_err) };
+        let r = mbutils::pg_mbstrlen(bytes);
+        cmp_result("pg_mbstrlen(unpadded)", enc_be, bytes, c_ret, c_err, &r);
+    }
+
     // clip family (value plane only; strings need not be valid)
     let len = (len_sel as i32) % (p.len() as i32 + 1);
     let limit = limit_sel as i8 as i32;

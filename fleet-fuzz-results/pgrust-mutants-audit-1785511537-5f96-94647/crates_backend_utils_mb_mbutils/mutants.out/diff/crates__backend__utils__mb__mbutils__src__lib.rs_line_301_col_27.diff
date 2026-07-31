@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in PrepareClientEncoding
+@@ -293,17 +293,17 @@
+     if xact_seams::is_transaction_state::call() {
+         let to_server_proc =
+             namespace_seams::find_default_conversion_proc::call(encoding, current_server_encoding)?;
+         if to_server_proc == InvalidOid {
+             return Ok(-1);
+         }
+         let to_client_proc =
+             namespace_seams::find_default_conversion_proc::call(current_server_encoding, encoding)?;
+-        if to_client_proc == InvalidOid {
++        if to_client_proc != /* ~ changed by cargo-mutants ~ */ InvalidOid {
+             return Ok(-1);
+         }
+         let convinfo = ConvProcInfo {
+             s_encoding: current_server_encoding,
+             c_encoding: encoding,
+             to_server: resolve_conv_proc(to_server_proc)?,
+             to_client: resolve_conv_proc(to_client_proc)?,
+         };

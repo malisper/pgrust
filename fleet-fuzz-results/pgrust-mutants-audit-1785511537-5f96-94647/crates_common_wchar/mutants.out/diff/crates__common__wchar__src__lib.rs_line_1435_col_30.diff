@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace | with & in unicode_to_utf8
+@@ -1427,17 +1427,17 @@
+     if c <= 0x7f {
+         utf8string[0] = c as u8;
+     } else if c <= 0x7ff {
+         utf8string[0] = 0xc0 | ((c >> 6) & 0x1f) as u8;
+         utf8string[1] = 0x80 | (c & 0x3f) as u8;
+     } else if c <= 0xffff {
+         utf8string[0] = 0xe0 | ((c >> 12) & 0x0f) as u8;
+         utf8string[1] = 0x80 | ((c >> 6) & 0x3f) as u8;
+-        utf8string[2] = 0x80 | (c & 0x3f) as u8;
++        utf8string[2] = 0x80 & /* ~ changed by cargo-mutants ~ */ (c & 0x3f) as u8;
+     } else {
+         utf8string[0] = 0xf0 | ((c >> 18) & 0x07) as u8;
+         utf8string[1] = 0x80 | ((c >> 12) & 0x3f) as u8;
+         utf8string[2] = 0x80 | ((c >> 6) & 0x3f) as u8;
+         utf8string[3] = 0x80 | (c & 0x3f) as u8;
+     }
+ }
+ 

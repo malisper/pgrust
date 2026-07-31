@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace || with && in pg_eucjp_verifychar
+@@ -862,17 +862,17 @@
+         if !is_euc_range_valid(s[1]) || !is_euc_range_valid(s[2]) {
+             return -1;
+         }
+         3
+     } else if is_highbit_set(c1) {
+         if len < 2 {
+             return -1;
+         }
+-        if !is_euc_range_valid(c1) || !is_euc_range_valid(s[1]) {
++        if !is_euc_range_valid(c1) && /* ~ changed by cargo-mutants ~ */ !is_euc_range_valid(s[1]) {
+             return -1;
+         }
+         2
+     } else {
+         1
+     }
+ }
+ 

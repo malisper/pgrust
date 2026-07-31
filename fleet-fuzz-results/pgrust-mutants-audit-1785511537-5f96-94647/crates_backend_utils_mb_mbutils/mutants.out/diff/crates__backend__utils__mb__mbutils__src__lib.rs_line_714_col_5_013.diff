@@ -1,0 +1,29 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_encoding_wchar2mb_with_len -> PgResult<PgVec<'mcx, u8>> with PgResult::from_iter([PgVec::from_iter([1])])
+@@ -706,25 +706,17 @@
+     pg_encoding_wchar2mb_with_len(mcx, database_encoding(), from)
+ }
+ 
+ pub fn pg_encoding_wchar2mb_with_len<'mcx>(
+     mcx: Mcx<'mcx>,
+     encoding: pg_enc,
+     from: &[pg_wchar],
+ ) -> PgResult<PgVec<'mcx, u8>> {
+-    let conv = pg_wchar_table[encoding as usize]
+-        .wchar2mb_with_len
+-        .unwrap_or_else(|| panic!("wchar2mb: client-only encoding {encoding} has no converter"));
+-    let cap = from.len() * pg_wchar_table[encoding as usize].maxmblen as usize + 1;
+-    let mut to: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, cap)?;
+-    to.resize(cap, 0);
+-    let n = conv(from, &mut to);
+-    to.truncate(n as usize);
+-    Ok(to)
++    PgResult::from_iter([PgVec::from_iter([1])]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Byte length of the leading character, bounded by the slice end (C's
+ /// `pg_mblen_range(mbstr, end)`); errors if the character overruns it.
+ pub fn pg_mblen_range(mbstr: &[u8]) -> PgResult<i32> {
+     debug_assert!(!mbstr.is_empty());
+     let length = pg_encoding_mblen(database_encoding(), mbstr);
+     if length as usize > mbstr.len() {

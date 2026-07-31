@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_mbcliplen -> i32 with 0
+@@ -853,17 +853,17 @@
+     }
+     while i < s.len() && s[i].wrapping_sub(1) < 0x7f {
+         i += 1;
+     }
+     i
+ }
+ 
+ pub fn pg_mbcliplen(mbstr: &[u8], len: i32, limit: i32) -> i32 {
+-    pg_encoding_mbcliplen(database_encoding(), mbstr, len, limit)
++    0 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Byte length of the longest prefix of the first `len` bytes not exceeding
+ /// `limit` bytes without splitting a character; string must be valid.
+ pub fn pg_encoding_mbcliplen(encoding: pg_enc, mbstr: &[u8], len: i32, limit: i32) -> i32 {
+     if pg_encoding_max_length(encoding) == 1 {
+         return cliplen(mbstr, len, limit);
+     }

@@ -1,0 +1,25 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_encoding_to_char -> &'static str with "xyzzy"
+@@ -217,21 +217,17 @@
+     let enc = pg_char_to_encoding(name);
+     if enc < 0 || !pg_valid_be_encoding(enc) {
+         return -1;
+     }
+     enc
+ }
+ 
+ pub fn pg_encoding_to_char(encoding: pg_enc) -> &'static str {
+-    if pg_valid_encoding(encoding) {
+-        enc_name(encoding)
+-    } else {
+-        ""
+-    }
++    "xyzzy" /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// The resolved conversion procedure (C caches a `FmgrInfo`; the resolved
+ /// `fn_addr` is the resolve-once payload — conversion procs use no `fn_extra`).
+ #[derive(Clone, Copy)]
+ struct ResolvedConvProc {
+     fn_addr: PGFunction,
+ }

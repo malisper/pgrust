@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace += with -= in pg_verify_mbstr_len
+@@ -1106,17 +1106,17 @@
+         let remaining = &mbstr[pos..];
+         if remaining[0] & 0x80 == 0 {
+             if remaining[0] == 0 {
+                 if no_error {
+                     return Ok(-1);
+                 }
+                 return Err(report_invalid_encoding(encoding, remaining));
+             }
+-            mb_len += 1;
++            mb_len -= /* ~ changed by cargo-mutants ~ */ 1;
+             pos += 1;
+             continue;
+         }
+         let l = pg_encoding_verifymbchar(encoding, remaining);
+         if l < 0 {
+             if no_error {
+                 return Ok(-1);
+             }

@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace GetMessageEncoding -> pg_enc with Default::default()
+@@ -935,17 +935,17 @@
+     database_encoding()
+ }
+ 
+ pub fn GetDatabaseEncodingName() -> &'static str {
+     enc_name(database_encoding())
+ }
+ 
+ pub fn GetMessageEncoding() -> pg_enc {
+-    MESSAGE_ENCODING.with(|e| e.get())
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_database_encoding_max_length() -> i32 {
+     pg_wchar_table[database_encoding() as usize].maxmblen
+ }
+ 
+ pub type MbcharacterIncrementer = fn(&mut [u8]) -> bool;
+ 

@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace >= with < in pg_do_encoding_conversion
+@@ -458,17 +458,17 @@
+         ));
+     }
+ 
+     let proc = namespace_seams::find_default_conversion_proc::call(src_encoding, dest_encoding)?;
+     if proc == InvalidOid {
+         return Err(no_default_conversion_error(src_encoding, dest_encoding));
+     }
+ 
+-    if src.len() >= MAX_ALLOC_HUGE_SIZE / MAX_CONVERSION_GROWTH {
++    if src.len() < /* ~ changed by cargo-mutants ~ */ MAX_ALLOC_HUGE_SIZE / MAX_CONVERSION_GROWTH {
+         return Err(too_long_error(src.len()));
+     }
+ 
+     // General case: C's OidFunctionCall6 re-resolves per call (only the
+     // client<->server default pair is cached); mirrored here.
+     let resolved = resolve_conv_proc(proc)?;
+     let (_, result) = convert_with_proc(mcx, resolved, src_encoding, dest_encoding, src, false)?;
+ 

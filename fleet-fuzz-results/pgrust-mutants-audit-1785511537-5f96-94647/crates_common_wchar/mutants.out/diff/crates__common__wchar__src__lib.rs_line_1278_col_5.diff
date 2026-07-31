@@ -1,0 +1,59 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_utf8_islegal -> bool with true
+@@ -1270,55 +1270,17 @@
+             break;
+         }
+         rest = &rest[l as usize..];
+     }
+     (len - rest.len()) as i32
+ }
+ 
+ pub fn pg_utf8_islegal(source: &[u8], length: i32) -> bool {
+-    match length {
+-        4 => {
+-            if !(0x80..=0xbf).contains(&source[3]) {
+-                return false;
+-            }
+-            if !(0x80..=0xbf).contains(&source[2]) {
+-                return false;
+-            }
+-            if !utf8_second_byte_legal(source[0], source[1]) {
+-                return false;
+-            }
+-        }
+-        3 => {
+-            if !(0x80..=0xbf).contains(&source[2]) {
+-                return false;
+-            }
+-            if !utf8_second_byte_legal(source[0], source[1]) {
+-                return false;
+-            }
+-        }
+-        2 => {
+-            if !utf8_second_byte_legal(source[0], source[1]) {
+-                return false;
+-            }
+-        }
+-        1 => {}
+-        // C (wchar.c pg_utf8_islegal) switch default: lengths outside 1..=4
+-        // are illegal. Divergence found+fixed via proofs/utf8 out-of-contract
+-        // harness (Rust used to fall through to the first-byte checks).
+-        _ => return false,
+-    }
+-    let a = source[0];
+-    if (0x80..0xc2).contains(&a) {
+-        return false;
+-    }
+-    if a > 0xf4 {
+-        return false;
+-    }
+-    true
++    true /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[inline(always)]
+ fn utf8_second_byte_legal(b0: u8, a: u8) -> bool {
+     match b0 {
+         0xe0 => (0xa0..=0xbf).contains(&a),
+         0xed => (0x80..=0x9f).contains(&a),
+         0xf0 => (0x90..=0xbf).contains(&a),

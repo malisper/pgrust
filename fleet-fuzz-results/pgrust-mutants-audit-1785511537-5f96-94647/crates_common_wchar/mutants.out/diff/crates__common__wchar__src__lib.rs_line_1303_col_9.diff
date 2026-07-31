@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete match arm 1 in pg_utf8_islegal
+@@ -1295,17 +1295,17 @@
+                 return false;
+             }
+         }
+         2 => {
+             if !utf8_second_byte_legal(source[0], source[1]) {
+                 return false;
+             }
+         }
+-        1 => {}
++         /* ~ changed by cargo-mutants ~ */
+         // C (wchar.c pg_utf8_islegal) switch default: lengths outside 1..=4
+         // are illegal. Divergence found+fixed via proofs/utf8 out-of-contract
+         // harness (Rust used to fall through to the first-byte checks).
+         _ => return false,
+     }
+     let a = source[0];
+     if (0x80..0xc2).contains(&a) {
+         return false;

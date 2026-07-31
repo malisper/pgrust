@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ delete ! in SetClientEncoding
+@@ -342,17 +342,17 @@
+ 
+     let mut found = false;
+     CONV_PROC_LIST.with(|l| {
+         let mut list = l.borrow_mut();
+         let mut i = 0;
+         while i < list.len() {
+             let info = list[i];
+             if info.s_encoding == current_server_encoding && info.c_encoding == encoding {
+-                if !found {
++                if  /* ~ changed by cargo-mutants ~ */found {
+                     CLIENT_ENCODING.with(|c| c.set(encoding));
+                     TO_SERVER_CONV_PROC.with(|p| p.set(Some(info.to_server)));
+                     TO_CLIENT_CONV_PROC.with(|p| p.set(Some(info.to_client)));
+                     found = true;
+                     i += 1;
+                 } else {
+                     list.remove(i);
+                 }

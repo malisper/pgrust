@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace database_encoding -> pg_enc with Default::default()
+@@ -255,17 +255,17 @@
+     static UTF8_TO_SERVER_CONV_PROC: Cell<Option<ResolvedConvProc>> = const { Cell::new(None) };
+     // C ConvProcList lives in TopMemoryContext for the backend lifetime; no
+     // arena outlives the backend thread, so a std Vec of Copy entries.
+     static CONV_PROC_LIST: RefCell<Vec<ConvProcInfo>> = const { RefCell::new(Vec::new()) };
+ }
+ 
+ #[inline]
+ fn database_encoding() -> pg_enc {
+-    DATABASE_ENCODING.with(|e| e.get())
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[inline]
+ fn client_encoding() -> pg_enc {
+     CLIENT_ENCODING.with(|e| e.get())
+ }
+ 
+ fn resolve_conv_proc(proc: Oid) -> PgResult<ResolvedConvProc> {

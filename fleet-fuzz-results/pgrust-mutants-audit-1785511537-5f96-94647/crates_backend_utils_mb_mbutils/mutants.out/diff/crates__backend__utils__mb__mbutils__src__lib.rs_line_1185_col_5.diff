@@ -1,0 +1,28 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace report_invalid_encoding_int -> Box<PgError> with Box::new(Default::default())
+@@ -1177,24 +1177,17 @@
+ #[track_caller]
+ #[cold]
+ fn report_invalid_encoding_int(
+     encoding: pg_enc,
+     mbstr: &[u8],
+     mblen: i32,
+     len: i32,
+ ) -> Box<PgError> {
+-    Box::new(
+-        PgError::error(format!(
+-            "invalid byte sequence for encoding \"{}\": {}",
+-            enc_name(encoding),
+-            byte_sequence(mbstr, mblen, len)
+-        ))
+-        .with_sqlstate(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+-    )
++    Box::new(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[track_caller]
+ #[cold]
+ fn report_invalid_encoding_db(mbstr: &[u8], mblen: i32, len: i32) -> Box<PgError> {
+     report_invalid_encoding_int(database_encoding(), mbstr, mblen, len)
+ }
+ 
