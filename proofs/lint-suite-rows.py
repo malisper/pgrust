@@ -26,12 +26,14 @@ divergence:
      harness field, leaving expected/tier/time_s empty (fixed in 4b69bcd5a2).
 
 Vocabulary is derived, not invented:
-  expected  green | must-fail | wall-recorded   -- the three run-suite.sh
-                                                  `case "$expected"` arms
+  expected  green | must-fail | wall-recorded   -- gating/informational
+                                                  run-suite.sh `case` arms
             missing                             -- adjudicated-absent rows,
-                                                  check-suite-names.py rule 2
+                                                  check-suite-names.py rule 2;
+                                                  runner skips without kani
             unmeasured                          -- dark-harness-sweep
-                                                  registration (1e63949b81)
+                                                  registration (1e63949b81);
+                                                  run by `run-suite.sh measure`
   tier      per-commit | release-gate | calibration | defect-witness |
             unmeasured                          -- README.md "Layout" +
                                                   run-suite.sh row_selected()
@@ -53,9 +55,9 @@ Checks (violations; any one exits 1):
               the CI cluster; check-suite-names.py never looks at flag paths)
 
 Advisories (reported, never fail): rows whose `expected` token is in the
-manifest vocabulary but which run-suite.sh's own `case` cannot score
-(`missing`, `unmeasured` -> BAD-MANIFEST-ROW under `run-suite.sh all`), and
-exact duplicate rows.
+manifest vocabulary but which run-suite.sh has no arm for (none today —
+`missing` and `unmeasured` gained real arms in the suite-runner-arms lane;
+the advisory stays armed for future vocabulary), and exact duplicate rows.
 
 Usage:
   ./lint-suite-rows.py                 # lint proofs/SUITE.tsv
@@ -75,9 +77,13 @@ REQUIRED = COLUMNS[:-1]  # notes may legitimately be empty
 
 EXPECTED_TOKENS = {"green", "must-fail", "wall-recorded", "missing",
                    "unmeasured"}
-# Tokens run-suite.sh's `case "$expected"` can actually score; anything else
-# in EXPECTED_TOKENS is manifest bookkeeping the runner reports as a bad row.
-RUNNER_SCORED = {"green", "must-fail", "wall-recorded"}
+# Tokens run-suite.sh can actually handle. Since the suite-runner-arms lane,
+# ALL five have real runner arms: `missing` -> skipped-missing (no kani
+# invocation, never gates); `unmeasured` -> the `measure` sweep, recorded as
+# unmeasured-<verdict>, never gates. The EXPECTED-UNSCORED advisory below
+# stays armed for any FUTURE vocabulary token added here without a runner arm.
+RUNNER_SCORED = {"green", "must-fail", "wall-recorded", "missing",
+                 "unmeasured"}
 TIER_TOKENS = {"per-commit", "release-gate", "calibration", "defect-witness",
                "unmeasured"}
 

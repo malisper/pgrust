@@ -161,8 +161,27 @@ The whole suite:
 cd proofs
 ./run-suite.sh per-commit     # documented <10s greens + must-fail controls
 ./run-suite.sh release-gate   # + the 10-30s harnesses
-./run-suite.sh all            # everything incl. calibration and unmeasured
+./run-suite.sh all            # every GATING row incl. calibration
+./run-suite.sh measure        # opt-in dark-harness sweep (see below)
 ```
+
+Two `expected` values get special, non-gating handling:
+
+- `expected=missing` (adjudicated-absent harnesses, owned by
+  `check-suite-names.py` rule 2) are **skipped without invoking kani** —
+  `--harness` on a nonexistent name can only fail. Outcome
+  `skipped-missing`, own counter, no effect on the exit code.
+- `expected=unmeasured` (the dark-harness sweep: registered harnesses
+  never solved under the manifest) are **excluded from every gating
+  tier**, including `all` — 700+ harnesses of unknown solve time do not
+  belong in a gate. `./run-suite.sh measure` runs exactly these rows,
+  records the real verdict as `unmeasured-green` / `unmeasured-failed` /
+  `unmeasured-timeout` / `unmeasured-rss-kill` (with wall time) in
+  `suite-results.tsv`, and never gates on them. Greens are the promotion
+  vehicle: each is appended to `suite-promotion-candidates.tsv`
+  (family, harness, measured wall seconds) — candidates for promotion to
+  `expected=green` with a tier derived from the measured time. Failures
+  are the triage queue.
 
 ## Validating the manifest
 
