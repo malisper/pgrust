@@ -65,7 +65,13 @@ extern "C" {
 }
 
 const MAXDATEFIELDS: usize = 25;
-const DATE_WORKBUF: usize = adt_datetime::MAXDATELEN + MAXDATEFIELDS;
+/// Real interval_in's ParseDateTime frame is `char workbuf[256]`
+/// (timestamp.c:908) — NOT date.c's MAXDATELEN+1 (129) and NOT
+/// MAXDATELEN+MAXDATEFIELDS (153, timestamp_in's). Both sides of this
+/// target model interval_in exactly; with the 200-byte text cap +
+/// MAXDATEFIELDS=25 the buffer-full arm is unreachable here (max
+/// fields+NULs = 225), matching by construction.
+const DATE_WORKBUF: usize = 256;
 
 /// datetime.h unit codes for the range masks (DecodeInterval's typmod
 /// range argument) — the set intervaltypmodin can actually produce.

@@ -732,7 +732,13 @@ pg_diff_decode_interval(const char *str, int32 range, int istyle,
 						int64 *usec, int32 *mday, int32 *mon, int32 *year,
 						int32 *dtype)
 {
-	char		workbuf[MAXDATELEN + 1];
+	/* workbuf sized as real interval_in's frame (timestamp.c:908,
+	 * `char workbuf[256]`) — NOT date.c's MAXDATELEN+1. Sizing it 129 made
+	 * the oracle reject 130..256-field-byte inputs with DTERR_BAD_FORMAT
+	 * where real 18.3 interval_in parses on to DTERR_FIELD_OVERFLOW
+	 * (known-divergences/interval-decode-sqlstd-dterr-1-vs-2, RESOLVED:
+	 * shim defect, pgrust was right; docker postgres:18.3 = 22015). */
+	char		workbuf[256];
 	char	   *field[MAXDATEFIELDS];
 	int			ftype[MAXDATEFIELDS];
 	int			nf;
