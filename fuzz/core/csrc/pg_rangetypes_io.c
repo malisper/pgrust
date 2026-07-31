@@ -8360,12 +8360,26 @@ pg_rt_call(PGFunction fn, Oid rettype, int nargs,
 	return d;
 }
 
-static int
-pg_rt_copy_range(Datum d, unsigned char *out, int *outlen, int outcap)
-{
-	RangeType  *r = DatumGetRangeTypeP(d);
-	int			n = (int) VARSIZE(r);
+/*
+ * SQL-NULL is a COMPARED plane, not an ignored one: every entry that copies a
+ * by-ref result reports isnull as class PG_DIFF_ISNULL so the driver can hold
+ * it against the Rust wrapper's own isnull flag. Dereferencing an unreported
+ * SQL NULL was the pg_diff_range_accessors SEGV shape (lane p1-laneac).
+ */
+#define PG_DIFF_ISNULL 97
 
+static int
+pg_rt_copy_range(Datum d, bool isnull, unsigned char *out, int *outlen, int outcap)
+{
+	RangeType  *r;
+	int			n;
+
+	if (isnull)
+		return PG_DIFF_ISNULL;
+	r = DatumGetRangeTypeP(d);
+	if (r == NULL)
+		return PG_DIFF_ISNULL;
+	n = (int) VARSIZE(r);
 	if (n > outcap)
 		return -1;
 	memcpy(out, r, n);
@@ -8379,13 +8393,14 @@ pg_diff_range_in(int typ, const char *str,
 {
 	Datum		args[3];
 	Datum		d;
+	bool		isnull;
 
 	PG_DIFF_ENTER();
 	args[0] = CStringGetDatum(str);
 	args[1] = ObjectIdGetDatum(pg_rt_typ_oid(typ));
 	args[2] = Int32GetDatum(-1);
-	d = pg_rt_call(range_in, InvalidOid, 3, args, NULL, NULL);
-	return pg_rt_copy_range(d, out, outlen, outcap);
+	d = pg_rt_call(range_in, InvalidOid, 3, args, NULL, &isnull);
+	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 
 int
@@ -8393,11 +8408,14 @@ pg_diff_range_out(const unsigned char *img, char *out, int *outlen, int outcap)
 {
 	Datum		args[1];
 	Datum		d;
+	bool		isnull;
 	int			n;
 
 	PG_DIFF_ENTER();
 	args[0] = PointerGetDatum(img);
-	d = pg_rt_call(range_out, InvalidOid, 1, args, NULL, NULL);
+	d = pg_rt_call(range_out, InvalidOid, 1, args, NULL, &isnull);
+	if (isnull || DatumGetCString(d) == NULL)
+		return PG_DIFF_ISNULL;
 	n = (int) strlen(DatumGetCString(d));
 	if (n + 1 > outcap)
 		return -1;
@@ -8413,6 +8431,7 @@ pg_diff_range_recv(int typ, const unsigned char *wire, int wirelen,
 	StringInfoData buf;
 	Datum		args[3];
 	Datum		d;
+	bool		isnull;
 
 	PG_DIFF_ENTER();
 	initStringInfo(&buf);
@@ -8421,8 +8440,8 @@ pg_diff_range_recv(int typ, const unsigned char *wire, int wirelen,
 	args[0] = PointerGetDatum(&buf);
 	args[1] = ObjectIdGetDatum(pg_rt_typ_oid(typ));
 	args[2] = Int32GetDatum(-1);
-	d = pg_rt_call(range_recv, InvalidOid, 3, args, NULL, NULL);
-	return pg_rt_copy_range(d, out, outlen, outcap);
+	d = pg_rt_call(range_recv, InvalidOid, 3, args, NULL, &isnull);
+	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 
 int
@@ -8431,12 +8450,15 @@ pg_diff_range_send(const unsigned char *img,
 {
 	Datum		args[1];
 	Datum		d;
+	bool		isnull;
 	bytea	   *b;
 	int			n;
 
 	PG_DIFF_ENTER();
 	args[0] = PointerGetDatum(img);
-	d = pg_rt_call(range_send, InvalidOid, 1, args, NULL, NULL);
+	d = pg_rt_call(range_send, InvalidOid, 1, args, NULL, &isnull);
+	if (isnull)
+		return PG_DIFF_ISNULL;
 	b = DatumGetByteaP(d);
 	n = (int) (VARSIZE(b) - VARHDRSZ);
 	if (n > outcap)
@@ -8457,6 +8479,10 @@ pg_rt_bound_datum(int typ, int64 v, const unsigned char *numptr)
 		case 1:
 			return Int64GetDatum(v);
 		default:
+			/* byref element: a NULL bound pointer is a DRIVER bug, and the
+			 * verbatim bodies would dereference it — abort loudly instead of
+			 * segfaulting inside a C body. */
+			assert(numptr != NULL);
 			return PointerGetDatum(numptr);
 	}
 }
@@ -8472,6 +8498,7 @@ pg_diff_range_ctor(int typ, int nargs,
 	Datum		args[3];
 	bool		nulls[3] = {null1 != 0, null2 != 0, false};
 	Datum		d;
+	bool		isnull;
 
 	PG_DIFF_ENTER();
 	args[0] = null1 ? (Datum) 0 : pg_rt_bound_datum(typ, v1, n1);
@@ -8483,11 +8510,11 @@ pg_diff_range_ctor(int typ, int nargs,
 		SET_VARSIZE(t, VARHDRSZ + flags_len);
 		memcpy(VARDATA(t), flags_txt, flags_len);
 		args[2] = PointerGetDatum(t);
-		d = pg_rt_call(range_constructor3, pg_rt_typ_oid(typ), 3, args, nulls, NULL);
+		d = pg_rt_call(range_constructor3, pg_rt_typ_oid(typ), 3, args, nulls, &isnull);
 	}
 	else
-		d = pg_rt_call(range_constructor2, pg_rt_typ_oid(typ), 2, args, nulls, NULL);
-	return pg_rt_copy_range(d, out, outlen, outcap);
+		d = pg_rt_call(range_constructor2, pg_rt_typ_oid(typ), 2, args, nulls, &isnull);
+	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 
 /*
@@ -8516,7 +8543,11 @@ pg_diff_range_accessors(const unsigned char *img,
 	}			acc[2];
 
 	PG_DIFF_ENTER();
-	tc = lookup_type_cache(RangeTypeGetOid(r), TYPECACHE_RANGE_INFO);
+	/* SWEEP (lane p1-laneac): range_get_typcache is the C-faithful accessor and
+	 * elogs when rngelemtype is unset, so the ->rngelemtype deref below cannot
+	 * be reached with a non-range entry. A raw lookup_type_cache + unchecked
+	 * deref was the shape audited out of this oracle. */
+	tc = range_get_typcache(NULL, RangeTypeGetOid(r));
 	args[0] = PointerGetDatum(img);
 	acc[0].fn = range_lower;
 	acc[0].out = lower_out;
@@ -8544,7 +8575,12 @@ pg_diff_range_accessors(const unsigned char *img,
 			}
 			else
 			{
-				int			n = (int) VARSIZE_ANY(DatumGetPointer(d));
+				int			n;
+
+				/* fenced by the driver (see fence_flags): a byref bound datum
+				 * reported not-null can never be NULL here. Loud, not skipped. */
+				assert(DatumGetPointer(d) != NULL);
+				n = (int) VARSIZE_ANY(DatumGetPointer(d));
 
 				if (n > outcap)
 					return -1;
@@ -8624,6 +8660,7 @@ pg_diff_range_setop(int which, const unsigned char *img1,
 {
 	Datum		args[2];
 	Datum		d;
+	bool		isnull;
 	PGFunction	fn;
 
 	PG_DIFF_ENTER();
@@ -8632,8 +8669,8 @@ pg_diff_range_setop(int which, const unsigned char *img1,
 	fn = (which == 0) ? range_union :
 		(which == 1) ? range_intersect :
 		(which == 2) ? range_minus : range_merge;
-	d = pg_rt_call(fn, InvalidOid, 2, args, NULL, NULL);
-	return pg_rt_copy_range(d, out, outlen, outcap);
+	d = pg_rt_call(fn, InvalidOid, 2, args, NULL, &isnull);
+	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 
 int
@@ -8666,14 +8703,15 @@ pg_diff_range_canonical(int typ, const unsigned char *img,
 {
 	Datum		args[1];
 	Datum		d;
+	bool		isnull;
 	PGFunction	fn;
 
 	PG_DIFF_ENTER();
 	args[0] = PointerGetDatum(img);
 	fn = (typ == 0) ? int4range_canonical :
 		(typ == 1) ? int8range_canonical : daterange_canonical;
-	d = pg_rt_call(fn, InvalidOid, 1, args, NULL, NULL);
-	return pg_rt_copy_range(d, out, outlen, outcap);
+	d = pg_rt_call(fn, InvalidOid, 1, args, NULL, &isnull);
+	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 
 /* which: 0 int4, 1 int8, 2 num, 3 date, 4 ts, 5 tstz */
@@ -8720,29 +8758,6 @@ pg_diff_range_subdiff(int which, int64 a, int64 b,
 			break;
 	}
 	*out = DatumGetFloat8(pg_rt_call(fn, InvalidOid, 2, args, NULL, NULL));
-	return 0;
-}
-
-/* numeric_in over a cstring: the driver uses this ONCE per numrange bound to
- * mint identical bound images for both sides (parse parity itself is the
- * adt/numeric lane's surface; this target consumes well-formed bounds). */
-int
-pg_diff_rt_numeric_in(const char *str, unsigned char *out, int *outlen, int outcap)
-{
-	Datum		args[3];
-	Datum		d;
-	int			n;
-
-	PG_DIFF_ENTER();
-	args[0] = CStringGetDatum(str);
-	args[1] = ObjectIdGetDatum(InvalidOid);
-	args[2] = Int32GetDatum(-1);
-	d = pg_rt_call(numeric_in, InvalidOid, 3, args, NULL, NULL);
-	n = (int) VARSIZE_ANY(DatumGetPointer(d));
-	if (n > outcap)
-		return -1;
-	memcpy(out, DatumGetPointer(d), n);
-	*outlen = n;
 	return 0;
 }
 

@@ -57,6 +57,11 @@
 //! on a native LocalFcinfo (cash_diff pattern) — the wrapper IS the shipped
 //! entry, so builtins.rs/io.rs/ops.rs/lib.rs execute under the diff.
 //!
+//! FLAGS DOMAIN: fully arbitrary (all 256 values) for the byval
+//! instantiations; the two vestigial `RANGE_*_NULL` bits are fenced off for
+//! byref (numrange) only — see `fence_flags` for why C cannot produce such an
+//! image and why this is a domain restriction rather than a skipped compare.
+//!
 //! SKIPPED rows (see phase1-routes.tsv exceptions): range_intersect_agg
 //! transfn (agg-state carve), planner support fns (engine carve),
 //! range_sortsupport (unported panic stub), unnest/agg (multirange crate).
@@ -467,6 +472,38 @@ impl Bound {
     }
 }
 
+/// BY-REF SUBTYPE FLAGS FENCE (rangetypes.h: `RANGE_LB_NULL 0x20 /* lower bound
+/// is null (NOT USED) */`, same for `RANGE_UB_NULL 0x40`).
+///
+/// These two bits are vestigial: NOTHING in rangetypes.c / multirangetypes.c
+/// ever sets them (`range_serialize` builds the flags byte from scratch and
+/// `range_recv` masks them off), so no C code path can produce an image
+/// carrying them. They are read only by RANGE_HAS_L/UBOUND, where they mean
+/// "this bound is absent from the image" WITHOUT the matching `*_INF` bit that
+/// would mark it infinite. `range_deserialize` therefore hands back
+/// `val = (Datum) 0` with `infinite = false`, and every consumer treats that
+/// as a live element value:
+///   * for a BYVAL subtype that is the integer 0 — perfectly well defined, so
+///     the FULL 256-value flags domain stays in scope (matching the
+///     full-symbolic-flags domain of the proofs/typcache-inst harnesses);
+///   * for a BYREF subtype it is a NULL element POINTER, which C's own
+///     `range_lower`/`range_upper` return unflagged and C's own comparators
+///     dereference. The verbatim oracle segfaults on it exactly as the shipped
+///     Rust does — there is no C behavior to compare against, because C cannot
+///     construct the input in the first place.
+///
+/// So the two bits are masked off for byref instantiations ONLY. This is a
+/// domain restriction to inputs the oracle actually specifies, not a skipped
+/// comparison: no flags value is dropped for int4range/int8range, and for
+/// numrange the other 64 combinations are all still compared.
+fn fence_flags(t: usize, flags: u8) -> u8 {
+    if PINS[t].typbyval {
+        flags
+    } else {
+        flags & !(rt::RANGE_LB_NULL | rt::RANGE_UB_NULL)
+    }
+}
+
 /// Hand-build a serialized range image (on-disk spec: 4B varlena header,
 /// range oid, bounds present iff RANGE_HAS_L/UBOUND(flags), zero pad bytes
 /// for alignment before an upper bound, flags byte last). The flags byte is
@@ -474,6 +511,7 @@ impl Bound {
 /// identical image, mirroring the proved harnesses' full-flags domain.
 fn build_image(t: usize, flags: u8, lo: &Bound, up: &Bound) -> Vec<u8> {
     let p = PINS[t];
+    let flags = fence_flags(t, flags);
     let mut img = vec![0u8; 8];
     img[4..8].copy_from_slice(&p.rngtypid.to_ne_bytes());
     let has_l = flags & (rt::RANGE_EMPTY | rt::RANGE_LB_NULL | rt::RANGE_LB_INF) == 0;
@@ -529,14 +567,25 @@ fn wf_flags(raw: u8) -> u8 {
     }
 }
 
+/// Oracle class for "the C body returned SQL NULL" (see PG_DIFF_ISNULL in
+/// csrc/pg_rangetypes_io.c). The nullness plane is COMPARED, never skipped.
+const C_ISNULL: i32 = 97;
+
 /// Compare a C entry outcome (ret + image bytes) with a Rust fc outcome
-/// producing a range image.
+/// producing a range image. Planes: nullness, error class, image bytes.
 fn compare_range_result(name: &str, cret: i32, cbytes: &[u8], r: &FcOut, dbg: &str) {
     assert!(cret >= 0, "{name}: oracle buffer overflow (harness bug) {dbg}");
     match &r.result {
         Ok(d) => {
+            if r.isnull || cret == C_ISNULL {
+                assert!(
+                    r.isnull && cret == C_ISNULL,
+                    "{name} NULLNESS DIVERGENCE {dbg}: C ret {cret} vs Rust isnull={}",
+                    r.isnull
+                );
+                return;
+            }
             assert!(cret == 0, "{name} DIVERGENCE {dbg}: C err {cret} vs Rust Ok");
-            assert!(!r.isnull, "{name} DIVERGENCE {dbg}: Rust returned SQL NULL");
             let rbytes = datum_varlena_bytes(*d);
             assert!(
                 rbytes == cbytes,
@@ -627,6 +676,14 @@ fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     );
     match &r.result {
         Ok(d) => {
+            if r.isnull || tret == C_ISNULL {
+                assert!(
+                    r.isnull && tret == C_ISNULL,
+                    "range_out NULLNESS DIVERGENCE {dbg}: C ret {tret} vs Rust isnull={}",
+                    r.isnull
+                );
+                return;
+            }
             assert!(tret == 0, "range_out DIVERGENCE {dbg}: C err {tret} vs Ok");
             let rbytes = datum_cstring_bytes(*d);
             assert!(
@@ -695,6 +752,11 @@ fn arm_binary_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         [Some(Datum::from_usize(img.as_ptr() as usize))],
     );
     let d = r.result.expect("range_send infallible on a recv-produced image");
+    assert!(
+        !r.isnull && wret != C_ISNULL,
+        "range_send NULLNESS DIVERGENCE {dbg}: C ret {wret} vs Rust isnull={}",
+        r.isnull
+    );
     let rbytes = datum_varlena_bytes(d);
     assert!(
         &rbytes[4..] == &wbuf[..wlen as usize],
