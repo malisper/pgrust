@@ -76,6 +76,7 @@ adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (sca
 # numutils_diff (p1-laneaj adt/numutils batch):
 numutils = { path = "../../crates/backend/utils/adt/numutils" }
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+adt_oracle_compat = { path = "../../crates/backend/utils/adt/oracle_compat" }  # oraclefam_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"

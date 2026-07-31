@@ -350,3 +350,6 @@ pub use geo_io_diff::geo_io_diff;
 // core/src/numutils_diff.rs.
 pub mod numutils_diff;
 pub use numutils_diff::numutils_diff;
+// oraclefam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-oraclefam_diff.md.
+pub mod oraclefam_diff;
+pub use oraclefam_diff::oraclefam_diff;
