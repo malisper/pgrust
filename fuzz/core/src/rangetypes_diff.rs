@@ -173,7 +173,22 @@ const INT8OID: Oid = 20;
 const NUMERICOID: Oid = 1700;
 const DATEOID: Oid = 1082;
 
-const OUTCAP: usize = 4096;
+/// Oracle out-buffer capacity. Sized for the WORST-CASE numrange text, not for
+/// typical values: `numeric_out` can emit ~147k digits (weight up to
+/// NUMERIC_WEIGHT_MAX = 32767 NBASE digits = 131068 integer digits, plus dscale
+/// up to 16383 fractional digits), `range_bound_escape` can double every
+/// character, and a range carries two bounds — so the text form reaches
+/// hundreds of KiB from a 20-byte literal like `[94771e10506,)`. A too-small
+/// cap made the oracle return its -1 capacity sentinel, which the range_out arm
+/// then mis-read as an error class and reported as a divergence (harness
+/// defect, 2026-07-31). `vec![0u8; OUTCAP]` is alloc_zeroed, so the untouched
+/// tail costs no page faults.
+const OUTCAP: usize = 2 << 20;
+
+/// The oracle's "caller buffer too small" sentinel. Never an error class and
+/// never a divergence: it is a harness bug, so every arm asserts on it loudly
+/// instead of comparing it.
+const C_BUFCAP: i32 = -1;
 
 /// sqlstate -> the oracle's errcode CLASS (pg_rangetypes_io.c header table).
 fn err_class(e: &PgError) -> i32 {
@@ -574,7 +589,7 @@ const C_ISNULL: i32 = 97;
 /// Compare a C entry outcome (ret + image bytes) with a Rust fc outcome
 /// producing a range image. Planes: nullness, error class, image bytes.
 fn compare_range_result(name: &str, cret: i32, cbytes: &[u8], r: &FcOut, dbg: &str) {
-    assert!(cret >= 0, "{name}: oracle buffer overflow (harness bug) {dbg}");
+    assert!(cret != C_BUFCAP, "{name}: oracle buffer too small (harness bug) {dbg}");
     match &r.result {
         Ok(d) => {
             if r.isnull || cret == C_ISNULL {
@@ -674,6 +689,7 @@ fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         mcx,
         [Some(Datum::from_usize(img.as_ptr() as usize))],
     );
+    assert!(tret != C_BUFCAP, "range_out: oracle buffer too small (harness bug) {dbg}");
     match &r.result {
         Ok(d) => {
             if r.isnull || tret == C_ISNULL {
@@ -743,6 +759,7 @@ fn arm_binary_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let mut wlen = 0i32;
     let wret =
         unsafe { pg_diff_range_send(img.as_ptr(), wbuf.as_mut_ptr(), &mut wlen, OUTCAP as i32) };
+    assert!(wret != C_BUFCAP, "range_send: oracle buffer too small (harness bug) {dbg}");
     assert!(wret == 0, "range_send errored on a recv-produced image {dbg}");
     let mut fl = io_flinfo(t, lsyscache::IOFuncSelector::IOFunc_send);
     let r = fc_call(
@@ -842,6 +859,7 @@ fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
             OUTCAP as i32,
         )
     };
+    assert!(cret != C_BUFCAP, "accessors: oracle buffer too small (harness bug) {}", flags);
     assert!(cret == 0, "accessors: C errored ({cret}) on a built image");
     let dbg = format!("t={t} flags={flags:02x}");
     let acc: [(&str, PGFunction, i32, &Vec<u8>, i32); 2] = [
