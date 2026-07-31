@@ -109,8 +109,13 @@ fn gen_node(cur: &mut Cur<'_>, budget: &mut usize, depth: usize) -> Node {
 fn emit(n: &Node, items: &mut Vec<Item>, pool: &mut Vec<u8>) {
     match n {
         Node::Val { lex, weight, prefix } => {
-            // operand pool dedup: reuse an existing NUL-terminated entry
-            let distance = find_or_push(pool, lex);
+            // NO pool dedup: real PG (tsqueryin / tsqueryrecv / QTN2QT)
+            // appends every operand's string separately, so QueryOperand
+            // distances are UNIQUE per operand. A deduped pool makes two
+            // operands share a distance — legal bytes but SQL-unreachable,
+            // and the Rust rank kernel's distance->item map is ambiguous on
+            // them (fuzz/DIVERGENCES-tsrank.md robustness note).
+            let distance = push_operand(pool, lex);
             items.push(Item::Val(Operand {
                 weight: *weight,
                 prefix: *prefix,
@@ -132,15 +137,7 @@ fn emit(n: &Node, items: &mut Vec<Item>, pool: &mut Vec<u8>) {
     }
 }
 
-fn find_or_push(pool: &mut Vec<u8>, lex: &[u8]) -> usize {
-    let mut off = 0;
-    while off < pool.len() {
-        let end = off + pool[off..].iter().position(|&b| b == 0).unwrap();
-        if &pool[off..end] == lex {
-            return off;
-        }
-        off = end + 1;
-    }
+fn push_operand(pool: &mut Vec<u8>, lex: &[u8]) -> usize {
     let off = pool.len();
     pool.extend_from_slice(lex);
     pool.push(0);
