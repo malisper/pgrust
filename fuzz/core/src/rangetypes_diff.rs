@@ -486,7 +486,26 @@ impl Bound {
             _ => {
                 let n = (rd.u8() % 20) as usize + 1;
                 let lit = rd.bytes(n).to_vec();
-                mint_numeric(mcx, &lit).map(Bound::Num)
+                // Try the raw bytes FIRST, so odd literals (exponents, signs,
+                // NaN/Infinity, underscores, hex prefixes) keep reaching
+                // numeric_in on the range path. Random bytes rarely parse
+                // though (measured: 464k mint failures per 1M execs, i.e. the
+                // byref instantiation — the one that carries the packed-short
+                // layout — was getting ~10x less coverage than the byval ones),
+                // so on failure fall back to a digit-mapped literal built from
+                // the SAME bytes. Deterministic, and it only adds inputs.
+                if let Some(b) = mint_numeric(mcx, &lit) {
+                    return Some(Bound::Num(b));
+                }
+                let digits: Vec<u8> = lit
+                    .iter()
+                    .map(|b| match b % 12 {
+                        10 => b'.',
+                        11 => b'e',
+                        d => b'0' + d,
+                    })
+                    .collect();
+                mint_numeric(mcx, &digits).map(Bound::Num)
             }
         }
     }
@@ -768,7 +787,33 @@ fn compare_range_result(name: &str, cret: i32, cbytes: &[u8], r: &FcOut, dbg: &s
 // dispatch
 // ---------------------------------------------------------------------------
 
+/// Periodic non-vacuity report. `PGRUST_FUZZ_RT_STATS=1` makes a fuzz run print
+/// the per-(layout x instantiation) build counts, so a clean campaign can be
+/// SHOWN to have exercised the numrange/packed-short arms rather than assumed to
+/// (a builder that quietly declined everything would otherwise pass vacuously —
+/// the gate-blindness class).
+fn maybe_report_stats() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static EXECS: AtomicU64 = AtomicU64::new(0);
+    let n = EXECS.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 250_000 != 0 {
+        return;
+    }
+    if std::env::var_os("PGRUST_FUZZ_RT_STATS").is_none() {
+        return;
+    }
+    STATS.with(|s| {
+        let st = s.borrow();
+        eprintln!(
+            "[rt-stats] execs={n} hand(int4/int8/num)={:?} ctor(int4/int8/num)={:?} \
+             ctor_declined={} mint_failed={}",
+            st.hand, st.ctor, st.ctor_declined, st.mint_failed
+        );
+    });
+}
+
 pub fn rangetypes_diff(data: &[u8]) {
+    maybe_report_stats();
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
