@@ -996,7 +996,10 @@ fn arm_setops(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
 
 fn arm_hash(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let mut rd = Rd(payload, 0);
-    let flags = rd.u8();
+    // CONTAIN_EMPTY (0x80) masked: a GiST-internal bit never present in
+    // stored ranges, and C's `(uint32) flags` hash sign-extends it on
+    // signed-char hosts (Apple arm64) — a platform artifact, not a surface.
+    let flags = rd.u8() & 0x7f;
     let seed = rd.i64() as u64;
     let lo = Bound::decode(t, &mut rd, mcx);
     let up = Bound::decode(t, &mut rd, mcx);

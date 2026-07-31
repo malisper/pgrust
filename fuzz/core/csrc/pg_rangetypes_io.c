@@ -277,7 +277,7 @@ typedef varlena text;
 #define PointerGetDatum(X)  ((Datum) (X))
 #define DatumGetCString(X)  ((char *) DatumGetPointer(X))
 #define CStringGetDatum(X)  PointerGetDatum(X)
-#define DatumGetByteaP(X)   ((bytea *) DatumGetPointer(X))
+/* DatumGetByteaP / DatumGetNumeric route through PG_DETOAST_DATUM below */
 
 static inline float8
 DatumGetFloat8(Datum X)
@@ -613,8 +613,27 @@ store_att_byval(void *T, Datum newdatum, int attlen)
 	}
 }
 
-/* never-toasted caller contract (shim 3) */
-#define PG_DETOAST_DATUM(d) ((varlena *) DatumGetPointer(d))
+/* Never-toasted caller contract (shim 3): external/compressed values never
+ * occur; SHORT (1B-header) values DO (range_serialize packs typstorage!='p'
+ * bounds), and PG_DETOAST_DATUM expands them to the 4B-header form exactly
+ * as heap_tuple_untoast_attr's short arm does. */
+static void *
+pg_rt_detoast(void *p)
+{
+	if (VARATT_IS_SHORT(p))
+	{
+		Size		data_size = VARSIZE_SHORT(p) - VARHDRSZ_SHORT;
+		Size		new_size = data_size + VARHDRSZ;
+		varlena    *new_attr = palloc(new_size);
+
+		SET_VARSIZE(new_attr, new_size);
+		memcpy(VARDATA(new_attr), VARDATA_SHORT(p), data_size);
+		return new_attr;
+	}
+	return p;
+}
+
+#define PG_DETOAST_DATUM(d) ((varlena *) pg_rt_detoast(DatumGetPointer(d)))
 #define PG_DETOAST_DATUM_PACKED(d) ((varlena *) DatumGetPointer(d))
 
 /* ---------------- minimal fmgr (shim 3) ---------------- */
@@ -1022,7 +1041,8 @@ typedef int64 TimestampTz;
 
 /* Numeric (numeric.h) */
 typedef struct NumericData *Numeric;
-#define DatumGetNumeric(X)  ((Numeric) DatumGetPointer(X))
+#define DatumGetByteaP(X)   ((bytea *) PG_DETOAST_DATUM(X))
+#define DatumGetNumeric(X)  ((Numeric) PG_DETOAST_DATUM(X))
 #define NumericGetDatum(X)  PointerGetDatum(X)
 #define PG_GETARG_NUMERIC(n) DatumGetNumeric(PG_GETARG_DATUM(n))
 #define PG_RETURN_NUMERIC(x) return NumericGetDatum(x)
