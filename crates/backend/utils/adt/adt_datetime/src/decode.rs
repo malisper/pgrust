@@ -699,8 +699,13 @@ pub fn ValidateDate(fmask: i32, isjulian: bool, is2digits: bool, bc: bool, tm: &
     }
 
     if fmask & DTK_M(DOY) != 0 {
+        // C computes this in plain int under -fwrapv; near the julian
+        // ceiling ('5874898-201'::timestamptz, fuzz witness p1-laney) the
+        // add wraps and the junk julian is rejected downstream (real 18.3
+        // answers 22008). Wrapping keeps the panic out and the arithmetic
+        // C-exact (same class as the date2j/j2date wrap fixes).
         j2date(
-            date2j(tm.tm_year, 1, 1) + tm.tm_yday - 1,
+            date2j(tm.tm_year, 1, 1).wrapping_add(tm.tm_yday).wrapping_sub(1),
             &mut tm.tm_year,
             &mut tm.tm_mon,
             &mut tm.tm_mday,
