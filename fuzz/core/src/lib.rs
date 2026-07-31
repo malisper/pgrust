@@ -295,3 +295,7 @@ mod tests {
 // encode_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-encode_diff.md.
 pub mod encode_diff;
 pub use encode_diff::encode_diff;
+
+// datetime_io_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-datetime_io_diff.md.
+pub mod datetime_io_diff;
+pub use datetime_io_diff::datetime_io_diff;

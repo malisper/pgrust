@@ -4,6 +4,10 @@
 // no Kani arm here (the fuzz workspace never builds under cargo-kani).
 fn main() {
     cc::Build::new()
+        // datetime_io_diff oracle (gate cleared: all paste sites filled, see
+        // csrc/pg_datetime_io_io.c header for provenance + pinned environment).
+
+        .file("csrc/pg_datetime_io_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
@@ -14,6 +18,8 @@ fn main() {
         .file("csrc/ryu/d2s.c")
         .file("csrc/ryu/f2s.c")
         .include("csrc/shim")
+        .include("csrc/pgdt")
+        .include("csrc")
         .include("csrc/ryu")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")

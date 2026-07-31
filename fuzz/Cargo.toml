@@ -107,3 +107,11 @@ path = "fuzz_targets/encode_diff.rs"
 test = false
 doc = false
 bench = false
+
+# datetime_io_diff: scaffolded by fuzz/scaffold.py — see README-TODO-datetime_io_diff.md.
+[[bin]]
+name = "datetime_io_diff"
+path = "fuzz_targets/datetime_io_diff.rs"
+test = false
+doc = false
+bench = false
