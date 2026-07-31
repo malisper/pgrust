@@ -237,3 +237,11 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+# jsonbio_diff: scaffolded by fuzz/scaffold.py — see README-TODO-jsonbio_diff.md.
+[[bin]]
+name = "jsonbio_diff"
+path = "fuzz_targets/jsonbio_diff.rs"
+test = false
+doc = false
+bench = false

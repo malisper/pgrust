@@ -1,0 +1,6 @@
+/* SHIM catalog/pg_collation.h */
+#ifndef PG_JSONBFAM_SHIM_PG_COLLATION_H
+#define PG_JSONBFAM_SHIM_PG_COLLATION_H
+#define DEFAULT_COLLATION_OID 100
+#define C_COLLATION_OID 950
+#endif

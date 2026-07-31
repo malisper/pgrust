@@ -1607,6 +1607,7 @@ dependencies = [
  "adt_encode",
  "adt_float",
  "adt_geo",
+ "adt_jsonb",
  "adt_mac",
  "adt_mac8",
  "adt_numeric",
