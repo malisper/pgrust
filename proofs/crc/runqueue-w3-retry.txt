@@ -1,0 +1,1 @@
+proofs::eq_crc32c_len3 | green | per-commit | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c --harness proofs::eq_crc32c_len3 --exact

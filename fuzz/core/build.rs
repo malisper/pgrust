@@ -3,7 +3,19 @@
 // pattern as proofs/brin-minmax/build.rs — plain native compile; there is
 // no Kani arm here (the fuzz workspace never builds under cargo-kani).
 fn main() {
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    // SANCOV ON THE C ORACLE (NEZHA union-coverage, campaign 2026-07-30):
+    // instrument the vendored csrc objects so libFuzzer's retention feedback
+    // sees C-side edges too — Rust-side-only feedback discards exactly the
+    // inputs likeliest to diverge. Opt-in (PGRUST_FUZZ_CSANCOV=1) rather
+    // than keyed off CARGO_CFG_FUZZING: cargo-fuzz builds every workspace
+    // dep with the same env, and the flag is meaningless (though harmless)
+    // for `cargo test`. Verified linking under cargo +nightly-2026-07-17
+    // fuzz build (libFuzzer provides the sancov runtime).
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    build
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
@@ -16,6 +28,10 @@ fn main() {
         .file("csrc/pg_mac_io.c")
         .file("csrc/pg_name_io.c")
         .file("csrc/pg_cash_io.c")
+        .file("csrc/pg_char.c")
+        .file("csrc/pg_bool.c")
+        .file("csrc/pg_pseudotypes.c")
+        .file("csrc/pg_lsn_oracle.c")
         .file("csrc/ryu/d2s.c")
         .file("csrc/ryu/f2s.c")
         .include("csrc/shim")
@@ -35,4 +51,5 @@ fn main() {
         .flag_if_supported("-ffp-contract=off")
         .compile("pg_difffuzz_oracle");
     println!("cargo:rerun-if-changed=csrc");
+    println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");
 }

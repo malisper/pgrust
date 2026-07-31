@@ -592,3 +592,67 @@ mod wave5 {
         core::mem::forget(ctx);
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// wrapper_fc: entry-point proofs for the fc_lsn_cmp! macro-generated fmgr
+// wrappers (p1-lane0a 2026-07-30). Cores proved above (full-u64xu64); these
+// lift to the SHIPPED fc_* entry points and carry measured coverage for the
+// fc_lsn_cmp! invocation declaration lines (see macro_attrib.py rationale).
+// ---------------------------------------------------------------------------
+#[cfg(kani)]
+mod wrapper_fc {
+    use datum::Datum;
+    use types_fmgr::LocalFcinfo;
+
+    extern "C" {
+        fn pg_pg_lsn_eq(a: u64, b: u64) -> i32;
+        fn pg_pg_lsn_ne(a: u64, b: u64) -> i32;
+        fn pg_pg_lsn_lt(a: u64, b: u64) -> i32;
+        fn pg_pg_lsn_gt(a: u64, b: u64) -> i32;
+        fn pg_pg_lsn_le(a: u64, b: u64) -> i32;
+        fn pg_pg_lsn_ge(a: u64, b: u64) -> i32;
+    }
+
+    fn drive(f: types_fmgr::PGFunction, a: u64, b: u64) -> bool {
+        let mut fcinfo = LocalFcinfo::<2>::new(0);
+        fcinfo.set_arg(0, Datum::from_i64(a as i64));
+        fcinfo.set_arg(1, Datum::from_i64(b as i64));
+        match f(None, &mut fcinfo) {
+            Ok(d) => d.as_bool(),
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("fc pg_lsn cmp wrapper errored")
+            }
+        }
+    }
+
+    macro_rules! fc_eq_harness {
+        ($($h:ident: $fc:ident / $c:ident;)*) => {$(
+            #[kani::proof]
+            fn $h() {
+                let (a, b): (u64, u64) = (kani::any(), kani::any());
+                let c = unsafe { $c(a, b) };
+                assert_eq!(c != 0, drive(adt_pg_lsn::builtins::$fc, a, b));
+            }
+        )*};
+    }
+
+    fc_eq_harness! {
+        eq_fc_pg_lsn_eq: fc_pg_lsn_eq / pg_pg_lsn_eq;
+        eq_fc_pg_lsn_ne: fc_pg_lsn_ne / pg_pg_lsn_ne;
+        eq_fc_pg_lsn_lt: fc_pg_lsn_lt / pg_pg_lsn_lt;
+        eq_fc_pg_lsn_gt: fc_pg_lsn_gt / pg_pg_lsn_gt;
+        eq_fc_pg_lsn_le: fc_pg_lsn_le / pg_pg_lsn_le;
+        eq_fc_pg_lsn_ge: fc_pg_lsn_ge / pg_pg_lsn_ge;
+    }
+
+    /// Must-fail control: comparator fires on the intended skew
+    /// (fc_pg_lsn_lt driven against C pg_lsn_le).
+    #[kani::proof]
+    fn control_fc_pg_lsn_lt_vs_c_le_must_fail() {
+        let (a, b): (u64, u64) = (kani::any(), kani::any());
+        let c = unsafe { pg_pg_lsn_le(a, b) };
+        assert!((c != 0) == drive(adt_pg_lsn::builtins::fc_pg_lsn_lt, a, b));
+    }
+}

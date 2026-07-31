@@ -322,7 +322,22 @@ version = "0.1.0"
 dependencies = [
  "adt_mac",
  "adt_mac8",
+ "datum",
+ "mcx",
+ "proof_support",
  "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "proof_support"
+version = "0.1.0"
+dependencies = [
+ "allocator-api2",
+ "datum",
+ "mcx",
+ "types_error",
+ "types_fmgr",
 ]
 
 [[package]]

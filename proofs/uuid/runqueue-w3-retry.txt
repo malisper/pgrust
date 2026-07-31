@@ -1,0 +1,2 @@
+wave5::eq_uuid_recv_core_d20 | green | release-gate | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --harness wave5::eq_uuid_recv_core_d20 --exact
+wave5::eq_uuid_send | green | release-gate | timeout 1800 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_uuid.c --harness wave5::eq_uuid_send --exact

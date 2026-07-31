@@ -1,0 +1,231 @@
+family	suite_harness	kani_harness	rc	wall_s	verdict	status	kaniraw_new
+bool	eq_boolout	harnesses::eq_boolout	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_booleq	harnesses::eq_booleq	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolne	harnesses::eq_boolne	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boollt	harnesses::eq_boollt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolgt	harnesses::eq_boolgt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolle	harnesses::eq_boolle	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_boolge	harnesses::eq_boolge	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l0	harnesses::eq_parse_bool_with_len_l0	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l1	harnesses::eq_parse_bool_with_len_l1	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l2	harnesses::eq_parse_bool_with_len_l2	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l3	harnesses::eq_parse_bool_with_len_l3	0	9	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l4	harnesses::eq_parse_bool_with_len_l4	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l5	harnesses::eq_parse_bool_with_len_l5	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_parse_bool_with_len_l6	harnesses::eq_parse_bool_with_len_l6	0	10	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	cover_parse_bool_with_len_split	harnesses::cover_parse_bool_with_len_split	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_accum	harnesses::eq_bool_accum	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_accum_inv	harnesses::eq_bool_accum_inv	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_alltrue	harnesses::eq_bool_alltrue	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_anytrue	harnesses::eq_bool_anytrue	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_int4_bool	harnesses::eq_int4_bool	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	eq_bool_int4	harnesses::eq_bool_int4	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::charout_equiv_and_roundtrip	proofs::charout_equiv_and_roundtrip	0	30	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::charin_equiv	proofs::charin_equiv	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+char	eq_chartoi4	proofs::eq_chartoi4	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::eq_i4tochar	proofs::eq_i4tochar	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+char	proofs::eq_text_char	proofs::eq_text_char	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+char	eq_char_text_value_core	proofs::eq_char_text_value_core	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_out	eq_pg_lsn_out	0	13	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	drift_pg_lsn_out_master_format	drift_pg_lsn_out_master_format	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_cmp	eq_pg_lsn_cmp	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_eq	eq_pg_lsn_eq	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_ne	eq_pg_lsn_ne	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_lt	eq_pg_lsn_lt	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_gt	eq_pg_lsn_gt	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_le	eq_pg_lsn_le	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_ge	eq_pg_lsn_ge	0	1	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_larger	eq_pg_lsn_larger	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_smaller	eq_pg_lsn_smaller	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_reject	eq_pg_lsn_in_reject	0	33	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	cover_pg_lsn_in_partition	cover_pg_lsn_in_partition	0	24	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_1	eq_pg_lsn_in_accept_1_1	0	28	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_2	eq_pg_lsn_in_accept_1_2	0	19	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_3	eq_pg_lsn_in_accept_1_3	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_4	eq_pg_lsn_in_accept_1_4	0	35	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_5	eq_pg_lsn_in_accept_1_5	0	17	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_6	eq_pg_lsn_in_accept_1_6	0	22	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_7	eq_pg_lsn_in_accept_1_7	0	41	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_1_8	eq_pg_lsn_in_accept_1_8	0	34	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_1	eq_pg_lsn_in_accept_2_1	0	33	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_2	eq_pg_lsn_in_accept_2_2	0	24	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_3	eq_pg_lsn_in_accept_2_3	0	32	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_4	eq_pg_lsn_in_accept_2_4	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_5	eq_pg_lsn_in_accept_2_5	0	21	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_6	eq_pg_lsn_in_accept_2_6	0	46	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_7	eq_pg_lsn_in_accept_2_7	0	27	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_2_8	eq_pg_lsn_in_accept_2_8	0	35	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_1	eq_pg_lsn_in_accept_3_1	0	25	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_2	eq_pg_lsn_in_accept_3_2	0	23	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_3	eq_pg_lsn_in_accept_3_3	0	25	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_4	eq_pg_lsn_in_accept_3_4	0	37	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_5	eq_pg_lsn_in_accept_3_5	0	29	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_6	eq_pg_lsn_in_accept_3_6	0	28	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_7	eq_pg_lsn_in_accept_3_7	0	35	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_3_8	eq_pg_lsn_in_accept_3_8	0	14	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_1	eq_pg_lsn_in_accept_4_1	0	13	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_2	eq_pg_lsn_in_accept_4_2	0	12	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_3	eq_pg_lsn_in_accept_4_3	0	12	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_4	eq_pg_lsn_in_accept_4_4	0	14	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_5	eq_pg_lsn_in_accept_4_5	0	13	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_6	eq_pg_lsn_in_accept_4_6	0	14	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_7	eq_pg_lsn_in_accept_4_7	0	14	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_4_8	eq_pg_lsn_in_accept_4_8	0	15	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_1	eq_pg_lsn_in_accept_5_1	0	14	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_2	eq_pg_lsn_in_accept_5_2	0	15	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_3	eq_pg_lsn_in_accept_5_3	0	55	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_4	eq_pg_lsn_in_accept_5_4	0	116	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_5	eq_pg_lsn_in_accept_5_5	0	15	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_6	eq_pg_lsn_in_accept_5_6	0	15	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_7	eq_pg_lsn_in_accept_5_7	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_5_8	eq_pg_lsn_in_accept_5_8	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_1	eq_pg_lsn_in_accept_6_1	0	17	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_2	eq_pg_lsn_in_accept_6_2	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_3	eq_pg_lsn_in_accept_6_3	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_4	eq_pg_lsn_in_accept_6_4	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_5	eq_pg_lsn_in_accept_6_5	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_6	eq_pg_lsn_in_accept_6_6	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_7	eq_pg_lsn_in_accept_6_7	0	19	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_6_8	eq_pg_lsn_in_accept_6_8	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_1	eq_pg_lsn_in_accept_7_1	0	15	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_2	eq_pg_lsn_in_accept_7_2	0	16	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_3	eq_pg_lsn_in_accept_7_3	0	20	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_4	eq_pg_lsn_in_accept_7_4	0	23	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_5	eq_pg_lsn_in_accept_7_5	0	34	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_6	eq_pg_lsn_in_accept_7_6	0	38	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_7	eq_pg_lsn_in_accept_7_7	0	21	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_7_8	eq_pg_lsn_in_accept_7_8	0	21	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_8_1	eq_pg_lsn_in_accept_8_1	0	23	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_8_2	eq_pg_lsn_in_accept_8_2	0	14	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_8_3	eq_pg_lsn_in_accept_8_3	0	18	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_8_4	eq_pg_lsn_in_accept_8_4	0	19	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anyarray_in	proofs::eq_anyarray_in	0	14	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anyarray_recv	proofs::eq_anyarray_recv	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatiblearray_in	proofs::eq_anycompatiblearray_in	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatiblearray_recv	proofs::eq_anycompatiblearray_recv	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anyenum_in	proofs::eq_anyenum_in	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anyrange_in	proofs::eq_anyrange_in	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatiblerange_in	proofs::eq_anycompatiblerange_in	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anymultirange_in	proofs::eq_anymultirange_in	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatiblemultirange_in	proofs::eq_anycompatiblemultirange_in	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_shell_in	proofs::eq_shell_in	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_shell_out	proofs::eq_shell_out	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_pg_node_tree_in	proofs::eq_pg_node_tree_in	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_pg_node_tree_recv	proofs::eq_pg_node_tree_recv	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_pg_ddl_command_in	proofs::eq_pg_ddl_command_in	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_pg_ddl_command_out	proofs::eq_pg_ddl_command_out	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_pg_ddl_command_recv	proofs::eq_pg_ddl_command_recv	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_pg_ddl_command_send	proofs::eq_pg_ddl_command_send	0	7	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_any_in	proofs::eq_any_in	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_any_out	proofs::eq_any_out	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_trigger_in	proofs::eq_trigger_in	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_trigger_out	proofs::eq_trigger_out	0	2	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_event_trigger_in	proofs::eq_event_trigger_in	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_event_trigger_out	proofs::eq_event_trigger_out	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_language_handler_in	proofs::eq_language_handler_in	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_language_handler_out	proofs::eq_language_handler_out	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_fdw_handler_in	proofs::eq_fdw_handler_in	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_fdw_handler_out	proofs::eq_fdw_handler_out	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_table_am_handler_in	proofs::eq_table_am_handler_in	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_table_am_handler_out	proofs::eq_table_am_handler_out	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_index_am_handler_in	proofs::eq_index_am_handler_in	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_index_am_handler_out	proofs::eq_index_am_handler_out	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_tsm_handler_in	proofs::eq_tsm_handler_in	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_tsm_handler_out	proofs::eq_tsm_handler_out	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_internal_in	proofs::eq_internal_in	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_internal_out	proofs::eq_internal_out	0	3	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anyelement_in	proofs::eq_anyelement_in	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anyelement_out	proofs::eq_anyelement_out	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anynonarray_in	proofs::eq_anynonarray_in	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anynonarray_out	proofs::eq_anynonarray_out	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatible_in	proofs::eq_anycompatible_in	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatible_out	proofs::eq_anycompatible_out	0	8	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatiblenonarray_in	proofs::eq_anycompatiblenonarray_in	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_anycompatiblenonarray_out	proofs::eq_anycompatiblenonarray_out	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_void_in	proofs::eq_void_in	0	5	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_void_recv	proofs::eq_void_recv	0	6	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_void_out	proofs::eq_void_out	0	4	VERIFICATION:- SUCCESSFUL	RAN	1
+pseudotypes	proofs::eq_void_out_core	proofs::eq_void_out_core	0	53	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	eq_pg_lsn_in_accept_8_5	eq_pg_lsn_in_accept_8_5	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	eq_pg_lsn_in_accept_8_6	eq_pg_lsn_in_accept_8_6	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	eq_pg_lsn_in_accept_8_7	eq_pg_lsn_in_accept_8_7	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	eq_pg_lsn_in_accept_8_8	eq_pg_lsn_in_accept_8_8	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_void_send	proofs::eq_void_send	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+scalar-misc	eq_chareq	eq_chareq	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+scalar-misc	eq_charne	eq_charne	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+scalar-misc	eq_charlt	eq_charlt	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+scalar-misc	eq_charle	eq_charle	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+scalar-misc	eq_chargt	eq_chargt	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+scalar-misc	eq_charge	eq_charge	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+scalar-misc	eq_btcharcmp	eq_btcharcmp	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_in_spot_empty	proofs::eq_cstring_in_spot_empty	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_in_spot_len1	proofs::eq_cstring_in_spot_len1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_in_spot_len3	proofs::eq_cstring_in_spot_len3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_out_spot_empty	proofs::eq_cstring_out_spot_empty	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_out_spot_len1	proofs::eq_cstring_out_spot_len1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_out_spot_len3	proofs::eq_cstring_out_spot_len3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len0	proofs::eq_pg_node_tree_out_len0	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len1	proofs::eq_pg_node_tree_out_len1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len2	proofs::eq_pg_node_tree_out_len2	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len3	proofs::eq_pg_node_tree_out_len3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len4	proofs::eq_pg_node_tree_out_len4	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len5	proofs::eq_pg_node_tree_out_len5	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len6	proofs::eq_pg_node_tree_out_len6	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len7	proofs::eq_pg_node_tree_out_len7	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_out_len8	proofs::eq_pg_node_tree_out_len8	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len0	proofs::eq_pg_node_tree_send_len0	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len1	proofs::eq_pg_node_tree_send_len1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len2	proofs::eq_pg_node_tree_send_len2	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len3	proofs::eq_pg_node_tree_send_len3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len4	proofs::eq_pg_node_tree_send_len4	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len5	proofs::eq_pg_node_tree_send_len5	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len6	proofs::eq_pg_node_tree_send_len6	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len7	proofs::eq_pg_node_tree_send_len7	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_pg_node_tree_send_len8	proofs::eq_pg_node_tree_send_len8	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::cover_node_tree_len_partition	proofs::cover_node_tree_len_partition	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_send	wave5::eq_pg_lsn_send	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_send_spot_empty	proofs::eq_cstring_send_spot_empty	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_send_spot_len1	proofs::eq_cstring_send_spot_len1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_send_spot_len3	proofs::eq_cstring_send_spot_len3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_send_spot_tail_garbage	proofs::eq_cstring_send_spot_tail_garbage	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_recv_len0	proofs::eq_cstring_recv_len0	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_recv_len1	proofs::eq_cstring_recv_len1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_recv_len3	proofs::eq_cstring_recv_len3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_recv_len5	proofs::eq_cstring_recv_len5	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pseudotypes	proofs::eq_cstring_recv_len5_cursor2	proofs::eq_cstring_recv_len5_cursor2	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d0	wave5::eq_pg_lsn_recv_core_d0	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d1	wave5::eq_pg_lsn_recv_core_d1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d2	wave5::eq_pg_lsn_recv_core_d2	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d3	wave5::eq_pg_lsn_recv_core_d3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d4	wave5::eq_pg_lsn_recv_core_d4	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d5	wave5::eq_pg_lsn_recv_core_d5	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d6	wave5::eq_pg_lsn_recv_core_d6	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d7	wave5::eq_pg_lsn_recv_core_d7	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d8	wave5::eq_pg_lsn_recv_core_d8	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d9	wave5::eq_pg_lsn_recv_core_d9	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d10	wave5::eq_pg_lsn_recv_core_d10	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d11	wave5::eq_pg_lsn_recv_core_d11	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+pg_lsn	wave5::eq_pg_lsn_recv_core_d12	wave5::eq_pg_lsn_recv_core_d12	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+bool	wave_sendtext::eq_boolsend	wave_sendtext::eq_boolsend	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+bool	wave_sendtext::eq_booltext_true	wave_sendtext::eq_booltext_true	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+bool	wave_sendtext::eq_booltext_false	wave_sendtext::eq_booltext_false	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+char	wave5::eq_charrecv_core_d0	wave5::eq_charrecv_core_d0	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+char	wave5::eq_charrecv_core_d1	wave5::eq_charrecv_core_d1	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+char	wave5::eq_charrecv_core_d2	wave5::eq_charrecv_core_d2	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+char	wave5::eq_charrecv_core_d3	wave5::eq_charrecv_core_d3	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+char	wave5::eq_charrecv_core_d4	wave5::eq_charrecv_core_d4	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+char	wave5::eq_charsend	wave5::eq_charsend	-	0	NOT-ATTEMPTED (policy 5b2646b127)	FAILED-TO-RUN	0
+bool	wrapper_fc::eq_fc_booleq	wrapper_fc::eq_fc_booleq	0	1.8	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	wrapper_fc::eq_fc_boolne	wrapper_fc::eq_fc_boolne	0	1.9	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	wrapper_fc::eq_fc_boollt	wrapper_fc::eq_fc_boollt	0	2.1	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	wrapper_fc::eq_fc_boolgt	wrapper_fc::eq_fc_boolgt	0	1.6	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	wrapper_fc::eq_fc_boolle	wrapper_fc::eq_fc_boolle	0	1.5	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	wrapper_fc::eq_fc_boolge	wrapper_fc::eq_fc_boolge	0	1.6	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	wrapper_fc::eq_fc_booland_statefunc	wrapper_fc::eq_fc_booland_statefunc	0	1.5	VERIFICATION:- SUCCESSFUL	RAN	1
+bool	wrapper_fc::eq_fc_boolor_statefunc	wrapper_fc::eq_fc_boolor_statefunc	0	1.5	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_eq	wrapper_fc::eq_fc_pg_lsn_eq	0	1.2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_ne	wrapper_fc::eq_fc_pg_lsn_ne	0	1.1	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_lt	wrapper_fc::eq_fc_pg_lsn_lt	0	1.1	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_gt	wrapper_fc::eq_fc_pg_lsn_gt	0	1.1	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_le	wrapper_fc::eq_fc_pg_lsn_le	0	1.2	VERIFICATION:- SUCCESSFUL	RAN	1
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_ge	wrapper_fc::eq_fc_pg_lsn_ge	0	1.1	VERIFICATION:- SUCCESSFUL	RAN	1
