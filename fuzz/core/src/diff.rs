@@ -420,6 +420,18 @@ pub const FLOAT_MATH2: &[(&str, Math2)] = &[
 /// from the same platform libm; canonical-vs-passthrough is pinned by the
 /// smoke grid instead) — everything else is bit-exact.
 fn float_math_compare(name: &str, fn_id: i32, a: f64, b: f64, rres: types_error::PgResult<f64>) {
+    // The verbatim C oracle's INIT_DEGREE_CONSTANTS() gate is a plain
+    // static bool over plain double globals — a data race when parallel
+    // tests first hit degree-based functions concurrently (C Postgres is
+    // one-thread-per-backend and never sees this; observed as a spurious
+    // dcotd "divergence" under `cargo test` default parallelism). Warm the
+    // constants exactly once, before any concurrent callers.
+    static DEGREE_WARMUP: std::sync::Once = std::sync::Once::new();
+    DEGREE_WARMUP.call_once(|| {
+        let mut w = 0.0f64;
+        // dsind (a degree-family fn): forces init_degree_constants().
+        unsafe { pg_diff_float_math(23, 45.0, 0.0, &mut w) };
+    });
     let mut cval = 0.0f64;
     let cerr = unsafe { pg_diff_float_math(fn_id, a, b, &mut cval) };
     assert!(cerr >= 0, "bad fn_id {fn_id}");

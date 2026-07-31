@@ -151,8 +151,11 @@ fn pin_utf8() {
     // Seams are process-global set-once: install exactly once.
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        detoast::init_seams();
-        adt_json::init_seams(); // shipped no-op registration hook
+        // catch_unwind tolerates another lane's harness installing the
+        // detoast seam first (double-install panics; all lanes share one
+        // test binary — same convention as arrayfuncs_diff::init_seams).
+        let _ = std::panic::catch_unwind(detoast::init_seams);
+        let _ = std::panic::catch_unwind(adt_json::init_seams); // shipped no-op registration hook
     });
 }
 

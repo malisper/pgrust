@@ -200,10 +200,26 @@ std::thread_local! {
     static ARGTYPE_PIN: Cell<Oid> = const { Cell::new(0) };
 }
 
-fn setup() {
+/// Seams are process-global set-once and other diff modules (arrayfuncs_diff,
+/// rowtypes_diff) pin the same ones with THEIR fixtures: exactly one diff
+/// module can own the environment per process. Fuzz binaries are
+/// one-target-per-process so ownership is always ours there; under
+/// `cargo test` whichever module installs first owns it and our drivers
+/// become no-ops (run `cargo test array_userfuncs_diff` when the full suite
+/// raced the seams) — same convention as rowtypes_diff.
+static OWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn setup() -> bool {
     static SEAMS: Once = Once::new();
     SEAMS.call_once(|| {
         use syscache_seams as sc;
+        if sc::lookup_pg_type_typcache_shape::is_installed()
+            || sc::lookup_pg_type_shape::is_installed()
+            || fmgr_seams::fmgr_info::is_installed()
+        {
+            return; // another diff module owns the environment
+        }
+        OWNED.store(true, std::sync::atomic::Ordering::Relaxed);
         // TupleDescInitEntry-shape reads (lsyscache get_typlenbyvalalign).
         sc::lookup_pg_type_shape::set(|typid| {
             Ok(type_lba(typid).map(|(l, bv, al)| types_tuple::PgTypeShape {
@@ -291,12 +307,19 @@ fn setup() {
             _ => panic!("fmgr_info: unexpected oid {oid}"),
         });
         fmgr_seams::get_fn_expr_argtype::set(|_flinfo, _argnum| ARGTYPE_PIN.with(|c| c.get()));
-        detoast_seams::detoast_attr::set(|mcx, raw| {
-            let mut v = mcx::vec_with_capacity_in(mcx, raw.len())?;
-            mcx::vec_append_bytes(&mut v, raw)?;
-            Ok(v)
+        // catch_unwind tolerates another lane's harness installing the
+        // detoast seam first (double-install panics; all lanes share one
+        // test binary). All images here are inline, for which every
+        // installed impl is the identity copy.
+        let _ = std::panic::catch_unwind(|| {
+            detoast_seams::detoast_attr::set(|mcx, raw| {
+                let mut v = mcx::vec_with_capacity_in(mcx, raw.len())?;
+                mcx::vec_append_bytes(&mut v, raw)?;
+                Ok(v)
+            })
         });
     });
+    OWNED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
@@ -724,7 +747,9 @@ fn compare_imgres(
 // ---------------------------------------------------------------------------
 
 pub fn array_userfuncs_diff(data: &[u8]) {
-    setup();
+    if !setup() {
+        return; // another diff module owns the seam environment (see OWNED)
+    }
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };

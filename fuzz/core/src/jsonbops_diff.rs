@@ -97,13 +97,22 @@ fn init_ops_env() {
     use std::sync::Once;
     static SEAMS: Once = Once::new();
     SEAMS.call_once(|| {
+        // catch_unwind tolerates another lane's harness installing these
+        // seams first (double-install panics; all lanes share one test
+        // binary — same convention as arrayfuncs_diff::init_seams). All
+        // images here are inline, for which every installed impl is the
+        // identity copy.
         // Database-collation-C pin (see module header).
-        pg_locale_seams::varstr_cmp_locale::set(|_collid, a, b| {
-            Ok(varlena::varstrfastcmp_c(a, b))
+        let _ = std::panic::catch_unwind(|| {
+            pg_locale_seams::varstr_cmp_locale::set(|_collid, a, b| {
+                Ok(varlena::varstrfastcmp_c(a, b))
+            })
         });
         // Real detoast for the flat text[] argument reads (inline images
         // only in this harness; the seam is the shipped detoast_attr).
-        detoast_seams::detoast_attr::set(detoast::detoast_attr);
+        let _ = std::panic::catch_unwind(|| {
+            detoast_seams::detoast_attr::set(detoast::detoast_attr)
+        });
     });
 }
 
