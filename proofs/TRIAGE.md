@@ -231,7 +231,12 @@ Refinements, each measured:
   allocators must be individually-NAMED static structs — pooled slots
   kill field sensitivity (11k symex paths → 9.9s). Byte-punned
   cross-language reads need typed staging (the memcpy builtin silently
-  truncates under tight unwinds). Growth-exact dest caps per engine
+  truncates under tight unwinds) — and, measured 2026-07-30 (jsonb-probe
+  cast rig), it can also MIS-MODEL a symbolic int16 copy out of a u8
+  harness object at SUFFICIENT unwinds: the copied digits arrived
+  corrupted in the formula (fabricated out==v counterexamples whose
+  concrete playbacks were green) while direct x.digits[i] reads decoded
+  correctly; spelling the memcpy as a per-element typed loop fixed it. Growth-exact dest caps per engine
   direction (D = maxgrowth·L+1); an undersized D fails as OOB — classify
   OOB/unwinding failures as harness defects before suspecting divergence.
 

@@ -62,19 +62,20 @@ impl<'a> GkRef<'a> {
         GkRef(p, core::marker::PhantomData)
     }
 
-    fn family(self) -> u8 {
+    // accessors pub for proofs/network-gist; behavior unchanged.
+    pub fn family(self) -> u8 {
         // SAFETY: construction contract — a live GistInetKey image.
         unsafe { *self.0.add(GK_HDR) }
     }
-    fn minbits(self) -> i32 {
+    pub fn minbits(self) -> i32 {
         // SAFETY: as family().
         unsafe { *self.0.add(GK_HDR + 1) as i32 }
     }
-    fn commonbits(self) -> i32 {
+    pub fn commonbits(self) -> i32 {
         // SAFETY: as family().
         unsafe { *self.0.add(GK_HDR + 2) as i32 }
     }
-    fn addr(self) -> &'a [u8] {
+    pub fn addr(self) -> &'a [u8] {
         // SAFETY: image carries addrsize() address bytes at GK_ADDR_OFF.
         unsafe { core::slice::from_raw_parts(self.0.add(GK_ADDR_OFF), self.addrsize()) }
     }
@@ -259,14 +260,16 @@ pub fn consistent_internal(key: GkRef<'_>, query: InetRef<'_>, strategy: u16, le
     }
 }
 
-struct UnionParams {
-    minfamily: u8,
-    maxfamily: u8,
-    minbits: i32,
-    commonbits: i32,
+// pub for proofs/network-gist (Kani C-equivalence harnesses); behavior unchanged.
+pub struct UnionParams {
+    pub minfamily: u8,
+    pub maxfamily: u8,
+    pub minbits: i32,
+    pub commonbits: i32,
 }
 
-fn calc_inet_union_params<'a>(keys: impl Iterator<Item = GkRef<'a>>) -> UnionParams {
+// pub for proofs/network-gist; behavior unchanged.
+pub fn calc_inet_union_params<'a>(keys: impl Iterator<Item = GkRef<'a>>) -> UnionParams {
     let mut it = keys;
     let first = it.next().expect("union of zero keys");
     let mut p = UnionParams {

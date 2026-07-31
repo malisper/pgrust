@@ -355,6 +355,7 @@ dependencies = [
  "adt_float",
  "datum",
  "mcx",
+ "pg_string",
  "postgres_seams",
  "pqformat",
  "stack_depth",
@@ -415,6 +416,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -450,6 +452,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "pg_locale_seams",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -875,9 +878,12 @@ dependencies = [
  "heaptuple",
  "lsyscache",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
+ "syscache_seams",
+ "tupdesc",
  "typcache",
  "types_core",
  "types_error",
@@ -1488,6 +1494,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "numutils",
+ "pg_string",
  "pglz",
  "pqformat",
  "stringinfo",
@@ -14337,6 +14344,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "psql"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcx",
+ "pg_b64",
+ "pg_hmac",
+ "pg_md5",
+ "saslprep",
+ "scram_common",
+ "wchar",
+]
+
+[[package]]
 name = "publicationcmds_seams"
 version = "0.0.0"
 dependencies = [
@@ -15239,6 +15260,7 @@ dependencies = [
  "guc",
  "heapam",
  "init_small",
+ "inval",
  "lsyscache",
  "mcx",
  "miscinit",
@@ -20498,6 +20520,7 @@ dependencies = [
  "parallel_seams",
  "pg_enum_seams",
  "pg_sema_seams",
+ "pg_string",
  "pgstat",
  "pgsync",
  "pmsignal",
@@ -20546,6 +20569,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_guc",
  "types_nbtree",
  "types_rel",
  "types_resowner",

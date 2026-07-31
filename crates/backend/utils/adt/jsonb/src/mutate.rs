@@ -435,16 +435,10 @@ fn path_elem_as_index(elem: &[u8], level: usize) -> PgResult<i32> {
             .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
         )
     };
-    let s = core::str::from_utf8(elem).map_err(|_| bad())?;
-    let t = s.trim_ascii_start();
-    if t.is_empty() {
-        return Err(bad());
-    }
-    let v: i64 = t.parse().map_err(|_| bad())?;
-    if v > i32::MAX as i64 || v < i32::MIN as i64 {
-        return Err(bad());
-    }
-    Ok(v as i32)
+    // C: strtoint(c, &badp, 10) with the
+    // `badp == c || *badp != '\0' || errno != 0` reject.  Leading C-locale
+    // whitespace (which includes VT, unlike Rust's trim_ascii) is skipped.
+    pg_string::strtoint10_strict(elem).ok_or_else(bad)
 }
 
 pub struct SetPathArgs<'p, 'mcx> {

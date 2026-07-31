@@ -151,8 +151,10 @@ pg_proof_set_varsize_4b(uint8 *ptr, uint32 len)
 
 /*
  * cstring — real I/O functions (pseudotypes.c verbatim modulo the fmgr /
- * pstrdup shims). cstring_recv/cstring_send are not pg_proc-reachable in
- * pgrust (no registered callers) and are not vendored.
+ * pstrdup shims). cstring_recv/cstring_send vendored 2026-07-30 (w2-fmgr
+ * lane; the earlier "not pg_proc-reachable" note was WRONG — both are
+ * pg_proc rows 2500/2501 in REL_18_STABLE; pgrust's missing registration
+ * is a confirmed dispatch-gap defect, see ledger rows 2500/2501).
  */
 int
 pg_cstring_in(const char *str, char *out)
@@ -166,6 +168,61 @@ pg_cstring_out(const char *str, char *out)
 {
 	/* char *str = PG_GETARG_CSTRING(0); PG_RETURN_CSTRING(pstrdup(str)); */
 	return pg_proof_strcpy(out, str);
+}
+
+int
+pg_cstring_recv(const uint8 *payload, int plen, char *out)
+{
+	/*
+	 * cstring_recv (pseudotypes.c):
+	 *   StringInfo buf = (StringInfo) PG_GETARG_POINTER(0);
+	 *   char *str; int nbytes;
+	 *   str = pq_getmsgtext(buf, buf->len - buf->cursor, &nbytes);
+	 *   PG_RETURN_CSTRING(str);
+	 * pq_getmsgtext (pqformat.c) with rawbytes computed from the SAME
+	 * fields it range-checks, so the "insufficient data" ereport is
+	 * statically dead here (matching the shipped Rust saturating_sub
+	 * framing); the client->server conversion seam is taken in its
+	 * IDENTITY arm (pg_client_to_server returns the caller's pointer):
+	 *   p = palloc(rawbytes + 1); memcpy(p, str, rawbytes);
+	 *   p[rawbytes] = '\0';
+	 * (payload, plen) models the unread region &data[cursor], len-cursor;
+	 * palloc -> caller buffer. Returns rawbytes (= C *nbytes).
+	 */
+	int			i;
+
+	for (i = 0; i < plen; i++)
+		out[i] = (char) payload[i];
+	out[plen] = '\0';
+	return plen;
+}
+
+int
+pg_cstring_send(const char *str, uint8 *out)
+{
+	/*
+	 * cstring_send (pseudotypes.c):
+	 *   char *str = PG_GETARG_CSTRING(0);
+	 *   StringInfoData buf;
+	 *   pq_begintypsend(&buf);
+	 *   pq_sendtext(&buf, str, strlen(str));
+	 *   PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
+	 * strlen inlined (Kani has no libc model); pq_sendtext identity arm
+	 * (no server->client conversion): append strlen bytes after the
+	 * reserved VARHDRSZ header; endtypsend stamps SET_VARSIZE. Returns
+	 * the total image length.
+	 */
+	int			slen = 0;
+	int			i;
+	uint32		len;
+
+	while (str[slen] != '\0')
+		slen++;
+	len = (uint32) VARHDRSZ + (uint32) slen;
+	for (i = 0; i < slen; i++)
+		out[VARHDRSZ + i] = (uint8) str[i];
+	pg_proof_set_varsize_4b(out, len);
+	return (int) len;
 }
 
 /* anyarray: dummy in/recv (out/send delegate to array_out/array_send) */

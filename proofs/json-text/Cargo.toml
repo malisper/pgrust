@@ -1,0 +1,19 @@
+[package]
+name = "proof-json-text"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_json = { path = "../../crates/backend/utils/adt/json" }
+datum = { path = "../../crates/_support/types/datum" }
+mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
+mcx = { path = "../../crates/_support/mcx" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+varlena = { path = "../../crates/backend/utils/adt/varlena" }
+proof_support = { path = "../support", features = ["mcx-stubs", "tiny-proof-heap"] }
+
+[build-dependencies]
+cc = "1"

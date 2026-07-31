@@ -38,10 +38,12 @@ pub struct ArrayIoMeta {
 
 const ASSGN: &[u8] = b"=";
 
-#[inline]
-fn scanner_isspace(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
-}
+// C: scanner_isspace (src/backend/parser/scansup.c) -- scan.l's {space} class,
+// which is exactly the C-locale isspace set {HT, LF, VT, FF, CR, SP}.  It must
+// come from the shared helper: Rust's `u8::is_ascii_whitespace` omits VT
+// (0x0b), so a hand-rolled set silently loses VT everywhere array_in decides
+// what is whitespace, and array_out then fails to quote a VT-bearing element.
+use ::pg_string::isspace_c_locale as scanner_isspace;
 
 #[cold]
 fn malformed(orig: &str, detail: &str) -> PgError {

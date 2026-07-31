@@ -297,6 +297,7 @@ members = [
     "crates/backend/access/transam/rmgr",
     "crates/backend/access/rmgrdesc",
     "crates/bin/waldesc",
+    "crates/bin/psql",
     "crates/backend/access/transam/xlogutils",
     "crates/backend/access/table/tableam_vocab",
     "crates/backend/access/table/tableam",

@@ -1,0 +1,20 @@
+[package]
+name = "proof-enum-cmp"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+adt_enum = { path = "../../crates/backend/utils/adt/adt_enum" }
+typcache_seams = { path = "../../crates/backend/utils/cache/typcache_seams" }
+syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_tuple = { path = "../../crates/_support/types/types_tuple" }
+datum = { path = "../../crates/_support/types/datum" }
+proof_support = { path = "../support" }
+
+[package.metadata.kani.flags]
+c-lib = ["c/pg_enum_cmp.c"]

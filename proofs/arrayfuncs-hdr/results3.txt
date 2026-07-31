@@ -1,0 +1,98 @@
+=== proofs::eq_array_ndims_ndim_corrupt start=15:08:28 load=4.25
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 90.384514s
+=== proofs::eq_array_dims_ndim_corrupt start=15:10:44 load=4.02
+rc=124
+=== proofs::eq_array_cardinality_ndim_nonpos start=15:20:44 load=6.20
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 160.4611s
+=== proofs::rust_array_cardinality_ndim_over_maxdim_errors start=15:23:28 load=6.04
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 106.052216s
+=== proofs::eq_array_lower_ndim_corrupt start=15:25:19 load=4.69
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 101.27092s
+=== proofs::eq_array_length_ndim_corrupt start=15:27:04 load=6.28
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 129.07625s
+=== proofs::eq_array_upper_ndim_corrupt start=15:29:18 load=5.68
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 146.4722s
+=== proofs::eq_array_ndims start=15:31:56 load=5.31
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 78.43876s
+=== proofs::eq_array_lower_n0 start=15:33:19 load=6.74
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 70.166885s
+=== proofs::eq_array_lower_n1 start=15:34:33 load=10.86
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 115.67562s
+=== proofs::eq_array_lower_n2 start=15:36:33 load=14.62
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 115.09063s
+=== proofs::eq_array_lower_n6 start=15:38:32 load=6.59
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 117.81632s
+=== proofs::eq_array_length_n0 start=15:40:34 load=7.01
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 63.590343s
+=== proofs::eq_array_length_n1 start=15:41:42 load=5.93
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 104.58203s
+=== proofs::eq_array_length_n2 start=15:43:31 load=6.71
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 113.97873s
+=== proofs::eq_array_length_n6 start=15:45:30 load=6.52
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 113.39121s
+=== proofs::eq_array_upper_n0 start=15:47:27 load=7.62
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 62.63929s
+=== proofs::eq_array_upper_n1 start=15:48:34 load=6.91
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 136.94693s
+=== proofs::eq_array_upper_n2 start=15:50:55 load=5.17
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 139.45767s
+=== proofs::eq_array_upper_n6 start=15:53:19 load=6.82
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 123.49445s
+=== proofs::eq_array_cardinality_n0 start=15:55:28 load=12.18
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 66.125305s
+=== proofs::eq_array_cardinality_n1 start=15:56:39 load=8.64
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 146.1403s
+=== proofs::eq_array_cardinality_n2 start=15:59:10 load=9.04
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 312.2282s
+=== proofs::eq_array_dims_nullplane start=16:04:27 load=19.89
+rc=0
+VERIFICATION:- SUCCESSFUL
+Verification Time: 77.05403s
+=== proofs::control_array_lower_reqdim_skew_must_fail start=16:05:51 load=21.83
+rc=1
+VERIFICATION:- FAILED
+Verification Time: 65.15964s

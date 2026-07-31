@@ -1,0 +1,19 @@
+[package]
+name = "proof_network_gist"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+network_gist = { path = "../../crates/backend/utils/adt/network_gist" }
+adt_network = { path = "../../crates/backend/utils/adt/network" }
+datum = { path = "../../crates/_support/types/datum" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_gist = { path = "../../crates/_support/types/gist" }
+types_error = { path = "../../crates/_support/types/types_error" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }
+
+[build-dependencies]
+cc = "1"

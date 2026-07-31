@@ -439,7 +439,10 @@
         <div id="lines"></div>
         <div style="display: flex; align-items: flex-start;">
           <span id="prompt" style="color: var(--accent, #e0794a); white-space: pre; flex: none;">pgrust=# </span>
-          <input id="input" value="" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" style="flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: #e6e9ee; font: inherit; padding: 0; margin: 0; caret-color: var(--accent, #e0794a);" />
+          <!-- textarea, not input: recalled history entries keep their embedded
+               newlines the way real psql's readline does (repl.js intercepts
+               Enter, so typing never inserts a literal newline). -->
+          <textarea id="input" rows="1" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" style="flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: #e6e9ee; font: inherit; padding: 0; margin: 0; caret-color: var(--accent, #e0794a); resize: none; overflow-y: hidden; white-space: pre-wrap;"></textarea>
         </div>
       </div>
     </main>

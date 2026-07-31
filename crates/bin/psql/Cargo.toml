@@ -1,0 +1,19 @@
+[package]
+name = "psql"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "psql"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../../_support/mcx" }
+pg_b64 = { path = "../../common/base64" }
+pg_hmac = { path = "../../common/hmac" }
+pg_md5 = { path = "../../common/md5" }
+saslprep = { path = "../../common/saslprep" }
+scram_common = { path = "../../common/scram_common" }
+wchar = { path = "../../common/wchar" }

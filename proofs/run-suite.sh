@@ -18,8 +18,10 @@
 #
 # Outputs a human scoreboard on stdout and machine-readable rows to
 # proofs/suite-results.tsv. Exit status is nonzero if any green-expected
-# harness fails/times out, or if any must-fail harness verifies
-# SUCCESSFUL (vacuity — a broken gate, the worst outcome).
+# harness fails/times out, if any must-fail harness verifies
+# SUCCESSFUL (vacuity — a broken gate, the worst outcome), or if any row
+# carries a tier outside the vocabulary (BAD-MANIFEST-TIER: such a row is
+# selected by no tier and would otherwise be dropped silently).
 #
 # Outcome vocabulary (suite-results.tsv `outcome` column):
 #   pass              expected green, VERIFICATION:- SUCCESSFUL
@@ -65,6 +67,19 @@ command -v timeout >/dev/null 2>&1 || {
 [ -f "$SUITE_TSV" ] || {
     echo "FATAL: $SUITE_TSV not found" >&2
     exit 2
+}
+
+# Known tier vocabulary. A tier value outside this set is a HARD ERROR, not a
+# silent omission: an unrecognized tier is matched by no arm of row_selected()
+# below, so the row would be selected by no tier and never run. That is how
+# eight must-fail negative controls (tier=control) sat silently disabled while
+# every gate reported green — the vacuity guards were not in any gate at all.
+# See proofs/lint-suite-rows.py (check TIER) for the authoring-time version.
+tier_known() { # $1 = row tier
+    case "$1" in
+        per-commit|release-gate|calibration|defect-witness|unmeasured) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Does a manifest row belong to the requested tier run?
@@ -141,7 +156,7 @@ printf 'family\tharness\ttier\texpected\toutcome\twall_s\tverdict\n' \
     >"$RESULTS_TSV"
 
 n_pass=0 n_fail=0 n_xfail_ok=0 n_vacuous=0 n_timeout=0 n_rsskill=0 n_wall=0
-n_skipped_missing=0
+n_skipped_missing=0 n_bad_tier=0
 suite_rc=0
 
 echo "== proof suite: tier=$TIER  (strictly serial; RSS cap 6 GiB) =="
@@ -150,6 +165,17 @@ while IFS=$'\t' read -r family harness flags expected tier time_s notes; do
     # Skip header and blank/comment lines.
     [ -n "${family:-}" ] || continue
     case "$family" in family|\#*) continue ;; esac
+
+    # A tier outside the vocabulary belongs to no gate tier: fail loudly here
+    # rather than dropping the row on the floor (see tier_known()).
+    if ! tier_known "$tier"; then
+        echo "BAD-MANIFEST-TIER  $family/$harness tier='$tier' matches no" \
+             "selection arm — the row would run in NO tier" >&2
+        n_bad_tier=$((n_bad_tier + 1))
+        suite_rc=1
+        continue
+    fi
+
     row_selected "$tier" || continue
 
     crate_dir="$PROOFS_DIR/$family"
@@ -262,5 +288,6 @@ echo "  timeout:           $n_timeout"
 echo "  rss-kill:          $n_rsskill"
 echo "  wall-recorded:     $n_wall"
 [ "$n_skipped_missing" -gt 0 ] && echo "  missing-crate:     $n_skipped_missing"
+[ "$n_bad_tier" -gt 0 ] && echo "  bad-manifest-tier: $n_bad_tier   (row in NO gate tier: BROKEN GATE)"
 echo "  results:           $RESULTS_TSV"
 exit "$suite_rc"

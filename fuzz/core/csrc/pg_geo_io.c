@@ -35,14 +35,21 @@
 #include <stdio.h>
 
 /* from pg_float_io.c */
-extern int	pg_diff_errcode;
+extern _Thread_local int pg_diff_errcode;
 extern char *float8out_internal(double num);
 
 #define pfree free
 
 /* ---- error shims (see header comment) ---- */
 
-static jmp_buf pg_geo_jmp;
+/*
+ * THREAD-LOCAL (2026-07-30): cargo test runs the differential smoke tests
+ * in parallel threads; a shared jmp_buf raced between geo tests (longjmp
+ * into a half-written buffer => SIGSEGV) and the shared pg_diff_errcode
+ * raced across oracles. Thread-local state removes both; single-threaded
+ * libFuzzer behavior is unchanged.
+ */
+static _Thread_local jmp_buf pg_geo_jmp;
 
 static void
 float_overflow_error(void)

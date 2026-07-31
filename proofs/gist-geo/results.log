@@ -1,0 +1,305 @@
+=== eq_gist_translate_cmptype_common ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 1.3153223s
+rc=0
+=== eq_gist_point_compress_noop ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.1439471s
+rc=0
+=== eq_gist_poly_compress_noop ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.2366247s
+rc=0
+=== eq_gist_circle_compress_noop ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 1.709976s
+rc=0
+=== eq_gist_box_penalty_degenerate_y ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.9423475s
+rc=0
+=== eq_gist_box_same_nonnan ===
+Failed Checks: unwinding assertion loop 0
+VERIFICATION:- FAILED
+Verification Time: 1.2884251s
+rc=0
+=== eq_gist_box_same_nulls ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.5482037s
+rc=0
+=== eq_gist_point_consistent_group0 ===
+rc=1
+=== eq_gist_point_consistent_group1 ===
+Failed Checks: assertion failed: v as c_int == cres
+VERIFICATION:- FAILED
+Verification Time: 13.838374s
+rc=0
+=== eq_gist_point_consistent_badgroup ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.1894886s
+rc=0
+=== eq_gist_box_same_nonnan ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.7001657s
+rc=0
+=== eq_gist_point_consistent_group1 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 15.134389s
+rc=0
+=== probe_gist_box_same_nan_plane ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.390223s
+rc=0
+=== eq_gist_box_same_full ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.9433398s
+rc=0
+=== eq_gist_box_union_n2 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 8.819922s
+rc=0
+=== eq_gist_box_union_n3 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 15.339647s
+rc=0
+=== eq_gist_point_distance_inbox ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 98.71027s
+rc=0
+=== eq_gist_point_distance_ystrip ===
+rc=1
+=== eq_gist_point_distance_xstrip ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 214.10197s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 345.41763s
+=== grid_gist_point_distance_vertex ===
+rc=1
+=== eq_gist_point_distance_badstrategy ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 59.500008s
+rc=0
+=== eq_gist_box_distance_strips (kissat) ===
+=== eq_gist_circle_distance_strips (kissat) ===
+=== eq_gist_poly_distance_strips (kissat) ===
+=== eq_gist_box_distance_inbox (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 144.45197s
+=== eq_gist_circle_distance_inbox (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 63.972843s
+=== eq_gist_poly_distance_inbox (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 69.81773s
+=== eq_gist_box_consistent_leaf (kissat) ===
+=== eq_gist_box_consistent_internal (kissat) ===
+=== eq_gist_circle_consistent (kissat) ===
+=== eq_gist_poly_consistent (kissat) ===
+=== grid_gist_box_penalty (kissat) ===
+Failed Checks: unwinding assertion loop 0
+VERIFICATION:- FAILED
+Verification Time: 1.4290612s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 18.112759s
+=== eq_gbc_leaf_s1 (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.4327s
+=== eq_gbc_int_s7 (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 15.210391s
+=== eq_gcc_s3 (kissat) ===
+=== eq_gpc_s3 (kissat) ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 13.318483s
+=== eq_gbc_leaf_s2 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.8898754s
+=== eq_gbc_leaf_s3 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 14.933677s
+=== eq_gbc_leaf_s4 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.5887613s
+=== eq_gbc_leaf_s5 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.65423s
+=== eq_gbc_leaf_s6 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 34.902023s
+=== eq_gbc_leaf_s7 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 11.982428s
+=== eq_gbc_leaf_s8 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 12.535443s
+=== eq_gbc_leaf_s9 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.8799162s
+=== eq_gbc_leaf_s10 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.0928264s
+=== eq_gbc_leaf_s11 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.70178s
+=== eq_gbc_leaf_s12 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.6500397s
+=== eq_gbc_int_s1 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.9868155s
+=== eq_gbc_int_s2 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.4789047s
+=== eq_gbc_int_s3 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 14.000537s
+=== eq_gbc_int_s4 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.6975965s
+=== eq_gbc_int_s5 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.7671404s
+=== eq_gbc_int_s6 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 11.144926s
+=== eq_gbc_int_s8 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 17.76523s
+=== eq_gbc_int_s9 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.106048s
+=== eq_gbc_int_s10 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.530409s
+=== eq_gbc_int_s11 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.800624s
+=== eq_gbc_int_s12 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.1729865s
+=== eq_gist_box_consistent_badstrategy ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.27658s
+=== eq_gist_box_consistent_nulls ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 13.128567s
+Failed Checks: assertion failed: v as c_int == cres
+VERIFICATION:- FAILED
+Verification Time: 2.805533s
+=== eq_gpc_s1 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.4171886s
+=== eq_gpc_s2 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.776624s
+=== eq_gpc_s4 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.389118s
+=== eq_gpc_s5 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.1590934s
+=== eq_gpc_s6 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 16.203955s
+=== eq_gpc_s7 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 17.006323s
+=== eq_gpc_s8 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 13.52438s
+=== eq_gpc_s9 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.657486s
+=== eq_gpc_s10 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 7.2096424s
+=== eq_gpc_s11 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 9.580456s
+=== eq_gpc_s12 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.0618114s
+=== eq_gcc_s1 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 122.42779s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 61.970108s
+=== eq_gcc_s2 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 77.88376s
+=== eq_gcc_s3 ===
+=== eq_gcc_s4 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 49.07466s
+=== eq_gcc_s5 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 74.554985s
+=== eq_gcc_s6 ===
+=== eq_gcc_s7 ===
+=== eq_gcc_s8 ===
+=== eq_gcc_s9 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 65.722145s
+=== eq_gcc_s10 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 60.52775s
+=== eq_gcc_s11 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 71.68505s
+=== eq_gcc_s12 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 44.684227s
+=== eq_gist_circle_consistent_nulls ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 6.355653s
+=== eq_gist_poly_consistent_nulls ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 7.1390915s
+=== eq_gist_point_compress_leaf ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.3196726s
+=== eq_gist_point_fetch ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.5136776s
+=== eq_gist_poly_compress_leaf ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 6.8218093s
+=== eq_gist_circle_compress_leaf ===
+=== eq_gp0_s1 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 15.885188s
+=== eq_gp0_s5 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.005073s
+=== eq_gp0_s6 ===
+=== eq_gp0_s10 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 4.1418896s
+=== eq_gp0_s11 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 5.3069506s
+=== eq_gp0_s29 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.8393195s
+=== eq_gp0_s30 ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.7454042s
+=== eq_gist_point_consistent_group0_badstrategy ===
+VERIFICATION:- SUCCESSFUL
+Verification Time: 7.378511s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 241.84569s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 65.09507s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 170.94684s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 164.30327s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 154.39204s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 159.97841s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 172.68889s
+VERIFICATION:- SUCCESSFUL
+Verification Time: 154.802s

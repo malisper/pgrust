@@ -149,6 +149,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -181,6 +182,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -1976,6 +1978,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_string"
+version = "0.0.0"
+dependencies = [
+ "string_seams",
+]
+
+[[package]]
 name = "pg_strong_random"
 version = "0.1.0"
 dependencies = [
@@ -2858,6 +2867,13 @@ name = "strftime"
 version = "0.1.0"
 dependencies = [
  "localtime",
+]
+
+[[package]]
+name = "string_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]

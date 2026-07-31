@@ -640,19 +640,20 @@ fn fc_hstore_slice_to_array(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
             }
         }
     }
-    let mut dims = [0i32; 6];
-    let mut lbs = [0i32; 6];
-    for d in 0..ndim as usize {
-        dims[d] = arrayfuncs::foundation::arr_dim(key_image, d);
-        lbs[d] = arrayfuncs::foundation::arr_lbound(key_image, d);
-    }
+    // C hands ARR_NDIM/ARR_DIMS/ARR_LBOUND straight to construct_md_array,
+    // which raises "number of array dimensions (%d) exceeds the maximum
+    // allowed (%d)" above MAXDIM. read_dims_lbounds keeps the raw ndim so
+    // that error still fires; the dims read itself stays in bounds (a
+    // corrupt key-array header used to panic here).
+    let (_, dims, lbs) = arrayfuncs::foundation::read_dims_lbounds(key_image);
+    let n = (ndim as usize).min(arrayfuncs::foundation::MAXDIM);
     let img = arrayfuncs::construct::construct_md_array(
         mcx,
         &datums,
         Some(&nulls),
         ndim,
-        &dims[..ndim as usize],
-        &lbs[..ndim as usize],
+        &dims[..n],
+        &lbs[..n],
         types_core::TEXTOID,
         -1,
         false,
