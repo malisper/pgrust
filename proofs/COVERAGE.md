@@ -171,6 +171,21 @@ the three percentages are comparable with each other. It is not a
 compiler-grade statement count; do not compare these percentages against
 numbers produced with a different rule.
 
+**Rule v2 exists, built and measured, default OFF pending Michael's
+ruling** (`proofs/coverage/SLOC-RULE-V2.md`): v1 minus pure control-flow
+syntax lines (`} else {`, `else {`, bare `else`, `loop {`, `unsafe {`,
+punctuation-only match-arm heads) — the lines no instrument can
+meaningfully map, which every established coverage tool (llvm-cov line
+tables, gcov/lcov, coverage.py, Istanbul, JaCoCo) leaves out of its
+denominator, and which under v1 read permanently uncovered. Under v2 the
+7-crate `any` headline moves 72.12% -> 73.57% (SLOC 21,986 -> 21,408; 472
+permanently-red lines reclassified). `merge-coverage.py --sloc-rule v2`
+for captures, `recut-sloc.py` to re-cut ANY existing capture (including
+the full-tree run) as pure post-processing, `tree-sloc.py --sloc-rule v2`
+for the tree census (tree: 883,248 -> 870,496). The rule statement, the
+per-tool research, the instrument line-table precedence, and the
+generated-tables decision table live in SLOC-RULE-V2.md.
+
 Region-to-line mapping caveats:
 - Kani reports source **regions** (spans). Every SLOC line intersecting
   a `COVERED` region is counted — a multi-line region marks all its
