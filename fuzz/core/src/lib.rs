@@ -263,6 +263,11 @@ pub use mac_diff::mac_diff;
 pub use name_diff::name_diff;
 pub use uuid_diff::uuid_diff;
 
+// hashenc_diff (p1-lanee): base64/md5/sha1/sha2/hmac/scram/to_ascii/crc
+// family vs vendored 18.3 C (csrc/hashenc/). See hashenc.rs.
+pub mod hashenc;
+pub use hashenc::hashenc_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;

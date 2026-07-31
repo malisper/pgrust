@@ -3196,3 +3196,26 @@ pg_lsn	wrapper_fc::eq_fc_pg_lsn_gt	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --
 pg_lsn	wrapper_fc::eq_fc_pg_lsn_le	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.2	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
 pg_lsn	wrapper_fc::eq_fc_pg_lsn_ge	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
 pg_lsn	wrapper_fc::control_fc_pg_lsn_lt_vs_c_le_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --exact	must-fail	defect-witness	2	fails on exactly '(c != 0) == drive(...fc_pg_lsn_lt...)'; DEFAULT solver
+hashenc	eq_b64_enc_len	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	7	fence 0..=1.61e9 (below *4 i32 overflow)
+hashenc	eq_b64_dec_len	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	1	fence 0..=7.15e8 (below *3 i32 overflow)
+hashenc	eq_b64_encode_len0	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	symbolic bytes, exact cap
+hashenc	eq_b64_encode_len1	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_encode_len2	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_encode_len3	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_encode_len4	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	5	
+hashenc	eq_b64_encode_len5	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_encode_len6	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	5	
+hashenc	eq_b64_encode_len4_short	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	short dst: -1 + zeroing parity
+hashenc	eq_b64_encode_len6_short	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	short dst: -1 + zeroing parity
+hashenc	eq_b64_decode_len0	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	symbolic bytes incl '='/ws/invalid arms
+hashenc	eq_b64_decode_len1	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_b64_decode_len2	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_b64_decode_len3	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_decode_len4	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_decode_len5	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_decode_len6	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_decode_len7	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_b64_decode_len8	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_bytes_to_hex	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	full symbolic 16 bytes + NUL terminator
+hashenc	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	symbolic src<=6 + symbolic destsiz<=8, full-buffer compare
+hashenc	control_bytes_to_hex_uppercase_must_fail	-Z c-ffi --c-lib c/pg_hashenc_kani.c	must-fail	per-commit	1	negative control: fails on intended assert (lowercase hex)

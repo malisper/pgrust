@@ -37,6 +37,16 @@ adt_pseudotypes = { path = "../../crates/backend/utils/adt/pseudotypes" }
 mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
 adt_pg_lsn = { path = "../../crates/backend/utils/adt/pg_lsn" }
 adt_numeric = { path = "../../crates/backend/utils/adt/numeric" }
+# hashenc_diff (p1-lanee batch):
+pg_b64 = { path = "../../crates/common/base64" }
+pg_md5 = { path = "../../crates/common/md5" }
+pg_sha1 = { path = "../../crates/common/sha1" }
+pg_sha2 = { path = "../../crates/common/sha2" }
+pg_hmac = { path = "../../crates/common/hmac" }
+scram_common = { path = "../../crates/common/scram_common" }
+adt_ascii = { path = "../../crates/backend/utils/adt/adt_ascii" }
+cryptohashfuncs = { path = "../../crates/backend/utils/adt/cryptohashfuncs" }
+postgres_seams = { path = "../../crates/backend/tcop/postgres_seams" }
 adt_encode = { path = "../../crates/backend/utils/adt/encode" }  # encode_diff (scaffold.py)
 # strfam_diff (p1-lanec string-family batch):
 pg_string = { path = "../../crates/common/string" }
