@@ -59,13 +59,33 @@
 //!       + time_mi_interval (1748)                          — [time i64][span]
 //!   4 timetz_pl_interval (1749) + timetz_mi_interval (1750)
 //!                                            — [time i64][zone i32][span]
+//!   5 DecodeTimezoneAbbrev       — [token bytes]   (pinned abbrev table)
+//!   6 DecodeTimezoneAbbrevPrefix — [string bytes]  (pinned abbrev table)
+//!
+//! PINNED ABBREVIATION TABLE (arms 5-6 only): the io target never installs a
+//! `zoneabbrevtbl`, which is why decode.rs 250-313 reads zero hits across all
+//! three floor-clean targets. These two arms install one — through
+//! PostgreSQL's OWN `ConvertTimeZoneAbbrevs` + `InstallTimeZoneAbbrevs` on the
+//! C side (vendored verbatim, so neither side hand-rolls the
+//! TimeZoneAbbrevTable layout or the DYNTZ value-is-a-byte-offset encoding) and
+//! the shipped Rust equivalents on ours, from the SAME entry list. The list
+//! spans positive/negative/zero fixed offsets, a DTZ (is_dst) entry, an abbrev
+//! of exactly TOKMAXLEN so the full-width NUL-terminated token path is
+//! witnessed, and ONE DYNTZ
+//! entry whose zone is "GMT" — which keeps the DYNTZ branch
+//! (FetchDynamicTimeZone -> pg_tzset) INSIDE the compared domain, GMT being the
+//! one name the pinned tz database admits. A DYNTZ entry naming a tzdata zone
+//! would leave the domain through the pg_tzset carve, so none is included.
+//! The pg_tz pointer itself is not comparable across implementations, so its
+//! plane is "did it resolve to a zone" (have_tz), alongside ftype and offset.
 
 use adt_date::{
     date2timestamptz, interval_time, time_mi_interval, time_pl_interval, timestamp_date,
     timestamp_time, timestamptz_date, timestamptz_time, timestamptz_timetz, timetz_mi_interval,
     timetz_pl_interval, DateADT, TimeADT, TimeTzADT,
 };
-use adt_datetime::Interval;
+use adt_datetime::tz::{ConvertTimeZoneAbbrevs, InstallTimeZoneAbbrevs, PgTz, TzEntry};
+use adt_datetime::{DateTimeErrorExtra, DecodeTimezoneAbbrev, DecodeTimezoneAbbrevPrefix, Interval};
 use types_error::PgError;
 
 extern "C" {
@@ -83,6 +103,19 @@ extern "C" {
         sp_day: i32,
         sp_month: i32,
         out: *mut i64,
+    ) -> i32;
+    fn pg_diff_decode_timezone_abbrev(
+        tok: *const u8,
+        toklen: i32,
+        ftype: *mut i32,
+        offset: *mut i32,
+        have_tz: *mut i32,
+    ) -> i32;
+    fn pg_diff_decode_timezone_abbrev_prefix(
+        s: *const u8,
+        len: i32,
+        offset: *mut i32,
+        have_tz: *mut i32,
     ) -> i32;
     fn pg_diff_timetz_pm_interval(
         sub: i32,
@@ -192,12 +225,14 @@ pub fn datetime_convert_diff(data: &[u8]) {
         return;
     };
     super::datetime_io_diff::init_env_for_siblings();
-    match sel % 5 {
+    match sel % 7 {
         0 => timestamp_to_date_time(payload),
         1 => timestamptz_to_date_time_timetz(payload),
         2 => date_to_timestamptz(payload),
         3 => time_interval_arith(payload),
-        _ => timetz_interval_arith(payload),
+        4 => timetz_interval_arith(payload),
+        5 => decode_tz_abbrev(payload),
+        _ => decode_tz_abbrev_prefix(payload),
     }
 }
 
@@ -439,6 +474,145 @@ fn timetz_interval_arith(payload: &[u8]) {
     }
 }
 
+/// The pinned abbreviation entries (see header), byte-identical to the C
+/// oracle's `pg_dt_pinned_abbrevs`. Sorted by strcmp, as CheckDateTokenTable
+/// requires.
+///
+/// No abbrev exceeds TOKMAXLEN, because `ConvertTimeZoneAbbrevs` has that as a
+/// PRECONDITION its real caller enforces: tzparser.c:59 rejects a longer
+/// abbreviation ("time zone abbreviation %s is too long") before the table
+/// builder ever sees it. An over-long entry produced a C-vs-Rust length
+/// mismatch here (C missed the lookup where pgrust matched) purely because it
+/// is out of contract on both sides — not a product defect.
+fn pinned_abbrev_entries() -> Vec<TzEntry<'static>> {
+    vec![
+        TzEntry { abbrev: b"aaa", zone: None, offset: -43200, is_dst: false },
+        TzEntry { abbrev: b"bbb", zone: None, offset: 0, is_dst: true },
+        TzEntry { abbrev: b"ccc", zone: None, offset: 3600, is_dst: false },
+        TzEntry { abbrev: b"dddddddddd", zone: None, offset: 50400, is_dst: true },
+        TzEntry { abbrev: b"eee", zone: None, offset: -1, is_dst: false },
+        TzEntry { abbrev: b"gmtdyn", zone: Some(b"GMT"), offset: 0, is_dst: false },
+        TzEntry { abbrev: b"zzz", zone: None, offset: 57599, is_dst: false },
+    ]
+}
+
+/// Install the pinned table once per thread (C: `pg_dt_install_pinned_abbrevs`).
+/// The table must outlive the installing exec, exactly as the real GUC extra
+/// does, so it is leaked on both sides rather than arena-allocated.
+fn install_pinned_abbrevs() {
+    std::thread_local! {
+        static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    DONE.with(|d| {
+        if !d.get() {
+            let entries = pinned_abbrev_entries();
+            let tbl = ConvertTimeZoneAbbrevs(&entries);
+            InstallTimeZoneAbbrevs(tbl);
+            d.set(true);
+        }
+    });
+}
+
+/// Tokens are downcased and capped at TOKMAXLEN by both sides (the C entry
+/// aborts above it as a driver contract, mirroring DecodeTimezoneAbbrev's own
+/// callers, which only ever hand it a datetkn-sized token).
+const TOKMAXLEN: usize = 10;
+
+/// Arm 5: DecodeTimezoneAbbrev over the pinned table.
+fn decode_tz_abbrev(payload: &[u8]) {
+    if payload.is_empty() {
+        return;
+    }
+    install_pinned_abbrevs();
+
+    // PLUMBING FENCE (not a behavior carve): the C entry hands the vendored
+    // code a NUL-TERMINATED lowtoken, so an embedded NUL truncates its view
+    // while a Rust slice would keep the padded tail — the two sides would be
+    // given different logical tokens. Truncate at the first NUL so they agree.
+    // Nothing observable is fenced out: DecodeTimezoneAbbrev's only callers
+    // pass ParseDateTime's `field[i]`, which are exact-length slices of token
+    // runs (decode.rs:583) and are NUL-free by construction, so a NUL-padded
+    // token is unreachable through SQL.
+    let stop = payload.iter().position(|&c| c == 0).unwrap_or(payload.len());
+    let n = stop.min(TOKMAXLEN);
+    if n == 0 {
+        return;
+    }
+    let low: Vec<u8> = payload[..n].iter().map(|c| c.to_ascii_lowercase()).collect();
+
+    let (mut cft, mut coff, mut chave) = (0i32, 0i32, 0i32);
+    let crc = unsafe {
+        pg_diff_decode_timezone_abbrev(low.as_ptr(), n as i32, &mut cft, &mut coff, &mut chave)
+    };
+
+    let (mut rft, mut roff) = (0i32, 0i32);
+    let mut rtz: Option<&'static PgTz> = None;
+    let mut extra = DateTimeErrorExtra::default();
+    let rrc = DecodeTimezoneAbbrev(0, &low, &mut rft, &mut roff, &mut rtz, &mut extra);
+    let rhave = i32::from(rtz.is_some());
+
+    assert!(
+        crc == rrc,
+        "DecodeTimezoneAbbrev DTERR DIVERGENCE tok={:?}: C={crc} Rust={rrc}",
+        String::from_utf8_lossy(&low)
+    );
+    // planes are only defined when the call succeeded
+    if crc == 0 {
+        assert!(
+            cft == rft && coff == roff && chave == rhave,
+            "DecodeTimezoneAbbrev PLANE DIVERGENCE tok={:?}: \
+             C=(ftype {cft} offset {coff} have_tz {chave}) \
+             Rust=(ftype {rft} offset {roff} have_tz {rhave})",
+            String::from_utf8_lossy(&low)
+        );
+    }
+}
+
+/// Arm 6: DecodeTimezoneAbbrevPrefix (longest-prefix match) over the same table.
+fn decode_tz_abbrev_prefix(payload: &[u8]) {
+    if payload.is_empty() || payload.len() > 63 {
+        return;
+    }
+    install_pinned_abbrevs();
+
+    // C reads a NUL-terminated buffer, so an embedded NUL would truncate its
+    // view while Rust's slice keeps the tail: strip them so both sides see the
+    // same string (a plumbing fence, not a behavior carve).
+    let buf: Vec<u8> = payload.iter().copied().filter(|&c| c != 0).collect();
+    if buf.is_empty() {
+        return;
+    }
+
+    let (mut coff, mut chave) = (0i32, 0i32);
+    let crc = unsafe {
+        pg_diff_decode_timezone_abbrev_prefix(
+            buf.as_ptr(),
+            buf.len() as i32,
+            &mut coff,
+            &mut chave,
+        )
+    };
+
+    let mut roff = 0i32;
+    let mut rtz: Option<&'static PgTz> = None;
+    let rrc = DecodeTimezoneAbbrevPrefix(&buf, &mut roff, &mut rtz);
+    let rhave = i32::from(rtz.is_some());
+
+    assert!(
+        crc == rrc,
+        "DecodeTimezoneAbbrevPrefix LENGTH DIVERGENCE str={:?}: C={crc} Rust={rrc}",
+        String::from_utf8_lossy(&buf)
+    );
+    if crc > 0 {
+        assert!(
+            coff == roff && chave == rhave,
+            "DecodeTimezoneAbbrevPrefix PLANE DIVERGENCE str={:?}: \
+             C=(offset {coff} have_tz {chave}) Rust=(offset {roff} have_tz {rhave})",
+            String::from_utf8_lossy(&buf)
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -617,5 +791,99 @@ mod tests {
             0
         );
         assert_eq!((tt, tzn), (1, 3600), "zone is passthrough");
+    }
+
+    fn abbrev_arm(tok: &[u8]) -> Vec<u8> {
+        let mut v = vec![5u8];
+        v.extend_from_slice(tok);
+        v
+    }
+
+    fn prefix_arm(s: &[u8]) -> Vec<u8> {
+        let mut v = vec![6u8];
+        v.extend_from_slice(s);
+        v
+    }
+
+    #[test]
+    fn arms_smoke_tz_abbrev() {
+        for tok in [
+            &b"aaa"[..],
+            b"bbb",
+            b"ccc",
+            b"dddddddddd",
+            b"eee",
+            b"gmtdyn",
+            b"zzz",
+            b"AAA",
+            b"GmtDyn",
+            b"aa",
+            b"aaaa",
+            b"gmt",
+            b"gmtdy",
+            b"zz",
+            b"a",
+            b"\xff\xfe",
+        ] {
+            datetime_convert_diff(&abbrev_arm(tok));
+            datetime_convert_diff(&prefix_arm(tok));
+        }
+        for tail in [&b"+05"[..], b"-1", b"x", b"0", b" rest", b"aaa", b""] {
+            for tok in [&b"aaa"[..], b"gmtdyn", b"dddddddddd", b"zzz"] {
+                let mut v = tok.to_vec();
+                v.extend_from_slice(tail);
+                datetime_convert_diff(&prefix_arm(&v));
+            }
+        }
+        // byte sweep so the non-alphabetic and case paths are all hit
+        for b in 0u8..=255 {
+            datetime_convert_diff(&abbrev_arm(&[b, b'a', b'a']));
+            datetime_convert_diff(&prefix_arm(&[b, b'a', b'a', b'a']));
+        }
+    }
+
+    /// The pinned abbrev table must actually be INSTALLED and consulted: with
+    /// zoneabbrevtbl NULL (the io target's environment) every lookup misses and
+    /// both arms would agree vacuously on UNKNOWN_FIELD forever — which is the
+    /// state that left decode.rs 250-313 at zero hits in the first place.
+    #[test]
+    fn tz_abbrev_arms_are_not_vacuous() {
+        super::super::datetime_io_diff::init_env_for_siblings();
+        install_pinned_abbrevs();
+
+        // a fixed-offset TZ entry resolves with its offset and no zone
+        let (mut ft, mut off, mut have) = (0i32, 0i32, 0i32);
+        let rc = unsafe {
+            pg_diff_decode_timezone_abbrev(b"ccc".as_ptr(), 3, &mut ft, &mut off, &mut have)
+        };
+        assert_eq!(rc, 0, "pinned abbrev 'ccc' must resolve");
+        assert_eq!((off, have), (3600, 0), "fixed offset, no dynamic zone");
+
+        // the DYNTZ entry resolves THROUGH pg_tzset to a real zone
+        let rc = unsafe {
+            pg_diff_decode_timezone_abbrev(b"gmtdyn".as_ptr(), 6, &mut ft, &mut off, &mut have)
+        };
+        assert_eq!(rc, 0, "pinned DYNTZ abbrev must resolve");
+        assert_eq!(have, 1, "DYNTZ resolves to a pg_tz (GMT)");
+
+        // a near-miss must MISS (so the table is not matching everything)
+        let rc = unsafe {
+            pg_diff_decode_timezone_abbrev(b"aab".as_ptr(), 3, &mut ft, &mut off, &mut have)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(have, 0, "'aab' is not in the pinned table");
+
+        // the prefix matcher returns the matched LENGTH, not a boolean
+        let (mut poff, mut phave) = (0i32, 0i32);
+        let n = unsafe {
+            pg_diff_decode_timezone_abbrev_prefix(
+                b"cccx".as_ptr(),
+                4,
+                &mut poff,
+                &mut phave,
+            )
+        };
+        assert_eq!(n, 3, "longest prefix match of 'cccx' is 'ccc'");
+        assert_eq!(poff, 3600);
     }
 }

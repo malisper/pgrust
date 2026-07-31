@@ -29,7 +29,7 @@ def extract_fn(lines, name):
             start = i
             j = i - 1
             while j >= 0 and re.match(
-                r"^(static |const |inline |unsigned |struct |size_t|long|double|int|char|bool|void|float8|Datum|pg_time_t|fsec_t|TimeADT|DateADT|Timestamp|datetkn)",
+                r"^(static |const |inline |unsigned |struct |size_t|long|double|int|char|bool|void|float8|Datum|pg_time_t|fsec_t|TimeADT|DateADT|Timestamp|datetkn|TimeZoneAbbrevTable|pg_tz|Numeric)",
                 lines[j],
             ) and "{" not in lines[j] and ";" not in lines[j] and "*/" not in lines[j]:
                 start = j
@@ -117,6 +117,11 @@ def main(out):
               "DecodeNumberField", "DecodeTimezone", "DecodeTimezoneAbbrev",
               "ClearTimeZoneAbbrevCache", "DecodeSpecial", "DecodeUnits",
               "DateTimeParseError", "datebsearch", "EncodeTimezone",
+              # datetime_convert_diff abbrev arms: the prefix matcher, the
+              # DYNTZ resolver, and C's OWN table builder (so neither side
+              # hand-rolls the TimeZoneAbbrevTable layout).
+              "DecodeTimezoneAbbrevPrefix", "FetchDynamicTimeZone",
+              "ConvertTimeZoneAbbrevs", "InstallTimeZoneAbbrevs",
               "EncodeDateOnly", "EncodeTimeOnly", "AppendTimestampSeconds",
               "EncodeDateTime"]:
         sec(f"src/backend/utils/adt/datetime.c {f}", extract_fn(dt, f))

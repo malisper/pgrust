@@ -89,9 +89,9 @@ ZONES = [0, 1, -1, 3600, -3600, 57_599, -57_599, 15 * 3600, -15 * 3600]
 
 
 def sel(arm, n=0):
-    """A selector byte landing on `arm` (sel % 5), varied by n for corpus
+    """A selector byte landing on `arm` (sel % 7), varied by n for corpus
     diversity without changing the arm."""
-    return bytes([arm + 5 * (n % 51)])
+    return bytes([arm + 7 * (n % 36)])
 
 
 def emit(seeds, arm, payload, tag):
@@ -157,6 +157,29 @@ def main():
         fields[fi] += delta
         emit(seeds, 4, struct.pack("<qiqii", base_t, base_z, *fields),
              f"witness-tz-iv-f{fi}+")
+
+    # ---- arms 5/6: tz abbreviations over the PINNED table ----
+    # Every pinned abbrev (exact, case-varied, truncated-at-TOKMAXLEN), the
+    # DYNTZ token, near-misses that must MISS, and prefix strings whose
+    # longest-prefix match is a pinned abbrev followed by trailing text.
+    PINNED = ["aaa", "bbb", "ccc", "dddddddddd", "eee", "gmtdyn", "zzz"]
+    NEARMISS = ["aa", "aaaa", "aab", "ab", "gmt", "gmtdy", "gmtdynx", "zz",
+                "zzzz", "ddddddddd", "ddddddddddd", "", "a",
+                "AAA", "GmtDyn", "ZZZ"]
+    for tok in PINNED + NEARMISS:
+        if tok:
+            emit(seeds, 5, tok.encode(), f"abbrev-{tok}")
+    for tok in PINNED:
+        emit(seeds, 6, tok.encode(), f"prefix-exact-{tok}")
+        for tail in ["+05", "-1", "x", "0", " rest", "aaa"]:
+            emit(seeds, 6, (tok + tail).encode(),
+                 f"prefix-{tok}-tail{tail.strip() or 'sp'}")
+    for tok in NEARMISS:
+        if tok:
+            emit(seeds, 6, tok.encode(), f"prefix-miss-{tok}")
+    # non-alphabetic leads: the prefix scanner stops immediately
+    for tok in ["1aaa", "+aaa", "-aaa", ".aaa", "\x7faaa"]:
+        emit(seeds, 6, tok.encode("latin-1"), f"prefix-nonalpha-{tok!r}")
 
     for name, blob in seeds.items():
         with open(os.path.join(OUT, name), "wb") as f:

@@ -3162,6 +3162,213 @@ EncodeTimezone(char *str, int tz, int style)
 	return str;
 }
 
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c DecodeTimezoneAbbrevPrefix ==== */
+
+int
+DecodeTimezoneAbbrevPrefix(const char *str, int *offset, pg_tz **tz)
+{
+	char		lowtoken[TOKMAXLEN + 1];
+	int			len;
+
+	*offset = 0;				/* avoid uninitialized vars on failure */
+	*tz = NULL;
+
+	/* Downcase as much of the string as we could need */
+	for (len = 0; len < TOKMAXLEN; len++)
+	{
+		if (*str == '\0' || !isalpha((unsigned char) *str))
+			break;
+		lowtoken[len] = pg_tolower((unsigned char) *str++);
+	}
+	lowtoken[len] = '\0';
+
+	/*
+	 * We could avoid doing repeated binary searches if we cared to duplicate
+	 * datebsearch here, but it's not clear that such an optimization would be
+	 * worth the trouble.  In common cases there's probably not anything after
+	 * the zone abbrev anyway.  So just search with successively truncated
+	 * strings.
+	 */
+	while (len > 0)
+	{
+		bool		isfixed;
+		int			isdst;
+		const datetkn *tp;
+
+		/* See if the current session_timezone recognizes it. */
+		if (session_timezone &&
+			TimeZoneAbbrevIsKnown(lowtoken, session_timezone,
+								  &isfixed, offset, &isdst))
+		{
+			if (isfixed)
+			{
+				/* flip sign to agree with the convention in zoneabbrevtbl */
+				*offset = -(*offset);
+			}
+			else
+			{
+				/* Caller must resolve the abbrev's current meaning */
+				*tz = session_timezone;
+			}
+			return len;
+		}
+
+		/* Known in zoneabbrevtbl? */
+		if (zoneabbrevtbl)
+			tp = datebsearch(lowtoken, zoneabbrevtbl->abbrevs,
+							 zoneabbrevtbl->numabbrevs);
+		else
+			tp = NULL;
+		if (tp != NULL)
+		{
+			if (tp->type == DYNTZ)
+			{
+				DateTimeErrorExtra extra;
+				pg_tz	   *tzp = FetchDynamicTimeZone(zoneabbrevtbl, tp,
+													   &extra);
+
+				if (tzp != NULL)
+				{
+					/* Caller must resolve the abbrev's current meaning */
+					*tz = tzp;
+					return len;
+				}
+			}
+			else
+			{
+				/* Fixed-offset zone abbrev, so it's easy */
+				*offset = tp->value;
+				return len;
+			}
+		}
+
+		/* Nope, try the next shorter string. */
+		lowtoken[--len] = '\0';
+	}
+
+	/* Did not find a match */
+	return -1;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c FetchDynamicTimeZone ==== */
+
+static pg_tz *
+FetchDynamicTimeZone(TimeZoneAbbrevTable *tbl, const datetkn *tp,
+					 DateTimeErrorExtra *extra)
+{
+	DynamicZoneAbbrev *dtza;
+
+	/* Just some sanity checks to prevent indexing off into nowhere */
+	Assert(tp->type == DYNTZ);
+	Assert(tp->value > 0 && tp->value < tbl->tblsize);
+
+	dtza = (DynamicZoneAbbrev *) ((char *) tbl + tp->value);
+
+	/* Look up the underlying zone if we haven't already */
+	if (dtza->tz == NULL)
+	{
+		dtza->tz = pg_tzset(dtza->zone);
+		if (dtza->tz == NULL)
+		{
+			/* Ooops, bogus zone name in config file entry */
+			extra->dtee_timezone = dtza->zone;
+			extra->dtee_abbrev = tp->token;
+		}
+	}
+	return dtza->tz;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c ConvertTimeZoneAbbrevs ==== */
+
+TimeZoneAbbrevTable *
+ConvertTimeZoneAbbrevs(struct tzEntry *abbrevs, int n)
+{
+	TimeZoneAbbrevTable *tbl;
+	Size		tbl_size;
+	int			i;
+
+	/* Space for fixed fields and datetkn array */
+	tbl_size = offsetof(TimeZoneAbbrevTable, abbrevs) +
+		n * sizeof(datetkn);
+	tbl_size = MAXALIGN(tbl_size);
+	/* Count up space for dynamic abbreviations */
+	for (i = 0; i < n; i++)
+	{
+		struct tzEntry *abbr = abbrevs + i;
+
+		if (abbr->zone != NULL)
+		{
+			Size		dsize;
+
+			dsize = offsetof(DynamicZoneAbbrev, zone) +
+				strlen(abbr->zone) + 1;
+			tbl_size += MAXALIGN(dsize);
+		}
+	}
+
+	/* Alloc the result ... */
+	tbl = guc_malloc(LOG, tbl_size);
+	if (!tbl)
+		return NULL;
+
+	/* ... and fill it in */
+	tbl->tblsize = tbl_size;
+	tbl->numabbrevs = n;
+	/* in this loop, tbl_size reprises the space calculation above */
+	tbl_size = offsetof(TimeZoneAbbrevTable, abbrevs) +
+		n * sizeof(datetkn);
+	tbl_size = MAXALIGN(tbl_size);
+	for (i = 0; i < n; i++)
+	{
+		struct tzEntry *abbr = abbrevs + i;
+		datetkn    *dtoken = tbl->abbrevs + i;
+
+		/* use strlcpy to truncate name if necessary */
+		strlcpy(dtoken->token, abbr->abbrev, TOKMAXLEN + 1);
+		if (abbr->zone != NULL)
+		{
+			/* Allocate a DynamicZoneAbbrev for this abbreviation */
+			DynamicZoneAbbrev *dtza;
+			Size		dsize;
+
+			dtza = (DynamicZoneAbbrev *) ((char *) tbl + tbl_size);
+			dtza->tz = NULL;
+			strcpy(dtza->zone, abbr->zone);
+
+			dtoken->type = DYNTZ;
+			/* value is offset from table start to DynamicZoneAbbrev */
+			dtoken->value = (int32) tbl_size;
+
+			dsize = offsetof(DynamicZoneAbbrev, zone) +
+				strlen(abbr->zone) + 1;
+			tbl_size += MAXALIGN(dsize);
+		}
+		else
+		{
+			dtoken->type = abbr->is_dst ? DTZ : TZ;
+			dtoken->value = abbr->offset;
+		}
+	}
+
+	/* Assert the two loops above agreed on size calculations */
+	Assert(tbl->tblsize == tbl_size);
+
+	/* Check the ordering, if testing */
+	Assert(CheckDateTokenTable("timezone abbreviations", tbl->abbrevs, n));
+
+	return tbl;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c InstallTimeZoneAbbrevs ==== */
+
+void
+InstallTimeZoneAbbrevs(TimeZoneAbbrevTable *tbl)
+{
+	zoneabbrevtbl = tbl;
+	/* reset tzabbrevcache, which may contain results from old table */
+	memset(tzabbrevcache, 0, sizeof(tzabbrevcache));
+}
+
 /* ==== VERBATIM: src/backend/utils/adt/datetime.c EncodeDateOnly ==== */
 
 void

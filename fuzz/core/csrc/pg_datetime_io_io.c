@@ -122,6 +122,7 @@
 #include "pgtime.h"
 #include "datatype/timestamp.h"
 #include "utils/datetime.h"
+#include "utils/tzparser.h"
 #include "utils/date.h"
 
 /* ---- miscadmin.h constants (verbatim values) ---- */
@@ -580,17 +581,34 @@ int64_div_fast_to_numeric(int64 val1, int log10val2)
 	abort();					/* retnumeric plane not driven here */
 }
 
-static pg_tz *
-FetchDynamicTimeZone(TimeZoneAbbrevTable *tbl, const datetkn *tp,
-					 DateTimeErrorExtra *extra)
+/* guc_malloc -> the per-exec arena is WRONG for the abbrev table (it must
+ * outlive the exec that installed it, exactly as the real GUC extra does), so
+ * it gets its own one-shot static block. LOG level is ignored: the only caller
+ * here is the driver's pinned-table install, whose size is a compile-time
+ * constant that fits. */
+/* elog.h level the vendored guc_malloc call passes through (value irrelevant:
+ * the shim ignores it — see pg_dt_guc_malloc). */
+#define LOG 15
+
+#define PG_DT_ABBREVTBL_SZ 1024
+static _Thread_local char pg_dt_abbrevtbl_block[PG_DT_ABBREVTBL_SZ];
+
+static void *
+pg_dt_guc_malloc(int elevel, size_t sz)
 {
-	(void) tbl;
-	(void) tp;
-	(void) extra;
-	abort();					/* zoneabbrevtbl == NULL: DYNTZ unreachable */
+	(void) elevel;
+	if (sz > sizeof(pg_dt_abbrevtbl_block))
+		abort();				/* driver contract: pinned table is small */
+	return pg_dt_abbrevtbl_block;
 }
 
+#define guc_malloc(elevel, sz) pg_dt_guc_malloc(elevel, sz)
+#define MAXALIGN(LEN) (((size_t) (LEN) + 7) & ~((size_t) 7))
+
 /* ---- static prototypes for the verbatim bodies below (order-free) ---- */
+
+static pg_tz *FetchDynamicTimeZone(TimeZoneAbbrevTable *tbl, const datetkn *tp,
+								   DateTimeErrorExtra *extra);
 
 static int	DecodeNumber(int flen, char *str, bool haveTextMonth,
 						 int fmask, int *tmask,
@@ -1218,4 +1236,108 @@ pg_diff_timetz_pm_interval(int sub, int64 time, int32 zone, int64 sp_time,
 	*out_time = r->time;
 	*out_zone = r->zone;
 	return 0;
+}
+
+/*
+ * ---- datetime_convert_diff abbrev arms (DecodeTimezoneAbbrev{,Prefix}) ----
+ *
+ * These two are fuzz-uncovered with zoneabbrevtbl == NULL (the io target's
+ * pinned environment never installs one), so they get a PINNED abbreviation
+ * table installed through PostgreSQL's OWN ConvertTimeZoneAbbrevs +
+ * InstallTimeZoneAbbrevs — vendored verbatim, so neither side hand-rolls the
+ * TimeZoneAbbrevTable layout or the DYNTZ value-is-a-byte-offset encoding.
+ *
+ * The table (identical on both sides, sorted by strcmp as CheckDateTokenTable
+ * requires): fixed-offset TZ and DTZ entries spanning positive/negative/zero
+ * offsets, one abbrev of exactly TOKMAXLEN so the full-width NUL-terminated
+ * token path is witnessed, and ONE DYNTZ entry whose zone is "GMT" — which keeps the DYNTZ branch
+ * (FetchDynamicTimeZone -> pg_tzset) inside the compared domain, since GMT is
+ * the one name the pinned tz database admits. A DYNTZ entry naming a tzdata
+ * zone would leave the domain via the header's pg_tzset carve.
+ */
+static tzEntry pg_dt_pinned_abbrevs[] = {
+	/* abbrev, zone, offset, is_dst, lineno, filename */
+	{"aaa", NULL, -43200, false, 0, NULL},
+	{"bbb", NULL, 0, true, 0, NULL},
+	{"ccc", NULL, 3600, false, 0, NULL},
+	{"dddddddddd", NULL, 50400, true, 0, NULL},	/* exactly TOKMAXLEN */
+	{"eee", NULL, -1, false, 0, NULL},
+	{"gmtdyn", "GMT", 0, false, 0, NULL},	/* DYNTZ, in-domain zone */
+	{"zzz", NULL, 57599, false, 0, NULL},
+};
+
+/* install once per thread; the table must outlive the installing exec */
+static void
+pg_dt_install_pinned_abbrevs(void)
+{
+	static _Thread_local int done = 0;
+	TimeZoneAbbrevTable *tbl;
+
+	if (done)
+		return;
+	tbl = ConvertTimeZoneAbbrevs(pg_dt_pinned_abbrevs,
+								 (int) (sizeof(pg_dt_pinned_abbrevs) /
+										sizeof(pg_dt_pinned_abbrevs[0])));
+	if (tbl == NULL)
+		abort();
+	InstallTimeZoneAbbrevs(tbl);
+	done = 1;
+}
+
+/*
+ * DecodeTimezoneAbbrev over the pinned table.
+ * Returns the dterr; *ftype/*offset/*have_tz are the compared planes (the
+ * pg_tz POINTER itself is not comparable across implementations, so the
+ * plane is "did it resolve to a zone", plus the tzset-carve flag).
+ */
+int
+pg_diff_decode_timezone_abbrev(const unsigned char *tok, int toklen,
+							   int *ftype, int *offset, int *have_tz)
+{
+	char		lowtoken[TOKMAXLEN + 1];
+	DateTimeErrorExtra extra;
+	pg_tz	   *tz = NULL;
+	int			dterr;
+	int			i;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	pg_dt_install_pinned_abbrevs();
+	if (setjmp(pg_dt_jmp))
+		return 1000 + pg_diff_errcode;
+	if (toklen > TOKMAXLEN)
+		abort();				/* driver contract */
+	for (i = 0; i < toklen; i++)
+		lowtoken[i] = (char) pg_tolower((unsigned char) tok[i]);
+	lowtoken[toklen] = '\0';
+
+	memset(&extra, 0, sizeof(extra));
+	*ftype = UNKNOWN_FIELD;
+	*offset = 0;
+	dterr = DecodeTimezoneAbbrev(0, lowtoken, ftype, offset, &tz, &extra);
+	*have_tz = (tz != NULL);
+	return dterr;
+}
+
+/* DecodeTimezoneAbbrevPrefix returns the matched prefix LENGTH (or -1). */
+int
+pg_diff_decode_timezone_abbrev_prefix(const unsigned char *str, int len,
+									  int *offset, int *have_tz)
+{
+	char		buf[64];
+	pg_tz	   *tz = NULL;
+	int			rc;
+
+	pg_dt_reset(USE_ISO_DATES, DATEORDER_YMD);
+	pg_dt_install_pinned_abbrevs();
+	if (setjmp(pg_dt_jmp))
+		return -1000 - pg_diff_errcode;
+	if (len > (int) sizeof(buf) - 1)
+		abort();				/* driver contract */
+	memcpy(buf, str, len);
+	buf[len] = '\0';
+
+	*offset = 0;
+	rc = DecodeTimezoneAbbrevPrefix(buf, offset, &tz);
+	*have_tz = (tz != NULL);
+	return rc;
 }
