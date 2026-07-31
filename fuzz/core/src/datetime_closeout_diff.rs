@@ -1257,6 +1257,31 @@ fn cmp_arm(payload: &[u8]) {
     let tt1 = TimeTzADT { time: fold_time(t1), zone: z1 };
     let tt2 = TimeTzADT { time: fold_time(t2), zone: z2 };
 
+    // date +- int wrappers ride this arm's (d1, raw-int) inputs so the
+    // date_pli/date_mii overflow arms (date_out_of_range_plain, adt_date
+    // lib.rs) are in the fuzzed domain — the raw i32 addend is deliberately
+    // UNfenced, matching SQL ('5874897-12-31'::date + 1 errors 22008).
+    {
+        let addend = rd_i32(payload, 4); /* raw, pre-fold */
+        for (nm, f, core) in [
+            ("date_pli", db::fc_date_pli as types_fmgr::PGFunction, adt_date::date_pli(d1, addend)),
+            ("date_mii", db::fc_date_mii, adt_date::date_mii(d1, addend)),
+        ] {
+            let fc = fc_call(f, [Datum::from_i32(d1), Datum::from_i32(addend)]);
+            match (&core, &fc.0) {
+                (Ok(cv), Ok(fv)) => assert!(
+                    *cv == fv.as_i32(),
+                    "{nm} FC-PLANE value: core={cv} fc={}",
+                    fv.as_i32()
+                ),
+                (Err(ce), Err(fe)) => {
+                    assert!(ce.sqlstate == fe.sqlstate, "{nm} FC-PLANE sqlstate mismatch")
+                }
+                _ => panic!("{nm} FC-PLANE verdict mismatch"),
+            }
+        }
+    }
+
     // date_cmp_ops
     let (da, db_) = (Datum::from_i32(d1), Datum::from_i32(d2));
     cmp_bool("date_eq", db::fc_date_eq, da, db_, d1 == d2);
