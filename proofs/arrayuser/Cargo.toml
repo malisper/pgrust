@@ -1,0 +1,10 @@
+[package]
+name = "poc-arrayuser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED crate's local transcription, not a copy.
+array_userfuncs = { path = "../../crates/backend/utils/adt/array_userfuncs" }
+
+[workspace]

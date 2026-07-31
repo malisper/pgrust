@@ -500,7 +500,8 @@ pub fn make_array_result_arr<'m>(
 }
 
 // pg_bitutils.h pg_nextpower2_32; valid for num in [1, 2^31].
-fn pg_nextpower2_32(num: u32) -> u32 {
+// pub for proofs/arrayuser (Kani full-domain equivalence vs vendored C).
+pub fn pg_nextpower2_32(num: u32) -> u32 {
     debug_assert!(num > 0 && num <= 0x8000_0000);
     if num.is_power_of_two() {
         num

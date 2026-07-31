@@ -3231,3 +3231,5 @@ base64	eq_b64_dec_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-c
 base64	control_encode_vs_decode_must_fail	-Z c-ffi --c-lib c/pg_base64.c	must-fail	defect-witness	2	DEFAULT solver (suite convention); fails on intended assert
 name-ascii	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_name_ascii.c --solver kissat	green	per-commit	2	src[u8;8] full sym (incl interior NULs) + destsiz<=8; whole-dest-image parity; unwind(10)
 name-ascii	control_safe_strlcpy_shorter_src_must_fail	-Z c-ffi --c-lib c/pg_name_ascii.c	must-fail	defect-witness	2	DEFAULT solver; fails on intended assert (first cut src[..7] was unobservable at destsiz 8 — rewritten to src[..3])
+arrayuser	eq_local_nextpower2_32	-Z c-ffi --c-lib c/pg_arrayuser_np2.c --solver kissat	green	per-commit	1	local array_userfuncs transcription vs vendored 18.3 pg_bitutils.h; full contract domain [1,2^31]
+arrayuser	control_np2_off_by_one	-Z c-ffi --c-lib c/pg_arrayuser_np2.c	must-fail	per-commit	1	negative control; fails on intended assert (lib.rs:53)
