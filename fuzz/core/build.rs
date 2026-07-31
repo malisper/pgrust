@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // oraclefam_diff oracle (p1-laneaj): verbatim 18.3 oracle_compat.c +
+        // varlena.c text family + formatting.c asc_* kernels + the mbutils/
+        // wchar multibyte walkers behind them (see pg_oraclefam_io.c header).
+        .file("csrc/pg_oraclefam_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).

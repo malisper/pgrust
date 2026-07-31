@@ -237,3 +237,11 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+# oraclefam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-oraclefam_diff.md.
+[[bin]]
+name = "oraclefam_diff"
+path = "fuzz_targets/oraclefam_diff.rs"
+test = false
+doc = false
+bench = false
