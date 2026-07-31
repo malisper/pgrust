@@ -695,7 +695,12 @@ pub fn trim_array_internal<'m>(
     let lower_provided = [false; MAXDIM];
     let mut upper_provided = [false; MAXDIM];
     if ndim > 0 {
-        upper[0] = lbs[0] + array_length - n - 1;
+        // C trim_array computes `ARR_LBOUND(v)[0] + array_length - n - 1`
+        // bare under -fwrapv; lbs[0] == i32::MIN with n == array_length wraps
+        // to i32::MAX in C (DIV-3, p1-laneai — CI cluster find, same class as
+        // DIV-1). ArrayCheckBounds guarantees lbs[0] + array_length itself
+        // fits.
+        upper[0] = (lbs[0] + array_length).wrapping_sub(n).wrapping_sub(1);
         upper_provided[0] = true;
     }
     ::arrayfuncs::element::array_get_slice(
