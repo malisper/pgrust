@@ -599,7 +599,9 @@ fn delete_arm(inp: &Input<'_>) {
     prelude!(inp, m, jb);
     let which = i32::from(inp.flags & 3) % 3;
     let key = inp.s[0];
-    let arr = input_array(inp, false);
+    // bit4 drives the text[]-arm ndim>1 subscript-error plane, as in the
+    // path/object arms (fc_jsonb_delete_array checks arr_ndim first).
+    let arr = input_array(inp, inp.flags & 16 != 0);
     let (crc, c_bytes) = c_retry(|b, cap, l| unsafe {
         pg_diff_jbops_delete(which, inp.doc1.as_ptr(), key.as_ptr(),
                              key.len() as i32, inp.aux, arr.ptr(), b, cap, l)
