@@ -141,7 +141,8 @@ pub fn buildint2vector<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<PgVec<'m
     let size = int2vector_size(n);
     let mut v: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     if v.try_reserve_exact(size).is_err() {
-        return Err(Box::new(mcx.oom(size)));
+        // C parity: palloc OOM ereports (mcxt.c); exception row int-residual.tsv.
+        return Err(types_error::never_reached!(Box::new(mcx.oom(size))));
     }
     let hdr = types_array::int2vector {
         vl_len_: i32::from_ne_bytes(::datum::varlena::set_varsize_4b(size)),
@@ -281,7 +282,10 @@ pub fn int2vectorin<'mcx>(
             }
         }
         if ints.try_reserve(1).is_err() {
-            return Err(Box::new(mcx.oom(core::mem::size_of::<i16>())));
+            // C parity: repalloc OOM ereports (mcxt.c); exception row int-residual.tsv.
+            return Err(types_error::never_reached!(Box::new(
+                mcx.oom(core::mem::size_of::<i16>())
+            )));
         }
         ints.push(l as i16);
         rest = &rest[consumed..];
@@ -300,7 +304,8 @@ pub fn int2vectorout<'mcx>(
     let cap = values.len() * 7;
     let mut out: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     if out.try_reserve_exact(cap.max(1)).is_err() {
-        return Err(Box::new(mcx.oom(cap)));
+        // C parity: palloc OOM ereports (mcxt.c); exception row int-residual.tsv.
+        return Err(types_error::never_reached!(Box::new(mcx.oom(cap))));
     }
     let mut len = 0usize;
     // SAFETY: each value writes at most 7 bytes (space + sign + 5 digits)

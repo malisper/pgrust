@@ -1,0 +1,157 @@
+{
+ "generated": "2026-07-31T07:06:23+00:00",
+ "head_sha": "7306d300196dce2d7f7e25fbe163fd3c21a60c3e",
+ "sloc_rule": "v1 minus pure control-flow syntax lines (else-only/loop-only/unsafe-only/arrow-only), instrument line tables reinstating \u2014 see proofs/coverage/SLOC-RULE-V2.md",
+ "sloc_rule_id": "v2+no-const-tables",
+ "sloc_exclusions": {
+  "arm-head": 6,
+  "use-mod": 22,
+  "thread-local": 3,
+  "macro-scaffold": 26,
+  "const-table": 175,
+  "else-only": 4,
+  "loop-only": 1,
+  "unsafe-only": 2,
+  "attr": 65,
+  "const-static": 7,
+  "typedef": 4,
+  "impl-header": 1
+ },
+ "line_table_inputs": [],
+ "census": {
+  "expected": null,
+  "census_closed": false,
+  "kaniraw_files": 0,
+  "note": "run with --no-census-required: harnesses that failed to run are indistinguishable from covered-nothing; DO NOT PUBLISH"
+ },
+ "macro_attribution": {
+  "enabled": true,
+  "rule": "a COVERED region inside a macro_rules! definition body also credits the unique source line that declares the generated function named in the region's `function` field; see proofs/coverage/macro_attrib.py",
+  "stats": {
+   "unresolved_functions": {}
+  },
+  "index": {
+   "files": 155,
+   "macro_defs": 322,
+   "generator_macros": 221,
+   "call_blocks": 468,
+   "decl_lines": 2293
+  }
+ },
+ "sources": {
+  "kani": {
+   "kind": "kani-source-coverage",
+   "raw_files": 0,
+   "meaning": "region reachable under some proof harness's FENCED domain"
+  },
+  "fuzz": {
+   "kind": "llvm-lcov",
+   "inputs": [
+    "/tmp/int_diff.lcov"
+   ],
+   "meaning": "line executed by at least one corpus input of a differential fuzz target"
+  },
+  "regress": {
+   "kind": "llvm-lcov",
+   "inputs": [],
+   "meaning": "line executed while serving the pg_regress schedule ONCE"
+  }
+ },
+ "caveat": "A covered line is NOT a verified line. See proofs/COVERAGE.md.",
+ "scope": [
+  "crates/backend/utils/adt/int"
+ ],
+ "totals": {
+  "sloc": 735,
+  "kani": 0,
+  "fuzz": 517,
+  "regress": 0,
+  "any": 517,
+  "pct": {
+   "kani": 0.0,
+   "fuzz": 70.34,
+   "regress": 0.0,
+   "any": 70.34
+  }
+ },
+ "tree_touched": {
+  "fuzz": {
+   "files_touched": 16,
+   "covered_sloc_in_touched_files": 1257,
+   "sloc_of_touched_files": 3485
+  },
+  "regress": {
+   "files_touched": 0,
+   "covered_sloc_in_touched_files": 0,
+   "sloc_of_touched_files": 0
+  }
+ },
+ "crates": [
+  {
+   "name": "int",
+   "path": "crates/backend/utils/adt/int",
+   "sloc": 735,
+   "kani": 0,
+   "fuzz": 517,
+   "regress": 0,
+   "any": 517,
+   "pct": {
+    "kani": 0.0,
+    "fuzz": 70.34,
+    "regress": 0.0,
+    "any": 70.34
+   },
+   "files": [
+    {
+     "path": "crates/backend/utils/adt/int/src/builtins.rs",
+     "sloc": 261,
+     "kani": 0,
+     "fuzz": 96,
+     "regress": 0,
+     "any": 96,
+     "detail": "files/crates__backend__utils__adt__int__src__builtins.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/int/src/lib.rs",
+     "sloc": 449,
+     "kani": 0,
+     "fuzz": 421,
+     "regress": 0,
+     "any": 421,
+     "detail": "files/crates__backend__utils__adt__int__src__lib.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/int/src/series.rs",
+     "sloc": 25,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__int__src__series.rs.json"
+    },
+    {
+     "path": "crates/backend/utils/adt/int/src/tests.rs",
+     "sloc": 0,
+     "kani": 0,
+     "fuzz": 0,
+     "regress": 0,
+     "any": 0,
+     "detail": "files/crates__backend__utils__adt__int__src__tests.rs.json"
+    }
+   ]
+  }
+ ],
+ "auto_exceptions": {
+  "rows": 8,
+  "by_class": {
+   "auto:macro-decl": 6,
+   "auto:table-head": 2
+  },
+  "stats": {
+   "uncovered_lines": 218,
+   "unclassified": 204,
+   "no_table_evidence[auto:fmt-cont]": 6
+  },
+  "note": "mechanical instrument-unmappable classification; see auto-exceptions.tsv header. auto: rows are measurement notes, never denominator changes."
+ }
+}

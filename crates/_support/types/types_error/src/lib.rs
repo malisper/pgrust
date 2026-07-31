@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod error;
+pub mod exceptions;
 pub mod pg_error;
 
 pub use error::*;

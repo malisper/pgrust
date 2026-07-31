@@ -1,0 +1,56 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 4,
+ "total_lines": 196,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 4
+ },
+ "spans": [
+  {
+   "path": "crates/backend/utils/adt/int/src/builtins.rs",
+   "head_line": 443,
+   "span": [
+    444,
+    545
+   ],
+   "lines": 100,
+   "reason": "const-array-heuristic",
+   "head": "pub const INT_BUILTINS: &[FmgrBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/int/src/builtins.rs",
+   "head_line": 554,
+   "span": [
+    555,
+    630
+   ],
+   "lines": 75,
+   "reason": "const-array-heuristic",
+   "head": "pub static INT_THIN: &[ThinBuiltin] = &["
+  },
+  {
+   "path": "crates/backend/utils/adt/numutils/src/lib.rs",
+   "head_line": 488,
+   "span": [
+    489,
+    509
+   ],
+   "lines": 20,
+   "reason": "const-array-heuristic",
+   "head": "const POWERS_OF_TEN: [u64; 20] = ["
+  },
+  {
+   "path": "crates/backend/utils/adt/numutils/src/lib.rs",
+   "head_line": 480,
+   "span": [
+    481,
+    482
+   ],
+   "lines": 1,
+   "reason": "const-array-heuristic",
+   "head": "const POWERS_OF_TEN: [u32; 10] = ["
+  }
+ ]
+}

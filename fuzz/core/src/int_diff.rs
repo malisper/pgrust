@@ -342,6 +342,36 @@ fn int2vectorin_diff(text: &[u8], soft: bool) {
                 e.message()
             ),
         }
+        // fc-wrapper soft plane: armed ErrorSaveNode + result mcx; on a soft
+        // error the wrapper sets isnull and returns a NULL datum.
+        let mut esn = types_fmgr::ErrorSaveNode::new(true);
+        let mut fci = types_fmgr::LocalFcinfo::<1>::new(0);
+        fci.context = esn.fm_node_ptr();
+        // SAFETY: cx outlives the call.
+        unsafe { fci.set_result_mcx(mcx) };
+        fci.set_arg(0, datum::Datum::from_usize(cs.as_ptr() as usize));
+        match ints::builtins::fc_int2vectorin(None, &mut fci) {
+            Ok(d) => {
+                if esn.ctx.error_occurred() {
+                    let e = esn.ctx.take_error().unwrap();
+                    assert_eq!(rust_err_class(&e), -c_rc, "fc_int2vectorin soft errclass {s:?}");
+                    assert!(fci.isnull, "fc_int2vectorin soft: isnull unset {s:?}");
+                } else {
+                    assert_eq!(c_rc, 0, "fc_int2vectorin soft verdict {s:?}");
+                    let p = d.as_usize() as *const u8;
+                    // SAFETY: leaked in-mcx varlena image, 4B LE varsize head.
+                    let full = unsafe {
+                        let sz = (core::ptr::read_unaligned(p.cast::<u32>()) >> 2) as usize;
+                        core::slice::from_raw_parts(p, sz)
+                    };
+                    assert_eq!(full, &c_img[..c_len as usize], "fc_int2vectorin soft image {s:?}");
+                }
+            }
+            Err(e) => panic!(
+                "fc_int2vectorin soft: hard error {:?} escaped input={s:?}",
+                e.message()
+            ),
+        }
     } else {
         match ints::int2vectorin(mcx, s, None) {
             Ok(img) => {
@@ -749,6 +779,10 @@ fn fn_diff(fn_id: i32, a: i64, b: i64, c: i64, sub: bool, less: bool) {
 }
 
 pub fn int_diff(data: &[u8]) {
+    // Exception-audit rail: every exec turns the crate's never_reached! arms
+    // (OOM defensive arms, recorded exception rows) into panics if they fire.
+    static ARM: std::sync::Once = std::sync::Once::new();
+    ARM.call_once(types_error::exceptions::arm_exception_audit);
     let Some((&family, payload)) = data.split_first() else {
         return;
     };
