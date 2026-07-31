@@ -152,12 +152,17 @@ def gen_c_shim(target: str, base: str, crate_rel: str, rows: list[dict]) -> str:
  *     PG_FUNCTION_ARGS unwrapped to plain C signatures, palloc'd results ->
  *     caller buffers, wire triples for recv/send), NEVER logic. List every
  *     shim in this header when you paste.
+ *   - palloc/palloc0/repalloc/pfree -> the TLS pointer arena below (NOT
+ *     bare malloc/free): models PG's memory-context reset; error paths
+ *     strand allocations otherwise. Do NOT free() arena pointers by hand.
  *
  * Errcode capture follows csrc/pg_float_io.c: the shared _Thread_local
  * pg_diff_errcode (defined there) records the errcode class; map each
  * errcode this crate's C raises to a small class constant below.
  */
 
+#include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -168,6 +173,90 @@ extern _Thread_local int pg_diff_errcode;
  * raises, e.g.:
  *   #define PG_DIFF_ERR_INVALID_TEXT 1   (22P02)
  */
+
+/* palloc arena shim: PostgreSQL frees these via memory-context reset; the
+ * oracle mirrors that with a TLS pointer arena reset at every pg_diff_*
+ * dispatcher entry, so error-path longjmp/ereturn/goto exits cannot leak.
+ * (Three LSan incidents of the naive palloc->malloc mapping on 2026-07-31;
+ * pattern proven on proofs/p1-lanej @ 7306d300196 — copied, not re-derived.
+ * Final-exec allocations stay rooted in the arena, so LSan's exit scan is
+ * quiet without any manual free().) */
+#define PG_DIFF_ARENA_MAX 64
+static _Thread_local void *pg_diff_arena[PG_DIFF_ARENA_MAX];
+static _Thread_local int pg_diff_arena_n;
+
+static void
+pg_diff_arena_reset(void)
+{{
+	int			i;
+
+	for (i = 0; i < pg_diff_arena_n; i++)
+		free(pg_diff_arena[i]);
+	pg_diff_arena_n = 0;
+}}
+
+static void *
+pg_diff_palloc_impl(size_t n)
+{{
+	void	   *p = malloc(n);
+
+	assert(pg_diff_arena_n < PG_DIFF_ARENA_MAX);
+	pg_diff_arena[pg_diff_arena_n++] = p;
+	return p;
+}}
+
+static void *
+pg_diff_palloc0_impl(size_t n)
+{{
+	void	   *p = calloc(1, n);
+
+	assert(pg_diff_arena_n < PG_DIFF_ARENA_MAX);
+	pg_diff_arena[pg_diff_arena_n++] = p;
+	return p;
+}}
+
+static void *
+pg_diff_repalloc_impl(void *old, size_t n)
+{{
+	void	   *p = realloc(old, n);
+	int			i;
+
+	for (i = 0; i < pg_diff_arena_n; i++)
+	{{
+		if (pg_diff_arena[i] == old)
+		{{
+			pg_diff_arena[i] = p;
+			return p;
+		}}
+	}}
+	assert(!"repalloc of a pointer the arena never issued");
+	return p;
+}}
+
+static void
+pg_diff_pfree_impl(void *p)
+{{
+	int			i;
+
+	for (i = 0; i < pg_diff_arena_n; i++)
+	{{
+		if (pg_diff_arena[i] == p)
+		{{
+			free(p);
+			pg_diff_arena[i] = pg_diff_arena[--pg_diff_arena_n];
+			return;
+		}}
+	}}
+	/* abort-loud: freeing a pointer the arena never issued is a shim bug
+	 * (double-free after reset, or a bare malloc that bypassed palloc). */
+	assert(!"pfree of a pointer the arena never issued");
+	abort();
+}}
+
+#define palloc(n) pg_diff_palloc_impl(n)
+#define palloc0(n) pg_diff_palloc0_impl(n)
+#define repalloc(p, n) pg_diff_repalloc_impl((p), (n))
+#define pfree(p) pg_diff_pfree_impl(p)
 """)
     for i, c in enumerate(c_files, 1):
         fns = [r["fn"] for r in rows if r["c_file"] == c]
@@ -187,14 +276,17 @@ extern _Thread_local int pg_diff_errcode;
 /* ========== SECTION {len(c_files) + 1}: fuzz-facing driver entries (NOT Postgres code) ===== */
 
 /*
- * One thin pg_diff_* wrapper per fuzz arm: reset pg_diff_errcode = 0 on
- * entry, call the vendored function, return an int status (0 = ok, nonzero
- * = error class) and write results through caller-provided buffers. Shape
- * them after csrc/pg_uuid_io.c section 4, e.g.:
+ * One thin pg_diff_* wrapper per fuzz arm: FIRST pg_diff_arena_reset()
+ * (models PG's memory-context reset; error paths strand allocations
+ * otherwise), then reset pg_diff_errcode = 0, call the vendored function,
+ * return an int status (0 = ok, nonzero = error class) and write results
+ * through caller-provided buffers. Shape them after csrc/pg_uuid_io.c
+ * section 4, e.g.:
  *
  *   int pg_diff_uuid_in(const char *source, unsigned char *out)
  *   {{
  *       pg_uuid_t u;
+ *       pg_diff_arena_reset();
  *       pg_diff_errcode = 0;
  *       if (pg_string_to_uuid(source, &u) != 0)
  *       {{
@@ -209,6 +301,7 @@ extern _Thread_local int pg_diff_errcode;
     for r in rows:
         out.append(f"""/*
  * TODO(scaffold): int pg_diff_{r["fn"]}(...)   [oid {r["oid"]}, {r["c_file"]}]
+ * (first line of the body: pg_diff_arena_reset(); — see the arena header)
  */
 #error "SCAFFOLD-TODO({target}): pg_diff_{r["fn"]} driver entry not written yet"
 """)
@@ -449,8 +542,13 @@ Function rows given at scaffold time:
 - [ ] Document every shim in the file header (plumbing only, never logic:
       ereturn -> int sentinel, fmgr unwrapping, caller buffers, C-locale
       ctype shims). Map each errcode to a `PG_DIFF_ERR_*` class constant.
+- [ ] Keep palloc/palloc0/repalloc/pfree on the emitted TLS arena (models
+      PG's memory-context reset; error paths strand allocations otherwise
+      — the 2026-07-31 LSan incident class, proofs/p1-lanej @ 7306d300196).
+      No hand `free()` of arena pointers; every `pg_diff_*` entry calls
+      `pg_diff_arena_reset()` first.
 - [ ] Write the `pg_diff_*` driver entries (section pattern in the file;
-      reset `pg_diff_errcode = 0` per entry).
+      `pg_diff_arena_reset()` then `pg_diff_errcode = 0` per entry).
 - [ ] Uncomment the `.file("csrc/pg_{base}_io.c")` line in `core/build.rs`.
 
 ## 2. Implement the Rust driver (`core/src/{target}.rs`)
