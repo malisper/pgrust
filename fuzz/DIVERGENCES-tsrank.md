@@ -74,3 +74,29 @@ triage as SQL-reachable.
   sort_and_uniq_items (exact parity), (b) ratify a documented
   tie-survivor rule as a non-surface with a sorted-multiset-style gate
   (needs Michael). Coordinator to triage.
+
+---
+
+## ADJUDICATION of #2 (lane coordinator, 2026-07-31 — Docker postgres:18.3)
+
+CONFIRMED pgrust-bug, FIXED. Ground truth that tie order is REAL PG
+behavior (not an oracle artifact) — real 18.3 gives different ranks when
+only the text order of two same-lexeme operands flips:
+
+    ts_rank('aab:1 u:2', 'u|v|w|x|y|z|aa:*|aa') = 0.008684673
+    ts_rank('aab:1 u:2', 'u|v|w|x|y|z|aa|aa:*') = 0.017369347
+    ts_rank('aab:1 u:2', 'aa:*|aa') = 0
+    ts_rank('aab:1 u:2', 'aa|aa:*') = 0.06079271
+
+"Parity" therefore means matching PG's qsort_arg equal-key output order
+exactly. Fix: `crates/backend/utils/adt/tsrank/src/qsort.rs` — verbatim
+Rust port of lib/sort_template.h pg_qsort (same per-crate-copy convention
+as gistproc/analyze/rangetypes_gist/brin_minmax_multi) — now used by
+`sort_and_uniq_items` (rank.rs). Option (b) (ratify a tie-survivor rule)
+rejected: the tie changes a scalar SQL result, and exact parity is
+mechanically available.
+
+Validation: driver carve `has_flagged_lexeme_tie` RETIRED (strict f32
+plane restored for flagged-tie queries); full corpus replay clean;
+fresh 301s smoke = 5,691,644 execs, zero divergences with the tie class
+back in the domain.

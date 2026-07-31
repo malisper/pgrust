@@ -218,27 +218,13 @@ fn build_weights_payload(shape: u8, ws: &[f32; 4], extra: f32) -> Vec<u8> {
     p
 }
 
-/// KNOWN-DIVERGENCE-2 carve (fuzz/DIVERGENCES-tsrank.md): C SortAndUniqItems
-/// dedups same-lexeme operands with PG's UNSTABLE qsort_arg; when two
-/// operands share a lexeme but differ in (weight, prefix), C and Rust
-/// (stable sort) keep DIFFERENT survivors and the rank value differs.
-/// SQL-reachable ('a | a:C'). Skip such queries until adjudicated.
-fn has_flagged_lexeme_tie(q: TsQueryRef<'_>) -> bool {
-    use adt_tsvector_core::query::Item;
-    let mut vals: Vec<(&[u8], u8, bool)> = Vec::new();
-    for i in 0..q.size() {
-        if let Item::Val(op) = q.item(i) {
-            let lex = q.operand_str(&op);
-            for &(l, w, p) in &vals {
-                if l == lex && (w != op.weight || p != op.prefix) {
-                    return true;
-                }
-            }
-            vals.push((lex, op.weight, op.prefix));
-        }
-    }
-    false
-}
+// KNOWN-DIVERGENCE-2 carve RETIRED 2026-07-31: adjudicated pgrust-bug and
+// FIXED — sort_and_uniq_items now uses the verbatim pg_qsort port
+// (crates/backend/utils/adt/tsrank/src/qsort.rs), so the same-lexeme tie
+// SURVIVOR matches C's qsort_arg exactly. Docker postgres:18.3 ground truth
+// (2026-07-31): ts_rank('aab:1 u:2', 'u|v|w|x|y|z|aa:*|aa') = 0.008684673
+// vs ...'|aa|aa:*') = 0.017369347 — tie order is REAL PG behavior, not an
+// oracle artifact. Flagged-tie queries are back on the strict f32 plane.
 
 /// UTF-8 + NUL-free gate, then parse with the shipped Rust parser.
 fn parse_tsvector(m: mcx::Mcx<'_>, text: &[u8]) -> Option<Vec<u8>> {
@@ -291,10 +277,6 @@ pub fn tsrank_diff(data: &[u8]) {
     let m = cx.mcx();
     let Some(vpayload) = parse_tsvector(m, vtext) else { return };
     let qpayload = gen_tsquery_payload(qbytes);
-    if has_flagged_lexeme_tie(TsQueryRef { payload: &qpayload }) {
-        return; // KNOWN-DIVERGENCE-2 carve, see above
-    }
-
     let ws = gen_weights(wmode, &wbytes);
     let wpayload = build_weights_payload(shape, &ws, 0.3);
 

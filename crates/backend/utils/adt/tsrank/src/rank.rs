@@ -95,16 +95,18 @@ fn sort_and_uniq_items<'mcx>(
         return Ok(res);
     }
     let pool = q.operand_pool();
-    res.sort_by(|a, b| {
-        match ts_compare_string(
+    // C (tsrank.c:180): qsort_arg keyed ONLY on the operand string. Same-lexeme
+    // operands with different weight/prefix flags are sort TIES, and the dedup
+    // below keeps the first of each equal run — so the surviving operand (whose
+    // flags feed find_wordentry and the rank scalar) is decided by pg_qsort's
+    // exact equal-key output order. Stable sort here is a REAL divergence
+    // (tsrank_diff DIVERGENCE-2); use the verbatim pg_qsort port.
+    crate::qsort::pg_qsort(&mut res, |a, b| {
+        ts_compare_string(
             &pool[a.distance..a.distance + a.length],
             &pool[b.distance..b.distance + b.length],
             false,
-        ) {
-            n if n < 0 => core::cmp::Ordering::Less,
-            0 => core::cmp::Ordering::Equal,
-            _ => core::cmp::Ordering::Greater,
-        }
+        )
     });
     res.dedup_by(|a, b| {
         ts_compare_string(
