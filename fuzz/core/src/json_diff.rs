@@ -1104,6 +1104,73 @@ mod tests {
         assert!(n >= 30, "expected >=30 seeds, found {n}");
     }
 
+    /// a0 EXHAUSTIVE-DIFF (Michael 2026-07-31): the \uXXXX escape domain.
+    /// Phase 1: ALL 2^16 single escapes through json_in (validation lane)
+    /// and ->> de-escape (json_object_field_text). Phase 2: ALL escape
+    /// pairs whose behavior is state-dependent — every high surrogate
+    /// (0xD800..=0xDBFF) x every second escape (2^16) = 67,108,864 cases —
+    /// through the de-escape lane. Pairs with a non-high-surrogate first
+    /// escape reduce to phase 1 (hi_surrogate state is -1; the lone-low /
+    /// zero / conversion verdicts fire per-escape), and a low-surrogate
+    /// first escape fails before the second is read, so this union is
+    /// TOTAL over the 1- and 2-escape domain. Run explicitly (release):
+    ///   cargo test --release -p decoder_fuzz \
+    ///     json_diff::tests::exhaustive_unicode_escape_domain -- \
+    ///     --ignored --nocapture
+    #[test]
+    #[ignore = "a0 exhaustive sweep: run explicitly in release"]
+    fn exhaustive_unicode_escape_domain() {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        fn esc(cp: u32, out: &mut Vec<u8>) {
+            out.extend_from_slice(b"\\u");
+            out.push(HEX[((cp >> 12) & 0xf) as usize]);
+            out.push(HEX[((cp >> 8) & 0xf) as usize]);
+            out.push(HEX[((cp >> 4) & 0xf) as usize]);
+            out.push(HEX[(cp & 0xf) as usize]);
+        }
+        pin_utf8();
+        // Phase 1: singles (json_in + de-escape planes).
+        for cp in 0..=0xFFFFu32 {
+            let mut j = Vec::with_capacity(24);
+            j.extend_from_slice(b"{\"a\":\"");
+            esc(cp, &mut j);
+            j.extend_from_slice(b"\"}");
+            let mut p = vec![1u8, b'a'];
+            p.extend_from_slice(&j);
+            json_get_field_diff(&p, true);
+            json_in_diff(&j);
+        }
+        println!("phase 1 (65536 singles) done");
+        // Phase 2: high surrogate x all second escapes, sharded across
+        // threads (C oracle state is thread-local).
+        let nthreads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let counter = std::sync::atomic::AtomicU32::new(0xD800);
+        std::thread::scope(|sc| {
+            for _ in 0..nthreads {
+                sc.spawn(|| {
+                    pin_utf8();
+                    loop {
+                        let hi = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if hi > 0xDBFF {
+                            break;
+                        }
+                        for lo in 0..=0xFFFFu32 {
+                            let mut j = Vec::with_capacity(32);
+                            j.extend_from_slice(b"{\"a\":\"");
+                            esc(hi, &mut j);
+                            esc(lo, &mut j);
+                            j.extend_from_slice(b"\"}");
+                            let mut p = vec![1u8, b'a'];
+                            p.extend_from_slice(&j);
+                            json_get_field_diff(&p, true);
+                        }
+                    }
+                });
+            }
+        });
+        println!("phase 2 (1024 x 65536 pairs) done: total 67,174,400 cases");
+    }
+
     fn arm(sel: u8, body: &[u8]) -> Vec<u8> {
         let mut v = vec![sel];
         v.extend_from_slice(body);
