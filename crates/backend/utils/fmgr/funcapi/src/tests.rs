@@ -531,3 +531,74 @@ fn polymorphic_rettype_resolves_via_agg_carrier() {
     assert_eq!(r.class, TypeFuncClass::Scalar);
     assert_eq!(r.result_type_id, INT4OID);
 }
+
+// exprType (nodeFuncs.c) is ONE function in C, total over the expression
+// vocabulary. This crate used to carry a second, narrower 24-arm copy whose
+// default arm panicked, so a call-expression argument that was a NullIfExpr or
+// MinMaxExpr raised XX000 out of `get_call_expr_argtype` /
+// `get_call_expr_rettype`. Ordinary SQL reached it: `to_jsonb(nullif(s, 3))`,
+// `array_append(least(ar, ar), 0)`. The fix delegates to the canonical
+// backend-nodes-core port (48 arms), so this test guards the DELEGATION, not
+// two hand-added arms. Found by the sqldiff differential fuzzer at 10k queries.
+#[test]
+fn call_expr_argtype_resolves_delegated_node_families() {
+    let ctx = MemoryContext::new_bump("funcapi-exprtype");
+    let mcx = ctx.mcx();
+
+    let int_const = |v: i32| {
+        Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), false, true).unwrap()
+    };
+
+    // nullif(1, 2) :: int4 — T_NullIfExpr, resolved from `opresulttype`.
+    let nullif = Node::mk(
+        mcx,
+        ::nodes::primnodes::NullIfExpr {
+            opno: 96,
+            opfuncid: 65,
+            opresulttype: INT4OID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: ::nodes::list::NodeList::make2(mcx, int_const(1), int_const(2)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+
+    // least('a', 'b') :: text — T_MinMaxExpr, resolved from `minmaxtype`.
+    let minmax = Node::mk(
+        mcx,
+        ::nodes::primnodes::MinMaxExpr {
+            minmaxtype: TEXTOID,
+            minmaxcollid: 100,
+            inputcollid: 100,
+            op: ::nodes::primnodes::MinMaxOp::IS_LEAST,
+            args: ::nodes::list::NodeList::make2(mcx, int_const(1), int_const(2)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+
+    // A FuncExpr whose two arguments are those nodes — the shape the fuzzer hit
+    // (`to_jsonb(nullif(...))`, `array_append(least(...), ...)`).
+    let call = Node::mk(
+        mcx,
+        ::nodes::primnodes::FuncExpr {
+            funcid: 2000,
+            funcresulttype: TEXTOID,
+            args: ::nodes::list::NodeList::make2(mcx, nullif, minmax).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Pre-fix each of these panicked with "funcapi exprType: node family ... not
+    // ported" instead of returning the argument's type.
+    assert_eq!(get_call_expr_argtype(call, 0), INT4OID);
+    assert_eq!(get_call_expr_argtype(call, 1), TEXTOID);
+    // Out-of-range stays C's InvalidOid.
+    assert_eq!(get_call_expr_argtype(call, 2), InvalidOid);
+    // The rettype path shares the delegation.
+    assert_eq!(get_call_expr_rettype(minmax), TEXTOID);
+    assert_eq!(get_call_expr_rettype(nullif), INT4OID);
+}

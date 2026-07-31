@@ -1757,3 +1757,67 @@ fn equal_coerce_to_domain_matches_c_field_rules() {
     assert!(crate::equal(mkv(0, 1), mkv(0, 2)));
     assert!(!crate::equal(mkv(0, 1), mkv(100, 1)));
 }
+
+// _equalMinMaxExpr (equalfuncs.funcs.c). T_MinMaxExpr was MISSING from equal()'s
+// dispatch entirely, so `equal()` raised "not in the carried vocabulary" on it.
+// Unlike clausesel.c, C's equal() genuinely errors on an unrecognized tag
+// (`elog(ERROR, "unrecognized node type: %d")`), so the port's error arm is
+// C-faithful in KIND — the defect was the missing ENTRY. Reached from ordinary
+// SQL: `SELECT ... WHERE least(k, k) OR greatest(k, k)` errored at plan time,
+// because OR-clause processing compares qual subclauses with equal(). Found by
+// the sqldiff differential-probe battery while triaging the T_MinMaxExpr
+// selectivity class.
+#[test]
+fn equal_minmax_expr_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    use crate::primnodes::MinMaxOp::{IS_GREATEST, IS_LEAST};
+    let mk = |minmaxtype: u32,
+              minmaxcollid: u32,
+              inputcollid: u32,
+              op: crate::primnodes::MinMaxOp,
+              arg_attno: i16,
+              location: i32| {
+        Node::mk(
+            mcx,
+            crate::primnodes::MinMaxExpr {
+                minmaxtype,
+                minmaxcollid,
+                inputcollid,
+                op,
+                args: NodeList::make1(mcx, mk_var_at(mcx, 1, arg_attno, 0)).unwrap(),
+                location,
+            },
+        )
+        .unwrap()
+    };
+    // Identical but for `location`, a COMPARE_LOCATION_FIELD: equal.
+    assert!(crate::equal(
+        mk(25, 100, 100, IS_LEAST, 2, 5),
+        mk(25, 100, 100, IS_LEAST, 2, 77)
+    ));
+    // Each compared field is load-bearing. minmaxtype/minmaxcollid/inputcollid
+    // carry `query_jumble_ignore`, which suppresses them in the query jumble
+    // only — equal() still compares them (that would need `equal_ignore`).
+    assert!(!crate::equal(
+        mk(25, 100, 100, IS_LEAST, 2, 5),
+        mk(23, 100, 100, IS_LEAST, 2, 5)
+    ));
+    assert!(!crate::equal(
+        mk(25, 100, 100, IS_LEAST, 2, 5),
+        mk(25, 0, 100, IS_LEAST, 2, 5)
+    ));
+    assert!(!crate::equal(
+        mk(25, 100, 100, IS_LEAST, 2, 5),
+        mk(25, 100, 0, IS_LEAST, 2, 5)
+    ));
+    assert!(!crate::equal(
+        mk(25, 100, 100, IS_LEAST, 2, 5),
+        mk(25, 100, 100, IS_GREATEST, 2, 5)
+    ));
+    // The args list recurses.
+    assert!(!crate::equal(
+        mk(25, 100, 100, IS_LEAST, 2, 5),
+        mk(25, 100, 100, IS_LEAST, 3, 5)
+    ));
+}

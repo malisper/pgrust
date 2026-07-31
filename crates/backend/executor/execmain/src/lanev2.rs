@@ -6710,8 +6710,17 @@ unsafe fn agg_fold_staged_mm<'mcx>(
     // A shape error aborts the RG and the serial arm reruns the statement, so
     // the failure mode of a future missed arming is a slow correct answer, not
     // a freed pointer in a live pergroup.
+    //
+    // GL-SINKCRASH-3: "is a sink build" must be `agg_sink_mode` — sink_cap
+    // armed — the SAME predicate the arming side (`agg_sink_arm_str_state`)
+    // keys on. The original check spelled it `agg_sink_state_bytes(..)
+    // .is_some()`, which is true for EVERY hashed build (perhash always has a
+    // state size), so sound SERIAL grouped min/max(text) folds — whose
+    // aggcontext home is correct, per the comment above — were rejected with
+    // this shape error on the leader's own executor, where there is no serial
+    // rerun to absorb it (SQLSTATE XX000 straight to the client).
     if sa.is_none()
-        && ::nodeagg::sink::agg_sink_state_bytes(agg).is_some()
+        && ::nodeagg::sink::agg_sink_mode(agg)
         && ::lanefold::plan_has_str_trans(plan)
     {
         return Err(::nodeagg::sink::sink_shape_error(

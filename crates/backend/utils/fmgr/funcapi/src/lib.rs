@@ -95,42 +95,25 @@ fn is_polymorphic_type(typid: Oid) -> bool {
     )
 }
 
-// C exprType (nodeFuncs.c, unported unit) over the families a call expression
-// carries here; exprType(NULL) == InvalidOid.
+// exprType (nodeFuncs.c). Delegates to the single canonical port in
+// backend-nodes-core rather than carrying a second, narrower copy: C has ONE
+// exprType, total over the expression vocabulary, and every caller reaches the
+// same arms. `exprType(NULL)` is not a C-legal call (C Asserts non-NULL); the
+// Option wrapper preserves this port's InvalidOid-for-absent-expression
+// contract that the AggFnArgTypes carriers below rely on.
+//
+// Regression: this function used to be a closed 24-arm subset whose default arm
+// panicked, so ordinary SQL whose call-expression argument contained a
+// NullIfExpr or MinMaxExpr — e.g. `to_jsonb(nullif(s, 3))`,
+// `array_append(least(ar, ar), 0)` — failed with XX000. The canonical port
+// handles 48 arms including both; delegating retires the whole class here
+// instead of adding the two arms that happened to be hit. Found by the sqldiff
+// query-level differential fuzzer at 10k queries (gen:1496/1937/2169/2964/
+// 9170/9781, all six divergences of that run).
 fn expr_type(expr: Option<Node<'_>>) -> Oid {
-    let Some(node) = expr else {
-        return InvalidOid;
-    };
-    match node.node_tag() {
-        NodeTag::T_Var => node.as_var().unwrap().vartype,
-        NodeTag::T_Const => node.as_const().unwrap().consttype,
-        NodeTag::T_Param => node.as_param().unwrap().paramtype,
-        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
-        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
-        NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
-        NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
-        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
-        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
-        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
-        NodeTag::T_JsonValueExpr => {
-            expr_type(node.as_json_value_expr().unwrap().formatted_expr)
-        }
-        NodeTag::T_JsonConstructorExpr => {
-            node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
-        }
-        NodeTag::T_JsonIsPredicate => types_core::catalog::BOOLOID,
-        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
-        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
-        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
-        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
-        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
-        tag => panic!("funcapi exprType: node family {tag:?} not ported"),
+    match expr {
+        Some(node) => ::nodes_core::node_funcs::expr_type(node),
+        None => InvalidOid,
     }
 }
 

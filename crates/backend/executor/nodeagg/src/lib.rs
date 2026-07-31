@@ -1950,7 +1950,43 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
                 collect_base_var_cols(sp, out);
             }
         }
-        tag => panic!("find_cols (nodeAgg.c): node family {tag:?} not ported"),
+        // C's find_cols_walker tail, verbatim:
+        //
+        //     return expression_tree_walker(node, find_cols_walker, context);
+        //
+        // find_cols_walker special-cases exactly two tags (Var and Aggref) and
+        // hands EVERY other node to the generic expression_tree_walker, so it
+        // is total over the expression vocabulary. The explicit arms above are
+        // an inlined fast path over the common tags; this arm restores C's
+        // totality for the rest (T_SubscriptingRef from `count(ar[1])`,
+        // T_XmlExpr, T_JsonExpr, T_FieldSelect, T_FieldStore, T_CollateExpr,
+        // T_SetToDefault, T_MergeSupportFunc, ...). It must stay a wildcard,
+        // not an enumeration: an Agg tlist or qual can legally contain any
+        // expression node, and a miss here is an executor panic on ordinary
+        // SQL rather than a wrong plan.
+        //
+        // The walk is a strict superset in structure, never in effect: the
+        // shim's `visit` re-enters this function, so a Var found anywhere in
+        // the delegated subtree marks its outer column exactly as an inlined
+        // arm would, and the callback never returns `true` (C's find_cols_walker
+        // likewise never short-circuits on a non-Var/non-Aggref node).
+        _ => {
+            struct Shim<'a, 'v> {
+                out: &'a mut PgVec<'v, bool>,
+            }
+            impl<'mcx, 'a, 'v> ::nodes_core::NodeWalker<'mcx> for Shim<'a, 'v> {
+                fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+                    collect_base_var_cols(node, self.out);
+                    Ok(false)
+                }
+            }
+            let mut shim = Shim { out };
+            // `expression_tree_walker` is infallible for an infallible
+            // callback: it only ever propagates an error raised by `visit`,
+            // and this `visit` returns `Ok` unconditionally.
+            ::nodes_core::expression_tree_walker(node, &mut shim)
+                .expect("collect_base_var_cols shim is infallible");
+        }
     }
 }
 

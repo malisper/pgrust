@@ -9377,6 +9377,7 @@ dependencies = [
  "mcx",
  "mcxt_stats",
  "miscinit_seams",
+ "nodes_core",
  "pglz",
  "pgstat_seams",
  "postgres_seams",
