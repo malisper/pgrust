@@ -375,6 +375,7 @@ dependencies = [
  "hashfn",
  "mcx",
  "numutils",
+ "pg_string",
  "pqformat",
  "stringinfo",
  "types_array",

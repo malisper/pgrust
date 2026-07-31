@@ -10,6 +10,7 @@ funcapi = { path = "../../fmgr/funcapi" }
 hashfn = { path = "../../../../common/hashfn" }
 mcx = { path = "../../../../_support/mcx" }
 numutils = { path = "../numutils" }
+pg_string = { path = "../../../../common/string" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 types_array = { path = "../../../../_support/types/array" }

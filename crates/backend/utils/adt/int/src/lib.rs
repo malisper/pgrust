@@ -230,8 +230,11 @@ pub fn int2vectorin<'mcx>(
     let mut ints: PgVec<'mcx, i16> = PgVec::new_in(mcx);
     let mut rest = input.as_bytes();
     loop {
+        // C isspace() in the C locale, not Rust is_ascii_whitespace(): the C
+        // set includes VT (0x0b), which Rust's omits (int_diff divergence,
+        // witness input "\r\r\x0b\r\r-0 ").
         while let Some((&c, tail)) = rest.split_first() {
-            if !c.is_ascii_whitespace() {
+            if !pg_string::isspace_c_locale(c) {
                 break;
             }
             rest = tail;
