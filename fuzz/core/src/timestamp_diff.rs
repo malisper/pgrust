@@ -1664,7 +1664,7 @@ fn interval_unops_arm(payload: &[u8]) {
     if payload.len() < 33 {
         return;
     }
-    let op = payload[0] % 4;
+    let op = payload[0] % 6;
     let a =
         Interval { time: rd_i64(payload, 1), day: rd_i32(payload, 9), month: rd_i32(payload, 13) };
     let b = Interval {
@@ -1720,7 +1720,7 @@ fn interval_unops_arm(payload: &[u8]) {
                 "interval_cmp DIVERGENCE: C {ccmp} vs Rust {rcmp}"
             );
         }
-        _ => {
+        3 => {
             // izone: interval-typed zone displacement
             let tz = (payload[0] >> 2 & 1) as i32;
             let ts = rd_i64(payload, 17);
@@ -1734,6 +1734,95 @@ fn interval_unops_arm(payload: &[u8]) {
                 tsiv::timestamp_izone(&a, ts)
             };
             check_i64("timestamp_izone", cerr, cval, &r);
+        }
+        4 => {
+            // typmod fc wrappers vs the PROVED cores (2903-2908): the C
+            // plane rides those proofs; here the wrapper's cstring[]-array
+            // decode + out-image plumbing gets the wrapper==core check.
+            let n = 1 + (payload[0] >> 2 & 1) as usize; /* 1 or 2 elems */
+            let v0 = rd_i32(payload, 1) % 100_000;
+            let v1 = rd_i32(payload, 9) % 100_000;
+            let mut img = Vec::new();
+            let mut payload_bytes = Vec::new();
+            for v in [v0, v1].iter().take(n) {
+                payload_bytes.extend_from_slice(v.to_string().as_bytes());
+                payload_bytes.push(0);
+            }
+            img.extend_from_slice(&0u32.to_le_bytes()); /* varlena hdr patched below */
+            img.extend_from_slice(&1i32.to_le_bytes()); /* ndim */
+            img.extend_from_slice(&0i32.to_le_bytes()); /* no nulls */
+            img.extend_from_slice(&(types_core::CSTRINGOID).to_le_bytes());
+            img.extend_from_slice(&(n as i32).to_le_bytes());
+            img.extend_from_slice(&1i32.to_le_bytes()); /* lbound */
+            img.extend_from_slice(&payload_bytes);
+            let hdr = ((img.len() as u32) << 2).to_le_bytes();
+            img[..4].copy_from_slice(&hdr);
+            let d = Datum::from_usize(img.as_ptr() as usize);
+
+            // interval typmodin: wrapper vs core over the same ints
+            let fc = fc_call(tsb::fc_intervaltypmodin, [d]);
+            let core = if n == 1 {
+                tsiv::intervaltypmodin(&[v0])
+            } else {
+                tsiv::intervaltypmodin(&[v0, v1])
+            };
+            match (&core, &fc.0) {
+                (Ok(cv), Ok(fv)) => {
+                    assert!(*cv == fv.as_i32(), "intervaltypmodin FC-PLANE value")
+                }
+                (Err(ce), Err(fe)) => {
+                    assert!(ce.sqlstate == fe.sqlstate, "intervaltypmodin FC-PLANE sqlstate")
+                }
+                _ => panic!("intervaltypmodin FC-PLANE verdict mismatch"),
+            }
+            // timestamp[tz] typmodin: wrapper vs proved core check
+            for (f, istz) in [
+                (tsb::fc_timestamptypmodin as PGFunction, false),
+                (tsb::fc_timestamptztypmodin as PGFunction, true),
+            ] {
+                let fc = fc_call(f, [d]);
+                if n == 1 {
+                    let core = adt_timestamp::anytimestamp_typmod_check(istz, v0);
+                    match (&core, &fc.0) {
+                        (Ok(cv), Ok(fv)) => {
+                            assert!(*cv == fv.as_i32(), "ts typmodin FC-PLANE value")
+                        }
+                        (Err(ce), Err(fe)) => assert!(
+                            ce.sqlstate == fe.sqlstate,
+                            "ts typmodin FC-PLANE sqlstate"
+                        ),
+                        _ => panic!("ts typmodin FC-PLANE verdict mismatch"),
+                    }
+                } else {
+                    assert!(fc.0.is_err(), "ts typmodin must reject n!=1");
+                }
+            }
+            // typmodout family (proved 2904/2906/2908 whole-image): the
+            // wrapper plumbing runs; intervaltypmodout gets core compare.
+            let tmod = interval_typmod(payload[0], payload[13]);
+            let fc = fc_call(tsb::fc_intervaltypmodout, [Datum::from_i32(tmod)]);
+            let mut buf64 = [0u8; 64];
+            match (tsiv::intervaltypmodout(tmod, &mut buf64), &fc.0) {
+                (Ok(len), Ok(fv)) => assert!(
+                    datum_cstr_bytes(*fv) == &buf64[..len],
+                    "intervaltypmodout FC-PLANE image"
+                ),
+                (Err(ce), Err(fe)) => {
+                    assert!(ce.sqlstate == fe.sqlstate, "intervaltypmodout FC-PLANE sqlstate")
+                }
+                _ => panic!("intervaltypmodout FC-PLANE verdict mismatch"),
+            }
+            let tsmod = ts_typmod(payload[13]);
+            let _ = fc_call(tsb::fc_timestamptypmodout, [Datum::from_i32(tsmod)]);
+            let _ = fc_call(tsb::fc_timestamptztypmodout, [Datum::from_i32(tsmod)]);
+        }
+        _ => {
+            // float8_timestamptz wrapper vs the proved core (1158); covers
+            // the %g out-of-range message formatter (fmt_g6) error arm.
+            let secs = rd_f64(payload, 1);
+            let core = adt_timestamp::float8_timestamptz(secs);
+            let fc = fc_call(tsb::fc_float8_timestamptz, [Datum::from_f64(secs)]);
+            fc_check_i64("float8_timestamptz", &core, fc);
         }
     }
 }
