@@ -907,6 +907,32 @@ fn ts_out_arm(payload: &[u8]) {
     }
 }
 
+/// PLATFORM CARVE (documented; oracle of record = glibc): strtod's ERANGE
+/// on underflow uses tininess-BEFORE-rounding on glibc but AFTER-rounding
+/// on macOS, so a token whose true value sits just below DBL_MIN and
+/// rounds UP to it ('0x1.fffffffffffffp-1023') gets errno=ERANGE on glibc
+/// (real 18.3 answers 22007 — docker-verified) and errno=0 on macOS. The
+/// shipped Rust model follows glibc; execs whose text carries a token
+/// rounding to ±DBL_MIN leave the LOCAL (macOS) compared domain. On the
+/// CI cluster (glibc) the carve never fires with a differing verdict.
+fn dblmin_boundary(text: &[u8]) -> bool {
+    for i in 0..text.len() {
+        if let Some(tok) = adt_float::scan_number(&text[i..]) {
+            let t = &text[i..i + tok.len];
+            let v = match tok.kind {
+                adt_float::NumKind::Decimal => {
+                    std::str::from_utf8(t).ok().and_then(|s| s.parse::<f64>().ok())
+                }
+                adt_float::NumKind::Hex => Some(adt_float::parse_hex_float(t)),
+            };
+            if v.is_some_and(|v| v.abs() == f64::MIN_POSITIVE) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn interval_in_arm(payload: &[u8]) {
     let Some((&ib, rest)) = payload.split_first() else { return };
     let Some((&tb, rest)) = rest.split_first() else { return };
@@ -919,6 +945,10 @@ fn interval_in_arm(payload: &[u8]) {
     // SAFETY: cstring + out pointers valid for the call.
     let cerr = unsafe { pg_tsdiff_interval_in(cs.as_ptr(), typmod, is, &mut ct, &mut cd, &mut cm) };
     let r = tsiv::interval_in(s, typmod, None);
+    let c_ok = cerr == 0;
+    if c_ok != r.is_ok() && dblmin_boundary(s.as_bytes()) {
+        return; /* strtod tininess platform carve — see dblmin_boundary */
+    }
     check_interval("interval_in", cerr, (ct, cd, cm), &r);
 }
 
