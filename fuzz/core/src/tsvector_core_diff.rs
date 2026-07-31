@@ -66,7 +66,7 @@ use crate::tsq_gen::gen_tsquery_payload;
 
 extern "C" {
     fn pg_diff_tsvec_in(
-        input: *const i8,
+        input: *const std::ffi::c_char,
         soft: i32,
         out: *mut u8,
         outcap: i32,
@@ -112,7 +112,7 @@ extern "C" {
     fn pg_diff_tsvec_setweight(
         img: *const u8,
         imglen: i32,
-        w: i8,
+        w: std::ffi::c_char,
         out: *mut u8,
         outcap: i32,
         outlen: *mut i32,
@@ -120,7 +120,7 @@ extern "C" {
     fn pg_diff_tsvec_setweight_by_filter(
         img: *const u8,
         imglen: i32,
-        w: i8,
+        w: std::ffi::c_char,
         lexbuf: *const u8,
         lexlens: *const i32,
         nlex: i32,
@@ -140,7 +140,7 @@ extern "C" {
     fn pg_diff_tsvec_filter(
         img: *const u8,
         imglen: i32,
-        weights: *const i8,
+        weights: *const std::ffi::c_char,
         wnulls: *const u8,
         nw: i32,
         out: *mut u8,
@@ -415,7 +415,7 @@ fn arm_in_out_send(payload: &[u8]) {
     let img = varlena_image(&payload_img);
     let d = fc_call::<1>(fcb::fc_tsvectorout, m, [varlena_datum(&img)])
         .expect("fc_tsvectorout verdict");
-    let cs = unsafe { std::ffi::CStr::from_ptr(d.as_usize() as *const i8) };
+    let cs = unsafe { std::ffi::CStr::from_ptr(d.as_usize() as *const std::ffi::c_char) };
     assert_eq!(cs.to_bytes(), cout.bytes(), "fc_tsvectorout != core");
 
     let d = fc_call::<1>(fcb::fc_tsvectorsend, m, [varlena_datum(&img)])
@@ -667,7 +667,7 @@ fn arm_unary(payload: &[u8]) {
             );
             let mut cout = COut::new();
             let rc = unsafe {
-                pg_diff_tsvec_setweight(p.as_ptr(), p.len() as i32, w as i8,
+                pg_diff_tsvec_setweight(p.as_ptr(), p.len() as i32, w as std::ffi::c_char,
                                         cout.buf.as_mut_ptr(), CBUF as i32, &mut cout.len)
             };
             match (&rres, rc) {
@@ -695,7 +695,7 @@ fn arm_unary(payload: &[u8]) {
                 return;
             }
             let (wraw, t) = rest2.split_at(nw);
-            let weights: Vec<i8> = wraw.iter().map(|&b| b as i8).collect();
+            let weights: Vec<std::ffi::c_char> = wraw.iter().map(|&b| b as std::ffi::c_char).collect();
             let wnulls: Vec<u8> = wraw.iter().map(|&b| (b == 0xEE) as u8).collect();
             let Some((t, c)) = take_text(t) else { return };
             let Ok(p) = parse_both(m, t, &c) else { return };
@@ -990,7 +990,7 @@ fn arm_lexops(payload: &[u8]) {
             let (buf, lens) = c_lexlist(&list);
             let mut cout = COut::new();
             let rc = unsafe {
-                pg_diff_tsvec_setweight_by_filter(p.as_ptr(), p.len() as i32, w as i8,
+                pg_diff_tsvec_setweight_by_filter(p.as_ptr(), p.len() as i32, w as std::ffi::c_char,
                                                   buf.as_ptr(), lens.as_ptr(),
                                                   lens.len() as i32, cout.buf.as_mut_ptr(),
                                                   CBUF as i32, &mut cout.len)
