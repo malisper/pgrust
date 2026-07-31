@@ -17,8 +17,16 @@ TARGETS="${*:-}"
 if [ -z "$TARGETS" ]; then
   TARGETS=$(for d in corpus/*/; do basename "$d"; done)
 fi
+# NON-LIVE corpus dirs (explicit, documented — extend only with a reason):
+#   encode_diff     — scaffold target, todo!() body; adopt per
+#                     README-TODO-encode_diff.md before removing this skip.
+#   formatting_diff — banked seeds only, no fuzz target yet; several seeds
+#                     are EXPECTED-DIVERGENCE cells (Y,YYY carve, ledger oids
+#                     1778/1780) — see corpus/formatting_diff/README.md.
+NOT_LIVE="encode_diff formatting_diff"
 rc=0
 for t in $TARGETS; do
+  case " $NOT_LIVE " in *" $t "*) echo "SKIP $t (not live: see replay-rail.sh header)"; continue;; esac
   [ -d "corpus/$t" ] || { echo "SKIP $t (no corpus)"; continue; }
   n=$(find "corpus/$t" -type f | wc -l | tr -d ' ')
   echo "== replay $t over $n inputs"
