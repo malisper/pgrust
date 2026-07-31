@@ -223,6 +223,33 @@ mod proofs {
         elevel >= ERROR
     }
 
+    /// Kani stub for `adt_numeric::var::word_buf_take` — the shipped
+    /// pool-miss arm (`pop()` on an empty pool -> `unwrap_or_default()`).
+    /// Buffer recycling leaves the proof (numeric-probe recipe); see the
+    /// timetz_part_cell macro comment for the Linux pthread_key_create
+    /// status-6 mechanism this cuts.
+    fn stub_word_buf_take() -> Vec<u16> {
+        Vec::new()
+    }
+
+    /// Kani stub for `adt_numeric::var::word_buf_put` — the shipped
+    /// `capacity() == 0` early-return arm (recycling out of proof).
+    fn stub_word_buf_put(_v: Vec<u16>) {}
+
+    /// Kani stub for `adt_numeric::var::digit_buf_heap_realloc`: the tz
+    /// cells never feasibly construct a numeric (retnumeric=false, units
+    /// literal), so reaching the digit heap arm is a harness defect —
+    /// panic loudly (never a silent fence).
+    fn stub_digit_buf_heap_realloc(_heap: &mut Vec<i16>, _n: usize) {
+        panic!("DigitBuf heap arm reached in a tz-only timetz_part cell");
+    }
+
+    /// Kani stub for `adt_numeric::var::digit_buf_put` — drop-time pool
+    /// return (recycling out of proof; numeric-probe precedent).
+    fn stub_digit_buf_put(v: Vec<i16>) {
+        core::mem::forget(v);
+    }
+
     /// Unreachable at runtime here (the only builder-level report is the
     /// intervaltypmodin precision WARNING, suppressed by
     /// model_level_interesting); present so reachability codegen never
@@ -1400,6 +1427,31 @@ mod proofs {
             // pthread_key_create type mismatch; CI cluster 31ad423d).
             #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
             #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            // Numeric TLS-pool stub quartet (CI cluster 33d7d09d31 status-6
+            // repair; numeric-probe recipe): part_result's statically-
+            // present Numeric arms pull adt_numeric's NumericVar/
+            // NumericImage machinery into the call graph, and its
+            // DIGIT_POOL/WORD_POOL `thread_local!`s hold Drop-carrying
+            // Vecs — the only Drop-carrying TLS these harnesses reach
+            // (goto call graph: the sole callers of std's TLS-destructor
+            // `register` are the two pool Storage initializers). On the
+            // LINUX toolchain that registration path converts a call to
+            // CBMC's builtin pthread_key_create, whose destructor
+            // parameter type-mismatches Kani's declaration (struct_tag vs
+            // pointer) -> CBMC status 6 -> reported "VERIFICATION FAILED"
+            // with no property counterexample. macOS std registers TLS
+            // destructors via _tlv_atexit instead, so laptop runs can't
+            // reproduce — which is how the 2026-07-29 env/OnceLock repair
+            // was banked green here while this TLS remained. The stubs
+            // are the shipped pool-miss / no-recycle arms (numeric-probe
+            // precedent): buffer recycling leaves the proof, values are
+            // bit-identical. The tz cells never feasibly build a numeric
+            // (retnumeric=false, units literal), so the realloc stub
+            // panics loudly if ever reached.
+            #[kani::stub(adt_numeric::var::word_buf_take, stub_word_buf_take)]
+            #[kani::stub(adt_numeric::var::word_buf_put, stub_word_buf_put)]
+            #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+            #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
             fn $h() {
                 let zone: i32 = kani::any();
                 // Contract fence (lane doctrine): validated timetz zone
@@ -3159,4 +3211,876 @@ mod rem {
         eq_date_pl_interval_noend:   adt_date::builtins::fc_date_pl_interval, pg_adr_date_pl_interval, i64::MAX, i32::MAX, i32::MAX;
         eq_date_mi_interval_noend:   adt_date::builtins::fc_date_mi_interval, pg_adr_date_mi_interval, i64::MAX, i32::MAX, i32::MAX;
     }
+}
+
+// ============================================================================
+// hlp — p1-lanel adt_datetime pure-helper rows (2026-07-31).
+//
+// Dual-exec vs the verbatim C appended to c/pg_datetime_b.c (provenance in
+// that file's p1-lanel section header). No allocator, no fmgr, no stubs:
+// every function here is scalar/table arithmetic, so harnesses compare raw
+// values only.
+//
+// Domain notes (fences are LITERAL-MASKED, never assumes):
+//   - eq_dtk_m / eq_interval_mask: t = raw & 31 — the full VALID shift
+//     domain; t >= 32 or t < 0 is shift-overflow UB in C and a Rust panic,
+//     out of both sides' contract (callers pass token constants 0..=37 only
+//     through DTK_M(t<=31) sites).
+//   - j2day/date2j/j2date/isoweek2j run on full i32 (C compiled -fwrapv;
+//     the Rust bodies use wrapping ops — bit-level equivalence is exactly
+//     the claim).
+//   - LADDER harnesses (_full over divider chains) may wall per the
+//     band-immune law; the spot grids + the datetime_io_diff fuzz target
+//     are the standing coverage for the bulk domain.
+// ============================================================================
+#[cfg(kani)]
+mod hlp {
+    use adt_datetime::calendar::{
+        date2isoweek, date2isoyear, date2isoyearday, date2j, isleap, isoweek2date, isoweek2j,
+        isoweekdate2date, j2date, j2day,
+    };
+    use adt_datetime::consts::{
+        DateTkn, DTK_M, INTERVAL_MASK, IS_VALID_JULIAN, MICROSECOND, MILLISECOND, SECOND,
+    };
+    use adt_datetime::decode::{
+        datebsearch, dt2time, float_time_overflows, time_overflows, CheckDateTokenTable,
+        CheckDateTokenTables, DecodeSpecial, DecodeUnits,
+    };
+    use adt_datetime::tables::{DATETKTBL, DELTATKTBL};
+    use adt_datetime::Interval;
+    use proof_support::stubs;
+    use adt_date::{
+        interval_time, time_mi_interval, time_pl_interval, timetz_mi_interval, timetz_pl_interval,
+        TimeTzADT,
+    };
+    use std::os::raw::{c_char, c_int};
+
+    extern "C" {
+        fn pg_hlp_dtk_m(t: c_int) -> c_int;
+        fn pg_hlp_interval_mask(b: c_int) -> c_int;
+        fn pg_hlp_is_valid_julian(y: c_int, m: c_int, d: c_int) -> c_int;
+        fn pg_hlp_isleap(y: c_int) -> c_int;
+        fn pg_hlp_j2day(date: c_int) -> c_int;
+        fn pg_hlp_j2date(jd: c_int, year: *mut c_int, month: *mut c_int, day: *mut c_int) -> c_int;
+        fn pg_hlp_date2j(y: c_int, m: c_int, d: c_int) -> c_int;
+        fn pg_hlp_dt2time(jd: i64, hour: *mut c_int, min: *mut c_int, sec: *mut c_int, fsec: *mut i32) -> c_int;
+        fn pg_hlp_time_overflows(hour: c_int, min: c_int, sec: c_int, fsec: i32) -> c_int;
+        fn pg_hlp_isoweek2j(year: c_int, week: c_int) -> c_int;
+        fn pg_hlp_isoweek2date(woy: c_int, year: *mut c_int, mon: *mut c_int, mday: *mut c_int) -> c_int;
+        fn pg_hlp_isoweekdate2date(
+            isoweek: c_int,
+            wday: c_int,
+            year: *mut c_int,
+            mon: *mut c_int,
+            mday: *mut c_int,
+        ) -> c_int;
+        fn pg_hlp_date2isoweek(year: c_int, mon: c_int, mday: c_int) -> c_int;
+        fn pg_hlp_date2isoyear(year: c_int, mon: c_int, mday: c_int) -> c_int;
+        fn pg_hlp_date2isoyearday(year: c_int, mon: c_int, mday: c_int) -> c_int;
+        fn pg_hlp_datebsearch_date(key: *const c_char, idx: *mut c_int) -> c_int;
+        fn pg_hlp_datebsearch_delta(key: *const c_char, idx: *mut c_int) -> c_int;
+        fn pg_hlp_decode_special(field: c_int, lowtoken: *const c_char, val: *mut c_int) -> c_int;
+        fn pg_hlp_decode_units(field: c_int, lowtoken: *const c_char, val: *mut c_int) -> c_int;
+        fn pg_hlp_check_date_token_tables() -> c_int;
+        fn pg_hlp_check_date_token_table_one(which: c_int) -> c_int;
+        fn pg_hlp_float_time_overflows(hour: c_int, min: c_int, sec: f64) -> c_int;
+        fn pg_hlp_interval_time(
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out: *mut i64,
+        ) -> c_int;
+        fn pg_hlp_time_pl_interval(
+            time: i64,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out: *mut i64,
+        ) -> c_int;
+        fn pg_hlp_time_mi_interval(
+            time: i64,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out: *mut i64,
+        ) -> c_int;
+        fn pg_hlp_timetz_pl_interval(
+            time: i64,
+            zone: i32,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out_time: *mut i64,
+            out_zone: *mut i32,
+        ) -> c_int;
+        fn pg_hlp_timetz_mi_interval(
+            time: i64,
+            zone: i32,
+            sp_time: i64,
+            sp_day: i32,
+            sp_month: i32,
+            out_time: *mut i64,
+            out_zone: *mut i32,
+        ) -> c_int;
+    }
+
+    /// Full valid shift domain (see module header) + the composite masks.
+    #[kani::proof]
+    fn eq_dtk_m_shiftdom() {
+        let raw: u8 = kani::any();
+        let t: i32 = (raw & 31) as i32;
+        assert!(DTK_M(t) == unsafe { pg_hlp_dtk_m(t) });
+        // composite mask constants ride the same C macro
+        let c_all_secs = unsafe {
+            pg_hlp_dtk_m(SECOND) | pg_hlp_dtk_m(MILLISECOND) | pg_hlp_dtk_m(MICROSECOND)
+        };
+        assert!(adt_datetime::consts::DTK_ALL_SECS_M == c_all_secs);
+    }
+
+    /// Full valid shift domain.
+    #[kani::proof]
+    fn eq_interval_mask_shiftdom() {
+        let raw: u8 = kani::any();
+        let b: i32 = (raw & 31) as i32;
+        assert!(INTERVAL_MASK(b) == unsafe { pg_hlp_interval_mask(b) });
+    }
+
+    /// Full-domain: pure compares, no dividers.
+    #[kani::proof]
+    fn eq_is_valid_julian_full() {
+        let (y, m, d): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        assert!(IS_VALID_JULIAN(y, m, d) == (unsafe { pg_hlp_is_valid_julian(y, m, d) } != 0));
+    }
+
+    /// Full-i32: %4/%100/%400 small-constant mods.
+    #[kani::proof]
+    fn eq_isleap_full() {
+        let y: i32 = kani::any();
+        assert!(isleap(y) == (unsafe { pg_hlp_isleap(y) } != 0));
+    }
+
+    /// Full-i32 incl. the INT_MAX wrap (+1 under -fwrapv) and negative fixup.
+    #[kani::proof]
+    fn eq_j2day_full() {
+        let d: i32 = kani::any();
+        assert!(j2day(d) == unsafe { pg_hlp_j2day(d) });
+    }
+
+    /// LADDER (honest full-domain screen over the /100 and /4 dividers).
+    #[kani::proof]
+    fn eq_date2j_full() {
+        let (y, m, d): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        assert!(date2j(y, m, d) == unsafe { pg_hlp_date2j(y, m, d) });
+    }
+
+    /// LADDER (unsigned /146097, /1461, %365/%366 chain).
+    #[kani::proof]
+    fn eq_j2date_full() {
+        let jd: i32 = kani::any();
+        let (mut ry, mut rm, mut rd) = (0i32, 0i32, 0i32);
+        j2date(jd, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (0i32, 0i32, 0i32);
+        unsafe { pg_hlp_j2date(jd, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// Julian boundary spots (symbolic index over a concrete grid).
+    #[kani::proof]
+    fn eq_j2date_spots() {
+        const G: &[i32] = &[
+            0, 1, -1, 32044, -32045, 146096, 146097, 1461, 1460, 2451545, 2440588, 1721426,
+            2361222, 2147483493, 2147483494, i32::MAX, i32::MIN, 60, 59,
+        ];
+        let idx: usize = kani::any();
+        kani::assume(idx < G.len());
+        let jd = G[idx];
+        let (mut ry, mut rm, mut rd) = (0i32, 0i32, 0i32);
+        j2date(jd, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (0i32, 0i32, 0i32);
+        unsafe { pg_hlp_j2date(jd, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// LADDER (64-bit /USECS_PER_HOUR//MINUTE//SEC divider chain).
+    #[kani::proof]
+    fn eq_dt2time_full() {
+        let jd: i64 = kani::any();
+        let (mut rh, mut rmin, mut rs, mut rf) = (0i32, 0i32, 0i32, 0i32);
+        dt2time(jd, &mut rh, &mut rmin, &mut rs, &mut rf);
+        let (mut ch, mut cmin, mut cs, mut cf) = (0i32, 0i32, 0i32, 0i32);
+        unsafe { pg_hlp_dt2time(jd, &mut ch, &mut cmin, &mut cs, &mut cf) };
+        assert!(rh == ch && rmin == cmin && rs == cs && rf == cf);
+    }
+
+    /// Divider-chain boundary spots.
+    #[kani::proof]
+    fn eq_dt2time_spots() {
+        const G: &[i64] = &[
+            0,
+            1,
+            -1,
+            999_999,
+            1_000_000,
+            59_999_999,
+            60_000_000,
+            3_599_999_999,
+            3_600_000_000,
+            43_200_000_000,
+            86_399_999_999,
+            86_400_000_000,
+            12_345_678_901_234,
+            i64::MAX,
+            i64::MIN,
+        ];
+        let idx: usize = kani::any();
+        kani::assume(idx < G.len());
+        let jd = G[idx];
+        let (mut rh, mut rmin, mut rs, mut rf) = (0i32, 0i32, 0i32, 0i32);
+        dt2time(jd, &mut rh, &mut rmin, &mut rs, &mut rf);
+        let (mut ch, mut cmin, mut cs, mut cf) = (0i32, 0i32, 0i32, 0i32);
+        unsafe { pg_hlp_dt2time(jd, &mut ch, &mut cmin, &mut cs, &mut cf) };
+        assert!(rh == ch && rmin == cmin && rs == cs && rf == cf);
+    }
+
+    /// Full 4xi32 domain: individual range checks fence the i64 total.
+    #[kani::proof]
+    fn eq_time_overflows_full() {
+        let (h, m, s, f): (i32, i32, i32, i32) = (kani::any(), kani::any(), kani::any(), kani::any());
+        assert!(time_overflows(h, m, s, f) == (unsafe { pg_hlp_time_overflows(h, m, s, f) } != 0));
+    }
+
+    /// AD-band year (literal-masked, covers the Julian-valid window) x full
+    /// symbolic week (the (week-1)*7 face wraps on both sides).
+    #[kani::proof]
+    fn eq_isoweek2j_ad_band() {
+        let raw: u32 = kani::any();
+        let year: i32 = 1 + (raw & 0x007F_FFFF) as i32;
+        let week: i32 = kani::any();
+        assert!(isoweek2j(year, week) == unsafe { pg_hlp_isoweek2j(year, week) });
+    }
+
+    /// BC/zero-band year x full symbolic week.
+    #[kani::proof]
+    fn eq_isoweek2j_bc_band() {
+        let raw: u32 = kani::any();
+        let year: i32 = -((raw & 0x007F_FFFF) as i32);
+        let week: i32 = kani::any();
+        assert!(isoweek2j(year, week) == unsafe { pg_hlp_isoweek2j(year, week) });
+    }
+
+    // ---- PANIC-FREEDOM ladders (salvage from the walled equality ladders) ----
+    //
+    // The five `_full`/`_band` equality ladders above wall in CBMC's
+    // per-property refinement phase (symex is trivial at ~0.03s; the SAT
+    // instance decides in ms, then per-property classification does not
+    // terminate inside 600s on the CI cluster under cadical). Bisecting those
+    // instances property-by-property showed every Kani-inserted
+    // arithmetic-overflow / division / subtraction check passing INDIVIDUALLY
+    // and only the cross-implementation equality assertion undecidable.
+    //
+    // These harnesses isolate exactly that decidable half: no C call and no
+    // equality claim, so the ONLY properties are Kani's panic checks. The
+    // resulting theorem is full-domain panic-freedom — precisely the property
+    // class this lane found SIX real -fwrapv defects in (j2date, dt2time,
+    // ValidateDate DOY, isoweek2j, date2j, display_year), each of which was a
+    // ported-in `panic!` where C wraps. Value parity for the bulk domain stays
+    // with the spot grids + the CGF targets; panic-freedom is now PROVED rather
+    // than deferred to a wall.
+    #[kani::proof]
+    fn panicfree_date2j_full() {
+        let (y, m, d): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        std::hint::black_box(date2j(y, m, d));
+    }
+
+    #[kani::proof]
+    fn panicfree_j2date_full() {
+        let jd: i32 = kani::any();
+        let (mut y, mut m, mut d) = (0i32, 0i32, 0i32);
+        j2date(jd, &mut y, &mut m, &mut d);
+        std::hint::black_box((y, m, d));
+    }
+
+    #[kani::proof]
+    fn panicfree_dt2time_full() {
+        let jd: i64 = kani::any();
+        let (mut h, mut mi, mut s, mut f) = (0i32, 0i32, 0i32, 0i32);
+        dt2time(jd, &mut h, &mut mi, &mut s, &mut f);
+        std::hint::black_box((h, mi, s, f));
+    }
+
+    #[kani::proof]
+    fn panicfree_isoweek2j_full() {
+        let (year, week): (i32, i32) = (kani::any(), kani::any());
+        std::hint::black_box(isoweek2j(year, week));
+    }
+
+    /// NEGATIVE CONTROL for the panic-freedom plane: a deliberately checked
+    /// `week - 1` reproduces the exact -fwrapv defect datetime_engine_diff
+    /// found in isoweek2j, so the plane demonstrably catches that defect class
+    /// rather than passing vacuously.
+    #[kani::proof]
+    fn control_panicfree_isoweek2j_checked_sub() {
+        let week: i32 = kani::any();
+        // The pre-fix shape: checked subtraction panics at week == i32::MIN.
+        std::hint::black_box((week - 1).wrapping_mul(7));
+    }
+
+    const ISO_GRID: &[(i32, i32, i32)] = &[
+        (2005, 1, 1),   // ISO week 53 of 2004
+        (2005, 1, 2),
+        (2005, 1, 3),
+        (2006, 1, 1),
+        (2008, 12, 29), // ISO week 1 of 2009
+        (2008, 12, 28),
+        (2004, 12, 31),
+        (2010, 1, 3),
+        (2010, 1, 4),
+        (2024, 2, 29),
+        (2000, 2, 29),
+        (1, 1, 1),
+        (-4713, 11, 24),
+        (5874897, 12, 31),
+        (1981, 12, 31),
+        (1982, 1, 1),
+    ];
+
+    /// ISO-week rollover spots + a masked mday face on two cells.
+    #[kani::proof]
+    fn eq_date2isoweek_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < ISO_GRID.len());
+        let (y, m, d) = ISO_GRID[idx];
+        assert!(date2isoweek(y, m, d) == unsafe { pg_hlp_date2isoweek(y, m, d) });
+    }
+
+    #[kani::proof]
+    fn eq_date2isoyear_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < ISO_GRID.len());
+        let (y, m, d) = ISO_GRID[idx];
+        assert!(date2isoyear(y, m, d) == unsafe { pg_hlp_date2isoyear(y, m, d) });
+    }
+
+    #[kani::proof]
+    fn eq_date2isoyearday_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < ISO_GRID.len());
+        let (y, m, d) = ISO_GRID[idx];
+        assert!(date2isoyearday(y, m, d) == unsafe { pg_hlp_date2isoyearday(y, m, d) });
+    }
+
+    /// Masked-mday face: concrete (y, m) cells x mday in [-16, 47].
+    #[kani::proof]
+    fn eq_date2isoweek_mday_face() {
+        let cell: bool = kani::any();
+        let (y, m) = if cell { (2005, 1) } else { (2008, 12) };
+        let raw: u8 = kani::any();
+        let d: i32 = (raw & 63) as i32 - 16;
+        assert!(date2isoweek(y, m, d) == unsafe { pg_hlp_date2isoweek(y, m, d) });
+        assert!(date2isoyear(y, m, d) == unsafe { pg_hlp_date2isoyear(y, m, d) });
+    }
+
+    /// isoweek2date over (year, woy) spot cells incl. out-of-convention woy.
+    #[kani::proof]
+    fn eq_isoweek2date_spots() {
+        const G: &[(i32, i32)] = &[
+            (2004, 53),
+            (2005, 1),
+            (2005, 52),
+            (2009, 1),
+            (2009, 53),
+            (2020, 10),
+            (1, 1),
+            (2024, 0),
+            (2024, -5),
+            (2024, 54),
+            (-100, 2),
+        ];
+        let idx: usize = kani::any();
+        kani::assume(idx < G.len());
+        let (iso_year, woy) = G[idx];
+        let (mut ry, mut rm, mut rd) = (iso_year, 0i32, 0i32);
+        isoweek2date(woy, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (iso_year, 0i32, 0i32);
+        unsafe { pg_hlp_isoweek2date(woy, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// isoweekdate2date: concrete (year, week) cells x masked wday band
+    /// [-4, 11] (covers the 1..=7 convention + both out-of-convention
+    /// sides; FULL symbolic wday shifts j2date's whole divider chain
+    /// symbolic and walls — LADDER attempt recorded 500s timeout, kissat).
+    #[kani::proof]
+    fn eq_isoweekdate2date_wday_band() {
+        let cell: bool = kani::any();
+        let (iso_year, isoweek) = if cell { (2005, 1) } else { (2009, 53) };
+        let raw: u8 = kani::any();
+        let wday: i32 = (raw & 15) as i32 - 4;
+        let (mut ry, mut rm, mut rd) = (iso_year, 0i32, 0i32);
+        isoweekdate2date(isoweek, wday, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (iso_year, 0i32, 0i32);
+        unsafe { pg_hlp_isoweekdate2date(isoweek, wday, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// WALL (recorded 2026-07-31): a fully/partially SYMBOLIC key makes
+    /// datebsearch's data-dependent binary-search loop unboundable for
+    /// CBMC — the unwinding assertion fails at unwind 16 AND 80 (> table
+    /// size) because merged states lose the interval-shrinkage argument;
+    /// SYMEX/unwinding phase, solver-irrelevant. Named remedy per TRIAGE =
+    /// concrete-cell spots (below; every cell folds the search concrete)
+    /// + the datetime_io_diff CGF target (DecodeSpecial/DecodeUnits sit on
+    /// every parse path, C side sancov'd), which owns the bulk key domain.
+    const DATE_KEYS: &[&[u8]] = &[
+        b"+infinity\0",
+        b"allballs\0\0",
+        b"am\0\0\0\0\0\0\0\0",
+        b"apr\0\0\0\0\0\0\0",
+        b"april\0\0\0\0\0",
+        b"aprila\0\0\0\0",
+        b"bc\0\0\0\0\0\0\0\0",
+        b"j\0\0\0\0\0\0\0\0\0",
+        b"yesterday\0",
+        b"zulu\0\0\0\0\0\0",
+        b"z\0\0\0\0\0\0\0\0\0",
+        b"\0\0\0\0\0\0\0\0\0\0",
+        b"\xff\xfe\0\0\0\0\0\0\0\0",
+        b"septembers",
+    ];
+    const DELTA_KEYS: &[&[u8]] = &[
+        b"@\0\0\0\0\0\0\0\0\0",
+        b"ago\0\0\0\0\0\0\0",
+        b"c\0\0\0\0\0\0\0\0\0",
+        b"centuries\0",
+        b"hr\0\0\0\0\0\0\0\0",
+        b"usecond\0\0\0",
+        b"w\0\0\0\0\0\0\0\0\0",
+        b"week\0\0\0\0\0\0",
+        b"yr\0\0\0\0\0\0\0\0",
+        b"yrs\0\0\0\0\0\0\0",
+        b"xyz\0\0\0\0\0\0\0",
+        b"\0\0\0\0\0\0\0\0\0\0",
+    ];
+
+    fn check_datebsearch_cell(
+        key10: &[u8],
+        table: &'static [DateTkn],
+        c_side: unsafe extern "C" fn(*const c_char, *mut c_int) -> c_int,
+    ) {
+        let mut kbuf = [0u8; 11];
+        kbuf[..10].copy_from_slice(&key10[..10]);
+        let r = datebsearch(&kbuf, table);
+        let mut c_idx: c_int = -1;
+        let c_hit = unsafe { c_side(kbuf.as_ptr() as *const c_char, &mut c_idx) };
+        match r {
+            None => assert!(c_hit == 0),
+            Some(tp) => {
+                assert!(c_hit == 1);
+                let r_idx = (tp as *const DateTkn as usize - table.as_ptr() as usize)
+                    / core::mem::size_of::<DateTkn>();
+                assert!(r_idx == c_idx as usize);
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn eq_datebsearch_date_cells() {
+        // Sequential CONCRETE calls, not a symbolic index over the grid: a
+        // symbolic index merges the loop states and CBMC then cannot bound
+        // the data-dependent bsearch loop at all (the unwinding assertion
+        // for `while (last >= base)` FAILED at unwind 16 AND 80, > table
+        // size 61/72, on CI cluster job pgrust-kani-suite-1785496407 — and a
+        // failed unwinding assertion makes every downstream check garbage:
+        // it reported a bogus pointer-OOB in strncmp and a bogus hit/miss
+        // mismatch that were pure loop-truncation artifacts, NOT a
+        // Rust-vs-C divergence). Concrete keys fold the loop; 0.43s/cell.
+        let mut i = 0;
+        while i < DATE_KEYS.len() {
+            match i {
+                0 => check_datebsearch_cell(DATE_KEYS[0], &DATETKTBL, pg_hlp_datebsearch_date),
+                1 => check_datebsearch_cell(DATE_KEYS[1], &DATETKTBL, pg_hlp_datebsearch_date),
+                2 => check_datebsearch_cell(DATE_KEYS[2], &DATETKTBL, pg_hlp_datebsearch_date),
+                3 => check_datebsearch_cell(DATE_KEYS[3], &DATETKTBL, pg_hlp_datebsearch_date),
+                4 => check_datebsearch_cell(DATE_KEYS[4], &DATETKTBL, pg_hlp_datebsearch_date),
+                5 => check_datebsearch_cell(DATE_KEYS[5], &DATETKTBL, pg_hlp_datebsearch_date),
+                6 => check_datebsearch_cell(DATE_KEYS[6], &DATETKTBL, pg_hlp_datebsearch_date),
+                7 => check_datebsearch_cell(DATE_KEYS[7], &DATETKTBL, pg_hlp_datebsearch_date),
+                8 => check_datebsearch_cell(DATE_KEYS[8], &DATETKTBL, pg_hlp_datebsearch_date),
+                9 => check_datebsearch_cell(DATE_KEYS[9], &DATETKTBL, pg_hlp_datebsearch_date),
+                10 => check_datebsearch_cell(DATE_KEYS[10], &DATETKTBL, pg_hlp_datebsearch_date),
+                11 => check_datebsearch_cell(DATE_KEYS[11], &DATETKTBL, pg_hlp_datebsearch_date),
+                12 => check_datebsearch_cell(DATE_KEYS[12], &DATETKTBL, pg_hlp_datebsearch_date),
+                _ => check_datebsearch_cell(DATE_KEYS[13], &DATETKTBL, pg_hlp_datebsearch_date),
+            }
+            i += 1;
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn eq_datebsearch_delta_cells() {
+        // Same concrete-cell discipline as the date row above.
+        let mut i = 0;
+        while i < DELTA_KEYS.len() {
+            match i {
+                0 => check_datebsearch_cell(DELTA_KEYS[0], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                1 => check_datebsearch_cell(DELTA_KEYS[1], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                2 => check_datebsearch_cell(DELTA_KEYS[2], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                3 => check_datebsearch_cell(DELTA_KEYS[3], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                4 => check_datebsearch_cell(DELTA_KEYS[4], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                5 => check_datebsearch_cell(DELTA_KEYS[5], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                6 => check_datebsearch_cell(DELTA_KEYS[6], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                7 => check_datebsearch_cell(DELTA_KEYS[7], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                8 => check_datebsearch_cell(DELTA_KEYS[8], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                9 => check_datebsearch_cell(DELTA_KEYS[9], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                10 => check_datebsearch_cell(DELTA_KEYS[10], &DELTATKTBL, pg_hlp_datebsearch_delta),
+                _ => check_datebsearch_cell(DELTA_KEYS[11], &DELTATKTBL, pg_hlp_datebsearch_delta),
+            }
+            i += 1;
+        }
+    }
+
+    fn check_decode_special_cell(key10: &[u8]) {
+        let mut kbuf = [0u8; 11];
+        kbuf[..10].copy_from_slice(&key10[..10]);
+        // cache-miss then cache-hit path
+        for _ in 0..2 {
+            let mut r_val: i32 = -99;
+            let r_type = DecodeSpecial(0, &kbuf, &mut r_val);
+            let mut c_val: c_int = -99;
+            let c_type =
+                unsafe { pg_hlp_decode_special(0, kbuf.as_ptr() as *const c_char, &mut c_val) };
+            assert!(r_type == c_type && r_val == c_val);
+        }
+    }
+
+    fn check_decode_units_cell(key10: &[u8]) {
+        let mut kbuf = [0u8; 11];
+        kbuf[..10].copy_from_slice(&key10[..10]);
+        for _ in 0..2 {
+            let mut r_val: i32 = -99;
+            let r_type = DecodeUnits(0, &kbuf, &mut r_val);
+            let mut c_val: c_int = -99;
+            let c_type =
+                unsafe { pg_hlp_decode_units(0, kbuf.as_ptr() as *const c_char, &mut c_val) };
+            assert!(r_type == c_type && r_val == c_val);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn eq_decode_special_cells() {
+        let mut i = 0;
+        while i < DATE_KEYS.len() {
+            match i {
+                0 => check_decode_special_cell(DATE_KEYS[0]),
+                1 => check_decode_special_cell(DATE_KEYS[1]),
+                2 => check_decode_special_cell(DATE_KEYS[2]),
+                3 => check_decode_special_cell(DATE_KEYS[3]),
+                4 => check_decode_special_cell(DATE_KEYS[4]),
+                5 => check_decode_special_cell(DATE_KEYS[5]),
+                6 => check_decode_special_cell(DATE_KEYS[6]),
+                7 => check_decode_special_cell(DATE_KEYS[7]),
+                8 => check_decode_special_cell(DATE_KEYS[8]),
+                9 => check_decode_special_cell(DATE_KEYS[9]),
+                10 => check_decode_special_cell(DATE_KEYS[10]),
+                11 => check_decode_special_cell(DATE_KEYS[11]),
+                12 => check_decode_special_cell(DATE_KEYS[12]),
+                _ => check_decode_special_cell(DATE_KEYS[13]),
+            }
+            i += 1;
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn eq_decode_units_cells() {
+        let mut i = 0;
+        while i < DELTA_KEYS.len() {
+            match i {
+                0 => check_decode_units_cell(DELTA_KEYS[0]),
+                1 => check_decode_units_cell(DELTA_KEYS[1]),
+                2 => check_decode_units_cell(DELTA_KEYS[2]),
+                3 => check_decode_units_cell(DELTA_KEYS[3]),
+                4 => check_decode_units_cell(DELTA_KEYS[4]),
+                5 => check_decode_units_cell(DELTA_KEYS[5]),
+                6 => check_decode_units_cell(DELTA_KEYS[6]),
+                7 => check_decode_units_cell(DELTA_KEYS[7]),
+                8 => check_decode_units_cell(DELTA_KEYS[8]),
+                9 => check_decode_units_cell(DELTA_KEYS[9]),
+                10 => check_decode_units_cell(DELTA_KEYS[10]),
+                _ => check_decode_units_cell(DELTA_KEYS[11]),
+            }
+            i += 1;
+        }
+    }
+
+    /// Concrete: both sides accept the SHIPPED tables (ordering + length).
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn check_date_token_tables_concrete() {
+        assert!(CheckDateTokenTables());
+        assert!(unsafe { pg_hlp_check_date_token_tables() } == 1);
+    }
+
+    /// Per-table variant: each SHIPPED table individually (the composite
+    /// row above ANDs them, so a single-table regression could in principle
+    /// hide behind the other's verdict).
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn check_date_token_table_one_concrete() {
+        assert!(CheckDateTokenTable(&DATETKTBL));
+        assert!(unsafe { pg_hlp_check_date_token_table_one(0) } == 1);
+        assert!(CheckDateTokenTable(&DELTATKTBL));
+        assert!(unsafe { pg_hlp_check_date_token_table_one(1) } == 1);
+    }
+
+    /// float_time_overflows int-field plane: hour/min FULL symbolic with
+    /// `sec` pinned to a literal cell, so the rint(sec * USECS_PER_SEC)
+    /// 53-bit face stays concrete while every integer range arm and the
+    /// (hour*60+min)*60*1e6 total-time arm is quantified. Literal pins, not
+    /// assume-pins: a symbolic-index concrete grid folds per cell.
+    #[kani::proof]
+    fn eq_float_time_overflows_intfields() {
+        const SECS: &[f64] = &[0.0, 1.0, 59.999999, 60.0, 60.000001, -0.0000001, 0.5];
+        let idx: usize = kani::any();
+        kani::assume(idx < SECS.len());
+        let sec = SECS[idx];
+        let (h, m): (i32, i32) = (kani::any(), kani::any());
+        assert!(
+            float_time_overflows(h, m, sec)
+                == (unsafe { pg_hlp_float_time_overflows(h, m, sec) } != 0)
+        );
+    }
+
+    /// float_time_overflows `sec` plane: concrete (hour, min) cells x a
+    /// literal `sec` grid covering NaN, both infinities, the rint
+    /// ties-to-even boundary, the 60s cap and negative underflow. FULL
+    /// symbolic f64 `sec` is a 53-bit WALL per TRIAGE (rint over a
+    /// symbolic double); the datetime_io_diff CGF target owns the bulk
+    /// domain (make_time / make_timestamp arms).
+    #[kani::proof]
+    fn eq_float_time_overflows_sec_cells() {
+        const SECS: &[f64] = &[
+            0.0,
+            -0.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0000005,
+            0.0000015,
+            59.9999995,
+            60.0,
+            60.0000004,
+            60.0000005,
+            -1.0,
+            -0.0000004,
+            86400.0,
+            1e300,
+        ];
+        let si: usize = kani::any();
+        kani::assume(si < SECS.len());
+        let sec = SECS[si];
+        let cell: u8 = kani::any();
+        kani::assume(cell < 4);
+        let (h, m) = match cell {
+            0 => (0, 0),
+            1 => (24, 0),
+            2 => (23, 59),
+            _ => (24, 59),
+        };
+        assert!(
+            float_time_overflows(h, m, sec)
+                == (unsafe { pg_hlp_float_time_overflows(h, m, sec) } != 0)
+        );
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Negative control (MUST FAIL, default solver): j2day off-by-one skew.
+    #[kani::proof]
+    fn control_hlp_j2day_skew() {
+        assert!(j2day(5) == unsafe { pg_hlp_j2day(5) } + 1);
+    }
+
+    /// Negative control (MUST FAIL): float_time_overflows with the `sec`
+    /// rounding cell shifted one ulp-class, proving the sec plane above is
+    /// not vacuous (its verdict does depend on the pinned value).
+    #[kani::proof]
+    fn control_hlp_float_time_overflows_sec_skew() {
+        assert!(
+            float_time_overflows(24, 0, 60.0000005)
+                == (unsafe { pg_hlp_float_time_overflows(24, 0, 0.0) } != 0)
+        );
+    }
+
+    // ---- time/timetz +- interval kernels (routes: kernel+spots+fuzz) ----
+    //
+    // These five share one divider chain: `result -= result / USECS_PER_DAY *
+    // USECS_PER_DAY` followed by the `< 0` wrap. The full-domain ladders over
+    // that expression are RECORDED WALLS for this family (601s, CBMC
+    // per-property refinement, both solvers), so the proof obligation the
+    // routes rows ask for is discharged as SPOT cells here and the
+    // remaining domain by the datetime_convert_diff CGF target.
+    //
+    // Every cell is a LITERAL, never a `G[symbolic_idx]` draw: literal pins
+    // constant-fold and the divider disappears, assume-pins do not — the
+    // 6+-confirmation law in proofs/TRIAGE.md, and precisely the rebuild that
+    // turned this family's 600s timeouts into seconds elsewhere.
+
+    /// One cell of the time+-interval planes: value + ereport-verdict parity.
+    macro_rules! eq_time_pm_iv_cell {
+        ($(#[$attr:meta])* $name:ident, $time:expr, $sp_time:expr, $sp_day:expr, $sp_month:expr) => {
+            #[kani::proof]
+            $(#[$attr])*
+            fn $name() {
+                const TIME: i64 = $time;
+                const SP_TIME: i64 = $sp_time;
+                const SP_DAY: i32 = $sp_day;
+                const SP_MONTH: i32 = $sp_month;
+                let span = Interval { time: SP_TIME, day: SP_DAY, month: SP_MONTH };
+
+                // pl
+                let mut c: i64 = 0;
+                let crc = unsafe { pg_hlp_time_pl_interval(TIME, SP_TIME, SP_DAY, SP_MONTH, &mut c) };
+                match time_pl_interval(TIME, &span) {
+                    Ok(r) => {
+                        assert!(crc == 0);
+                        assert!(r == c);
+                    }
+                    Err(_) => assert!(crc != 0),
+                }
+
+                // mi
+                let mut c2: i64 = 0;
+                let crc2 = unsafe { pg_hlp_time_mi_interval(TIME, SP_TIME, SP_DAY, SP_MONTH, &mut c2) };
+                match time_mi_interval(TIME, &span) {
+                    Ok(r) => {
+                        assert!(crc2 == 0);
+                        assert!(r == c2);
+                    }
+                    Err(_) => assert!(crc2 != 0),
+                }
+
+                // interval_time shares the family's `%`/wrap face
+                let mut c3: i64 = 0;
+                let crc3 = unsafe { pg_hlp_interval_time(SP_TIME, SP_DAY, SP_MONTH, &mut c3) };
+                match interval_time(&span) {
+                    Ok(r) => {
+                        assert!(crc3 == 0);
+                        assert!(r == c3);
+                    }
+                    Err(_) => assert!(crc3 != 0),
+                }
+            }
+        };
+    }
+
+    /// One cell of the timetz+-interval planes (adds the zone-passthrough).
+    macro_rules! eq_timetz_pm_iv_cell {
+        ($(#[$attr:meta])* $name:ident, $time:expr, $zone:expr, $sp_time:expr, $sp_day:expr, $sp_month:expr) => {
+            #[kani::proof]
+            $(#[$attr])*
+            fn $name() {
+                const TIME: i64 = $time;
+                const ZONE: i32 = $zone;
+                const SP_TIME: i64 = $sp_time;
+                const SP_DAY: i32 = $sp_day;
+                const SP_MONTH: i32 = $sp_month;
+                let span = Interval { time: SP_TIME, day: SP_DAY, month: SP_MONTH };
+                let arg = TimeTzADT { time: TIME, zone: ZONE };
+
+                let (mut ct, mut cz) = (0i64, 0i32);
+                let crc = unsafe {
+                    pg_hlp_timetz_pl_interval(TIME, ZONE, SP_TIME, SP_DAY, SP_MONTH, &mut ct, &mut cz)
+                };
+                match timetz_pl_interval(&arg, &span) {
+                    Ok(r) => {
+                        assert!(crc == 0);
+                        assert!(r.time == ct && r.zone == cz);
+                    }
+                    Err(_) => assert!(crc != 0),
+                }
+
+                let (mut ct2, mut cz2) = (0i64, 0i32);
+                let crc2 = unsafe {
+                    pg_hlp_timetz_mi_interval(TIME, ZONE, SP_TIME, SP_DAY, SP_MONTH, &mut ct2, &mut cz2)
+                };
+                match timetz_mi_interval(&arg, &span) {
+                    Ok(r) => {
+                        assert!(crc2 == 0);
+                        assert!(r.time == ct2 && r.zone == cz2);
+                    }
+                    Err(_) => assert!(crc2 != 0),
+                }
+            }
+        };
+    }
+
+    // Boundary grid the routes rows name: the 24h wrap (exact USECS_PER_DAY
+    // multiples, both signs), the fold-back sign flip, negative intervals, the
+    // i64 usec extremes where C relies on -fwrapv, and the two
+    // INTERVAL_NOT_FINITE sentinels that select the ereport arm.
+    eq_time_pm_iv_cell!(eq_time_pm_iv_zero, 0, 0, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_one, 0, 1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_negone, 0, -1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_day, 0, 86_400_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_negday, 0, -86_400_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_daym1, 0, 86_399_999_999, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_twoday, 0, 172_800_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_noon_day, 43_200_000_000, 86_400_000_000, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_eod_one, 86_400_000_000, 1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_eod_negone, 86_400_000_000, -1, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_i64max, 0, i64::MAX, 0, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_i64max_eod, 86_400_000_000, i64::MAX, 0, 0);
+    // The not-finite arms construct adt_date's #[track_caller] #[cold] error
+    // helper, and Kani cannot codegen caller_location (kani#374 — observed as
+    // "caller_location is not currently supported"). Stubbing the PgError
+    // constructor it calls is the crate-wide precedent (see the
+    // intervaltypmodout rows above): only the message TEXT leaves the theorem,
+    // while the verdict plane (Err vs Ok) and the arm's single sqlstate stay
+    // in — and the verdict is exactly what these cells assert.
+    eq_time_pm_iv_cell!(#[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)] eq_time_pm_iv_notfinite_max, 0, i64::MAX, i32::MAX, i32::MAX);
+    eq_time_pm_iv_cell!(#[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)] eq_time_pm_iv_notfinite_min, 0, i64::MIN, i32::MIN, i32::MIN);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_days_only, 43_200_000_000, 0, 3, 0);
+    eq_time_pm_iv_cell!(eq_time_pm_iv_months_only, 43_200_000_000, 0, 0, 5);
+
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_zero, 0, 0, 0, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_one, 0, 3600, 1, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_negone, 0, -3600, -1, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_day, 43_200_000_000, 57_599, 86_400_000_000, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_negday, 43_200_000_000, -57_599, -86_400_000_000, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_eod, 86_400_000_000, 0, 1, 0, 0);
+    eq_timetz_pm_iv_cell!(eq_timetz_pm_iv_i64max, 0, 3600, i64::MAX, 0, 0);
+    eq_timetz_pm_iv_cell!(#[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)] eq_timetz_pm_iv_notfinite, 0, 3600, i64::MIN, i32::MIN, i32::MIN);
+
+    /// MUST-FAIL CONTROL for the +-interval family: asserts the WRONG wrap
+    /// (C's `< 0` arm removed), so a vacuous plane cannot pass. Expected
+    /// verdict FAILED on `assert!(r == wrong)`.
+    #[kani::proof]
+    fn control_time_pl_interval_no_wrap() {
+        const TIME: i64 = 0;
+        const SP_TIME: i64 = -1;
+        let span = Interval { time: SP_TIME, day: 0, month: 0 };
+        let r = time_pl_interval(TIME, &span).expect("finite span");
+        // the un-wrapped value: what the kernel would return without C's
+        // `if (result < 0) result += USECS_PER_DAY`
+        let wrong: i64 = -1;
+        assert!(r == wrong);
+    }
+
 }

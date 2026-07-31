@@ -11,6 +11,7 @@
 #ifndef PG_DIFFFUZZ_SHIM_POSTGRES_H
 #define PG_DIFFFUZZ_SHIM_POSTGRES_H
 
+#include <stddef.h>					/* offsetof, for the abbrev-table builder */
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>

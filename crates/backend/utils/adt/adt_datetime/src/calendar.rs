@@ -21,18 +21,23 @@ pub const fn isleap(y: i32) -> bool {
 // year counts routes here through date2isoyear) must WRAP exactly as C does,
 // not panic (fnconf batch-1, to_char(interval) crash family).
 pub const fn date2j(mut year: i32, mut month: i32, day: i32) -> i32 {
+    // Every arithmetic op here wraps: `month` and `day` are unconstrained at
+    // this entry (the ISO week/year helpers and to_char hand through caller
+    // arithmetic), so the month bump and the 7834*month product overflow for
+    // large |month| exactly where C relies on -fwrapv. Found by
+    // datetime_engine_diff at month == i32::MAX.
     if month > 2 {
-        month += 1;
+        month = month.wrapping_add(1);
         year = year.wrapping_add(4800);
     } else {
-        month += 13;
+        month = month.wrapping_add(13);
         year = year.wrapping_add(4799);
     }
 
     let century = year / 100;
     let mut julian = year.wrapping_mul(365).wrapping_sub(32167);
     julian = julian.wrapping_add(year / 4 - century + century / 4);
-    julian = julian.wrapping_add(7834 * month / 256 + day);
+    julian = julian.wrapping_add((7834i32.wrapping_mul(month) / 256).wrapping_add(day));
 
     julian
 }
@@ -42,10 +47,13 @@ pub fn j2date(jd: i32, year: &mut i32, month: &mut i32, day: &mut i32) {
     julian = julian.wrapping_add(32044);
     let mut quad = julian / 146097;
     let extra = (julian - quad * 146097) * 4 + 3;
-    // C's julian is unsigned int: this add legitimately wraps for the
-    // huge u32 values a negative jd casts to (BC-year DOY inputs, e.g.
-    // '4955-120@BC'::timestamp — real 18.3 rejects downstream with 22008;
-    // fuzz witness p1-laney). Unsigned wrap is defined in C; match it.
+    // C computes in unsigned int, which wraps by definition; a checked add
+    // here is a ported-in panic for out-of-Julian-range inputs (same family
+    // as the date2j -fwrapv note above; found by proofs/datetime-b
+    // hlp::eq_j2date_spots at jd=i32::MAX, and independently by p1-laney's
+    // fuzz witness '4955-120@BC'::timestamp — a negative jd casts to a huge
+    // u32 and real 18.3 rejects downstream with 22008. Unsigned wrap is
+    // defined in C; match it.
     julian = julian.wrapping_add(60 + quad * 3 + extra / 146097);
     quad = julian / 1461;
     julian -= quad * 1461;
@@ -73,7 +81,13 @@ pub const fn j2day(mut date: i32) -> i32 {
 pub fn isoweek2j(year: i32, week: i32) -> i32 {
     let day4 = date2j(year, 1, 4);
     let day0 = j2day(day4.wrapping_sub(1));
-    (week - 1).wrapping_mul(7).wrapping_add(day4.wrapping_sub(day0))
+    // `week` is unconstrained here (to_char/extract hand through whatever the
+    // caller computed), and C's own comment on this function admits the
+    // overflow hazard it leaves to -fwrapv; a checked `week - 1` is a
+    // ported-in panic at week == i32::MIN (found by datetime_engine_diff).
+    week.wrapping_sub(1)
+        .wrapping_mul(7)
+        .wrapping_add(day4.wrapping_sub(day0))
 }
 
 pub fn isoweek2date(woy: i32, year: &mut i32, mon: &mut i32, mday: &mut i32) {

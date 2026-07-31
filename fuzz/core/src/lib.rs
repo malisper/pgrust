@@ -358,6 +358,13 @@ mod tests {
 pub mod encode_diff;
 pub use encode_diff::encode_diff;
 
+// datetime_io_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-datetime_io_diff.md.
+pub mod datetime_convert_diff;
+pub mod datetime_engine_diff;
+pub mod datetime_io_diff;
+pub mod interval_engine_diff;
+pub use datetime_io_diff::datetime_io_diff;
+
 // quote_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-quote_diff.md.
 pub mod quote_diff;
 pub use quote_diff::quote_diff;
@@ -452,3 +459,8 @@ pub fn install_detoast_seam_once() {
 // two targets (io + ops) over one pg_diff_num_call ABI.
 pub mod numericfam;
 pub use numericfam::{numeric_io_diff, numeric_ops_diff};
+
+// datetime_closeout_diff: p1-lanel2 closeout (adt_date extract numeric faces
+// vs C + the owed fc-wrapper plane) — see core/src/datetime_closeout_diff.rs.
+pub mod datetime_closeout_diff;
+pub use datetime_closeout_diff::datetime_closeout_diff;

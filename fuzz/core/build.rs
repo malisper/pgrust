@@ -82,6 +82,8 @@ fn main() {
         .file("csrc/ryu/d2s.c")
         .file("csrc/ryu/f2s.c")
         .include("csrc/shim")
+        .include("csrc/pgdt")
+        .include("csrc")
         .include("csrc/ryu")
         // pg_enc_tables.c includes the SAME generated kwlist_d.h the
         // shipped keywords crate's build.rs transcribes (table parity by
@@ -537,4 +539,52 @@ fn main() {
         .flag_if_supported("-ffp-contract=off")
         .compile("pg_difffuzz_tsdiff");
 
+    // datetime_io_diff oracle (p1-lanel; gate cleared: all paste sites
+    // filled, see csrc/pg_datetime_io_io.c header for provenance + pinned
+    // environment). OWN TU since the lane merge: its verbatim `strtoint`
+    // (src/common/string.c) collides with pg_strfam.c's copy inside one
+    // cc::Build — GNU ld rejects the duplicate (CI cluster
+    // fuzz-campaign-1785532267; Apple's ld resolved it silently). Renamed
+    // per the hashenc/cryptofam symbol-isolation precedent so each lane
+    // keeps its OWN vendored copy.
+    let mut dtio = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        dtio.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    dtio.define("strtoint", "dtio_impl_strtoint");
+    dtio.file("csrc/pg_datetime_io_io.c")
+        .include("csrc/shim")
+        .include("csrc/pgdt")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .compile("pg_difffuzz_dtio");
+
+    // datetime_closeout_diff oracle (p1-lanel2): extract_date /
+    // time_part_common(retnumeric) / timetz_part_common / date skip-support
+    // over the SAME vendored datetime.c/date.c core (pg_datetime_verbatim.inc)
+    // as the lanel and laney oracles. Own TU, dtclo_impl_ prefix rename of
+    // the same shared-global list (plus extract_date, which only this TU
+    // vendors — renamed anyway so a future lane vendoring it cannot silently
+    // cross-bind).
+    let mut dtclo = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        dtclo.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // pg_tzset_offset: a laney-prelude global NOT in TSDIFF_SHARED_SYMS
+    // (laney's TU is the lone definer on its branch); this TU copies that
+    // prelude, so it must rename its copy — GNU ld rejected the duplicate
+    // on the CI cluster (fuzz-campaign-1785532267; Apple's ld tolerated it
+    // locally, the known Linux-only link trap).
+    for s in TSDIFF_SHARED_SYMS.iter().chain(&["extract_date", "pg_tzset_offset"]) {
+        dtclo.define(s, format!("dtclo_impl_{s}").as_str());
+    }
+    dtclo
+        .file("csrc/pg_datetime_closeout.c")
+        .include("csrc/shim")
+        .include("csrc/pgdt")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .compile("pg_difffuzz_dtclo");
 }

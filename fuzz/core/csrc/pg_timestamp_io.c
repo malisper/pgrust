@@ -651,6 +651,10 @@ typedef struct TzAbbrevCache
 
 static TzAbbrevCache tzabbrevcache[MAXDATEFIELDS];
 
+/* This TU stubs FetchDynamicTimeZone (DYNTZ unreachable: zoneabbrevtbl==NULL)
+ * and has no tzEntry/guc_malloc support — skip the abbrev-table builders the
+ * datetime_convert_diff oracle carries in the shared .inc. */
+#define PG_DT_OMIT_ABBREV_BUILDERS 1
 #include "pg_datetime_verbatim.inc"
 
 /* ================================================================== *

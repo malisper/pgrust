@@ -182,6 +182,14 @@ test = false
 doc = false
 bench = false
 
+# datetime_io_diff: scaffolded by fuzz/scaffold.py — see README-TODO-datetime_io_diff.md.
+[[bin]]
+name = "datetime_io_diff"
+path = "fuzz_targets/datetime_io_diff.rs"
+test = false
+doc = false
+bench = false
+
 # Lane-0B differential targets (100%-coverage campaign, proofs/p1-lane0b):
 # uuid_diff / mac_diff (mac+mac8) / name_diff / cash_diff — shipped Rust vs
 # vendored PostgreSQL 18.3 C (Stamp-18.3, upstream sha 62d6c7d3df).
@@ -192,6 +200,13 @@ path = "fuzz_targets/uuid_diff.rs"
 [[bin]]
 name = "pg_prng_diff"
 path = "fuzz_targets/pg_prng_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interval_engine_diff"
+path = "fuzz_targets/interval_engine_diff.rs"
 test = false
 doc = false
 bench = false
@@ -208,8 +223,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "datetime_engine_diff"
+path = "fuzz_targets/datetime_engine_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "mac_diff"
 path = "fuzz_targets/mac_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "datetime_convert_diff"
+path = "fuzz_targets/datetime_convert_diff.rs"
 test = false
 doc = false
 bench = false
@@ -346,3 +375,15 @@ name = "numeric_ops_diff"
 path = "fuzz_targets/numeric_ops_diff.rs"
 test = false
 doc = false
+
+# datetime_closeout_diff: p1-lanel2 closeout — adt_date extract_date /
+# time_part_common(retnumeric) / timetz_part_common vs vendored 18.3 C
+# (csrc/pg_datetime_closeout.c, laney's numeric arg-capture plane) + the
+# owed adt_date builtins.rs fc-wrapper plane (recv/in-soft/out/conversions/
+# cmp families/typmod/in_range) wrapper-vs-core.
+[[bin]]
+name = "datetime_closeout_diff"
+path = "fuzz_targets/datetime_closeout_diff.rs"
+test = false
+doc = false
+bench = false

@@ -2978,3 +2978,1005 @@ pg_ts_float8_timestamptz(float8 seconds, int64 *out, int *err)
 	*out = result;
 	return 0;
 }
+
+/* =========================================================================
+ * p1-lanel helpers section (2026-07-31) — adt_datetime pure-helper rows.
+ *
+ * Provenance (VERBATIM unless listed as shim), all @ postgres-src
+ * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18, Stamp 18.3):
+ *   - datetime.c: j2date, j2day, datebsearch, DecodeSpecial, DecodeUnits,
+ *     CheckDateTokenTable, CheckDateTokenTables, datetktbl, deltatktbl,
+ *     szdatetktbl, szdeltatktbl, datecache, deltacache.
+ *   - timestamp.c: dt2time, isoweek2j, isoweek2date, isoweekdate2date,
+ *     date2isoweek, date2isoyear, date2isoyearday.
+ *   - date.c: time_overflows.
+ *   - datetime.h / timestamp.h macros: DTK_M (above), INTERVAL_MASK (above),
+ *     IS_VALID_JULIAN (above), token/type constants below.
+ * Shims (plumbing only, never logic):
+ *   - hlp_strncmp/hlp_strcmp/hlp_strlen: exact C-semantics loop models
+ *     (family convention: no libc string model dependence); #define'd over
+ *     the libc names for this section only.
+ *   - elog(LOG, ...): dropped (verdict-only; CheckDateTokenTable's return
+ *     value is the proof surface, its log text is not).
+ *   - date2j in verbatim bodies resolves to pg_date2j (the file's existing
+ *     verbatim copy) via #define.
+ * ========================================================================= */
+
+#define RESERV	0
+/* MONTH/YEAR/DAY/HOUR/MINUTE/SECOND/... field types already above */
+#define JULIAN	4
+#define TZ		5
+#define DTZ		6
+#define DYNTZ	7
+#define IGNORE_DTF	8
+#define AMPM	9
+#define DOW		16
+#define UNITS	17
+#define ADBC	18
+#define DTZMOD	28
+#define UNKNOWN_FIELD	31
+
+#define DTK_NOW			12
+#define DTK_YESTERDAY	13
+#define DTK_TODAY		14
+#define DTK_TOMORROW	15
+#define DTK_ZULU		16
+#define DTK_EARLY		9
+#define DTK_LATE		10
+#define DTK_EPOCH		11
+#define DTK_DELTA		17
+#define DTK_WEEK		22
+#define DTK_JULIAN		31
+#define DTK_DOW			32
+#define DTK_DOY			33
+#define DTK_ISOYEAR		36
+#define DTK_ISODOW		37
+/* unsuffixed value tokens used by the verbatim tables -> this file's _V names */
+#define DTK_SECOND		DTK_SECOND_V
+#define DTK_MINUTE		DTK_MINUTE_V
+#define DTK_HOUR		DTK_HOUR_V
+#define DTK_DAY			DTK_DAY_V
+#define DTK_MONTH		DTK_MONTH_V
+#define DTK_QUARTER		DTK_QUARTER_V
+#define DTK_YEAR		DTK_YEAR_V
+#define DTK_DECADE		DTK_DECADE_V
+#define DTK_CENTURY		DTK_CENTURY_V
+#define DTK_MILLENNIUM	DTK_MILLENNIUM_V
+
+#define AM		0
+#define PM		1
+#define AD		0
+#define BC		1
+
+#define EPOCH			"epoch"
+#define INVALID			"invalid"
+#define NOW				"now"
+#define TODAY			"today"
+#define TOMORROW		"tomorrow"
+#define YESTERDAY		"yesterday"
+#define ZULU			"zulu"
+#define ISODATE 22
+#define ISOTIME 23
+#define AGO		19
+#define DTK_NUMBER		0
+#define DTK_STRING		1
+#define DTK_DATE		2
+#define DTK_TIME		3
+#define DAGO			"ago"
+#define DCURRENT		"current"
+#define DMICROSEC		"usecond"
+#define DMILLISEC		"msecond"
+#define DSECOND			"second"
+#define DMINUTE			"minute"
+#define DHOUR			"hour"
+#define DDAY			"day"
+#define DWEEK			"week"
+#define DMONTH			"month"
+#define DQUARTER		"quarter"
+#define DYEAR			"year"
+#define DDECADE			"decade"
+#define DCENTURY		"century"
+#define DMILLENNIUM		"millennium"
+#define DA_D			"ad"
+#define DB_C			"bc"
+#define DTIMEZONE		"timezone"
+#define EARLY			"-infinity"
+#define LATE			"infinity"
+
+#define TOKMAXLEN		10
+#define MAXDATEFIELDS	25
+
+typedef struct
+{
+	char		token[TOKMAXLEN + 1];	/* always NUL-terminated */
+	char		type;
+	int32		value;
+} datetkn;
+
+/* ---- shims: exact-semantics string models (see section header) ---- */
+static int
+hlp_strncmp(const char *s1, const char *s2, unsigned long n)
+{
+	unsigned long i;
+	for (i = 0; i < n; i++)
+	{
+		unsigned char c1 = (unsigned char) s1[i];
+		unsigned char c2 = (unsigned char) s2[i];
+		if (c1 != c2)
+			return (int) c1 - (int) c2;
+		if (c1 == 0)
+			return 0;
+	}
+	return 0;
+}
+
+static int
+hlp_strcmp(const char *s1, const char *s2)
+{
+	unsigned long i = 0;
+	for (;;)
+	{
+		unsigned char c1 = (unsigned char) s1[i];
+		unsigned char c2 = (unsigned char) s2[i];
+		if (c1 != c2)
+			return (int) c1 - (int) c2;
+		if (c1 == 0)
+			return 0;
+		i++;
+	}
+}
+
+static unsigned long
+hlp_strlen(const char *s)
+{
+	unsigned long i = 0;
+	while (s[i] != 0)
+		i++;
+	return i;
+}
+
+#define strncmp hlp_strncmp
+#define strcmp hlp_strcmp
+#define strlen hlp_strlen
+#define elog(level, ...) ((void) 0)
+#define date2j pg_date2j
+static const datetkn datetktbl[] = {
+	/* token, type, value */
+	{"+infinity", RESERV, DTK_LATE},	/* same as "infinity" */
+	{EARLY, RESERV, DTK_EARLY}, /* "-infinity" reserved for "early time" */
+	{DA_D, ADBC, AD},			/* "ad" for years > 0 */
+	{"allballs", RESERV, DTK_ZULU}, /* 00:00:00 */
+	{"am", AMPM, AM},
+	{"apr", MONTH, 4},
+	{"april", MONTH, 4},
+	{"at", IGNORE_DTF, 0},		/* "at" (throwaway) */
+	{"aug", MONTH, 8},
+	{"august", MONTH, 8},
+	{DB_C, ADBC, BC},			/* "bc" for years <= 0 */
+	{"d", UNITS, DTK_DAY},		/* "day of month" for ISO input */
+	{"dec", MONTH, 12},
+	{"december", MONTH, 12},
+	{"dow", UNITS, DTK_DOW},	/* day of week */
+	{"doy", UNITS, DTK_DOY},	/* day of year */
+	{"dst", DTZMOD, SECS_PER_HOUR},
+	{EPOCH, RESERV, DTK_EPOCH}, /* "epoch" reserved for system epoch time */
+	{"feb", MONTH, 2},
+	{"february", MONTH, 2},
+	{"fri", DOW, 5},
+	{"friday", DOW, 5},
+	{"h", UNITS, DTK_HOUR},		/* "hour" */
+	{LATE, RESERV, DTK_LATE},	/* "infinity" reserved for "late time" */
+	{"isodow", UNITS, DTK_ISODOW},	/* ISO day of week, Sunday == 7 */
+	{"isoyear", UNITS, DTK_ISOYEAR},	/* year in terms of the ISO week date */
+	{"j", UNITS, DTK_JULIAN},
+	{"jan", MONTH, 1},
+	{"january", MONTH, 1},
+	{"jd", UNITS, DTK_JULIAN},
+	{"jul", MONTH, 7},
+	{"julian", UNITS, DTK_JULIAN},
+	{"july", MONTH, 7},
+	{"jun", MONTH, 6},
+	{"june", MONTH, 6},
+	{"m", UNITS, DTK_MONTH},	/* "month" for ISO input */
+	{"mar", MONTH, 3},
+	{"march", MONTH, 3},
+	{"may", MONTH, 5},
+	{"mm", UNITS, DTK_MINUTE},	/* "minute" for ISO input */
+	{"mon", DOW, 1},
+	{"monday", DOW, 1},
+	{"nov", MONTH, 11},
+	{"november", MONTH, 11},
+	{NOW, RESERV, DTK_NOW},		/* current transaction time */
+	{"oct", MONTH, 10},
+	{"october", MONTH, 10},
+	{"on", IGNORE_DTF, 0},		/* "on" (throwaway) */
+	{"pm", AMPM, PM},
+	{"s", UNITS, DTK_SECOND},	/* "seconds" for ISO input */
+	{"sat", DOW, 6},
+	{"saturday", DOW, 6},
+	{"sep", MONTH, 9},
+	{"sept", MONTH, 9},
+	{"september", MONTH, 9},
+	{"sun", DOW, 0},
+	{"sunday", DOW, 0},
+	{"t", ISOTIME, DTK_TIME},	/* Filler for ISO time fields */
+	{"thu", DOW, 4},
+	{"thur", DOW, 4},
+	{"thurs", DOW, 4},
+	{"thursday", DOW, 4},
+	{TODAY, RESERV, DTK_TODAY}, /* midnight */
+	{TOMORROW, RESERV, DTK_TOMORROW},	/* tomorrow midnight */
+	{"tue", DOW, 2},
+	{"tues", DOW, 2},
+	{"tuesday", DOW, 2},
+	{"wed", DOW, 3},
+	{"wednesday", DOW, 3},
+	{"weds", DOW, 3},
+	{"y", UNITS, DTK_YEAR},		/* "year" for ISO input */
+	{YESTERDAY, RESERV, DTK_YESTERDAY}	/* yesterday midnight */
+};
+
+static const int szdatetktbl = sizeof datetktbl / sizeof datetktbl[0];
+static const datetkn deltatktbl[] = {
+	/* token, type, value */
+	{"@", IGNORE_DTF, 0},		/* postgres relative prefix */
+	{DAGO, AGO, 0},				/* "ago" indicates negative time offset */
+	{"c", UNITS, DTK_CENTURY},	/* "century" relative */
+	{"cent", UNITS, DTK_CENTURY},	/* "century" relative */
+	{"centuries", UNITS, DTK_CENTURY},	/* "centuries" relative */
+	{DCENTURY, UNITS, DTK_CENTURY}, /* "century" relative */
+	{"d", UNITS, DTK_DAY},		/* "day" relative */
+	{DDAY, UNITS, DTK_DAY},		/* "day" relative */
+	{"days", UNITS, DTK_DAY},	/* "days" relative */
+	{"dec", UNITS, DTK_DECADE}, /* "decade" relative */
+	{DDECADE, UNITS, DTK_DECADE},	/* "decade" relative */
+	{"decades", UNITS, DTK_DECADE}, /* "decades" relative */
+	{"decs", UNITS, DTK_DECADE},	/* "decades" relative */
+	{"h", UNITS, DTK_HOUR},		/* "hour" relative */
+	{DHOUR, UNITS, DTK_HOUR},	/* "hour" relative */
+	{"hours", UNITS, DTK_HOUR}, /* "hours" relative */
+	{"hr", UNITS, DTK_HOUR},	/* "hour" relative */
+	{"hrs", UNITS, DTK_HOUR},	/* "hours" relative */
+	{"m", UNITS, DTK_MINUTE},	/* "minute" relative */
+	{"microsecon", UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{"mil", UNITS, DTK_MILLENNIUM}, /* "millennium" relative */
+	{"millennia", UNITS, DTK_MILLENNIUM},	/* "millennia" relative */
+	{DMILLENNIUM, UNITS, DTK_MILLENNIUM},	/* "millennium" relative */
+	{"millisecon", UNITS, DTK_MILLISEC},	/* relative */
+	{"mils", UNITS, DTK_MILLENNIUM},	/* "millennia" relative */
+	{"min", UNITS, DTK_MINUTE}, /* "minute" relative */
+	{"mins", UNITS, DTK_MINUTE},	/* "minutes" relative */
+	{DMINUTE, UNITS, DTK_MINUTE},	/* "minute" relative */
+	{"minutes", UNITS, DTK_MINUTE}, /* "minutes" relative */
+	{"mon", UNITS, DTK_MONTH},	/* "months" relative */
+	{"mons", UNITS, DTK_MONTH}, /* "months" relative */
+	{DMONTH, UNITS, DTK_MONTH}, /* "month" relative */
+	{"months", UNITS, DTK_MONTH},
+	{"ms", UNITS, DTK_MILLISEC},
+	{"msec", UNITS, DTK_MILLISEC},
+	{DMILLISEC, UNITS, DTK_MILLISEC},
+	{"mseconds", UNITS, DTK_MILLISEC},
+	{"msecs", UNITS, DTK_MILLISEC},
+	{"qtr", UNITS, DTK_QUARTER},	/* "quarter" relative */
+	{DQUARTER, UNITS, DTK_QUARTER}, /* "quarter" relative */
+	{"s", UNITS, DTK_SECOND},
+	{"sec", UNITS, DTK_SECOND},
+	{DSECOND, UNITS, DTK_SECOND},
+	{"seconds", UNITS, DTK_SECOND},
+	{"secs", UNITS, DTK_SECOND},
+	{DTIMEZONE, UNITS, DTK_TZ}, /* "timezone" time offset */
+	{"timezone_h", UNITS, DTK_TZ_HOUR}, /* timezone hour units */
+	{"timezone_m", UNITS, DTK_TZ_MINUTE},	/* timezone minutes units */
+	{"us", UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{"usec", UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{DMICROSEC, UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{"useconds", UNITS, DTK_MICROSEC},	/* "microseconds" relative */
+	{"usecs", UNITS, DTK_MICROSEC}, /* "microseconds" relative */
+	{"w", UNITS, DTK_WEEK},		/* "week" relative */
+	{DWEEK, UNITS, DTK_WEEK},	/* "week" relative */
+	{"weeks", UNITS, DTK_WEEK}, /* "weeks" relative */
+	{"y", UNITS, DTK_YEAR},		/* "year" relative */
+	{DYEAR, UNITS, DTK_YEAR},	/* "year" relative */
+	{"years", UNITS, DTK_YEAR}, /* "years" relative */
+	{"yr", UNITS, DTK_YEAR},	/* "year" relative */
+	{"yrs", UNITS, DTK_YEAR}	/* "years" relative */
+};
+
+static const int szdeltatktbl = sizeof deltatktbl / sizeof deltatktbl[0];
+
+static const datetkn *datecache[MAXDATEFIELDS] = {NULL};
+
+static const datetkn *deltacache[MAXDATEFIELDS] = {NULL};
+
+void
+j2date(int jd, int *year, int *month, int *day)
+{
+	unsigned int julian;
+	unsigned int quad;
+	unsigned int extra;
+	int			y;
+
+	julian = jd;
+	julian += 32044;
+	quad = julian / 146097;
+	extra = (julian - quad * 146097) * 4 + 3;
+	julian += 60 + quad * 3 + extra / 146097;
+	quad = julian / 1461;
+	julian -= quad * 1461;
+	y = julian * 4 / 1461;
+	julian = ((y != 0) ? ((julian + 305) % 365) : ((julian + 306) % 366))
+		+ 123;
+	y += quad * 4;
+	*year = y - 4800;
+	quad = julian * 2141 / 65536;
+	*day = julian - 7834 * quad / 256;
+	*month = (quad + 10) % MONTHS_PER_YEAR + 1;
+}								/* j2date() */
+
+
+/*
+ * j2day - convert Julian date to day-of-week (0..6 == Sun..Sat)
+ *
+ * Note: various places use the locution j2day(date - 1) to produce a
+ * result according to the convention 0..6 = Mon..Sun.  This is a bit of
+ * a crock, but will work as long as the computation here is just a modulo.
+ */
+int
+j2day(int date)
+{
+	date += 1;
+	date %= 7;
+	/* Cope if division truncates towards zero, as it probably does */
+	if (date < 0)
+		date += 7;
+
+	return date;
+}								/* j2day() */
+
+/*
+ * POINTER-PROVENANCE SHIM (plumbing only; comparison logic verbatim).
+ *
+ * Upstream carries the search interval in the pointers `base`/`last` and
+ * narrows with `last = position - 1` / `base = position + 1`. When the
+ * interval collapses at the left edge, `position - 1` materializes a
+ * pointer one element BEFORE the array, and `base = position + 1` one
+ * past it; both are undefined behavior in C (benign on real hardware, and
+ * this is PostgreSQL's own long-standing bsearch idiom). CBMC enforces
+ * pointer provenance strictly and reports "pointer outside object bounds"
+ * on the very next `position->token` dereference — and once a
+ * dereference check fails, CBMC continues with an unconstrained value, so
+ * every downstream assertion in the harness becomes garbage. CI job
+ * pgrust-kani-suite-1785496407 reported exactly that: a bogus hit/miss
+ * mismatch on keys "ago" and the all-NUL key that was pure UB fallout,
+ * NOT a Rust-vs-C divergence (confirmed by per-cell bisection).
+ *
+ * The interval bookkeeping is therefore carried as integer offsets, which
+ * never form an out-of-object pointer. This is the SAME search: identical
+ * midpoint (`(hi - lo) >> 1`), identical narrowing, identical
+ * key[0]-precheck and strncmp comparisons, identical return value. Only
+ * the loop's index arithmetic differs from upstream's pointer arithmetic.
+ */
+static const datetkn *
+datebsearch(const char *key, const datetkn *base, int nel)
+{
+	if (nel > 0)
+	{
+		int			lo = 0,
+					hi = nel - 1,
+					position;
+		int			result;
+
+		while (hi >= lo)
+		{
+			position = lo + ((hi - lo) >> 1);
+			/* precheck the first character for a bit of extra speed */
+			result = (int) key[0] - (int) base[position].token[0];
+			if (result == 0)
+			{
+				/* use strncmp so that we match truncated tokens */
+				result = strncmp(key, base[position].token, TOKMAXLEN);
+				if (result == 0)
+					return &base[position];
+			}
+			if (result < 0)
+				hi = position - 1;
+			else
+				lo = position + 1;
+		}
+	}
+	return NULL;
+}
+int
+DecodeSpecial(int field, const char *lowtoken, int *val)
+{
+	int			type;
+	const datetkn *tp;
+
+	tp = datecache[field];
+	/* use strncmp so that we match truncated tokens */
+	if (tp == NULL || strncmp(lowtoken, tp->token, TOKMAXLEN) != 0)
+	{
+		tp = datebsearch(lowtoken, datetktbl, szdatetktbl);
+	}
+	if (tp == NULL)
+	{
+		type = UNKNOWN_FIELD;
+		*val = 0;
+	}
+	else
+	{
+		datecache[field] = tp;
+		type = tp->type;
+		*val = tp->value;
+	}
+
+	return type;
+}
+
+int
+DecodeUnits(int field, const char *lowtoken, int *val)
+{
+	int			type;
+	const datetkn *tp;
+
+	tp = deltacache[field];
+	/* use strncmp so that we match truncated tokens */
+	if (tp == NULL || strncmp(lowtoken, tp->token, TOKMAXLEN) != 0)
+	{
+		tp = datebsearch(lowtoken, deltatktbl, szdeltatktbl);
+	}
+	if (tp == NULL)
+	{
+		type = UNKNOWN_FIELD;
+		*val = 0;
+	}
+	else
+	{
+		deltacache[field] = tp;
+		type = tp->type;
+		*val = tp->value;
+	}
+
+	return type;
+}								/* DecodeUnits() */
+static bool
+CheckDateTokenTable(const char *tablename, const datetkn *base, int nel)
+{
+	bool		ok = true;
+	int			i;
+
+	for (i = 0; i < nel; i++)
+	{
+		/* check for token strings that don't fit */
+		if (strlen(base[i].token) > TOKMAXLEN)
+		{
+			/* %.*s is safe since all our tokens are ASCII */
+			elog(LOG, "token too long in %s table: \"%.*s\"",
+				 tablename,
+				 TOKMAXLEN + 1, base[i].token);
+			ok = false;
+			break;				/* don't risk applying strcmp */
+		}
+		/* check for out of order */
+		if (i > 0 &&
+			strcmp(base[i - 1].token, base[i].token) >= 0)
+		{
+			elog(LOG, "ordering error in %s table: \"%s\" >= \"%s\"",
+				 tablename,
+				 base[i - 1].token,
+				 base[i].token);
+			ok = false;
+		}
+	}
+	return ok;
+}
+
+bool
+CheckDateTokenTables(void)
+{
+	bool		ok = true;
+
+	Assert(UNIX_EPOCH_JDATE == date2j(1970, 1, 1));
+	Assert(POSTGRES_EPOCH_JDATE == date2j(2000, 1, 1));
+
+	ok &= CheckDateTokenTable("datetktbl", datetktbl, szdatetktbl);
+	ok &= CheckDateTokenTable("deltatktbl", deltatktbl, szdeltatktbl);
+	return ok;
+}
+
+void
+dt2time(Timestamp jd, int *hour, int *min, int *sec, fsec_t *fsec)
+{
+	TimeOffset	time;
+
+	time = jd;
+
+	*hour = time / USECS_PER_HOUR;
+	time -= (*hour) * USECS_PER_HOUR;
+	*min = time / USECS_PER_MINUTE;
+	time -= (*min) * USECS_PER_MINUTE;
+	*sec = time / USECS_PER_SEC;
+	*fsec = time - (*sec * USECS_PER_SEC);
+}								/* dt2time() */
+
+/* isoweek2j()
+ *	XXX: This function has integer overflow hazards, but restructuring it to
+ *	work with the soft-error handling that its callers do is likely more
+ *	trouble than it's worth.
+ */
+int
+isoweek2j(int year, int week)
+{
+	int			day0,
+				day4;
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	return ((week - 1) * 7) + (day4 - day0);
+}
+
+/* isoweek2date()
+ * Convert ISO week of year number to date.
+ * The year field must be specified with the ISO year!
+ * karel 2000/08/07
+ */
+void
+isoweek2date(int woy, int *year, int *mon, int *mday)
+{
+	j2date(isoweek2j(*year, woy), year, mon, mday);
+}
+
+/* isoweekdate2date()
+ *
+ *	Convert an ISO 8601 week date (ISO year, ISO week) into a Gregorian date.
+ *	Gregorian day of week sent so weekday strings can be supplied.
+ *	Populates year, mon, and mday with the correct Gregorian values.
+ *	year must be passed in as the ISO year.
+ */
+void
+isoweekdate2date(int isoweek, int wday, int *year, int *mon, int *mday)
+{
+	int			jday;
+
+	jday = isoweek2j(*year, isoweek);
+	/* convert Gregorian week start (Sunday=1) to ISO week start (Monday=1) */
+	if (wday > 1)
+		jday += wday - 2;
+	else
+		jday += 6;
+	j2date(jday, year, mon, mday);
+}
+
+/* date2isoweek()
+ *
+ *	Returns ISO week number of year.
+ */
+int
+date2isoweek(int year, int mon, int mday)
+{
+	float8		result;
+	int			day0,
+				day4,
+				dayn;
+
+	/* current day */
+	dayn = date2j(year, mon, mday);
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	/*
+	 * We need the first week containing a Thursday, otherwise this day falls
+	 * into the previous year for purposes of counting weeks
+	 */
+	if (dayn < day4 - day0)
+	{
+		day4 = date2j(year - 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+	}
+
+	result = (dayn - (day4 - day0)) / 7 + 1;
+
+	/*
+	 * Sometimes the last few days in a year will fall into the first week of
+	 * the next year, so check for this.
+	 */
+	if (result >= 52)
+	{
+		day4 = date2j(year + 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		if (dayn >= day4 - day0)
+			result = (dayn - (day4 - day0)) / 7 + 1;
+	}
+
+	return (int) result;
+}
+
+
+/* date2isoyear()
+ *
+ *	Returns ISO 8601 year number.
+ *	Note: zero or negative results follow the year-zero-exists convention.
+ */
+int
+date2isoyear(int year, int mon, int mday)
+{
+	float8		result;
+	int			day0,
+				day4,
+				dayn;
+
+	/* current day */
+	dayn = date2j(year, mon, mday);
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	/*
+	 * We need the first week containing a Thursday, otherwise this day falls
+	 * into the previous year for purposes of counting weeks
+	 */
+	if (dayn < day4 - day0)
+	{
+		day4 = date2j(year - 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		year--;
+	}
+
+	result = (dayn - (day4 - day0)) / 7 + 1;
+
+	/*
+	 * Sometimes the last few days in a year will fall into the first week of
+	 * the next year, so check for this.
+	 */
+	if (result >= 52)
+	{
+		day4 = date2j(year + 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		if (dayn >= day4 - day0)
+			year++;
+	}
+
+	return year;
+}
+
+
+/* date2isoyearday()
+ *
+ *	Returns the ISO 8601 day-of-year, given a Gregorian year, month and day.
+ *	Possible return values are 1 through 371 (364 in non-leap years).
+ */
+int
+date2isoyearday(int year, int mon, int mday)
+{
+	return date2j(year, mon, mday) - isoweek2j(date2isoyear(year, mon, mday), 1) + 1;
+}
+bool
+time_overflows(int hour, int min, int sec, fsec_t fsec)
+{
+	/* Range-check the fields individually. */
+	if (hour < 0 || hour > HOURS_PER_DAY ||
+		min < 0 || min >= MINS_PER_HOUR ||
+		sec < 0 || sec > SECS_PER_MINUTE ||
+		fsec < 0 || fsec > USECS_PER_SEC)
+		return true;
+
+	/*
+	 * Because we allow, eg, hour = 24 or sec = 60, we must check separately
+	 * that the total time value doesn't exceed 24:00:00.
+	 */
+	if ((((((hour * MINS_PER_HOUR + min) * SECS_PER_MINUTE)
+		   + sec) * USECS_PER_SEC) + fsec) > USECS_PER_DAY)
+		return true;
+
+	return false;
+}
+
+/* float_time_overflows()
+
+/* ---- thin exported wrappers (plumbing only) ---- */
+
+int
+pg_hlp_dtk_m(int t)
+{
+	return DTK_M(t);
+}
+
+int
+pg_hlp_interval_mask(int b)
+{
+	return INTERVAL_MASK(b);
+}
+
+int
+pg_hlp_is_valid_julian(int y, int m, int d)
+{
+	return IS_VALID_JULIAN(y, m, d) ? 1 : 0;
+}
+
+int
+pg_hlp_isleap(int y)
+{
+	return isleap(y) ? 1 : 0;
+}
+
+int
+pg_hlp_j2day(int date)
+{
+	return j2day(date);
+}
+
+int
+pg_hlp_j2date(int jd, int *year, int *month, int *day)
+{
+	j2date(jd, year, month, day);
+	return 0;
+}
+
+int
+pg_hlp_date2j(int y, int m, int d)
+{
+	return date2j(y, m, d);
+}
+
+int
+pg_hlp_dt2time(int64 jd, int *hour, int *min, int *sec, int32 *fsec)
+{
+	fsec_t		f;
+
+	dt2time(jd, hour, min, sec, &f);
+	*fsec = f;
+	return 0;
+}
+
+int
+pg_hlp_time_overflows(int hour, int min, int sec, int32 fsec)
+{
+	return time_overflows(hour, min, sec, fsec) ? 1 : 0;
+}
+
+int
+pg_hlp_isoweek2j(int year, int week)
+{
+	return isoweek2j(year, week);
+}
+
+int
+pg_hlp_isoweek2date(int woy, int *year, int *mon, int *mday)
+{
+	isoweek2date(woy, year, mon, mday);
+	return 0;
+}
+
+int
+pg_hlp_isoweekdate2date(int isoweek, int wday, int *year, int *mon, int *mday)
+{
+	isoweekdate2date(isoweek, wday, year, mon, mday);
+	return 0;
+}
+
+int
+pg_hlp_date2isoweek(int year, int mon, int mday)
+{
+	return date2isoweek(year, mon, mday);
+}
+
+int
+pg_hlp_date2isoyear(int year, int mon, int mday)
+{
+	return date2isoyear(year, mon, mday);
+}
+
+int
+pg_hlp_date2isoyearday(int year, int mon, int mday)
+{
+	return date2isoyearday(year, mon, mday);
+}
+
+/* datebsearch: returns 1 + table index via *idx on hit, 0 on miss */
+int
+pg_hlp_datebsearch_date(const char *key, int *idx)
+{
+	const datetkn *tp = datebsearch(key, datetktbl, szdatetktbl);
+
+	if (tp == NULL)
+		return 0;
+	*idx = (int) (tp - datetktbl);
+	return 1;
+}
+
+int
+pg_hlp_datebsearch_delta(const char *key, int *idx)
+{
+	const datetkn *tp = datebsearch(key, deltatktbl, szdeltatktbl);
+
+	if (tp == NULL)
+		return 0;
+	*idx = (int) (tp - deltatktbl);
+	return 1;
+}
+
+int
+pg_hlp_decode_special(int field, const char *lowtoken, int *val)
+{
+	return DecodeSpecial(field, lowtoken, val);
+}
+
+int
+pg_hlp_decode_units(int field, const char *lowtoken, int *val)
+{
+	return DecodeUnits(field, lowtoken, val);
+}
+
+int
+pg_hlp_check_date_token_tables(void)
+{
+	return CheckDateTokenTables() ? 1 : 0;
+}
+
+int
+pg_hlp_float_time_overflows(int hour, int min, double sec)
+{
+	return pg_float_time_overflows(hour, min, sec) ? 1 : 0;
+}
+
+int
+pg_hlp_check_date_token_table_one(int which)
+{
+	if (which == 0)
+		return CheckDateTokenTable("datetktbl", datetktbl, szdatetktbl) ? 1 : 0;
+	return CheckDateTokenTable("deltatktbl", deltatktbl, szdeltatktbl) ? 1 : 0;
+}
+
+/*
+ * ---- time/timetz +- interval kernels (date.c) ----
+ *
+ * VERBATIM bodies of interval_time / time_pl_interval / time_mi_interval /
+ * timetz_pl_interval / timetz_mi_interval, with only the listed shims: fmgr
+ * unwrapping -> plain args, PG_RETURN_* -> out-params, and the single
+ * INTERVAL_NOT_FINITE ereport -> PROOF_EREPORT_FLAG + early return at the
+ * exact program point. The arithmetic — including the `result / USECS_PER_DAY
+ * * USECS_PER_DAY` fold-back and the `< 0` wrap, which is the divider chain
+ * this family's full-domain ladders wall on — is untouched.
+ *
+ * Return: 0 ok, nonzero = ereport fired (sqlstate 22008 on every arm).
+ */
+int
+pg_hlp_interval_time(int64 sp_time, int32 sp_day, int32 sp_month, int64 *out)
+{
+	Interval	span;
+	TimeADT		result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result = span.time % USECS_PER_DAY;
+	if (result < 0)
+		result += USECS_PER_DAY;
+
+	*out = result;
+	return 0;
+}
+
+int
+pg_hlp_time_pl_interval(int64 time, int64 sp_time, int32 sp_day,
+						int32 sp_month, int64 *out)
+{
+	Interval	span;
+	TimeADT		result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result = time + span.time;
+	result -= result / USECS_PER_DAY * USECS_PER_DAY;
+	if (result < INT64CONST(0))
+		result += USECS_PER_DAY;
+
+	*out = result;
+	return 0;
+}
+
+int
+pg_hlp_time_mi_interval(int64 time, int64 sp_time, int32 sp_day,
+						int32 sp_month, int64 *out)
+{
+	Interval	span;
+	TimeADT		result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result = time - span.time;
+	result -= result / USECS_PER_DAY * USECS_PER_DAY;
+	if (result < INT64CONST(0))
+		result += USECS_PER_DAY;
+
+	*out = result;
+	return 0;
+}
+
+int
+pg_hlp_timetz_pl_interval(int64 time, int32 zone, int64 sp_time, int32 sp_day,
+						  int32 sp_month, int64 *out_time, int32 *out_zone)
+{
+	Interval	span;
+	TimeTzADT	result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result.time = time + span.time;
+	result.time -= result.time / USECS_PER_DAY * USECS_PER_DAY;
+	if (result.time < INT64CONST(0))
+		result.time += USECS_PER_DAY;
+
+	result.zone = zone;
+
+	*out_time = result.time;
+	*out_zone = result.zone;
+	return 0;
+}
+
+int
+pg_hlp_timetz_mi_interval(int64 time, int32 zone, int64 sp_time, int32 sp_day,
+						  int32 sp_month, int64 *out_time, int32 *out_zone)
+{
+	Interval	span;
+	TimeTzADT	result;
+
+	span.time = sp_time;
+	span.day = sp_day;
+	span.month = sp_month;
+
+	if (INTERVAL_NOT_FINITE(&span))
+		return 1;				/* shim: ereport(ERROR) -> flag + return */
+
+	result.time = time - span.time;
+	result.time -= result.time / USECS_PER_DAY * USECS_PER_DAY;
+	if (result.time < INT64CONST(0))
+		result.time += USECS_PER_DAY;
+
+	result.zone = zone;
+
+	*out_time = result.time;
+	*out_zone = result.zone;
+	return 0;
+}

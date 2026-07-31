@@ -29,7 +29,7 @@ def extract_fn(lines, name):
             start = i
             j = i - 1
             while j >= 0 and re.match(
-                r"^(static |const |inline |unsigned |struct |size_t|long|double|int|char|bool|void|float8|Datum|pg_time_t|fsec_t|TimeADT|DateADT|Timestamp|datetkn)",
+                r"^(static |const |inline |unsigned |struct |size_t|long|double|int|char|bool|void|float8|Datum|pg_time_t|fsec_t|TimeADT|DateADT|Timestamp|datetkn|TimeZoneAbbrevTable|pg_tz|Numeric)",
                 lines[j],
             ) and "{" not in lines[j] and ";" not in lines[j] and "*/" not in lines[j]:
                 start = j
@@ -120,6 +120,18 @@ def main(out):
               "EncodeDateOnly", "EncodeTimeOnly", "AppendTimestampSeconds",
               "EncodeDateTime"]:
         sec(f"src/backend/utils/adt/datetime.c {f}", extract_fn(dt, f))
+
+    # datetime_convert_diff abbrev arms: the prefix matcher, the DYNTZ
+    # resolver, and C's OWN table builder (so neither side hand-rolls the
+    # TimeZoneAbbrevTable layout). GUARDED: pg_timestamp_io.c (p1-laney's
+    # oracle TU, which shares this .inc) stubs FetchDynamicTimeZone and has
+    # no tzEntry/guc_malloc support — it opts out via
+    # PG_DT_OMIT_ABBREV_BUILDERS before including.
+    w.write("\n#ifndef PG_DT_OMIT_ABBREV_BUILDERS\n")
+    for f in ["DecodeTimezoneAbbrevPrefix", "FetchDynamicTimeZone",
+              "ConvertTimeZoneAbbrevs", "InstallTimeZoneAbbrevs"]:
+        sec(f"src/backend/utils/adt/datetime.c {f}", extract_fn(dt, f))
+    w.write("\n#endif /* !PG_DT_OMIT_ABBREV_BUILDERS */\n")
 
     # timestamp.c ISO week/year calendar helpers (datetime_engine_diff target)
     for f in ["isoweek2j", "isoweek2date", "isoweekdate2date", "date2isoweek",
