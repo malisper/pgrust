@@ -232,6 +232,7 @@ dependencies = [
  "adt_float",
  "datum",
  "mcx",
+ "pg_string",
  "postgres_seams",
  "pqformat",
  "stack_depth",
@@ -292,6 +293,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -324,6 +326,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -967,6 +970,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "numutils",
+ "pg_string",
  "pqformat",
  "stringinfo",
  "typcache",
@@ -1592,12 +1596,20 @@ dependencies = [
  "adt_geo",
  "cc",
  "crc32c",
+ "cryptohashfuncs",
+ "datum",
  "mbutils",
  "mcx",
+ "pg_hmac",
+ "pg_md5",
+ "pg_sha1",
+ "postgres_seams",
  "pqformat",
+ "scram_common",
  "stringinfo",
  "types_core",
  "types_error",
+ "types_fmgr",
  "wchar",
  "xlogreader",
  "xlogreader_seams",
@@ -3203,6 +3215,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_b64"
+version = "0.1.0"
+
+[[package]]
 name = "pg_bitutils"
 version = "0.1.0"
 
@@ -3240,6 +3256,13 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "pg_hmac"
+version = "0.1.0"
+dependencies = [
+ "pg_sha2",
 ]
 
 [[package]]
@@ -3311,6 +3334,10 @@ dependencies = [
  "seam_core",
  "types_core",
 ]
+
+[[package]]
+name = "pg_sha1"
+version = "0.0.0"
 
 [[package]]
 name = "pg_sha2"
@@ -4218,6 +4245,18 @@ name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
+
+[[package]]
+name = "scram_common"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "pg_b64",
+ "pg_hmac",
+ "pg_sha2",
+ "postgres_seams",
+ "types_error",
+]
 
 [[package]]
 name = "seam_core"

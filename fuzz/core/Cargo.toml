@@ -26,6 +26,15 @@ wchar = { path = "../../crates/common/wchar" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+# cryptofam_diff (p1-lanef crypto/hash family batch):
+pg_md5 = { path = "../../crates/common/md5" }
+pg_sha1 = { path = "../../crates/common/sha1" }
+pg_hmac = { path = "../../crates/common/hmac" }
+scram_common = { path = "../../crates/common/scram_common" }
+cryptohashfuncs = { path = "../../crates/backend/utils/adt/cryptohashfuncs" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+datum = { path = "../../crates/_support/types/datum" }
+postgres_seams = { path = "../../crates/backend/tcop/postgres_seams" }
 
 [build-dependencies]
 cc = "1"

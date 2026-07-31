@@ -99,3 +99,10 @@ path = "fuzz_targets/float_math2_diff.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cryptofam_diff"
+path = "fuzz_targets/cryptofam_diff.rs"
+test = false
+doc = false
+bench = false

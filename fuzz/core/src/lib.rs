@@ -242,6 +242,11 @@ pub fn wire_pqformat(data: &[u8]) {
 pub mod diff;
 pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff, geo_diff};
 
+// cryptofam_diff (p1-lanef crypto/hash family batch): md5/sha1/hmac/scram +
+// adt/cryptohashfuncs fmgr wrappers vs vendored 18.3 C. See cryptofam.rs.
+pub mod cryptofam;
+pub use cryptofam::cryptofam_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
