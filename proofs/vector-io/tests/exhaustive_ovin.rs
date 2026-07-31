@@ -207,6 +207,116 @@ fn native_ovout_spots() {
     eprintln!("native ovout spots: both vectors identical to C");
 }
 
+/// ovout n=0 and n=1 over boundary + dense-sampled oids (EXHAUSTIVE-DIFF
+/// ruling scope: eq_ovout family). n=0: the single empty image. n=1:
+/// boundary bands (0..=65535, u32::MAX-65535..=MAX), decimal digit-length
+/// boundaries (10^k, 10^k-1, 10^k+1), power-of-two edges (2^k-1, 2^k,
+/// 2^k+1), plus a dense prime-stride sweep of the full u32 space.
+#[test]
+fn ovout_n0_n1_boundary_dense() {
+    let ctx = mcx::MemoryContext::new_bump("native-ovout-n01");
+
+    #[repr(C)]
+    struct OidVec1 {
+        hdr: array::oidvector,
+        values: [u32; 1],
+    }
+
+    let run_one = |n: i32, values: &[u32; 1]| -> Result<(), String> {
+        let mut cbuf = [0u8; 32];
+        let clen = unsafe { pg_oidvectorout(values.as_ptr(), n, cbuf.as_mut_ptr()) };
+        let total = 24 + 4 * n as usize;
+        let vl = ::datum::varlena::set_varsize_4b(total);
+        let img = OidVec1 {
+            hdr: array::oidvector {
+                vl_len_: i32::from_ne_bytes(vl),
+                ndim: 1,
+                dataoffset: 0,
+                elemtype: OIDOID,
+                dim1: n,
+                lbound1: 0,
+            },
+            values: *values,
+        };
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_usize(&img as *const OidVec1 as usize));
+        let d = adt_scalar::builtins::fc_oidvectorout(None, &mut f)
+            .map_err(|e| format!("rust errored: {:?}", e.sqlstate))?;
+        let out = unsafe {
+            core::slice::from_raw_parts(d.as_usize() as *const u8, clen as usize + 1)
+        };
+        if out != &cbuf[..clen as usize + 1] {
+            return Err(format!(
+                "n={} v={}: rust {:?} vs c {:?}",
+                n,
+                values[0],
+                String::from_utf8_lossy(&out[..clen as usize]),
+                String::from_utf8_lossy(&cbuf[..clen as usize])
+            ));
+        }
+        Ok(())
+    };
+
+    let mut count: u64 = 0;
+    let mut failures: Vec<String> = Vec::new();
+    let mut check = |n: i32, v: u32, count: &mut u64, failures: &mut Vec<String>| {
+        if let Err(e) = run_one(n, &[v]) {
+            if failures.len() < 20 {
+                failures.push(e);
+            }
+        }
+        *count += 1;
+    };
+
+    // n = 0 (value slot unread)
+    check(0, 0, &mut count, &mut failures);
+
+    // n = 1 boundary bands
+    for v in 0..=65535u32 {
+        check(1, v, &mut count, &mut failures);
+    }
+    for v in (u32::MAX - 65535)..=u32::MAX {
+        check(1, v, &mut count, &mut failures);
+    }
+    // decimal digit-length + power-of-two edges
+    let mut p: u64 = 1;
+    while p <= u32::MAX as u64 {
+        for d in [-1i64, 0, 1] {
+            let x = p as i64 + d;
+            if (0..=u32::MAX as i64).contains(&x) {
+                check(1, x as u32, &mut count, &mut failures);
+            }
+        }
+        p *= 10;
+    }
+    for k in 0..32u32 {
+        let p = 1u64 << k;
+        for d in [-1i64, 0, 1] {
+            let x = p as i64 + d;
+            if (0..=u32::MAX as i64).contains(&x) {
+                check(1, x as u32, &mut count, &mut failures);
+            }
+        }
+    }
+    // dense prime-stride sweep of full u32 space (~6.7M points)
+    let mut v: u64 = 0;
+    while v <= u32::MAX as u64 {
+        check(1, v as u32, &mut count, &mut failures);
+        v += 641;
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} divergences in {} cases; first: {}",
+        failures.len(),
+        count,
+        failures[0]
+    );
+    eprintln!("ovout n0/n1 boundary+dense: {} cases, 0 divergences", count);
+}
+
 /// cover_ovin_both_arms reachability facts, natively.
 #[test]
 fn native_cover_both_arms() {
