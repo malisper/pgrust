@@ -23,6 +23,7 @@ pqformat = { path = "../../crates/backend/libpq/pqformat" }
 stringinfo = { path = "../../crates/_support/types/stringinfo" }
 mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
 wchar = { path = "../../crates/common/wchar" }
+stack_depth = { path = "../../crates/backend/utils/misc/stack_depth" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }

@@ -52,12 +52,19 @@
 //!     locale model on both sides.
 //!
 //! CARVE-OUTS (ratified non-surfaces, documented per the skill's rules):
-//!   - stack-depth exhaustion (54001): MAX_TEXT caps the source text, which
-//!     bounds parser/flatten/print recursion far below either side's real
-//!     guard (C check_stack_depth, Rust stack_depth::check_stack_depth), so
-//!     the 54001 plane is structurally out of domain and the C shim's
-//!     check_stack_depth is a no-op. Deep-nesting inputs stay in-domain up to
-//!     the cap and ARE compared.
+//!   - stack-depth exhaustion (54001): pgrust's recursive-descent parser
+//!     guards NATIVE-stack recursion with check_stack_depth (54001); C's
+//!     bison parser keeps its stacks on the heap (YYMAXDEPTH -> 42601) and
+//!     the in-harness C shim's check_stack_depth is a no-op, so a Rust-side
+//!     54001 has no C counterpart by construction. setup() arms the Rust
+//!     guard per-thread at 1536kB (= the 2 MiB libtest thread minus C's
+//!     STACK_DEPTH_SLOP admission rule; this also keeps deep corpus seeds
+//!     from aborting a debug test thread — the pre-guard bug this lane
+//!     fixed, see README divergence 2), and any Rust 54001 verdict is carved
+//!     from comparison (`depth_carved`). In release the 1536kB budget is far
+//!     above what any MAX_TEXT-bounded input can consume (~1.2kB/level,
+//!     <=511 levels), so deep-nesting inputs stay in-domain up to the cap
+//!     and ARE compared.
 //!   - message/detail text: out of scope by the standing harness contract
 //!     (sqlstate is the error-identity plane).
 //!   - INVALID-UTF-8 SOURCE TEXT in arms 0 and 2 (added 2026-07-31 after the
@@ -151,6 +158,38 @@ fn setup() {
     if !pg_locale::default_locale_installed() {
         pg_locale::set_default_locale_c_for_tests();
     }
+    // Arm the Rust-side recursion guard exactly as a backend thread does
+    // (base at the dispatch frame — every parser/flatten/print recursion is
+    // deeper). Threshold: the smallest thread this harness runs on is a
+    // 2 MiB libtest thread, and C's own admission rule for max_stack_depth
+    // is stack minus STACK_DEPTH_SLOP (512kB), hence 1536kB. That keeps deep
+    // corpus inputs from ABORTING a debug test thread (the pre-guard bug
+    // this lane fixed), while in release 1536kB is far above what any
+    // MAX_TEXT-bounded input can use (~1.2kB/nesting level measured, <=511
+    // levels), so the carve below never engages there. See "divergence 2"
+    // in fuzz/README-TODO-jsonpath_diff.md.
+    const HARNESS_MAX_STACK_DEPTH_KB: i32 =
+        (2048 - stack_depth::STACK_DEPTH_SLOP as i32 / 1024);
+    if stack_depth::max_stack_depth() != HARNESS_MAX_STACK_DEPTH_KB {
+        stack_depth::set_max_stack_depth(HARNESS_MAX_STACK_DEPTH_KB);
+        stack_depth::assign_max_stack_depth(HARNESS_MAX_STACK_DEPTH_KB);
+    }
+    let _ = stack_depth::set_stack_base();
+}
+
+/// STACK-DEPTH CARVE (divergence 2 in the README): pgrust's parser guards
+/// native-stack recursion with check_stack_depth (54001) because it is a
+/// recursive-descent port; C's bison parser keeps its stacks on the HEAP and
+/// the in-harness C shim's check_stack_depth is a no-op, so a Rust-side
+/// 54001 has no C counterpart by construction. Whenever the Rust side (core
+/// or fc wrapper) reports 54001, the row is out of the comparison domain —
+/// this is a ratified non-surface, exactly bounded by that one sqlstate.
+fn depth_carved(v: Verdict) -> bool {
+    matches!(
+        v,
+        Verdict::Hard(st) | Verdict::Soft(st)
+            if st == types_error::ERRCODE_STATEMENT_TOO_COMPLEX.0
+    )
 }
 
 /// Shared domain for a jsonpath SOURCE TEXT (arms 0 and 2). See the
@@ -445,6 +484,9 @@ fn in_out_diff(payload: &[u8]) {
     let cx = mcx::MemoryContext::new("jsonpath_fuzz_in");
     let m = cx.mcx();
     let (rv, rimg) = rust_in(m, text, soft);
+    if depth_carved(rv) {
+        return; // stack-depth carve, see depth_carved
+    }
 
     assert!(
         cv == rv,
@@ -465,6 +507,9 @@ fn in_out_diff(payload: &[u8]) {
         let (r, isnull) =
             fc_call_soft::<1>(adt_jsonpath::builtins::fc_jsonpath_in, m, &mut esc, [din]);
         let wv = fc_verdict(&r, isnull, Some(&esc));
+        if depth_carved(wv) {
+            return; // stack-depth carve (boundary frames differ), see depth_carved
+        }
         assert!(
             wv == rv,
             "fc_jsonpath_in (soft) vs core VERDICT DIVERGENCE input={:?}: wrapper={wv:?} core={rv:?}",
@@ -480,6 +525,9 @@ fn in_out_diff(payload: &[u8]) {
     } else {
         let (r, isnull) = fc_call::<1>(adt_jsonpath::builtins::fc_jsonpath_in, m, [din]);
         let wv = fc_verdict(&r, isnull, None);
+        if depth_carved(wv) {
+            return; // stack-depth carve (boundary frames differ), see depth_carved
+        }
         assert!(
             wv == rv,
             "fc_jsonpath_in vs core VERDICT DIVERGENCE input={:?}: wrapper={wv:?} core={rv:?}",
@@ -507,6 +555,9 @@ fn out_planes(m: mcx::Mcx<'_>, image: &[u8], provenance: &[u8]) {
     let (cov, ctext) = c_out(image);
     let cmsg = c_last_msg();
     let (rov, rtext) = rust_out(m, image);
+    if depth_carved(rov) {
+        return; // stack-depth carve, see depth_carved
+    }
     assert!(
         cov == rov,
         "jsonpath_out VERDICT DIVERGENCE from={:?}: C={cov:?} ({cmsg:?}) Rust={rov:?}",
@@ -528,6 +579,9 @@ fn out_planes(m: mcx::Mcx<'_>, image: &[u8], provenance: &[u8]) {
     let din = NullableDatum::value(Datum::from_usize(img.as_ptr() as usize));
     let (r, isnull) = fc_call::<1>(adt_jsonpath::builtins::fc_jsonpath_out, m, [din]);
     let wv = fc_verdict(&r, isnull, None);
+    if depth_carved(wv) {
+        return; // stack-depth carve (boundary frames differ), see depth_carved
+    }
     assert!(
         wv == rov,
         "fc_jsonpath_out vs core VERDICT DIVERGENCE from={:?}: wrapper={wv:?} core={rov:?}",
@@ -566,6 +620,9 @@ fn recv_send_diff(wire: &[u8]) {
         }
     };
 
+    if depth_carved(rv) {
+        return; // stack-depth carve, see depth_carved
+    }
     assert!(
         cv == rv,
         "jsonpath_recv VERDICT/SQLSTATE DIVERGENCE wire={wire:02x?}: C={cv:?} ({cmsg:?}) Rust={rv:?}"
@@ -583,6 +640,9 @@ fn recv_send_diff(wire: &[u8]) {
         let din = NullableDatum::value(Datum::from_usize(&mut buf as *mut _ as usize));
         let (r, isnull) = fc_call::<1>(adt_jsonpath::builtins::fc_jsonpath_recv, m, [din]);
         let wv = fc_verdict(&r, isnull, None);
+        if depth_carved(wv) {
+            return; // stack-depth carve (boundary frames differ), see depth_carved
+        }
         assert!(
             wv == rv,
             "fc_jsonpath_recv vs core VERDICT DIVERGENCE wire={wire:02x?}: wrapper={wv:?} core={rv:?}"
@@ -606,6 +666,9 @@ fn recv_send_diff(wire: &[u8]) {
         Ok(b) => (Verdict::Ok, b.data().to_vec()),
         Err(e) => (Verdict::Hard(e.sqlstate().0), Vec::new()),
     };
+    if depth_carved(rsv) {
+        return; // stack-depth carve, see depth_carved
+    }
     assert!(
         csv == rsv,
         "jsonpath_send VERDICT DIVERGENCE wire={wire:02x?}: C={csv:?} ({cmsg:?}) Rust={rsv:?}"
@@ -620,6 +683,9 @@ fn recv_send_diff(wire: &[u8]) {
     let din = NullableDatum::value(Datum::from_usize(img.as_ptr() as usize));
     let (r, isnull) = fc_call::<1>(adt_jsonpath::builtins::fc_jsonpath_send, m, [din]);
     let wv = fc_verdict(&r, isnull, None);
+    if depth_carved(wv) {
+        return; // stack-depth carve (boundary frames differ), see depth_carved
+    }
     assert!(
         wv == rsv,
         "fc_jsonpath_send vs core VERDICT DIVERGENCE wire={wire:02x?}: wrapper={wv:?} core={rsv:?}"
@@ -707,6 +773,9 @@ fn mutability_diff(payload: &[u8]) {
     let cx = mcx::MemoryContext::new("jsonpath_fuzz_mut");
     let m = cx.mcx();
     let (rv, rimg) = rust_in(m, text, false);
+    if depth_carved(rv) {
+        return; // stack-depth carve, see depth_carved
+    }
     assert!(
         cv == rv,
         "jsonpath_in (mut arm) VERDICT DIVERGENCE input={:?}: C={cv:?} ({cmsg:?}) Rust={rv:?}",
@@ -736,6 +805,9 @@ fn mutability_diff(payload: &[u8]) {
         Ok(b) => (Verdict::Ok, b),
         Err(e) => (Verdict::Hard(e.sqlstate().0), false),
     };
+    if depth_carved(rmv) {
+        return; // stack-depth carve, see depth_carved
+    }
     assert!(
         cmv == rmv,
         "jspIsMutable VERDICT DIVERGENCE input={:?} vars={vars:?}: C={cmv:?} ({cmsg:?}) Rust={rmv:?}",
