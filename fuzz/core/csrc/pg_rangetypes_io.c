@@ -1060,15 +1060,49 @@ extern float8 float8in_internal(char *num, char **endptr_p,
 								const char *type_name, const char *orig_string,
 								struct Node *escontext);
 
+/*
+ * ERRCODE-NUMBERING TRANSLATION (harness defect fixed 2026-07-31, lane
+ * p1-laneac). pg_float_io.c and this file share the one _Thread_local
+ * pg_diff_errcode channel but number their classes DIFFERENTLY:
+ *
+ *     pg_float_io.c: 1 = 22P02 invalid_text,  2 = 22003 numeric_out_of_range
+ *     this file:     1 = 22003,               2 = 22P02   (see header table)
+ *
+ * So a raw call into the vendored float8in_internal stamps the OTHER file's
+ * numbering into the channel and the comparator reads a class this file never
+ * assigned. That produced a FALSE divergence on numrange_subdiff over huge
+ * numerics (C reported 2, Rust's genuine 22003 mapped to 1) — a harness
+ * defect, not a counterexample. Translate at the seam.
+ */
+#define PG_FLOAT_IO_ERR_INVALID_TEXT 1
+#define PG_FLOAT_IO_ERR_OUT_OF_RANGE 2
+
 static Datum
 float8in(PG_FUNCTION_ARGS)
 {
 	char	   *num = PG_GETARG_CSTRING(0);
 	float8		val;
+	int			float_io_err;
 
+	pg_diff_errcode = 0;
 	val = float8in_internal(num, NULL, "double precision", num, NULL);
-	if (pg_diff_errcode != 0)
+	float_io_err = pg_diff_errcode;
+	if (float_io_err != 0)
+	{
+		switch (float_io_err)
+		{
+			case PG_FLOAT_IO_ERR_INVALID_TEXT:
+				pg_diff_errcode = ERRCODE_INVALID_TEXT_REPRESENTATION;
+				break;
+			case PG_FLOAT_IO_ERR_OUT_OF_RANGE:
+				pg_diff_errcode = ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
+				break;
+			default:
+				pg_diff_errcode = 99;
+				break;
+		}
 		pg_diff_rt_throw();
+	}
 	PG_RETURN_FLOAT8(val);
 }
 
