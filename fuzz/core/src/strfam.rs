@@ -442,6 +442,23 @@ pub fn strfam_diff(data: &[u8]) {
 mod tests {
     use super::*;
 
+    /// CI replay rail: every committed corpus unit replays clean through the
+    /// differential on stable (the banked corpus is the regression suite —
+    /// any C/Rust divergence or harness panic fails this test per-commit).
+    #[test]
+    fn strfam_corpus_replay() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/strfam_diff");
+        let mut n = 0usize;
+        for entry in std::fs::read_dir(dir).expect("committed corpus present") {
+            let p = entry.unwrap().path();
+            if p.is_file() {
+                strfam_diff(&std::fs::read(&p).unwrap());
+                n += 1;
+            }
+        }
+        assert!(n > 1000, "corpus unexpectedly small: {n} units");
+    }
+
     /// Deterministic smoke sweep on stable: drive every selector with
     /// hand-picked inputs covering both verdict planes of each member.
     #[test]
