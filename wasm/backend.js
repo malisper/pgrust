@@ -50,6 +50,12 @@ const BUILD_INFO = {
     shortLabel: 'wasm · single',
     note: '',
   },
+  psql: {
+    build: 'wasip1',
+    label: 'wasm32-wasip1 · real psql over pgwire',
+    shortLabel: 'wasm · psql',
+    note: '',
+  },
 };
 
 let engineMode = 'single'; // updated by the worker's build/ready messages
@@ -68,6 +74,8 @@ function ensureWorker() {
   if (assetEncoding) workerParams.set('assetEncoding', assetEncoding);
   const engineOverride = params.get('engineMode');
   if (engineOverride) workerParams.set('engineMode', engineOverride);
+  if (clientMode === 'psql') workerParams.set('client', 'psql');
+  if (params.get('debug') === '1') workerParams.set('debug', '1');
   const qs = workerParams.toString();
   const workerUrl = qs ? `./worker.js?${qs}` : './worker.js';
   worker = new Worker(workerUrl, { type: 'module' });
@@ -92,7 +100,9 @@ function ensureWorker() {
       }
       if (m.type === 'status') { /* boot progress — surfaced via onStatus hook */ if (onStatus) onStatus(m.text); return; }
       if (m.type === 'reset-done') {
-        const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ ok: true }); }
+        // `retired` (psql client mode) reports whether the outgoing psql and
+        // server guests actually exited — see doResetPsql in repl.js.
+        const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ ok: true, retired: m.retired || null }); }
         return;
       }
       if (m.type === 'result') {
@@ -100,6 +110,10 @@ function ensureWorker() {
         if (p) { pending.delete(m.id); p.resolve(m); }
         return;
       }
+      if (m.type === 'psql-out') { if (psqlHooks.onOut) psqlHooks.onOut(m.data); return; }
+      if (m.type === 'psql-err') { if (psqlHooks.onErr) psqlHooks.onErr(m.data); return; }
+      if (m.type === 'psql-log') { if (psqlHooks.onLog) psqlHooks.onLog(m.data); return; }
+      if (m.type === 'psql-exit') { if (psqlHooks.onExit) psqlHooks.onExit(m.code, m.error); return; }
       if (m.type === 'error') {
         // A boot-time error rejects the ready promise; a per-request error
         // rejects that request.
@@ -119,6 +133,27 @@ function ensureWorker() {
 let onStatus = null;
 export function setStatusListener(fn) { onStatus = fn; }
 
+// ---- psql client mode (worker runs the REAL Rust psql.wasm) ------------------
+// Selected by ?client=psql (repl.js decides, defaulting to psql where JSPI
+// exists). Terminal output arrives as raw byte chunks; keystroke lines go
+// back as stream text.
+let clientMode = 'js';
+export function setClientMode(m) { clientMode = m; }
+export function getClientMode() { return clientMode; }
+
+const psqlHooks = {};
+export function setPsqlHooks({ onOut, onErr, onLog, onExit }) {
+  psqlHooks.onOut = onOut;
+  psqlHooks.onErr = onErr;
+  psqlHooks.onLog = onLog;
+  psqlHooks.onExit = onExit;
+}
+
+export function sendPsqlText(text) {
+  if (!worker) return;
+  worker.postMessage({ type: 'psql-line', text });
+}
+
 // ---- persistence (OPFS snapshot toggle; worker owns the mechanics) ----------
 let persistState = { persist: false, available: false, restored: false };
 let onPersist = null;
@@ -132,6 +167,14 @@ export async function setPersist(on) {
     pending.set(id, { resolve, reject });
     worker.postMessage({ type: 'persist', id, on: !!on });
   });
+}
+
+// Fire-and-forget teardown flush: the page is being hidden/unloaded, ask the
+// worker to snapshot the datadir right now. No reply — the page may be gone
+// before one could arrive.
+export function flushPersist() {
+  if (!worker || !persistState.persist) return;
+  worker.postMessage({ type: 'flush' });
 }
 
 export async function bootBackend() { return ensureWorker(); }

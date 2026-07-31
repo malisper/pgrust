@@ -8,7 +8,27 @@
 // EXCEPT the backend: queries run against OUR wasm engine (backend.js +
 // worker.js), not the design's mock.
 
-import { installBackend, bootBackend, resetBackend, setStatusListener, getBuildInfo, getEngineMode, setPersist, getPersistState, setPersistListener } from './backend.js';
+import { installBackend, bootBackend, resetBackend, setStatusListener, getBuildInfo, getEngineMode, setPersist, getPersistState, setPersistListener, setClientMode, setPsqlHooks, sendPsqlText, flushPersist } from './backend.js';
+import { jspiSupported } from './wiresession.js';
+
+// ---- client selection ----------------------------------------------------
+// 'psql' = the REAL Rust psql.wasm drives this terminal over the wire
+// protocol — the DEFAULT wherever the engine has JSPI (feature-detected:
+// WebAssembly.Suspending/promising — Chrome/Edge; WebKit/Safari has neither
+// as of mid-2026). 'js' = the legacy JS REPL: the ?client=js opt-out, and the
+// automatic fallback where JSPI is missing (a subtle note in the terminal
+// says so — see PSQL_FALLBACK at boot).
+//
+// Both toolbar buttons work in BOTH modes: `reset` respawns psql and its
+// server instance over a pristine datadir (doReset below), and `persist`
+// snapshots the same VFS to OPFS (worker.js). psql mode's `reset` rebuilds the
+// terminal in place — no page reload, so the compiled modules stay warm.
+const CLIENT_PARAM = new URLSearchParams(window.location.search).get('client');
+const JSPI_OK = jspiSupported();
+const CLIENT = CLIENT_PARAM === 'js' ? 'js' : (JSPI_OK ? 'psql' : 'js');
+// True when the user did not ASK for the JS REPL but got it anyway (no JSPI).
+const PSQL_FALLBACK = CLIENT === 'js' && CLIENT_PARAM !== 'js';
+setClientMode(CLIENT);
 
 // ---- example queries ---------------------------------------------------------
 // One build (wasm32-wasip1) with full float8 support — the old per-build
@@ -339,6 +359,32 @@ function pushHistory(stmt) {
   histIdx = null;
 }
 
+// psql-mode history entry: newlines PRESERVED, exactly what readline stores.
+// (pushHistory above is the JS REPL's line-flattening semantic; psql mode
+// never uses it.)
+function pushPsqlEntry(text) {
+  const entry = String(text).replace(/\s+$/, '');
+  if (!entry.trim()) return;
+  if (history.length && history[history.length - 1] === entry) { histIdx = null; return; }
+  history.push(entry);
+  histIdx = null;
+}
+
+// The input is a textarea so a recalled multi-line entry displays intact;
+// grow/shrink it to fit whatever value is put in it.
+function setInputValue(v) {
+  inputEl.value = v;
+  autoGrowInput();
+}
+function autoGrowInput() {
+  if (inputEl.value.includes('\n')) {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = `${inputEl.scrollHeight}px`;
+  } else {
+    inputEl.style.height = '';
+  }
+}
+
 function setPrompt(p) { curPrompt = p; promptEl.textContent = p; }
 
 function focusInput() { try { inputEl.focus({ preventScroll: true }); } catch { inputEl.focus(); } }
@@ -399,7 +445,7 @@ function resetSessionUi() {
   history = [];
   histIdx = null;
   q = [];
-  inputEl.value = '';
+  setInputValue('');
   banner();
 }
 
@@ -486,7 +532,164 @@ async function drain() {
   }
 }
 
+// ---- psql client mode: raw terminal streams --------------------------------
+// psql's stdout is rendered verbatim; the trailing partial line (psql's
+// prompt, printed without a newline while it waits for input) becomes the
+// input prompt. stderr renders in the error/notice colors.
+const psqlOutDecoder = new TextDecoder('utf-8');
+const psqlErrDecoder = new TextDecoder('utf-8');
+let psqlOutPending = '';
+let psqlErrPending = '';
+
+// Chunks that arrive while the terminal is being (re)built — boot, and reset —
+// queue up instead of painting, so the UI reset that follows cannot wipe them.
+// A fresh psql writes its banner the instant its instance starts, which is
+// BEFORE the worker answers our reset request, hence the hold rather than a
+// clear-then-listen.
+let psqlHoldQueue = [];
+
+function psqlHoldOutput() { if (!psqlHoldQueue) psqlHoldQueue = []; }
+
+function psqlOnOutRaw(bytes) {
+  if (psqlHoldQueue) { psqlHoldQueue.push(['out', bytes]); return; }
+  psqlOnOut(bytes);
+}
+
+function psqlOnErrRaw(bytes) {
+  if (psqlHoldQueue) { psqlHoldQueue.push(['err', bytes]); return; }
+  psqlOnErr(bytes);
+}
+
+function psqlFlushHoldQueue() {
+  const q = psqlHoldQueue;
+  psqlHoldQueue = null;
+  for (const [kind, bytes] of q || []) {
+    if (kind === 'out') psqlOnOut(bytes); else psqlOnErr(bytes);
+  }
+}
+
+function psqlOnOut(bytes) {
+  psqlOutPending += psqlOutDecoder.decode(bytes, { stream: true });
+  const parts = psqlOutPending.split('\n');
+  psqlOutPending = parts.pop();
+  for (const l of parts) pushLine('', l, '#c2c8d2');
+  setPrompt(psqlOutPending);
+  if (psqlAtPrompt()) {
+    if (psqlPromptKind(psqlOutPending) === 'primary') flushPsqlHistory();
+    psqlWakeIdle();
+  }
+  scrollEl.scrollTop = scrollEl.scrollHeight;
+}
+
+function psqlOnErr(bytes) {
+  psqlErrPending += psqlErrDecoder.decode(bytes, { stream: true });
+  const parts = psqlErrPending.split('\n');
+  psqlErrPending = parts.pop();
+  for (const l of parts) {
+    const color = l.startsWith('ERROR') || l.startsWith('FATAL') ? '#e0594d' : '#7e8794';
+    pushLine('', l, color);
+  }
+  scrollEl.scrollTop = scrollEl.scrollHeight;
+}
+
+// psql prints its prompt as a trailing partial line and only then reads the
+// next line; "the pending partial line looks like a prompt" is therefore the
+// only honest idle signal a raw byte stream offers. Used to PACE queued lines
+// (an example is several lines): without it every queued line is echoed at
+// once against a stale prompt, before the earlier lines' output arrives.
+function psqlAtPrompt() {
+  return /(?:=[#>]|-[#>]|\([#>]|[#>]) $/.test(psqlOutPending);
+}
+
+let psqlIdleWaiters = [];
+function psqlWakeIdle() {
+  const w = psqlIdleWaiters;
+  psqlIdleWaiters = [];
+  for (const f of w) f();
+}
+
+// Resolves at the next prompt — or after `ms`, so a prompt shape we failed to
+// recognize can never wedge the terminal (the line is sent regardless; psql
+// reads its stdin in order either way).
+function psqlWaitIdle(ms = 5000) {
+  if (psqlAtPrompt()) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    psqlIdleWaiters.push(finish);
+    setTimeout(finish, ms);
+  });
+}
+
+// ---- psql-mode history: STATEMENT-grained, matching real psql --------------
+// Observed spec (PGDG psql 18.4 driven over a real PTY — see the
+// psql-wasm-history lane report):
+//   1. a multi-line statement is ONE history entry with its newlines
+//      preserved (readline recalls the whole buffer);
+//   2. Up walks whole statements, never the lines inside one;
+//   3. backslash commands are their OWN entries, even when issued at a
+//      continuation prompt (\r at postgres-# recalls as "\r");
+//   4. a statement aborted mid-continuation (Ctrl-C, or \r buffer reset)
+//      leaves NO history entry for the discarded lines.
+// The prompt psql prints before each line is the grain signal — the same
+// trailing-partial-line parse the queued-line pacing uses.
+let psqlHistPending = []; // lines of the statement in progress
+
+function psqlPromptKind(p) {
+  if (/=[#>] $/.test(p)) return 'primary';
+  if (/['"`][#>] $/.test(p)) return 'quote'; // inside a string: backslash is content
+  return 'cont'; // -#, (#, and anything else psql-shaped
+}
+
+function recordPsqlHistory(line, promptText) {
+  const kind = psqlPromptKind(promptText);
+  const t = line.trim();
+  if (kind !== 'quote' && t.charAt(0) === '\\') {
+    // Backslash command: its own entry (spec 3). \r additionally DISCARDS the
+    // statement accumulated so far (spec 4 — psql clears the query buffer and
+    // the dropped lines never reach history).
+    if (/^\\r\b/.test(t)) psqlHistPending = [];
+    pushPsqlEntry(line);
+    return;
+  }
+  if (kind === 'primary') psqlHistPending = []; // a new statement begins
+  if (t !== '' || psqlHistPending.length) psqlHistPending.push(line);
+}
+
+// Called when psql paints a PRIMARY prompt: whatever accumulated belongs to a
+// statement psql just finished (executed or errored — both land in history).
+function flushPsqlHistory() {
+  if (!psqlHistPending.length) return;
+  pushPsqlEntry(psqlHistPending.join('\n'));
+  psqlHistPending = [];
+}
+
+function psqlSendLine(line) {
+  pushLine(curPrompt, line, '#dfe3ea');
+  recordPsqlHistory(line, curPrompt);
+  psqlOutPending = '';
+  setPrompt('');
+  sendPsqlText(line + '\n');
+}
+
+if (CLIENT === 'psql') {
+  setPsqlHooks({
+    onOut: psqlOnOutRaw,
+    onErr: psqlOnErrRaw,
+    onExit: (code, error) => {
+      pushLine('', '', '#6f7785');
+      pushLine('', `psql exited${code != null ? ` (code ${code})` : ''}${error ? `: ${error}` : ''} — press reset to start a fresh session.`, '#e0a24a');
+      setPrompt('');
+    },
+  });
+}
+
 async function processLine(line) {
+  if (CLIENT === 'psql') {
+    await psqlWaitIdle();
+    psqlSendLine(line);
+    return;
+  }
   pushLine(curPrompt, line, '#dfe3ea');
   const t = line.trim();
   if (buffer === '' && t === '') {
@@ -575,13 +778,71 @@ function runExample(ex) {
   });
   const lns = ex.sql.trim().split('\n');
   histIdx = null;
-  inputEl.value = '';
+  setInputValue('');
   const mobile = isMobileViewport();
   if (mobile) blurInput();
   feedLines(lns, { blurAfterRun: mobile });
 }
 
+// The scrollback header psql mode shows above the real psql banner (boot and
+// after a reset both land here).
+function psqlHandoverHeader() {
+  pushLine('', `engine ready — ${getBuildInfo().label} (the terminal below IS psql; \\? for help, ?client=js for the legacy JS REPL).`, '#6f7785');
+  pushLine('', '', '#6f7785');
+  setPrompt('');
+}
+
+// psql mode reset: the worker retires psql + its server instance, swaps in a
+// pristine datadir, and boots a fresh psql. We hold the new psql's output while
+// that happens, then clear the terminal and release it, so what lands under the
+// header is the REAL psql's banner and prompt — not a synthesized one.
+async function doResetPsql() {
+  pushLine('', 'restarting psql on a fresh datadir…', '#7e8794');
+  psqlHoldOutput();
+  let failure = null;
+  let stranded = null;
+  try {
+    const r = await resetBackend();
+    // The retired psql/server guests are expected to EXIT; one that had to be
+    // abandoned at the teardown timeout is a leaked wasm instance, so say so
+    // rather than pretending the reset was clean.
+    if (r && r.retired && (!r.retired.psqlExited || !r.retired.serverExited)) {
+      stranded = [!r.retired.psqlExited ? 'psql' : null, !r.retired.serverExited ? 'server' : null]
+        .filter(Boolean).join(' + ');
+    }
+    captureAnalytics('wasm_demo_reset', { example_id: lastExampleId });
+  } catch (e) {
+    failure = (e && e.message) || String(e);
+    captureAnalytics('wasm_demo_reset_failed', {
+      example_id: lastExampleId,
+      error: trackedText(failure),
+    });
+  }
+  // Terminal state that belonged to the retired psql.
+  buffer = '';
+  history = [];
+  histIdx = null;
+  q = [];
+  setInputValue('');
+  psqlHistPending = [];
+  psqlOutPending = '';
+  psqlErrPending = '';
+  clearScreen();
+  if (failure) {
+    pushLine('', 'reset failed: ' + failure, '#e0594d');
+    pushLine('', '', '#6f7785');
+    setPrompt('');
+  } else {
+    psqlHandoverHeader();
+    if (stranded) {
+      pushLine('', `warning: the previous ${stranded} instance did not exit within the teardown window (its memory stays held until the page reloads).`, '#e0a24a');
+    }
+  }
+  psqlFlushHoldQueue();
+}
+
 async function doReset() {
+  if (CLIENT === 'psql') { await doResetPsql(); return; }
   pushLine('', 'restarting session (restoring a fresh datadir)…', '#7e8794');
   try {
     await resetBackend();
@@ -632,10 +893,12 @@ inputEl.addEventListener('keydown', (e) => {
   if (k === 'Enter') {
     e.preventDefault();
     const line = inputEl.value;
-    inputEl.value = '';
+    setInputValue('');
     histIdx = null;
     const t = line.trim();
-    if (buffer === '' && t !== '' &&
+    // JS REPL only: meta lines enter history here. psql mode records history
+    // statement-grained inside psqlSendLine (recordPsqlHistory).
+    if (CLIENT !== 'psql' && buffer === '' && t !== '' &&
         (t.charAt(0) === '\\' || ['help', 'clear', 'quit', 'exit', 'reset'].indexOf(t.toLowerCase()) !== -1)) {
       pushHistory(line);
     }
@@ -646,7 +909,7 @@ inputEl.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (history.length) {
       histIdx = histIdx == null ? history.length - 1 : Math.max(0, histIdx - 1);
-      inputEl.value = history[histIdx];
+      setInputValue(history[histIdx]);
     }
     return;
   }
@@ -654,17 +917,25 @@ inputEl.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (histIdx != null) {
       histIdx++;
-      if (histIdx >= history.length) { histIdx = null; inputEl.value = ''; }
-      else inputEl.value = history[histIdx];
+      if (histIdx >= history.length) { histIdx = null; setInputValue(''); }
+      else setInputValue(history[histIdx]);
     }
     return;
   }
   if ((k === 'l' || k === 'L') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); clearScreen(); return; }
   if (k === 'c' && e.ctrlKey) {
+    // Ctrl-C IS the copy chord on Windows/Linux: when the user has text
+    // selected anywhere (the scrollback, or inside the input itself), let the
+    // browser copy it — do not eat the keystroke as a terminal interrupt.
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    if (inputEl.selectionStart !== inputEl.selectionEnd) return;
     e.preventDefault();
     pushLine(curPrompt, inputEl.value + '^C', '#7e8794');
-    buffer = ''; setPrompt('pgrust=# ');
-    inputEl.value = '';
+    if (CLIENT !== 'psql') {
+      buffer = ''; setPrompt('pgrust=# ');
+    }
+    setInputValue('');
     return;
   }
 });
@@ -706,7 +977,84 @@ persistBtnEl.addEventListener('click', async () => {
   updatePersistUi();
   maybeFocusInput();
 });
-scrollEl.addEventListener('click', () => { if (!isMobileViewport()) focusInput(); });
+// Teardown flush: closing the persistence loss window. Snapshots are
+// leading-edge (the worker snapshots the moment the server goes idle), so by
+// the time a human can react to a result the write is normally durable; these
+// hooks cover the machine-fast reload/close, asking the worker for one final
+// snapshot as the page goes away. Best-effort by nature — the browser tears
+// the worker down with the document and does not wait for its queue.
+window.addEventListener('pagehide', () => flushPersist());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushPersist();
+});
+
+// ---- paste ------------------------------------------------------------------
+// Real psql over a PTY treats a paste as raw bytes (observed, PGDG 18.4): every
+// COMPLETE line executes as it arrives — statements run one after another,
+// prompt-paced, one history entry per statement — and a trailing unterminated
+// line stays in the editing buffer, unexecuted and not in history. Match that:
+// complete lines feed the terminal (the same queue the sidebar examples use),
+// the remainder lands in the input box at the caret.
+function pasteIntoTerminal(text) {
+  const t = String(text).replace(/\r\n?/g, '\n');
+  if (!t) return;
+  const v = inputEl.value;
+  const s = inputEl.selectionStart != null ? inputEl.selectionStart : v.length;
+  const e = inputEl.selectionEnd != null ? inputEl.selectionEnd : v.length;
+  const combined = v.slice(0, s) + t + v.slice(e);
+  const lastNl = combined.lastIndexOf('\n');
+  if (lastNl === -1) {
+    setInputValue(combined);
+    const caret = s + t.length;
+    try { inputEl.setSelectionRange(caret, caret); } catch { /* not focusable yet */ }
+    return;
+  }
+  const lines = combined.slice(0, lastNl).split('\n');
+  const rest = combined.slice(lastNl + 1);
+  setInputValue(rest);
+  try { inputEl.setSelectionRange(rest.length, rest.length); } catch { /* ditto */ }
+  histIdx = null;
+  feedLines(lines, { blurAfterRun: isMobileViewport() });
+}
+
+// Multi-line paste INTO the input: intercept so the complete lines run now
+// (native insertion would just pile newlines into the box until Enter).
+// Single-line paste keeps the browser's native insertion (caret/undo intact).
+inputEl.addEventListener('paste', (e) => {
+  const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+  if (!text || !/[\r\n]/.test(text)) return;
+  e.preventDefault();
+  pasteIntoTerminal(text);
+});
+
+// Paste anywhere else on the page routes to the terminal, the way real
+// terminal emulators behave. This is the fix for "paste does not work": after
+// copying text out of the scrollback the input is deliberately NOT refocused
+// (the selection would be lost), so the very next Cmd/Ctrl-V used to land on
+// <body> and vanish. Other text fields (the updates-dialog email box) keep
+// their native paste.
+document.addEventListener('paste', (e) => {
+  const tgt = e.target;
+  if (tgt === inputEl) return; // the input's own handler owns this
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+  const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+  if (!text) return;
+  e.preventDefault();
+  focusInput();
+  pasteIntoTerminal(text);
+});
+
+// Click-to-focus, WITHOUT stealing a selection: a click that ends a
+// drag-select (or lands inside any selection) must leave the selection alive
+// so Cmd/Ctrl-C can copy it — refocusing the input here collapsed it (the
+// "text cannot be copied out of the terminal" bug). A plain click has a
+// collapsed selection and still refocuses.
+scrollEl.addEventListener('click', () => {
+  if (isMobileViewport()) return;
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed) return;
+  focusInput();
+});
 const updatesDialogEl = document.getElementById('updates-dialog');
 const updatesFormEl = document.getElementById('updates-form');
 const updatesEmailEl = document.getElementById('updates-email');
@@ -799,12 +1147,32 @@ bootBackend().then(() => {
   updateBuildUi();
   updatePersistUi();
   buildExamples();
+  if (CLIENT === 'psql') {
+    // The REAL psql owns the terminal: clear the boot chatter, replay its
+    // banner/prompt bytes, and hand over.
+    clearScreen();
+    psqlHandoverHeader();
+    if (getPersistState().restored) {
+      pushLine('', 'restored your persisted datadir from this browser’s storage (persist is on; reset wipes it).', '#7e8794');
+    }
+    psqlFlushHoldQueue();
+    setBootStatus('Engine ready.');
+    hideBootScreen();
+    captureAnalytics('wasm_demo_loaded', { build: getBuildInfo().build, engine: 'psql' });
+    maybeFocusInput();
+    return;
+  }
   banner();
   const engineNote = getEngineMode() === 'wire'
     ? 'one live protocol session (temp tables, prepared statements, and transactions span statements)'
     : 'single-user postgres over a persistent in-memory datadir';
   pushLine('', `engine ready — ${getBuildInfo().label}.`, '#6f7785');
   pushLine('', `${engineNote}.`, '#6f7785');
+  if (PSQL_FALLBACK) {
+    // Not an error: this browser simply has no JSPI (WebAssembly.Suspending),
+    // which the real-psql client needs, so the JS REPL drives the terminal.
+    pushLine('', 'note: this browser has no JSPI, so the JS REPL emulates psql here (Chrome/Edge get the real psql.wasm).', '#566070');
+  }
   if (getPersistState().restored) {
     pushLine('', 'restored your persisted datadir from this browser’s storage (persist is on; reset wipes it).', '#7e8794');
   }

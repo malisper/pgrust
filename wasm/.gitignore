@@ -6,3 +6,7 @@ assets/vfs.img
 assets/vfs.img.br
 assets/vfs.img.gz
 assets/vfs.json
+assets/psql.wasm.br
+assets/psql.wasm.gz
+# Local pre-upload bundle assembled by deploy.sh stage — never committed.
+deploy-staging/
