@@ -663,10 +663,36 @@ fn fixed_typlen(elemsel: i32, r: &mut Rdr<'_>) -> i32 {
     elmlen * ((r.u8() % 8) as i32 + 1)
 }
 
-/// A subscript/bound: i8-derived normally, full-range i32 in wide mode.
+/// Subscripts that make `lb - indx` or `indx - (dim + lb)` overflow i32 sit
+/// within a few counts of the i32 ends, so a uniform i32 draw never finds
+/// them (~2^-31). Wide mode therefore draws from this extremes table most of
+/// the time and uniformly otherwise — the standard extremes-dictionary trick,
+/// and the only way the 54000 "array size exceeds the maximum allowed" arms
+/// in the 1-D extension paths are reachable.
+const WIDE_EXTREMES: [i32; 12] = [
+    i32::MIN,
+    i32::MIN + 1,
+    i32::MIN + 2,
+    i32::MAX,
+    i32::MAX - 1,
+    i32::MAX - 2,
+    1 << 30,
+    -(1 << 30),
+    (1 << 30) + 1,
+    -((1 << 30) + 1),
+    0,
+    -1,
+];
+
+/// A subscript/bound: i8-derived normally, extremes-biased i32 in wide mode.
 fn subscript(mode: Mode, r: &mut Rdr<'_>) -> i32 {
     if mode.wide {
-        r.i32le()
+        let sel = r.u8();
+        if sel < 208 {
+            WIDE_EXTREMES[(sel as usize) % WIDE_EXTREMES.len()]
+        } else {
+            r.i32le()
+        }
     } else {
         (r.u8() as i8) as i32
     }
