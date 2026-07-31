@@ -20,11 +20,19 @@
 // completed statement (wire mode runs CHECKPOINT first, so a restore replays
 // only the WAL tail) and restores the newest valid snapshot at boot. Corrupt
 // snapshots and quota failures degrade to a fresh datadir / persistence-off
-// with a status message — never a wedged page.
+// with a status message — never a wedged page. psql client mode persists too,
+// keyed to the server's ReadyForQuery instead of statement boundaries the
+// worker cannot see (psqlSnapshotSoon).
+//
+// RESET: swap in a pristine VFS and respawn whatever is running over it — the
+// wire session (stopWireSession + warmEngine) or, in psql client mode, psql
+// and its server instance (resetPsqlSession). Never a page reload: the
+// terminal scrollback and the compiled modules survive.
 import { run, Vfs } from './pgrust-wasi.js';
 import { decodeUtf8Chunks, formatRun, normalizeSingleUserInput } from './format.js';
 import { WireSession, WireSessionDead, jspiSupported, parseMessage } from './wiresession.js';
 import { openOpfsStore, loadLatestSnapshot, saveSnapshot, clearSnapshots } from './snapshot.js';
+import { PsqlSession, makePushStream } from './psqlsession.js';
 
 let wasmModule = null;
 let baseImage = null;     // immutable packed file bytes (the pristine template)
@@ -49,12 +57,23 @@ const ENGINE = (() => {
   if (m === 'single' || m === 'wire') return m;
   return jspiSupported() ? 'wire' : 'single';
 })();
+// Client selection: 'psql' = the REAL Rust psql.wasm drives the terminal
+// (cross-piped to postgres --stdio-wire instances; needs JSPI); 'js' = the
+// legacy JS REPL. The page (repl.js) decides and passes it through.
+const CLIENT = PARAMS.get('client') === 'psql' && jspiSupported() ? 'psql' : 'js';
 const WASM_CACHE_DB = 'pgrust-wasm-cache-v1';
 const WASM_CACHE_STORE = 'modules';
 
 let session = null;       // wire mode: the live WireSession
 let sessionStderr = [];   // wire mode: stderr chunks since the last statement
 let runChain = Promise.resolve(); // serializes wire queries (runs + checkpoints)
+
+// psql client mode: the Rust psql.wasm cross-piped to server instances.
+let psqlSession = null;
+let psqlStdin = null;
+let psqlModule = null;
+let psqlDebugTimer = null;
+const psqlEnc = new TextEncoder();
 
 // Persistence state.
 let store = null;         // OPFS store or null (unavailable)
@@ -211,6 +230,7 @@ async function reviveWireSession() {
 async function snapshotNow() {
   if (!persist || !store) return;
   try {
+    const t0 = performance.now();
     if (ENGINE === 'wire' && session && !session.dead) {
       // Quiesce: a completed CHECKPOINT bounds restore-time WAL replay.
       await session.query('CHECKPOINT;');
@@ -218,7 +238,7 @@ async function snapshotNow() {
     const r = await saveSnapshot(store, vfs, snapGen, snapSlot);
     snapGen = r.generation;
     snapSlot = r.slot;
-    post({ type: 'persist-state', persist: true, note: `snapshot saved (${(r.bytes / (1024 * 1024)).toFixed(1)} MB)` });
+    post({ type: 'persist-state', persist: true, note: `snapshot saved (${(r.bytes / (1024 * 1024)).toFixed(1)} MB in ${Math.round(performance.now() - t0)}ms)` });
   } catch (e) {
     // Quota or any other storage failure: degrade to persistence-off, keep
     // the live session untouched.
@@ -227,9 +247,15 @@ async function snapshotNow() {
   }
 }
 
-function scheduleSnapshot() {
+// Statement-boundary durability for the js client (wire/single engines): the
+// run handlers call this BEFORE posting a successful result, so the page can
+// only render output whose datadir state is already flushed — the same
+// "you saw it, it's durable" contract the psql client's ReadyForQuery gate
+// provides. Both handlers already execute INSIDE runChain, so calling
+// snapshotNow() directly is the serialized position.
+async function snapshotBeforeReport() {
   if (!persist || !store) return;
-  runChain = runChain.then(() => snapshotNow());
+  await snapshotNow();
 }
 
 // ---- boot -------------------------------------------------------------------
@@ -288,6 +314,108 @@ async function tryRestoreSnapshot() {
   return true;
 }
 
+// psql client mode: boot the Rust psql against server instance(s) on the
+// live VFS. psql's terminal fds stream to the page; the server connection
+// is the fd 4/5 pipe pair inside PsqlSession.
+//
+// Every callback is fenced on `psqlSession === sess`: a session being retired
+// (reset) must not paint the page or report its exit as a crash, and the
+// retired instances must not be reachable from any live handler afterwards.
+async function startPsqlSession() {
+  const stdin = makePushStream();
+  let sess = null;
+  const mine = () => psqlSession === sess;
+  sess = new PsqlSession({
+    psqlModule,
+    serverModule: wasmModule,
+    vfs,
+    psqlStdin: stdin,
+    psqlArgv: ['psql'],
+    psqlEnv: { USER: 'postgres', PSQL_INTERACTIVE: '1' },
+    onPsqlStdout: (b) => { if (mine()) post({ type: 'psql-out', data: b }); },
+    onPsqlStderr: (b) => { if (mine()) post({ type: 'psql-err', data: b }); },
+    onServerStderr: (b) => { if (mine()) post({ type: 'psql-log', data: b }); },
+    onServerIdle: () => (mine() ? psqlSnapshotSoon() : undefined),
+  });
+  psqlSession = sess;
+  psqlStdin = stdin;
+  if (PARAMS.get('debug') === '1' && !psqlDebugTimer) {
+    let hb = 0;
+    psqlDebugTimer = setInterval(() => post({ type: 'status', text: `heartbeat ${hb++}` }), 1000);
+  }
+  post({ type: 'status', text: 'Starting psql… (spawning server instance)' });
+  await sess.start();
+  post({ type: 'status', text: 'Starting psql… (psql instance launched)' });
+  sess.psqlExit
+    .then((code) => { if (mine()) post({ type: 'psql-exit', code }); })
+    .catch((e) => { if (mine()) post({ type: 'psql-exit', code: null, error: String(e && e.message || e) }); });
+}
+
+// Reset in psql client mode: retire psql AND its server instance, swap in a
+// pristine VFS, then boot a fresh psql. No page reload, no orphaned instance.
+//
+// Teardown order (see PsqlSession.stop): psql goes down FIRST and takes the
+// server with it through Terminate + shutdown checkpoint. Only then is the VFS
+// replaced — a psql left running across the swap would be talking to a backend
+// whose datadir vanished mid-session.
+async function resetPsqlSession() {
+  const dying = psqlSession;
+  // Unfence first: from here on the old session is invisible to the page, so
+  // its farewell bytes and its exit are not mistaken for a live psql's.
+  psqlSession = null;
+  psqlStdin = null;
+  let retired = { psqlExited: true, serverExited: true };
+  if (dying) {
+    try { retired = await dying.stop(); }
+    catch (e) { retired = { psqlExited: false, serverExited: false, error: String(e && e.message || e) }; }
+  }
+  resetVfs();
+  if (persist && store) {
+    // Reset wipes the durable copy too, then re-snapshots the fresh datadir so
+    // a reload lands where the user left it: reset.
+    await clearSnapshots(store);
+    snapGen = 0; snapSlot = null;
+  }
+  await startPsqlSession();
+  if (persist && store) await snapshotNow();
+  return retired;
+}
+
+// Persistence cadence in psql client mode. The worker no longer sees statement
+// boundaries (psql owns the REPL), so the trigger is the server's
+// ReadyForQuery, and every one snapshots IMMEDIATELY. The RETURN VALUE is the
+// durability gate: PsqlSession withholds the bytes carrying that ReadyForQuery
+// from psql until the returned promise resolves, so a statement's result can
+// only reach the terminal once the snapshot covering it is flushed to OPFS.
+// "You saw it, it's durable" — a reload the instant a result paints cannot
+// lose that statement; a reload BEFORE it paints loses only a statement whose
+// completion nothing ever reported (the same contract as killing any database
+// client mid-statement). Persist off returns undefined: no gate, no latency.
+//
+// Bursts (psql's \d catalog chatter is several round trips) are bounded by
+// dedup: at most one snapshot RUNNING plus one QUEUED; an idle report arriving
+// while one is queued rides along with it (and gates on it), since the queued
+// snapshot serializes whatever state the datadir has when it runs.
+//
+// The image is never torn: serializeVfs() is synchronous and the guest only
+// advances when the JS stack yields, so a snapshot is a byte-exact copy of the
+// datadir at one instant, with the guest's writes applied in issue order.
+// Restoring it is therefore an ordinary crash recovery — committed work is in
+// the WAL and StartupXLOG replays it (no CHECKPOINT to inject, which we could
+// not do here anyway: the connection belongs to psql).
+let psqlSnapQueued = null; // promise of the queued-but-not-started snapshot
+function psqlSnapshotSoon() {
+  if (!persist || !store) return undefined;
+  if (psqlSnapQueued) return psqlSnapQueued; // it will cover this state too
+  const p = runChain.then(() => {
+    psqlSnapQueued = null;
+    return snapshotNow();
+  });
+  psqlSnapQueued = p;
+  runChain = p;
+  return p;
+}
+
 async function warmEngine() {
   if (ENGINE === 'wire') {
     await startWireSession();
@@ -301,7 +429,7 @@ async function warmEngine() {
 
 async function init() {
   try {
-    post({ type: 'build', build: 'wasip1', engine: ENGINE });
+    post({ type: 'build', build: 'wasip1', engine: CLIENT === 'psql' ? 'psql' : ENGINE });
     post({ type: 'status', text: 'Fetching wasm module…' });
     wasmModule = await loadWasmModule(`${ASSET_PREFIX}/postgres.wasm`);
     post({ type: 'status', text: 'Fetching datadir VFS…' });
@@ -320,6 +448,32 @@ async function init() {
       post({ type: 'status', text: 'Restored persisted datadir from OPFS snapshot…' });
     } else {
       resetVfs(); // initialize the pristine datadir
+    }
+
+    if (CLIENT === 'psql') {
+      // The REAL psql drives the terminal. Persistence works here too: the
+      // snapshot cadence just moves off statement boundaries (psql owns the
+      // REPL) and onto the server's ReadyForQuery — see psqlSnapshotSoon.
+      post({ type: 'status', text: 'Fetching psql.wasm…' });
+      psqlModule = await loadWasmModule(`${ASSET_PREFIX}/psql.wasm`);
+      post({ type: 'status', text: 'Starting psql…' });
+      try {
+        await startPsqlSession();
+      } catch (e) {
+        if (!restoredFromSnapshot) throw e;
+        // GUARD (same rule as the wire path): a snapshot that validates but
+        // cannot boot must not wedge the page.
+        post({ type: 'status', text: `Persisted snapshot unusable (${String(e && e.message || e)}); starting fresh…` });
+        if (psqlSession) { try { await psqlSession.stop(); } catch { /* going away */ } psqlSession = null; psqlStdin = null; }
+        await clearSnapshots(store);
+        persist = false;
+        restoredFromSnapshot = false;
+        snapGen = 0; snapSlot = null;
+        resetVfs();
+        await startPsqlSession();
+      }
+      post({ type: 'ready', engine: 'psql', persist, persistAvailable: !!store, restored: restoredFromSnapshot });
+      return;
     }
 
     const warmStart = performance.now();
@@ -350,6 +504,7 @@ async function init() {
 
 async function handleRunSingle(id, sql, t0) {
   const result = await runPreparedSql(sql);
+  if (result.exitCode === 0) await snapshotBeforeReport();
   post({
     type: 'result',
     id,
@@ -360,7 +515,6 @@ async function handleRunSingle(id, sql, t0) {
     exitCode: result.exitCode,
     ms: Math.round(performance.now() - t0),
   });
-  if (result.exitCode === 0) scheduleSnapshot();
 }
 
 async function handleRunWire(id, sql, t0) {
@@ -384,6 +538,7 @@ async function handleRunWire(id, sql, t0) {
     });
     return;
   }
+  if (!r.wire.error) await snapshotBeforeReport();
   post({
     type: 'result',
     id,
@@ -393,18 +548,41 @@ async function handleRunWire(id, sql, t0) {
     exitCode: null, // session still alive
     ms: Math.round(performance.now() - t0),
   });
-  if (!r.wire.error) scheduleSnapshot();
 }
 
 self.onmessage = (ev) => {
   const id = ev.data.id;
   const kind = ev.data.type;
+  // psql client mode: terminal keystrokes bypass the run chain — they are
+  // stream bytes, not statements.
+  if (kind === 'psql-line') {
+    if (psqlStdin) psqlStdin.push(psqlEnc.encode(ev.data.text));
+    return;
+  }
+  // `run` has no meaning in psql client mode — statements arrive as keystrokes
+  // on psql's stdin, not as worker requests. `reset` and `persist` DO work
+  // (respawn / OPFS snapshots against the same VFS).
+  if (CLIENT === 'psql' && kind === 'run') {
+    post({ type: 'error', id, message: `"${kind}" is not available in psql client mode` });
+    return;
+  }
+  // Page-teardown flush (pagehide / visibility:hidden): snapshot NOW,
+  // best-effort — the page is going away and will never read a reply.
+  if (kind === 'flush') {
+    if (persist && store) runChain = runChain.then(() => snapshotNow());
+    return;
+  }
   // Serialize EVERYTHING through the run chain: wire queries must never
   // overlap (one in-flight simple-query cycle per session), and single-mode
   // keeps its historical one-at-a-time behavior.
   runChain = runChain.then(async () => {
     if (kind === 'reset') {
       try {
+        if (CLIENT === 'psql') {
+          const retired = await resetPsqlSession();
+          post({ type: 'reset-done', id, retired });
+          return;
+        }
         await stopWireSession();
         resetVfs();
         if (persist && store) {
@@ -430,7 +608,12 @@ self.onmessage = (ev) => {
           }
           persist = true;
           await snapshotNow();
-          post({ type: 'persist-state', id, persist, note: persist ? 'persistence on — datadir snapshots to OPFS after each statement' : undefined });
+          post({
+            type: 'persist-state', id, persist,
+            note: persist
+              ? `persistence on — datadir snapshots to OPFS ${CLIENT === 'psql' ? 'when the session goes idle' : 'after each statement'}`
+              : undefined,
+          });
         } else {
           persist = false;
           if (store) await clearSnapshots(store);

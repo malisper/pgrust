@@ -14344,6 +14344,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "psql"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcx",
+ "pg_b64",
+ "pg_hmac",
+ "pg_md5",
+ "saslprep",
+ "scram_common",
+ "wchar",
+]
+
+[[package]]
 name = "publicationcmds_seams"
 version = "0.0.0"
 dependencies = [

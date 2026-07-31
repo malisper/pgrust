@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<!-- psql-e2e.html — headless-browser witness for the psql client mode
+     (increment 3): boots the worker in ?client=psql mode through backend.js,
+     feeds a scripted line battery (including the issue-#46 \c database
+     switch, \d, a multi-row aligned table, and an error), and POSTs its own
+     verdict + transcript to the harness listener (?reportTo=URL) — dump-dom
+     polling snapshots too early. Drive with:
+       node test/run-browser-e2e.mjs        (spawns serve.mjs + Chrome)
+     or manually:
+       node serve.mjs 8093 &
+       open 'http://localhost:8093/test/psql-e2e.html?client=psql'
+     The expected blocks below are EXACT native psql output (trailing spaces
+     included), captured from PGDG-parity target/release/psql against a
+     native pgrust server with the same battery.
+-->
+<meta charset="utf-8">
+<!-- Worker URLs resolve against the DOCUMENT base; the app lives one level
+     up, so rebase the page there. -->
+<base href="../">
+<title>psql wasm e2e</title>
+<pre id="transcript"></pre>
+<pre id="verdict">RUNNING</pre>
+<script type="module">
+import { setClientMode, setPsqlHooks, sendPsqlText, bootBackend, installBackend, setStatusListener } from './backend.js';
+
+// Progress breadcrumbs for the harness (POST /log): boot status, errors.
+const REPORT_TO = new URLSearchParams(location.search).get('reportTo');
+function log(msg) {
+  if (!REPORT_TO) return;
+  const u = new URL(REPORT_TO);
+  u.pathname = '/log';
+  fetch(u, { method: 'POST', body: msg }).catch(() => {});
+}
+setStatusListener((s) => log(`status: ${s}`));
+let alive = 0;
+setInterval(() => log(`page-alive ${alive += 5}s`), 5000);
+window.addEventListener('unhandledrejection', (e) => {
+  verdict.textContent = 'VERDICT: psql-browser-e2e FAIL (unhandled rejection: ' + (e.reason && e.reason.message || e.reason) + ')';
+  report();
+});
+
+const transcript = document.getElementById('transcript');
+const verdict = document.getElementById('verdict');
+const dec = new TextDecoder();
+let text = '';
+let exited = false;
+
+function append(chunk) {
+  const s = dec.decode(chunk, { stream: true });
+  log(`chunk: ${JSON.stringify(s.slice(0, 200))}`);
+  text += s;
+  transcript.textContent = text;
+}
+
+setClientMode('psql');
+setPsqlHooks({
+  onOut: append,
+  onErr: append,
+  onExit: () => { exited = true; finish(); },
+});
+
+const LINES = [
+  'select 1 as one;',
+  'create table brtab (a int, b text);',
+  "insert into brtab values (1, 'from-browser'), (2, 'second-row');",
+  'create database brdb;',
+  '\\c brdb',
+  'select current_database();',
+  'create table only_in_brdb (x int);',
+  '\\c postgres',
+  'select current_database();',
+  'select * from brtab order by a;',
+  '\\d brtab',
+  'select * from nosuchtable;',
+  '\\conninfo',
+  '\\q',
+];
+
+// Exact psql blocks (native-captured; trailing spaces are load-bearing).
+const CURRENT_DB_BRDB =
+  ' current_database \n' +
+  '------------------\n' +
+  ' brdb\n' +
+  '(1 row)\n';
+const CURRENT_DB_POSTGRES =
+  ' current_database \n' +
+  '------------------\n' +
+  ' postgres\n' +
+  '(1 row)\n';
+const ALIGNED_TABLE =
+  ' a |      b       \n' +
+  '---+--------------\n' +
+  ' 1 | from-browser\n' +
+  ' 2 | second-row\n' +
+  '(2 rows)\n';
+const DESCRIBE_BLOCK =
+  '               Table "public.brtab"\n' +
+  ' Column |  Type   | Collation | Nullable | Default \n' +
+  '--------+---------+-----------+----------+---------\n' +
+  ' a      | integer |           |          | \n' +
+  ' b      | text    |           |          | \n';
+const ERROR_BLOCK =
+  'ERROR:  relation "nosuchtable" does not exist\n' +
+  'LINE 1: select * from nosuchtable;\n' +
+  '                      ^\n';
+
+function finish() {
+  const checks = [
+    ['banner', /psql \(18\.3/.test(text)],
+    ['prompt', /postgres=# /.test(text)],
+    ['connect-brdb', text.includes('You are now connected to database "brdb" as user "postgres".')],
+    ['current-db-brdb', text.includes(CURRENT_DB_BRDB)],
+    ['connect-back', text.includes('You are now connected to database "postgres" as user "postgres".')],
+    ['current-db-postgres', text.includes(CURRENT_DB_POSTGRES)],
+    ['aligned-table', text.includes(ALIGNED_TABLE)],
+    ['describe', text.includes(DESCRIBE_BLOCK)],
+    ['error-block', text.includes(ERROR_BLOCK)],
+    ['conninfo', /Connection Information/.test(text)],
+  ];
+  const bad = checks.filter(([, ok]) => !ok).map(([n]) => n);
+  verdict.textContent = bad.length === 0 && exited
+    ? 'VERDICT: psql-browser-e2e PASS'
+    : `VERDICT: psql-browser-e2e FAIL (${exited ? '' : 'no-exit '}${bad.join(',')})`;
+  report();
+}
+
+// Headless driving: POST the verdict + transcript to the harness listener
+// (see the reportTo query param), since --dump-dom snapshots too early.
+function report() {
+  const to = new URLSearchParams(location.search).get('reportTo');
+  if (!to) return;
+  fetch(to, { method: 'POST', body: verdict.textContent + '\n---\n' + text }).catch(() => {});
+}
+window.addEventListener('error', (e) => {
+  verdict.textContent = 'VERDICT: psql-browser-e2e FAIL (page error: ' + e.message + ')';
+  report();
+});
+
+installBackend();
+await bootBackend();
+for (const l of LINES) sendPsqlText(l + '\n');
+// Give psql up to 90s of real time; the \q exit hook normally fires first.
+setTimeout(() => { if (!exited) finish(); }, 90000);
+</script>

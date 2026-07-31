@@ -67,6 +67,26 @@ fi
 echo "[build] copying wasm module ($WASM)..."
 cp "$WASM" "$ASSETS/postgres.wasm"
 
+# psql.wasm — the Rust psql client (crates/bin/psql) that drives the terminal
+# in ?client=psql mode. Build: same pinned nightly as the server module,
+#   cargo +nightly-2026-07-17 build --target wasm32-wasip1 \
+#     -Zbuild-std=std,panic_unwind -p psql --release
+# (RUSTFLAGS as in wasm/wasm-build.sh).
+PSQL_WASM="${PGRUST_PSQL_WASM:-}"
+if [[ -z "$PSQL_WASM" ]]; then
+  for cand in "$ROOT/target/wasm32-wasip1/wasm-release/psql.wasm" \
+              "$ROOT/target/wasm32-wasip1/release/psql.wasm" \
+              "$ROOT/target/wasm32-wasip1/debug/psql.wasm"; do
+    [[ -f "$cand" ]] && PSQL_WASM="$cand" && break
+  done
+fi
+if [[ -n "$PSQL_WASM" && -f "$PSQL_WASM" ]]; then
+  echo "[build] copying psql module ($PSQL_WASM)..."
+  cp "$PSQL_WASM" "$ASSETS/psql.wasm"
+else
+  echo "[build] WARNING: psql.wasm not found — ?client=psql will not work (build crates/bin/psql for wasm32-wasip1 first)"
+fi
+
 echo "[build] assembling VFS tree (datadir at /pgdata, share at /share)..."
 mkdir -p "$VFSROOT/pgdata" "$VFSROOT/share"
 cp -R "$DATADIR/." "$VFSROOT/pgdata/"
@@ -81,8 +101,10 @@ node "$HERE/pack-vfs.mjs" "$VFSROOT" "$ASSETS/vfs"
 if [[ "${PGRUST_COMPRESS:-1}" != "0" ]]; then
   echo "[build] compressing large browser assets..."
   gzip -kf9 "$ASSETS/postgres.wasm" "$ASSETS/vfs.img"
+  [[ -f "$ASSETS/psql.wasm" ]] && gzip -kf9 "$ASSETS/psql.wasm"
   if command -v brotli >/dev/null 2>&1; then
     brotli -f -q 9 "$ASSETS/postgres.wasm" "$ASSETS/vfs.img"
+    [[ -f "$ASSETS/psql.wasm" ]] && brotli -f -q 9 "$ASSETS/psql.wasm"
   fi
 else
   echo "[build] compression SKIPPED (PGRUST_COMPRESS=0)"
