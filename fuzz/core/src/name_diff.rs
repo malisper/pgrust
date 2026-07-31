@@ -287,6 +287,17 @@ fn namein_arm(payload: &[u8]) {
     }
 
     // ---- fc-wrapper plane (wrapper ≡ core) ----
+    // namestrcmp NULL lattice: C name.c namestrcmp's defensive NULL arms,
+    // oracled against the transcribed C semantics (0 / -1 / 1) plus the
+    // Some/Some arm against the C strncmp shim result already checked above
+    // for this input's parsed name.
+    assert!(name::namestrcmp(None, None) == 0);
+    assert!(name::namestrcmp(None, Some(payload)) == -1);
+    assert!(name::namestrcmp(Some(&r), None) == 1);
+    let nlen = r.data.iter().position(|&b| b == 0).unwrap_or(64);
+    let selfcmp = name::namestrcmp(Some(&r), Some(&r.data[..nlen]));
+    assert!(selfcmp == 0, "namestrcmp self-compare nonzero");
+
     // fc_namein: cstring arg; result rides the resolved FmgrInfo's scratch.
     let mut fl = FmgrInfo::unresolved();
     let din = fc_call(
