@@ -1,0 +1,1 @@
+$ >=(@ like_regex "\\na*t@r\\,\\^^^^^,^^$.tim\\yyyyyyyyyy\\y\^^^^^^^^^^^yy\na*t@r\\\\\\\@\\\yyyyyyyyyy\\y\,\\^^^^^,^^^^^^^^^^^^^^^^^yyyyy like_regex "\\rt\1^^^^^^im")

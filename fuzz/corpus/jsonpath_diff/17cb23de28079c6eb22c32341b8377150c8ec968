@@ -1,0 +1,1 @@
+$ ? (@ like_regex "||pa|t@r^^^^\\\\\\\\^^^^V.\^^v.a.{2,4}^Vkey^alue()W^^^^^^\\Y\\\\\^V^^V.keyvalue()^^^^^.^b^igint.integer()\^^^^V.\:^v.a{0,4}^"isim"keyvalue()^^^^^^^^^^^a1 "isim")

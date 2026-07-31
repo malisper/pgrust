@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patt@r\\\\\\\\@\\\\\\\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^JJJJJJJJJJJJJJJJJJJJ\\\\\.0\\\\\\\n" flag "isim")

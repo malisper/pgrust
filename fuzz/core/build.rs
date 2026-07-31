@@ -338,6 +338,60 @@ fn main() {
         .flag_if_supported("-O2")
         .compile("pg_difffuzz_mbconv");
     println!("cargo:rerun-if-changed=../../proofs/mbconv/c");
+    // jsonpath_diff oracle (p1-laneaa): verbatim 18.3 jsonpath.c + generated
+    // gram/scan (bison 2.3 / flex 2.6.4, checked in — no tools needed at
+    // build time) + the full 18.3 regex engine + numeric/formatting/support
+    // extracts, against its OWN shim include tree (csrc/jsonpath/include).
+    // Generic-named exported symbols get a family prefix so this family
+    // keeps its own vendored copies next to every other oracle family
+    // (same isolation rationale as CRYPTO_SHARED_SYMS above).
+    const JSONPATH_SHARED_SYMS: &[&str] = &[
+        "appendBinaryStringInfo", "appendBinaryStringInfoNT",
+        "appendStringInfo", "appendStringInfoChar", "appendStringInfoSpaces",
+        "appendStringInfoString", "appendStringInfoVA", "destroyStringInfo",
+        "enlargeStringInfo", "initStringInfo", "initStringInfoExt",
+        "makeStringInfo", "makeStringInfoExt", "resetStringInfo",
+        "errcode", "errdetail", "errdetail_internal", "errhint", "errmsg",
+        "errmsg_internal",
+        "escape_json", "escape_json_with_len", "exprType",
+        "GetDatabaseEncoding", "GetDatabaseEncodingName",
+        "lappend", "list_make1_impl", "list_make2_impl", "makeString",
+        "numeric_in", "numeric_out", "numeric_uminus",
+        "datetime_format_has_tz",
+        "pg_ascii_tolower", "pg_ascii_toupper", "pg_char_and_wchar_strncmp",
+        "pg_mb2wchar_with_len", "pg_mblen", "pg_mblen_cstr", "pg_mblen_range",
+        "pg_mblen_unbounded", "pg_mblen_with_len",
+        "pg_newlocale_from_collation", "pg_server_to_client",
+        "pg_set_regex_collation",
+        "pg_strcasecmp", "pg_strncasecmp", "pg_strtoint32",
+        "pg_strtoint32_safe", "pg_tolower", "pg_toupper",
+        "pg_unicode_to_server", "pg_unicode_to_server_noerror",
+        "pg_utf_mblen", "pg_utf8_islegal",
+        "pq_begintypsend", "pq_copymsgbytes", "pq_endtypsend",
+        "pq_getmsgbytes", "pq_getmsgint", "pq_getmsgtext", "pq_sendtext",
+        "psprintf", "pvsnprintf",
+    ];
+    let mut jsonpath = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        jsonpath.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in JSONPATH_SHARED_SYMS {
+        jsonpath.define(s, format!("jporcl_{s}").as_str());
+    }
+    for f in [
+        "jsonpath.c", "jsonpath_gram.c", "jsonpath_scan.c",
+        "pg_numeric_min.c", "pg_formatting_min.c", "pg_stringinfo.c",
+        "pg_support_min.c", "pg_jsonpath_env.c",
+        "regex/regcomp.c", "regex/regerror.c", "regex/regfree.c",
+    ] {
+        jsonpath.file(format!("csrc/jsonpath/{f}"));
+    }
+    jsonpath
+        .include("csrc/jsonpath/include")
+        .include("csrc/jsonpath")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .compile("pg_difffuzz_jsonpath");
 
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");

@@ -1,0 +1,1 @@
+N$.a.datetime("HH24:MI TZH") == $.b.time()

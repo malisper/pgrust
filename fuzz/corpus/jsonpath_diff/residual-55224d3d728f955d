@@ -1,0 +1,1 @@
+lax $.**{2}.datetime() == $.a.date()

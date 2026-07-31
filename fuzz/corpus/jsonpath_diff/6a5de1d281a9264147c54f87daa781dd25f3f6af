@@ -1,0 +1,1 @@
+$ ? (@ like_regex "||patt@\r\\\\\\\@\\\\#\^\^@\r\\\\\\\@\\1e-1^\^^^^^^e\u00a9 sign$the\u00a9 sign$d^^^^^^^^^^^^^^^^^^^^^^\\\\\\+\\\\\\\\\^^^^^e\u00a9 sign$the\u0\\\" flag "isim")ign$the\u00a9 s

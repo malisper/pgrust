@@ -1,0 +1,1 @@
+u$x.datetime("HH24:MI") == $y.datetime()

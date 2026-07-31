@@ -1,0 +1,1 @@
+$.a.timestamp(2) > $.b.string()

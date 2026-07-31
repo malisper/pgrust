@@ -1,0 +1,1 @@
+$.a.decimal(5,2).type()

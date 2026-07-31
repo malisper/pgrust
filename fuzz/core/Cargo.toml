@@ -24,6 +24,7 @@ stringinfo = { path = "../../crates/_support/types/stringinfo" }
 mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
 detoast = { path = "../../crates/backend/access/common/detoast" }
 wchar = { path = "../../crates/common/wchar" }
+stack_depth = { path = "../../crates/backend/utils/misc/stack_depth" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }
@@ -111,6 +112,8 @@ elog = { path = "../../crates/backend/utils/error/elog" }  # timestamp_diff env 
 fd = { path = "../../crates/backend/storage/file/fd" }  # timestamp_diff env pin
 xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }  # timestamp_diff env pin
 timestamp_seams = { path = "../../crates/backend/utils/adt/timestamp_seams" }  # timestamp_diff env pin
+adt_jsonpath = { path = "../../crates/backend/utils/adt/jsonpath" }  # jsonpath_diff (p1-laneaa)
+pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }  # jsonpath_diff: pinned C-ctype default collation (both sides)
 
 [build-dependencies]
 cc = "1"
