@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
+        // ruleutils.c quote_identifier; keyword tables extern'd from
+        // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).
+        .file("csrc/pg_quote_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).

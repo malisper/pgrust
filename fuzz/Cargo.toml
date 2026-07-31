@@ -221,3 +221,11 @@ path = "fuzz_targets/enc_tables_diff.rs"
 test = false
 doc = false
 bench = false
+
+# quote_diff: scaffolded by fuzz/scaffold.py — see README-TODO-quote_diff.md.
+[[bin]]
+name = "quote_diff"
+path = "fuzz_targets/quote_diff.rs"
+test = false
+doc = false
+bench = false

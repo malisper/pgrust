@@ -678,9 +678,12 @@ def register_build_gate(base: str, target: str, created: list, skipped: list) ->
     if f"pg_{base}_io.c" in text:
         skipped.append(f"{p} (pg_{base}_io.c gate line already present)")
         return
-    m = re.search(r"^(\s*)cc::Build::new\(\)\n", text, re.M)
+    # The main-oracle chain head: historically a bare `cc::Build::new()` line;
+    # since the sancov refactor (PGRUST_FUZZ_CSANCOV) it is a bare `build`
+    # statement line that the .file() chain hangs off. Accept either.
+    m = re.search(r"^(\s*)(?:cc::Build::new\(\)|build)\n", text, re.M)
     if not m:
-        die(f"could not find cc::Build::new() in {p}")
+        die(f"could not find the main oracle cc build chain head (bare `cc::Build::new()` or `build` line) in {p}")
     indent = m.group(1) + "    "
     gate = (
         f"{indent}// COMPILE GATE ({target}, scaffold.py): uncomment ONLY after every\n"
