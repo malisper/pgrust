@@ -357,3 +357,11 @@ pub use arrayfuncs_diff::arrayfuncs_diff;
 // native exhaustive-diff driver vs the proofs/mbconv vendored 18.3 C.
 pub mod mbconv_diff;
 pub use mbconv_diff::mbconv_diff;
+// numutils_diff (p1-laneaj adt/numutils batch): strtoint/uint*in_subr parse
+// family + the itoa/ultostr emit family vs vendored 18.3 C. See
+// core/src/numutils_diff.rs.
+pub mod numutils_diff;
+pub use numutils_diff::numutils_diff;
+// oraclefam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-oraclefam_diff.md.
+pub mod oraclefam_diff;
+pub use oraclefam_diff::oraclefam_diff;

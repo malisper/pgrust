@@ -85,6 +85,10 @@ fmgr_core = { path = "../../crates/backend/utils/fmgr/fmgr_core" }        # arra
 syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }  # arrayfuncs_diff pinned typcache fixture
 indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }   # arrayfuncs_diff pinned opclass fixture
 types_tuple = { path = "../../crates/_support/types/types_tuple" }        # NameData for the fixture
+# numutils_diff (p1-laneaj adt/numutils batch):
+numutils = { path = "../../crates/backend/utils/adt/numutils" }
+guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+adt_oracle_compat = { path = "../../crates/backend/utils/adt/oracle_compat" }  # oraclefam_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"
