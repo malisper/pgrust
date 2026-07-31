@@ -9084,14 +9084,17 @@ pg_diff_range_ctor(int typ, int nargs,
 				   const unsigned char *n1, const unsigned char *n2,
 				   int null1, int null2,
 				   const unsigned char *flags_txt, int flags_len,
-				   int null3,
+				   int null3, int soft, int *soft_class,
 				   unsigned char *out, int *outlen, int outcap)
 {
 	Datum		args[3];
 	bool		nulls[3] = {null1 != 0, null2 != 0, null3 != 0};
 	Datum		d;
 	bool		isnull;
+	Node	   *esc = soft ? PG_DIFF_SOFT_ESC : NULL;
 
+	if (soft_class)
+		*soft_class = 0;
 	PG_DIFF_ENTER();
 	args[0] = null1 ? (Datum) 0 : pg_rt_bound_datum(typ, v1, n1);
 	args[1] = null2 ? (Datum) 0 : pg_rt_bound_datum(typ, v2, n2);
@@ -9106,10 +9109,21 @@ pg_diff_range_ctor(int typ, int nargs,
 		SET_VARSIZE(t, VARHDRSZ + flags_len);
 		memcpy(VARDATA(t), flags_txt, flags_len);
 		args[2] = null3 ? (Datum) 0 : PointerGetDatum(t);
-		d = pg_rt_call(range_constructor3, pg_rt_typ_oid(typ), 3, args, nulls, &isnull);
+		d = pg_rt_call_ctx(range_constructor3, pg_rt_typ_oid(typ), 3, args, nulls,
+						   &isnull, esc);
 	}
 	else
-		d = pg_rt_call(range_constructor2, pg_rt_typ_oid(typ), 2, args, nulls, &isnull);
+		d = pg_rt_call_ctx(range_constructor2, pg_rt_typ_oid(typ), 2, args, nulls,
+						   &isnull, esc);
+	if (soft && pg_diff_errcode != 0)
+	{
+		/* soft failure: canonicalize overflowed and the error was captured
+		 * instead of thrown, which is the make_range -> canonicalize soft edge
+		 * (the daterange arm of that dispatch is otherwise unreachable). */
+		if (soft_class)
+			*soft_class = pg_diff_errcode;
+		return 0;
+	}
 	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 
@@ -9355,6 +9369,38 @@ pg_diff_range_canonical(int typ, const unsigned char *img,
 	fn = (typ == 0) ? int4range_canonical :
 		(typ == 1) ? int8range_canonical : daterange_canonical;
 	d = pg_rt_call(fn, InvalidOid, 1, args, NULL, &isnull);
+	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
+}
+
+/*
+ * The canonical functions in SOFT-ERROR mode. This is a REAL caller shape, not
+ * a harness invention: make_range invokes rng_canonical_finfo through a
+ * hand-built frame precisely so it can pass escontext ("Do this the hard way so
+ * that we can pass escontext" — rangetypes.c), so the canonical body genuinely
+ * runs with a soft context whenever a soft range_in canonicalizes. Contract as
+ * pg_diff_range_in_soft.
+ */
+int
+pg_diff_range_canonical_soft(int typ, const unsigned char *img,
+							 unsigned char *out, int *outlen, int outcap,
+							 int *soft_class, int *isnull_out)
+{
+	Datum		args[1];
+	Datum		d;
+	bool		isnull;
+	PGFunction	fn;
+
+	*soft_class = 0;
+	*isnull_out = 0;
+	PG_DIFF_ENTER();
+	args[0] = PointerGetDatum(img);
+	fn = (typ == 0) ? int4range_canonical :
+		(typ == 1) ? int8range_canonical : daterange_canonical;
+	d = pg_rt_call_ctx(fn, InvalidOid, 1, args, NULL, &isnull, PG_DIFF_SOFT_ESC);
+	*soft_class = pg_diff_errcode;
+	*isnull_out = isnull ? 1 : 0;
+	if (*soft_class != 0)
+		return 0;
 	return pg_rt_copy_range(d, isnull, out, outlen, outcap);
 }
 

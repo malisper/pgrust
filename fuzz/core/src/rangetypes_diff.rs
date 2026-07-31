@@ -97,6 +97,15 @@ extern "C" {
         soft_class: *mut i32,
         isnull_out: *mut i32,
     ) -> i32;
+    fn pg_diff_range_canonical_soft(
+        typ: i32,
+        img: *const u8,
+        out: *mut u8,
+        outlen: *mut i32,
+        outcap: i32,
+        soft_class: *mut i32,
+        isnull_out: *mut i32,
+    ) -> i32;
     fn pg_diff_range_out(
         img: *const u8,
         out: *mut core::ffi::c_char,
@@ -124,6 +133,8 @@ extern "C" {
         flags_txt: *const u8,
         flags_len: i32,
         null3: i32,
+        soft: i32,
+        soft_class: *mut i32,
         out: *mut u8,
         outlen: *mut i32,
         outcap: i32,
@@ -1271,6 +1282,18 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
     if three && flags_len != 2 {
         bump(|st| st.flags_len_off += 1);
     }
+    // ARMED-BUT-IGNORED escontext on the constructor. NOTE what this does and
+    // does not do: BOTH implementations hardcode NULL for make_range's
+    // escontext here (rangetypes.c range_constructor2/3 pass NULL; the shipped
+    // fc_range_constructor2/3 pass None), so a soft error can never be captured
+    // on this path and this arm does NOT reach canonicalize's soft edges — the
+    // daterange one (lib.rs:535) still needs date_in vendored so daterange can
+    // join the text-io arms. What it DOES pin is that neither side consults an
+    // escontext the C function ignores: if pgrust ever started threading it
+    // here, C would still throw hard while Rust captured softly and the
+    // OCCURRED assert below would fire.
+    let soft = nullbits & 0x20 != 0;
+    let mut csoft = 0i32;
     let mut cbuf = vec![0u8; OUTCAP];
     let mut clen = 0i32;
     let cret = unsafe {
@@ -1286,6 +1309,8 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
             flags_txt.as_ptr(),
             flags_len as i32,
             null3 as i32,
+            soft as i32,
+            &mut csoft,
             cbuf.as_mut_ptr(),
             &mut clen,
             OUTCAP as i32,
@@ -1305,10 +1330,76 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
         fc_call(rb::fc_range_constructor2, Some(&mut fl), mcx, [a0, a1])
     };
     let dbg = format!(
-        "t={t} three={three} nulls={nullbits:x} flags={:?} flags_len={flags_len} null3={null3}",
+        "t={t} three={three} nulls={nullbits:x} flags={:?} flags_len={flags_len} \
+         null3={null3} soft={soft}",
         &flags_txt[..flags_len as usize]
     );
-    compare_range_result("range_ctor", cret, &cbuf[..clen as usize], &r, &dbg);
+    if !soft {
+        compare_range_result("range_ctor", cret, &cbuf[..clen as usize], &r, &dbg);
+        return;
+    }
+    // Soft-mode constructor: run the shipped wrapper with an armed
+    // ErrorSaveNode and compare the soft planes.
+    bump(|st| st.soft_mode += 1);
+    let mut esc = types_fmgr::ErrorSaveNode::new(true);
+    let mut fl2 = ops_flinfo(t);
+    let sres = if three {
+        let n = flags_len as usize;
+        let mut tv = vec![0u8; 4 + n];
+        tv[0..4].copy_from_slice(&datum::set_varsize_4b(4 + n));
+        tv[4..4 + n].copy_from_slice(&flags_txt[..n]);
+        let mut fcinfo = LocalFcinfo::<3>::fresh(0);
+        // SAFETY: mcx and the node both outlive this call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        fcinfo.context = esc.fm_node_ptr();
+        if null1 { fcinfo.set_arg_null(0) } else { fcinfo.set_arg(0, lo.rust_datum()) }
+        if null2 { fcinfo.set_arg_null(1) } else { fcinfo.set_arg(1, up.rust_datum()) }
+        if null3 {
+            fcinfo.set_arg_null(2)
+        } else {
+            fcinfo.set_arg(2, Datum::from_usize(tv.as_ptr() as usize))
+        }
+        rb::fc_range_constructor3(Some(&mut fl2), &mut fcinfo)
+    } else {
+        let mut fcinfo = LocalFcinfo::<2>::fresh(0);
+        // SAFETY: mcx and the node both outlive this call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        fcinfo.context = esc.fm_node_ptr();
+        if null1 { fcinfo.set_arg_null(0) } else { fcinfo.set_arg(0, lo.rust_datum()) }
+        if null2 { fcinfo.set_arg_null(1) } else { fcinfo.set_arg(1, up.rust_datum()) }
+        rb::fc_range_constructor2(Some(&mut fl2), &mut fcinfo)
+    };
+    match &sres {
+        Err(e) => {
+            let rc = err_class(e);
+            assert!(
+                csoft == 0 && cret == rc,
+                "range_ctor/soft HARD-ERROR DIVERGENCE {dbg}: C=(ret {cret}, soft {csoft}) \
+                 Rust=hard {rc} ({})",
+                e.message
+            );
+        }
+        Ok(d) => {
+            let r_occurred = esc.ctx.error_occurred();
+            assert!(
+                r_occurred == (csoft != 0),
+                "range_ctor/soft OCCURRED DIVERGENCE {dbg}: C={csoft} Rust={r_occurred}"
+            );
+            if r_occurred {
+                bump(|st| st.soft_captured += 1);
+                let rc = esc.ctx.error().map(err_class).unwrap_or(98);
+                assert!(rc == csoft, "range_ctor/soft CLASS DIVERGENCE {dbg}: C={csoft} Rust={rc}");
+            } else if cret == 0 && d.as_usize() != 0 {
+                let rbytes = datum_varlena_bytes(*d);
+                assert!(
+                    rbytes == &cbuf[..clen as usize],
+                    "range_ctor/soft IMAGE DIVERGENCE {dbg}: C={:02x?} Rust={:02x?}",
+                    &cbuf[..clen as usize],
+                    rbytes
+                );
+            }
+        }
+    }
 }
 
 fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
@@ -1713,6 +1804,74 @@ fn arm_canonical(typb: u8, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let r = fc_call(fc, Some(&mut fl), mcx, [Some(Datum::from_usize(img.as_ptr() as usize))]);
     let dbg = format!("ct={ct} flags={flags:02x}");
     compare_range_result("range_canonical", cret, &cbuf[..clen as usize], &r, &dbg);
+
+    // SOFT-ERROR mode on the same image. Not a harness invention: make_range
+    // builds a frame by hand specifically to pass escontext into
+    // rng_canonical_finfo, so the canonical body really does run with a soft
+    // context. This is the only way to reach the canonical wrapper's own
+    // Ok(None) soft edges (builtins.rs:467/472) and, for daterange, the
+    // F_DATERANGE_CANONICAL soft edge in canonicalize (lib.rs:535).
+    if rd.u8() & 1 == 1 {
+        bump(|st| st.soft_mode += 1);
+        let mut sbuf = vec![0u8; OUTCAP];
+        let mut slen = 0i32;
+        let mut csoft = 0i32;
+        let mut cisnull = 0i32;
+        let sret = unsafe {
+            pg_diff_range_canonical_soft(
+                if ct == 2 { 3 } else { ct as i32 },
+                img.as_ptr(),
+                sbuf.as_mut_ptr(),
+                &mut slen,
+                OUTCAP as i32,
+                &mut csoft,
+                &mut cisnull,
+            )
+        };
+        let mut esc = types_fmgr::ErrorSaveNode::new(true);
+        let mut fcinfo = LocalFcinfo::<1>::fresh(0);
+        // SAFETY: mcx and the node both outlive this single call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        fcinfo.context = esc.fm_node_ptr();
+        fcinfo.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
+        let sres = fc(Some(&mut fl), &mut fcinfo);
+        let sdbg = format!("{dbg} soft");
+        match &sres {
+            Err(e) => {
+                let rc = err_class(e);
+                assert!(
+                    csoft == 0 && sret == rc,
+                    "range_canonical/soft HARD-ERROR DIVERGENCE {sdbg}: \
+                     C=(ret {sret}, soft {csoft}) Rust=hard {rc} ({})",
+                    e.message
+                );
+            }
+            Ok(d) => {
+                let r_occurred = esc.ctx.error_occurred();
+                assert!(
+                    r_occurred == (csoft != 0),
+                    "range_canonical/soft OCCURRED DIVERGENCE {sdbg}: C={csoft} Rust={r_occurred}"
+                );
+                if r_occurred {
+                    bump(|st| st.soft_captured += 1);
+                    let rc = esc.ctx.error().map(err_class).unwrap_or(98);
+                    assert!(
+                        rc == csoft,
+                        "range_canonical/soft CLASS DIVERGENCE {sdbg}: C={csoft} Rust={rc}"
+                    );
+                } else {
+                    assert!(sret == 0, "range_canonical/soft {sdbg}: C err {sret} vs Rust Ok");
+                    let rb = datum_varlena_bytes(*d);
+                    assert!(
+                        rb == &sbuf[..slen as usize],
+                        "range_canonical/soft IMAGE DIVERGENCE {sdbg}: C={:02x?} Rust={:02x?}",
+                        &sbuf[..slen as usize],
+                        rb
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn arm_subdiff(typb: u8, payload: &[u8], mcx: mcx::Mcx<'_>) {
@@ -1913,6 +2072,68 @@ mod tests {
 #[cfg(test)]
 mod vacuity {
     use super::*;
+
+    /// ANTI-VACUITY GATE for the arms added when the coverage gaps were closed.
+    /// Each one is a NEW path; a new arm that silently never fires is worse than
+    /// a known gap, because the campaign then reports coverage it does not have.
+    /// Every counter here must ADVANCE over a fixed input set.
+    #[test]
+    fn gap_closing_arms_all_fire() {
+        let before = STATS.with(|s| {
+            let st = s.borrow();
+            (
+                st.soft_mode,
+                st.soft_captured,
+                st.null_flags_arg,
+                st.flags_len_off,
+                st.daterange_built,
+                st.toast_built[2],
+            )
+        });
+
+        // soft-mode range_in: valid, and each malformed class
+        for lit in [
+            &b"[1,10)"[..],
+            &b"garbage"[..],
+            &b"[abc,2)"[..],
+            &b"[5,1)"[..],
+            &b"[1,2147483647]"[..],
+        ] {
+            let mut v = vec![0u8, 0x81];
+            v.extend_from_slice(lit);
+            rangetypes_diff(&v);
+        }
+        // constructor3: NULL flags arg (0x04), off-length flags (0x10/0x20),
+        // daterange instantiation (0x40), soft (0x20 shares with flags_len —
+        // driven separately below)
+        for nb in [0x04u8, 0x14, 0x24, 0x34, 0x40, 0x44] {
+            rangetypes_diff(&[3, 0, nb, b'[', b']', 1, 0, 0, 0, 9, 0, 0, 0]);
+        }
+        // accessors with a SHORT-header outer image (sel bit 0x40)
+        for sel in [0x40u8, 0x46, 0x4a] {
+            rangetypes_diff(&[4, 0, sel, 1, 0, 0, 0, 9, 0, 0, 0]);
+        }
+        // canonical arm in soft mode (trailing byte odd)
+        rangetypes_diff(&[9, 0, 0x06, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f, 1]);
+
+        let after = STATS.with(|s| {
+            let st = s.borrow();
+            (
+                st.soft_mode,
+                st.soft_captured,
+                st.null_flags_arg,
+                st.flags_len_off,
+                st.daterange_built,
+                st.toast_built[2],
+            )
+        });
+        assert!(after.0 > before.0, "soft-mode arm never fired");
+        assert!(after.1 > before.1, "soft-mode arm never CAPTURED a soft error");
+        assert!(after.2 > before.2, "NULL-flags-argument arm never fired");
+        assert!(after.3 > before.3, "off-length flags-text arm never fired");
+        assert!(after.4 > before.4, "daterange instantiation never built");
+        assert!(after.5 > before.5, "short-header image arm never fired");
+    }
 
     /// ANTI-VACUITY GATE. A clean fuzz run proves nothing if the builders quietly
     /// declined to construct anything, so this drives both layouts across all

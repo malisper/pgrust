@@ -746,6 +746,47 @@ fn build_range_array(ranges: &[Vec<u8>], elemtype: Oid, ndim: i32) -> Vec<u8> {
     build_range_array_nulls(ranges, elemtype, ndim, &[])
 }
 
+/// Re-pack a 4-byte-header range image into SHORT (1-byte) varlena form. Array
+/// MEMBERS are packed short by the array builder whenever they fit, so this is
+/// the on-disk shape of a real `int4range[]`, and it is what reaches
+/// multirange_constructor2's member-expand arm (builtins.rs:226-229). Short
+/// members also carry NO alignment padding, which the array walker must honour.
+/// `None` = too large for the short form.
+fn to_short_member(img: &[u8]) -> Option<Vec<u8>> {
+    let payload = &img[4..];
+    let total = payload.len() + 1;
+    if total > 126 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(total);
+    out.push(((total as u8) << 1) | 0x01);
+    out.extend_from_slice(payload);
+    Some(out)
+}
+
+/// Array image whose members are SHORT-form (1-byte header, no alignment pad).
+fn build_range_array_short(ranges: &[Vec<u8>], elemtype: Oid) -> Option<Vec<u8>> {
+    let shorts: Option<Vec<Vec<u8>>> = ranges.iter().map(|r| to_short_member(r)).collect();
+    let shorts = shorts?;
+    let mut img = vec![0u8; 16];
+    img[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    img[12..16].copy_from_slice(&elemtype.to_ne_bytes());
+    img.extend_from_slice(&(shorts.len() as i32).to_ne_bytes());
+    img.extend_from_slice(&1i32.to_ne_bytes());
+    while img.len() != maxalign(img.len()) {
+        img.push(0);
+    }
+    for r in &shorts {
+        // NO alignment padding before a short-form member: that is the whole
+        // point of the packed form, and mis-padding here would desync the two
+        // sides' array walks.
+        img.extend_from_slice(r);
+    }
+    let n = img.len();
+    img[0..4].copy_from_slice(&datum::set_varsize_4b(n));
+    Some(img)
+}
+
 /// `null_at` = element indexes to mark NULL in the array's null bitmap. A
 /// non-empty list is what reaches multirange_constructor2's per-element
 /// null_member arm (builtins.rs:220): the argisnull(0) arm rejects a NULL
@@ -886,6 +927,7 @@ static SOFT_CAPTURED: AtomicU64 = AtomicU64::new(0);
 static NULL_ARG: AtomicU64 = AtomicU64::new(0);
 static NULL_MEMBER: AtomicU64 = AtomicU64::new(0);
 static UNION_RANGE_EMPTY: AtomicU64 = AtomicU64::new(0);
+static SHORT_MEMBER: AtomicU64 = AtomicU64::new(0);
 
 pub fn null_member_count() -> u64 {
     NULL_MEMBER.load(Ordering::Relaxed)
@@ -926,6 +968,9 @@ impl MrStats {
     fn union_range_empty_inc(&self) {
         UNION_RANGE_EMPTY.fetch_add(1, Ordering::Relaxed);
     }
+    fn short_member_inc(&self) {
+        SHORT_MEMBER.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Total driver iterations, for the fallback-rate line below.
@@ -940,14 +985,15 @@ fn report_tie_fallbacks() {
     if n & (n - 1) == 0 && n >= 1 << 16 {
         eprintln!(
             "multirangetypes_diff: numeric-tie fallbacks {} / {} execs; \
-             soft_mode={} soft_captured={} null_arg={} null_member={} union_empty={}",
+             soft_mode={} soft_captured={} null_arg={} null_member={} union_empty={} short_member={}",
             NUMERIC_TIE_FALLBACKS.load(Ordering::Relaxed),
             n,
             SOFT_MODE.load(Ordering::Relaxed),
             SOFT_CAPTURED.load(Ordering::Relaxed),
             NULL_ARG.load(Ordering::Relaxed),
             NULL_MEMBER.load(Ordering::Relaxed),
-            UNION_RANGE_EMPTY.load(Ordering::Relaxed)
+            UNION_RANGE_EMPTY.load(Ordering::Relaxed),
+            SHORT_MEMBER.load(Ordering::Relaxed)
         );
     }
 }
@@ -1508,16 +1554,41 @@ fn arm_ctors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
             let sel = rd.u8();
             let multidim = sel & 1 == 1;
             let wrong_elem = sel & 2 == 2;
-            // The two NULL arms are DISTINCT paths: a NULL ARGUMENT
-            // (argisnull(0)) versus a non-null array carrying a NULL MEMBER
-            // in its bitmap. Both raise 22004 and both are SQL-reachable.
-            let arg_null = sel & 4 == 4;
+            // Only the NULL-MEMBER arm is driven. The two NULL paths look
+            // alike but are NOT both reachable:
+            //   * argisnull(0) — multirange_constructor2 is proisstrict=t
+            //     (ground-truthed on postgres:18.3), so fmgr returns SQL NULL
+            //     without entering the body: `select int4multirange(NULL::int4range)`
+            //     yields NULL, not an error. C's own comment says as much
+            //     ("should be guaranteed by our signature, but let's do it just
+            //     in case") and its arm is a bare elog, i.e. XX000, where pgrust
+            //     raises 22004. Driving it FABRICATED a state real PG cannot
+            //     produce and reported that sqlstate difference as a divergence.
+            //     Excepted instead: see phase1-exceptions.tsv.
+            //   * a NULL MEMBER inside a non-null array IS reachable through
+            //     the variadic form — `select int4multirange('[1,2)', NULL)`
+            //     raises 22004 on 18.3 — and both sides agree there.
+            let arg_null = false;
             let member_null = sel & 8 == 8;
             let Some(rimg) = decode_range(t, &mut rd, mcx) else { return };
             let elemtype = if wrong_elem { INT4OID } else { PINS[t].rngtypid };
             let ndim = if multidim { 2 } else { 1 };
             let null_at: &[usize] = if member_null { &[0] } else { &[] };
-            let arr = build_range_array_nulls(&[rimg], elemtype, ndim, null_at);
+            // A SHORT-form member is the real on-disk shape and reaches the
+            // member-expand arm; only meaningful without a null bitmap and at
+            // ndim 1.
+            let short_member = sel & 0x10 == 0x10 && !member_null && ndim == 1;
+            let arr = match if short_member {
+                build_range_array_short(&[rimg.clone()], elemtype)
+            } else {
+                None
+            } {
+                Some(a) => {
+                    bump(|st| st.short_member_inc());
+                    a
+                }
+                None => build_range_array_nulls(&[rimg], elemtype, ndim, null_at),
+            };
             if arg_null {
                 bump(|st| st.null_arg_inc());
             }
@@ -1940,6 +2011,42 @@ fn arm_internals(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ANTI-VACUITY GATE for the arms added when the coverage gaps were closed:
+    /// soft-error mode, the NULL-MEMBER array arm, the short-form array member,
+    /// and union_range over an EMPTY multirange. A new arm that silently never
+    /// fires is worse than a known gap.
+    #[test]
+    fn gap_closing_arms_all_fire() {
+        let b = (
+            soft_mode_count(),
+            soft_captured_count(),
+            null_member_count(),
+            union_range_empty_count(),
+        );
+        // soft-mode multirange_in: valid + malformed
+        for lit in [&b"{[1,5),[10,20)}"[..], &b"{garbage}"[..], &b"{[5,1)}"[..]] {
+            let mut v = vec![0u8, 0x81];
+            v.extend_from_slice(lit);
+            multirangetypes_diff(&v);
+        }
+        // ctor2 error arm: NULL member (0x08) and short-form member (0x10)
+        for sel in [0x08u8, 0x10] {
+            multirangetypes_diff(&[2, 0, 3, sel, 1, 5, 0, 0, 0, 0, 10, 0, 0, 0]);
+        }
+        // internals on an EMPTY multirange -> union_range's make_empty_range
+        multirangetypes_diff(&[10, 0, 0, 0]);
+        let a = (
+            soft_mode_count(),
+            soft_captured_count(),
+            null_member_count(),
+            union_range_empty_count(),
+        );
+        assert!(a.0 > b.0, "soft-mode arm never fired");
+        assert!(a.1 > b.1, "soft-mode arm never CAPTURED a soft error");
+        assert!(a.2 > b.2, "NULL-member array arm never fired");
+        assert!(a.3 > b.3, "empty-multirange union_range arm never fired");
+    }
 
     fn run(bytes: &[u8]) {
         multirangetypes_diff(bytes);

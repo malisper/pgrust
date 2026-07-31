@@ -1,113 +1,129 @@
 # fuzz/divergences/GAPS-p1-laneac.md — GENUINE FUZZ GAPS (NOT exceptions)
 
-Lane p1-laneac, 2026-07-31. adt/rangetypes + adt/multirangetypes.
+Lane p1-laneac. adt/rangetypes + adt/multirangetypes.
+Opened 2026-07-31 with 33 gap lines; **26 closed, 2 reclassified as excepted,
+5 still open** after the gap-closing pass. Numbers below are MEASURED
+(`cargo fuzz coverage` over the committed corpus, merged under SLOC-v2), not
+estimated.
 
-These 33 in-scope v2-SLOC lines are **reachable code that the differential corpus never
-drives**. They are deliberately NOT written as exception rows in
-`proofs/coverage/phase1-exceptions.tsv`: an exception says "this line cannot or must not be
-covered", and every line below CAN be. Recording them as exceptions would be the
-gate-blindness failure the campaign keeps getting burned by.
+A gap is reachable code the differential corpus never drives. Gaps are
+deliberately NOT written as exception rows: an exception says "this line cannot
+or must not be covered", and recording a reachable line that way is the
+gate-blindness failure the campaign keeps getting burned by. Conversely, when
+measurement PROVES a line is fenced, it moves out of this file and into
+`proofs/coverage/phase1-exceptions.tsv` with the evidence.
 
-**Consequence: the done-gate for these two crates does NOT close at 100%.**
-
-Accounting over the 2,982 in-scope non-test v2-SLOC lines of the two crates:
+## Accounting
 
 | bucket | lines | % |
 |---|---:|---:|
-| fuzz-measured (2 x 10M-exec CI cluster campaigns) | 2379 | 79.78% |
-| recorded executable exceptions | 570 | 19.11% |
-| **genuine fuzz gaps (this file)** | **33** | **1.11%** |
-| accounted total | 2949 | 98.89% |
+| fuzz-measured | 2406 | 80.68% |
+| recorded executable exceptions | 571 | 19.15% |
+| **genuine fuzz gaps (below)** | **5** | **0.17%** |
+| accounted total | 2977 | 99.83% |
 
-The exception census by class is in the report; the dominant class is `excluded-state`
-(458 lines = the claim's ratified agg-state / SRF / engine:planner / typcache-subtype
-carves), then `instrument-unmappable` (84 = fc*! macro invocation sites and multi-line
-call continuations whose counts land on neighbouring lines), `unreachable-arm` (14),
-`const-eval-only` (13 = the b() builtins table), `defensive-c-parity` (1).
+(in-scope non-test v2-SLOC = 2982; fuzz-measured was 2379/79.78% before this
+pass. The exception count rose by 2 — see "Reclassified" — and 26 former gap
+lines are now fuzz-measured.)
 
-## SOFT-ERROR (escontext) PLANE — 18 lines — THE DOMINANT GAP
+## STILL OPEN — 5 lines
 
-- `crates/backend/utils/adt/rangetypes/src/io.rs` lines 157, 171, 307, 326, 344
-- `crates/backend/utils/adt/rangetypes/src/builtins.rs` lines 105, 467, 472
-- `crates/backend/utils/adt/rangetypes/src/lib.rs` lines 525, 530
-- `crates/backend/utils/adt/multirangetypes/src/io.rs` lines 152
-- `crates/backend/utils/adt/multirangetypes/src/builtins.rs` lines 80
+### Toasted bound: external pointer / compressed — 4 lines
 
-NEITHER driver constructs a SoftErrorContext / ErrorSaveNode: `grep -n SoftErrorContext
-fuzz/core/src/*_diff.rs` returns nothing. Every `return Ok(None)` soft-failure edge is
-therefore undriven, and with it the whole soft-input plane that backs
-pg_input_is_valid() and COPY ... ON_ERROR ignore. The C oracle already threads
-escontext (it is a range_in/range_parse parameter), so this is purely a driver gap.
-TO CLOSE: add a payload bit selecting soft vs hard error mode; on soft, pass an armed
-ErrorSaveNode on the Rust side and the matching escontext on the C side, and compare a
-FOURTH plane: (error_occurred flag, captured sqlstate) instead of the thrown verdict.
-Arms needing it: range_in, multirange_in, range_constructor3 (flags), the fc_*_canonical
-family, and make_range/canonicalize via an overflowing int4range/int8range bound
-(i32::MAX / i64::MAX upper bound, which is what reaches lib.rs:525/:530).
+`crates/backend/utils/adt/rangetypes/src/lib.rs` 415, 416, 418, 419
 
-## DATERANGE canonicalize DISPATCH — 2 lines
+`detoast_bound_packed`'s external-pointer and pglz-compressed arms. Both
+drivers now feed SHORT-header images (that arm IS covered, and it closed
+`arg_range`'s RangeArg::Owned path at builtins.rs:29/47), but never an external
+TOAST pointer or a compressed datum.
 
-- `crates/backend/utils/adt/rangetypes/src/lib.rs` lines 534, 535
+WHY IT IS STILL OPEN, and the cost argument: the vendored oracle has neither
+pglz nor any toast-fetch machinery (`grep -c pglz csrc/pg_rangetypes_io.c` = 0).
+An external pointer additionally implies a toast RELATION on both sides. The
+compressed case is the cheaper half — it needs only `pglz_decompress` vendored,
+no toast table — and is the recommended next increment if these 4 lines are
+wanted. Note these lines ARE exercised by the crate's own tests
+(`rangetypes/src/tests.rs` `bound_detoast`: `external_bound_is_inlined`,
+`compressed_bound_is_decompressed`), which count for nothing under the campaign
+metric, so they remain gaps here rather than exceptions.
 
-canonical_adjust_date itself is FULLY covered (lib.rs:649-671, every arm incl. both
-IS_VALID_DATE overflow ereports) because the driver calls fc_daterange_canonical
-directly. What is NOT covered is canonicalize()'s F_DATERANGE_CANONICAL dispatch arm,
-because no daterange value is ever built THROUGH make_range.
-TO CLOSE: add daterange as a fourth pinned instantiation to the image/constructor arms
-(the typcache mock already has a daterange entry — it is used for the canonical/subdiff
-arms — so this is mostly wiring an existing pin into build_image + the ctor arm).
+### daterange canonicalize soft edge — 1 line
 
-## TOASTED / DETOASTED BOUND + ARGUMENT PATHS — 9 lines
+`crates/backend/utils/adt/rangetypes/src/lib.rs` 535
 
-- `crates/backend/utils/adt/rangetypes/src/lib.rs` lines 415, 416, 418, 419
-- `crates/backend/utils/adt/rangetypes/src/builtins.rs` lines 29, 47
-- `crates/backend/utils/adt/multirangetypes/src/builtins.rs` lines 226, 228, 229
+`canonicalize`'s `F_DATERANGE_CANONICAL` soft edge (`return Ok(None)` when
+`canonical_adjust_date` captures a soft error). Its int4 and int8 siblings
+(:525, :530) ARE now covered, via soft-mode `range_in` with a bound at the type
+maximum.
 
-detoast_bound_packed's external-pointer/compressed arm and the arg_range /
-arg_multirange RangeArg::Owned detoast arm. Both drivers feed FLAT images only.
-NOTE these paths ARE exercised by the crate's own tests (rangetypes/src/tests.rs
-bound_detoast: external_bound_is_inlined / compressed_bound_is_decompressed) — but
-in-crate tests count for NOTHING under the campaign metric, so they stay gaps here.
-TO CLOSE: an arm that builds a toast-pointer / pglz-compressed numrange bound behind the
-detoast seam (the tests.rs install_test_detoast harness is the model) and feeds the same
-image to both sides. Moderate cost: the C oracle needs the matching detoast shim.
+WHY THE OBVIOUS ROUTE DOES NOT WORK: the constructor arms cannot reach it.
+BOTH implementations hardcode a NULL escontext at that call site —
+`rangetypes.c` `range_constructor2/3` pass `NULL` to `make_range`, and the
+shipped `fc_range_constructor2/3` pass `None` — so no soft error is capturable
+through a constructor in either implementation. (The driver still runs the
+constructors with an armed-but-ignored escontext, which pins exactly that
+contract: if pgrust ever started threading it, C would throw hard while Rust
+captured softly and the OCCURRED assert would fire.)
 
-## NULL-ARGUMENT ERROR ARMS — 7 lines
+TO CLOSE: vendor `date_in`/`date_out` into the oracle so daterange joins the
+text-io arms (`NPINS_IO` 3 -> 4), then the existing soft-mode `range_in` path
+reaches it with a bound at the maximum valid date (2145031948; +1 leaves
+`IS_VALID_DATE`). Bounded work, not a structural obstacle.
 
-- `crates/backend/utils/adt/rangetypes/src/builtins.rs` lines 173, 174, 175, 176, 189
-- `crates/backend/utils/adt/multirangetypes/src/builtins.rs` lines 186, 220
+## RECLASSIFIED — measured to be fenced, now exception rows
 
-null_flags_arg (range_constructor3 with a NULL flags argument) and null_member
-(multirange_constructor2 with a NULL range member). The fc_call helper always passes
-non-NULL Datums, so no arm ever sets argisnull.
-TO CLOSE: cheap — give fc_call a per-argument null mask driven by a payload bit and let
-the C side pass the same PG_ARGISNULL pattern. This also widens the fc-wrapper plane for
-every other arm (all the strict-vs-nonstrict wrappers).
+- `multirangetypes/src/builtins.rs:186` — `multirange_constructor2`'s
+  `argisnull(0)` arm. **Strict-unreachable**: `pg_proc.proisstrict = t` for oids
+  4281/4282 (ground-truthed on postgres:18.3 — `select
+  int4multirange(NULL::int4range)` yields NULL, not an error), so fmgr never
+  enters the body. C's own comment says the same. C's arm is a bare `elog`
+  (XX000) where pgrust raises 22004, so the two differ ONLY in a state real PG
+  cannot construct; driving it briefly reported that as a divergence, which is
+  what identified it. Its sibling at :220 (a NULL MEMBER inside a non-null
+  array) IS reachable via the variadic form — `select int4multirange('[1,2)',
+  NULL)` raises 22004 on 18.3 — and is now fuzzed, both sides agreeing.
+- `multirangetypes/src/lib.rs:834` — `multirange_intersect_internal`'s
+  empty-operand short circuit. **Fenced by the call site, C-identically**: the
+  only in-scope caller (`fc_multirange_intersect`) returns
+  `make_empty_multirange` before calling the internal, and verbatim C has the
+  same two-level structure. The one caller that does reach it,
+  `multirange_intersect_agg_transfn`, is an agg-state carve. Seeded
+  empty-operand setop inputs left it uncovered, which is what proved the fence.
 
-## MISC REACHABLE PATHS — 4 lines
+## CLOSED — 26 lines
 
-- `crates/backend/utils/adt/rangetypes/src/io.rs` lines 81
-- `crates/backend/utils/adt/multirangetypes/src/lib.rs` lines 395, 834
+- **Soft-error (escontext) plane, 13 of the 18 originally listed**: a whole new
+  comparison plane (OCCURRED flag + captured sqlstate + valid-input image +
+  soft/hard verdict agreement), on `range_in`, `multirange_in`, and the
+  canonical family. io.rs 157/171/307/326/344, builtins.rs 105/467/472,
+  lib.rs 525/530, mr io.rs 152, mr builtins.rs 80.
+- **NULL-argument arms, 6**: rangetypes builtins.rs 173-176/189 via
+  `range_constructor3` with a SQL-NULL flags argument (non-strict, so genuinely
+  reachable: `select int4range(1,2,NULL)`); mr builtins.rs 220 via a NULL array
+  member.
+- **daterange dispatch, 1**: lib.rs 534, via daterange as a fourth pinned
+  constructor instantiation.
+- **Toast/short-header, 5**: rangetypes builtins.rs 29/47 (short-header outer
+  range image reaching `arg_range`'s Owned arm); mr builtins.rs 226/228/229
+  (short-form array members).
+- **Misc, 3**: io.rs 81 (`range_parse_flags`' LENGTH check — the original note
+  called this the invalid-character arm, but the characters were already
+  covered; a fixed-2 driver could never reach the length check), mr lib.rs 395
+  (`multirange_get_union_range` on an EMPTY multirange — both the driver AND the
+  oracle entry short-circuited on `rangeCount == 0`, so the compare existed but
+  could never see it).
 
-io.rs:81 = range_parse_flags's invalid-flags error (a 2-char flags string that is not one
-of [] [) (] (); the driver only ever mints valid pairs). lib.rs:395 =
-multirange_get_union_range on an EMPTY multirange (returns make_empty_range).
-lib.rs:834 = multirange_intersect_internal's early return.
-TO CLOSE: all three are seed/arm-input gaps, not structural — feed arbitrary 2-byte flag
-strings to the constructor3 arm, and drive the internals arm with a zero-range image.
+## Kani infeasibility-proof candidates (from exception rows, not gaps)
 
-## Kani infeasibility-proof candidates (from the exception rows, not gaps)
-
-Four `unreachable-arm` rows are fenced by CONTROL FLOW rather than a const the compiler
-folds, so they do not meet the exceptions-file preamble's "every unreachable-arm row is
-const-decided" bar. The preamble's own guidance is to prefer promotion to a Kani
-infeasibility proof; these are the candidates:
+Unchanged from the adjudication, plus the two reclassified rows above, which are
+the same shape — fenced by control flow rather than a const the compiler folds:
 
 - `rangetypes/src/lib.rs:353` — datum_write's toast-pointer panic, fenced by
-  detoast_bound_packed (lib.rs:409) flattening every by-ref bound first.
-- `multirangetypes/src/lib.rs:240,245-252` — multirange_canonicalize's comparator
-  error-capture, fenced by int4/int8/numeric btree comparators being total.
-- `multirangetypes/src/lib.rs:271-272,283-284` — range_union_internal's empty-operand
-  short circuits, fenced by the empty-skip at lib.rs:260/:263.
-- `multirangetypes/src/lib.rs:799` — range_minus_internal's non-overlap short circuit,
-  fenced by the call site's overlap test.
+  detoast_bound_packed flattening every by-ref bound first.
+- `multirangetypes/src/lib.rs:240,245-252` — canonicalize's comparator
+  error-capture, fenced by the btree comparators being total.
+- `multirangetypes/src/lib.rs:271-272,283-284` — range_union_internal's
+  empty-operand short circuits, fenced by the empty-skip above them.
+- `multirangetypes/src/lib.rs:799` — range_minus_internal's non-overlap short
+  circuit, fenced by the call site's overlap test.
+- `multirangetypes/src/lib.rs:834` — as above (newly added).
