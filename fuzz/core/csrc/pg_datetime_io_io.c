@@ -72,8 +72,10 @@
  *     WARNING sites do not pollute it) and longjmp out; errmsg/errdetail/
  *     errhint evaluate to 0 with arguments unevaluated (message text is out
  *     of comparison scope). elog(ERROR) -> class 99 (internal).
- *   - palloc/pstrdup -> malloc/strdup (results copied out and freed by the
- *     pg_diff_* driver entries).
+ *   - palloc/pstrdup/pfree -> per-exec bump arena, reset by pg_dt_reset()
+ *     (models PG's per-tuple memory context; pfree is a no-op exactly as
+ *     context reset makes it in the C originals' lifetimes; results are
+ *     copied out by the pg_diff_* driver entries before the next reset).
  *   - truncate_identifier stub aborts: the driver caps units at
  *     NAMEDATALEN-1 bytes so identifier truncation never fires.
  *   - int64_to_numeric / int64_div_fast_to_numeric stubs abort: only the
@@ -278,11 +280,42 @@ pg_dt_throw(void)
 		} \
 	} while (0)
 
-/* ---- allocator shims ---- */
+/* ---- allocator shims ----
+ * Real PostgreSQL frees per-call scratch (e.g. downcase_truncate_identifier's
+ * lowercased copy inside time_part) by resetting the per-tuple memory
+ * context, never by explicit pfree.  A malloc shim therefore LEAKS every
+ * such allocation (CI cluster LSan artifact leak-9b8209d924a8, 2-byte lowunits).
+ * Model the context instead: a per-exec bump arena, reset in pg_dt_reset().
+ * pfree becomes a no-op (context-owned), exactly PG's lifetime semantics. */
+#define PG_DT_ARENA_SZ (64 * 1024)
+static _Thread_local char pg_dt_arena[PG_DT_ARENA_SZ];
+static _Thread_local size_t pg_dt_arena_off;
+
+static void *
+pg_dt_palloc(size_t n)
+{
+	size_t		off = (pg_dt_arena_off + 7) & ~(size_t) 7;
+
+	if (n > PG_DT_ARENA_SZ - off)
+		abort();				/* arena exhausted: driver contract broken */
+	pg_dt_arena_off = off + n;
+	return pg_dt_arena + off;
+}
+
+static char *
+pg_dt_pstrdup(const char *s)
+{
+	size_t		len = strlen(s) + 1;
+	char	   *p = pg_dt_palloc(len);
+
+	memcpy(p, s, len);
+	return p;
+}
+
 #undef palloc
-#define palloc(n) malloc(n)
-#define pfree free
-#define pstrdup strdup
+#define palloc(n) pg_dt_palloc(n)
+#define pfree(p) ((void) (p))
+#define pstrdup pg_dt_pstrdup
 
 /* ---- environment pins (see file header) ---- */
 
@@ -541,6 +574,7 @@ pg_dt_reset(int style, int order)
 	pg_diff_errcode = 0;
 	pg_dt_pending = 0;
 	pg_dt_tzset_nongmt = 0;
+	pg_dt_arena_off = 0;		/* per-exec memory-context reset */
 	DateStyle = style;
 	DateOrder = order;
 }
@@ -582,7 +616,6 @@ pg_diff_date_out(int32 date, int style, int order, char *buf)
 	fcinfo->args[0].value = Int32GetDatum(date);
 	r = (char *) DatumGetPointer(date_out(fcinfo));
 	strcpy(buf, r);
-	free(r);
 	return 0;
 }
 
@@ -615,7 +648,6 @@ pg_diff_time_out(int64 time, int style, int order, char *buf)
 	fcinfo->args[0].value = Int64GetDatum(time);
 	r = (char *) DatumGetPointer(time_out(fcinfo));
 	strcpy(buf, r);
-	free(r);
 	return 0;
 }
 
@@ -635,7 +667,6 @@ pg_diff_timetz_in(const char *str, int32 typmod, int style, int order,
 	r = (TimeTzADT *) DatumGetPointer(timetz_in(fcinfo));
 	*out_time = r->time;
 	*out_zone = r->zone;
-	free(r);
 	return 0;
 }
 
@@ -654,7 +685,6 @@ pg_diff_timetz_out(int64 time, int32 zone, int style, int order, char *buf)
 	fcinfo->args[0].value = PointerGetDatum(&t);
 	r = (char *) DatumGetPointer(timetz_out(fcinfo));
 	strcpy(buf, r);
-	free(r);
 	return 0;
 }
 
