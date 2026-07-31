@@ -247,6 +247,16 @@ pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff,
 pub mod strfam;
 pub use strfam::strfam_diff;
 
+// Lane-0B differential targets (100%-coverage campaign, proofs/p1-lane0b):
+pub mod cash_diff;
+pub mod mac_diff;
+pub mod name_diff;
+pub mod uuid_diff;
+pub use cash_diff::cash_diff;
+pub use mac_diff::mac_diff;
+pub use name_diff::name_diff;
+pub use uuid_diff::uuid_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
