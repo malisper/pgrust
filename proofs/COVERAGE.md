@@ -54,109 +54,155 @@ Conversely, an uncovered line is not an unverified line **claim-wise**
 if a sibling branch is dark) — but the uncovered list is the actionable
 map of where no instrument currently reaches.
 
-## Headline numbers (capture of 2026-07-30, head cf2caf1bec)
+## Headline numbers (FULL-TREE capture of 2026-07-31, head e395e4c8a4)
 
-Scope SLOC 21,986 across seven adt crates. Percentages are of each
-crate's SLOC; **read the caveat above before quoting any of them.**
+**Scope: the whole tree** — every crate under `crates/` (847 with source,
+`proofs/coverage/fulltree/scope-fulltree.txt`), all three axes, one sha
+(e395e4c8a431; the `crates/` content is identical through the publish
+commit). Denominator = the ADOPTED rule (SLOC v2, const/data-table
+interiors excluded, instrument line-table reinstatement — ruling
+2026-07-30; inventory in `proofs/coverage/excluded-tables.json`).
 
-| crate   | SLOC  | kani          | fuzz         | regress        | any            |
-|---------|-------|---------------|--------------|----------------|----------------|
-| float   | 2,215 | 197 (8.9%)    | 361 (16.3%)  | 1,217 (54.9%)  | 1,401 (63.3%)  |
-| geo     | 2,819 | 192 (6.8%)    | 133 (4.7%)   | 1,959 (69.5%)  | 1,968 (69.8%)  |
-| jsonb   | 5,875 | 118 (2.0%)    | 0            | 4,458 (75.9%)  | 4,463 (76.0%)  |
-| network | 1,518 | 136 (9.0%)    | 0            | 1,037 (68.3%)  | 1,038 (68.4%)  |
-| numeric | 5,713 | 318 (5.6%)    | 0            | 4,115 (72.0%)  | 4,140 (72.5%)  |
-| varbit  | 866   | 182 (21.0%)   | 0            | 633 (73.1%)    | 656 (75.8%)    |
-| varlena | 2,980 | 178 (6.0%)    | 0            | 2,179 (73.1%)  | 2,190 (73.5%)  |
-| **all** | 21,986| 1,321 (6.0%)  | 494 (2.2%)   | 15,598 (71.0%) | 15,856 (72.1%) |
+| axis    | covered SLOC | % of 649,954 |
+|---------|--------------|-----------|
+| kani    | 6,117        | 0.94%     |
+| fuzz    | 1,182        | 0.18%     |
+| regress | 387,432      | 59.61%    |
+| **any** | **388,778**  | **59.82%** |
 
-**The Kani column of the table above is biased LOW and predates two
-instrument fixes** (macro attribution + the fail-closed census, both
-landed 2026-07-30 on `proofs/coverage-instrument-fix`). Re-measured under
-the fixed instrument, `float` — the only crate re-run so far — reads:
+v1 comparability footnote (pre-ruling text rule, tables included):
+SLOC 887,067 — kani 6,190 (0.70%), fuzz 0.13%, regress 43.68%, any
+43.84%. Covered counts barely move between rules; the denominator does.
+Earlier quotes used the same rules at older trees (rf tree-wide capture:
+647,303; 7-crate scope: 21,986 v1) — deltas are tree drift (this sha adds
+the psql client crate and the 2026-07-30/31 main merges), not rule drift.
 
-| float, per-commit tier                        | kani SLOC | %      |
-|-----------------------------------------------|-----------|--------|
-| as published above (45 harnesses' worth glob) | 197       | 8.89%  |
-| complete per-commit set, 140 harnesses        | 284       | 12.82% |
-| **+ macro-invocation attribution (the fix)**  | **338**   | **15.26%** |
+**Kani axis provenance (fail-closed census, CLOSED):** every registered
+per-commit-tier harness in `proofs/SUITE.tsv` — 964 jobs across 50
+families — plus 724 `expected=unmeasured` CI-solved registrations
+carried as census rows. Balance: **1,688 expected = 946 RAN + 17 WALLED
++ 725 FAILED-TO-RUN**, of which 742 waived by name with stated reasons
+(724 CI-solved, 17 walls with measured timeouts, 1 native differential
+binary registered in the per-commit tier). Zero silent omissions:
+census.json is the artifact. Calibration / release-gate / defect-witness
+tiers and unmeasured-tier `expected=green` quickwin rows are OUT of this
+capture (documented cut; proof line-coverage of what the full suite
+proves is therefore HIGHER than the kani row shows).
 
-Two separate corrections are stacked there: the harness set was
-incomplete (the prior capture ran 45 of float's 97 own-family per-commit
-harnesses), and the instrument mis-attributed macro-generated wrappers.
-Both are measured, not extrapolated: `proofs/coverage/SMOKE-RESULT.md`
-and `proofs/coverage/INSTRUMENT-FIX.md`. The preserved closed-census
-verification of the fix is the own-family PoC (97 harnesses: 245 raw ->
-299 attributed, delta confined to `fc*!` invocation lines; artifacts in
-`proofs/coverage/instrument-fix/`); the 140-harness 338 row above was
-measured before a scratchpad sweep destroyed its census files and is
-re-derived for free in the eventual full-tree run.
+**Wall inventory (17, all with waivers):** 9 text-slice string harnesses
+at 300 s (the known coverage-instrumentation slicing defeat — same class
+as the prior capture) and 8 hash_bytes harnesses at 900 s. The hash walls
+were re-verified at idle load; one of them (`hash_bytes_extended_len8_seeded`)
+had recorded VERIFICATION FAILED rc=101 under host load ~40 and **did not
+reproduce at idle** — it walls cleanly; the FAILED was a contention
+artifact (FAILED-is-not-a-verdict, again). Re-verify censuses:
+`proofs/coverage/fulltree/logs/hash-reverify/` (not committed) summarized
+in the family census.
 
-**The 6.0% scope-wide figure is NOT mostly a sampling artifact.** Four of
-the six crates with a per-commit tier — network, numeric, geo, varbit —
-were already at (or within 3 harnesses of) their complete per-commit
-harness sets when the table above was captured, so their Kani numbers
-cannot move on that axis at all. Only float (+52 harnesses) and varlena
-(+139) had real gaps. Adding the macro correction, the honest scope-wide
-Kani number is plausibly 8-11%; it stays single-to-low-double digits.
+**regress + fuzz axes** are the tree-wide rf capture
+(`proofs/coverage-rf/`, measured at ccd2d20b22): full parallel_schedule,
+218/230 ok, instrumented server; fuzz = differential corpus replay
+(float_in/out, geo — 666/106/705 inputs). Their lcov was remapped onto
+this sha by diff-hunk offset (`proofs/coverage/fulltree/remap-lcov.py`):
+142 regress + 25 fuzz executed-line records fell inside changed hunks and
+were dropped — they read uncovered here, a bounded published under-count
+(regress covered 387,432 vs 387,529 at the rf tree).
 
-**Provenance correction for float's 197.** The prior capture's run log
-implies 197 came from float-cmp + float-arith. It did not: those two
-families alone give **155**. The capture merged with
-`--kani-glob 'proofs/*/…'` — every family it ran — and `adt_geo` and
-`adt_numeric` genuinely compute in float8, so `geo-cmp` (26 harnesses)
-and `numeric-probe` (17) contributed the rest. Adding those two
-reproduces 197 exactly, to the line. Hence rule 3 below: capture with an
-explicit family list, and record it.
+**Macro attribution:** 1,095 macro-body regions credited to 335
+invocation-declaration lines; 202 of 1,297 unresolved (name-composing
+macros — `fc_timestamptz_*` casts, stub/closure noise), published in
+`summary.json.macro_attribution`, a residual undercount.
 
-The Kani column measures the **per-commit tier only** (165 harnesses;
-plus jsonb's 8 release-gate cmp cells) — the calibration and
-release-gate tiers that carry many of the ledger's `proved` rows are not
-in this capture, so the Kani line-coverage of what the full suite proves
-is HIGHER than this. Even allowing for that, the single-digit Kani
-percentages against 1,205 proved ledger rows are the quantified version
-of the fenced-domain point: the proofs are theorems over narrow,
-explicitly-fenced slices, not line-sweeps of the crates.
+### Per-crate table (every crate with any Kani coverage — 61 of 847)
 
-Largest uncovered regions per crate: `python3
-proofs/coverage/uncovered-report.py proofs/coverage`. Note the top hits
-in most crates are the `const *_BUILTINS: &[FmgrBuiltin]` registration
-tables and const declarations — real source lines with no runtime
-counters (const-eval'd data), inherently dark to all three instruments.
-The actionable logic gaps as of this capture include:
-- numeric: `fixed.rs` `mul_var_short_fixed` + neighbors (the fixed-size
-  fast path, 364-508 band), `io.rs:148-176`.
-- network: `pton.rs:71-102` (an inet_net_pton arm), `lib.rs:277-291`.
-- jsonb: `gin.rs` heads (4-35, 661-687), `populate.rs:5-37`,
-  `tojsonb.rs:5-36`.
-- float: `builtins.rs:159-250` macro-generated cast/wrapper shims — this
-  entry was largely an artifact of the macro-attribution defect; after the
-  fix 54 of those 121 declaration lines are covered, and of the remaining
-  67, 55 name a wrapper with no harness anywhere and 12 name one whose
-  harnesses are calibration/release-gate tier only. The real float logic
-  gaps are `io.rs` (482 SLOC of float parse/print, the fuzz axis' job) and
-  `aggregates.rs` (217 SLOC) — which is NOT unproved: `proofs/float-agg`
-  covers it, but that family was solved on the CI cluster and was dark in
-  SUITE.tsv at capture time, so its coverage is invisible to a local
-  capture (known distortion 7).
-- geo: `builtins.rs:317-543` bands of fmgr wrapper glue for predicates
-  the regress corpus never calls.
+Percentages are of each crate's own v2 SLOC. **A covered line is not a
+verified line** (see above); the kani column is the per-commit tier only.
+
+| crate | SLOC | kani | kani % | fuzz | regress % | any % |
+|-------|------|------|--------|------|-----------|-------|
+| backend/utils/adt/adt_timestamp | 3,138 | 819 | 26.10% | 0 | 71.41% | 76.10% |
+| backend/utils/adt/adt_date | 1,490 | 346 | 23.22% | 0 | 71.74% | 77.92% |
+| backend/utils/adt/float | 1,801 | 337 | 18.71% | 366 | 67.57% | 80.96% |
+| backend/utils/adt/numeric | 4,943 | 305 | 6.17% | 0 | 83.25% | 83.49% |
+| backend/utils/adt/network | 1,329 | 219 | 16.48% | 0 | 78.03% | 78.40% |
+| _support/types/fmgr | 637 | 209 | 32.81% | 0 | 71.11% | 76.30% |
+| backend/utils/adt/geo | 2,379 | 202 | 8.49% | 133 | 82.68% | 83.48% |
+| common/wchar | 911 | 202 | 22.17% | 0 | 74.53% | 83.97% |
+| backend/utils/adt/int | 740 | 194 | 26.22% | 0 | 74.05% | 81.76% |
+| backend/utils/adt/varlena | 2,545 | 186 | 7.31% | 0 | 85.62% | 86.37% |
+| backend/utils/adt/rangetypes | 1,559 | 185 | 11.87% | 0 | 80.56% | 80.89% |
+| backend/utils/adt/scalar | 746 | 185 | 24.80% | 0 | 61.53% | 70.64% |
+| backend/utils/adt/varbit | 756 | 181 | 23.94% | 0 | 83.73% | 86.64% |
+| backend/utils/adt/int8 | 534 | 175 | 32.77% | 0 | 74.91% | 83.15% |
+| backend/utils/adt/acl | 1,660 | 166 | 10.00% | 0 | 66.20% | 67.29% |
+| _support/mcx | 1,895 | 140 | 7.39% | 0 | 56.73% | 57.94% |
+| backend/utils/adt/mac8 | 262 | 135 | 51.53% | 0 | 67.56% | 73.66% |
+| backend/utils/adt/pseudotypes | 196 | 129 | 65.82% | 0 | 10.71% | 67.86% |
+| backend/utils/adt/mac | 270 | 112 | 41.48% | 0 | 74.44% | 75.19% |
+| backend/utils/adt/network_gist | 295 | 109 | 36.95% | 0 | 41.36% | 63.39% |
+| backend/utils/adt/jsonb | 5,021 | 108 | 2.15% | 0 | 88.07% | 88.29% |
+| common/hashfn | 164 | 94 | 57.32% | 0 | 93.90% | 93.90% |
+| backend/utils/adt/uuid | 266 | 91 | 34.21% | 0 | 86.47% | 86.47% |
+| backend/utils/adt/xid8funcs | 342 | 83 | 24.27% | 0 | 77.19% | 80.12% |
+| backend/utils/adt/bool | 204 | 80 | 39.22% | 0 | 71.08% | 77.45% |
+| backend/access/nbtree/compare | 113 | 78 | 69.03% | 0 | 56.64% | 77.88% |
+| backend/utils/adt/varchar | 493 | 77 | 15.62% | 0 | 64.10% | 67.55% |
+| backend/access/brin/brin_minmax_multi | 1,187 | 73 | 6.15% | 0 | 77.42% | 78.10% |
+| _support/types/datum | 382 | 71 | 18.59% | 0 | 68.59% | 68.59% |
+| backend/utils/mb/mbutils | 761 | 71 | 9.33% | 0 | 65.18% | 67.81% |
+| backend/utils/adt/adt_enum | 250 | 56 | 22.40% | 0 | 74.80% | 78.40% |
+| backend/utils/adt/cash | 535 | 53 | 9.91% | 0 | 72.90% | 75.51% |
+| backend/utils/adt/char | 107 | 53 | 49.53% | 0 | 57.01% | 71.96% |
+| port/pg_bitutils | 141 | 51 | 36.17% | 0 | 29.08% | 61.70% |
+| backend/utils/adt/pg_lsn | 158 | 48 | 30.38% | 0 | 84.81% | 85.44% |
+| _support/types/types_core | 250 | 46 | 18.40% | 8 | 76.40% | 76.80% |
+| backend/catalog/aclchk | 2,631 | 42 | 1.60% | 0 | 67.77% | 67.88% |
+| backend/utils/adt/name | 276 | 41 | 14.86% | 0 | 64.13% | 64.49% |
+| backend/utils/adt/numutils | 406 | 38 | 9.36% | 0 | 83.00% | 83.25% |
+| _support/types/types_tuple | 703 | 34 | 4.84% | 0 | 88.05% | 88.76% |
+| backend/utils/adt/adt_datetime | 2,569 | 33 | 1.28% | 0 | 86.41% | 86.41% |
+| common/string | 89 | 29 | 32.58% | 0 | 10.11% | 42.70% |
+| _support/types/types_error | 292 | 27 | 9.25% | 51 | 71.92% | 71.92% |
+| backend/utils/adt/adt_misc | 1,090 | 27 | 2.48% | 0 | 50.64% | 50.64% |
+| _support/types/stringinfo | 122 | 23 | 18.85% | 0 | 84.43% | 84.43% |
+| backend/utils/cache/cache_syscache | 2,247 | 19 | 0.85% | 0 | 86.25% | 86.38% |
+| backend/access/brin/brin_bloom | 231 | 18 | 7.79% | 0 | 68.83% | 71.86% |
+| backend/utils/adt/adt_ascii | 77 | 17 | 22.08% | 0 | 0.00% | 22.08% |
+| backend/utils/error/elog | 1,612 | 16 | 0.99% | 0 | 46.28% | 46.28% |
+| backend/utils/adt/arrayfuncs | 3,747 | 14 | 0.37% | 0 | 74.30% | 74.30% |
+| _support/seam_core | 90 | 11 | 12.22% | 0 | 22.22% | 22.22% |
+| backend/access/brin/brin_inclusion | 227 | 11 | 4.85% | 0 | 72.25% | 72.25% |
+| _support/types/types_brin | 143 | 10 | 6.99% | 0 | 80.42% | 81.82% |
+| backend/utils/adt/encode | 315 | 10 | 3.17% | 0 | 74.60% | 74.92% |
+| backend/libpq/pqformat | 180 | 6 | 3.33% | 0 | 70.00% | 70.00% |
+| backend/access/spgist/spgist_text | 331 | 5 | 1.51% | 0 | 93.05% | 93.05% |
+| backend/access/transam/multixact | 1,330 | 4 | 0.30% | 0 | 49.55% | 49.55% |
+| backend/timezone/pgtz | 226 | 4 | 1.77% | 0 | 74.78% | 74.78% |
+| backend/utils/misc/superuser | 26 | 4 | 15.38% | 0 | 96.15% | 96.15% |
+| backend/utils/fmgr/funcapi | 762 | 3 | 0.39% | 0 | 75.98% | 76.12% |
+| port/pg_strong_random | 59 | 2 | 3.39% | 0 | 11.86% | 11.86% |
+
+The other 786 crates have kani = 0 in this capture: either their proofs
+live in tiers/families not run here (CI-solved families are census-
+waived, so their zeros are marked UNMEASURED, not uncovered), or — for
+most of the tree (executor, planner, commands, catalog...) — no proof
+harness exists yet. The regress axis is the only instrument that reaches
+them; `verification-coverage.tsv` has every crate's row.
+
+### Superseded captures
+
+- 7-crate capture of 2026-07-30 (head 41ef1dd381, pre-instrument-fix
+  kani axis): preserved at `proofs/coverage/capture-20260730-7crate/`.
+- rf tree-wide regress+fuzz at its own tree: `proofs/coverage-rf/`.
 
 ## Scope
 
-Per `proofs/coverage/coverage-scope.txt`: the adt crates carrying the
-bulk of proved ledger rows plus the two fuzz-overlap crates —
-
-    geo, float, numeric, varlena, network, varbit, jsonb
-    (all under crates/backend/utils/adt/)
-
-Chosen because (a) they hold most `proved` rows in the function ledger,
-(b) the differential fuzz targets land in float + geo, so the scope can
-show all three sources overlapping, and (c) a bounded scope was mandated
-on a saturated build host. The regress and fuzz captures are whole-tree
-(the lcov inputs contain every instrumented crate); only the Kani runs
-and the per-file report grid are scope-bounded. `summary.json`'s
-`tree_touched` block reports the whole-tree regress/fuzz footprint.
+Full tree: every crate directory under `crates/` containing a
+`Cargo.toml` (`proofs/coverage/fulltree/scope-fulltree.txt`, regenerated
+at the capture sha). The Kani joblist is derived from `proofs/SUITE.tsv`
+(never from globs or from what happens to build); the rig lives in
+`proofs/coverage/fulltree/` (joblists, per-family censuses, banked
+kaniraw, drivers with checkpoint resume + single-driver lock).
 
 ## SLOC rule (the shared denominator)
 
@@ -170,34 +216,6 @@ all three sources (their covered-line sets are intersected with it), so
 the three percentages are comparable with each other. It is not a
 compiler-grade statement count; do not compare these percentages against
 numbers produced with a different rule.
-
-**ADOPTED (Michael, 2026-07-30): rule v2 with data tables excluded is the
-denominator of record** — `--sloc-rule v2 --exclude-const-tables` are the
-defaults in merge-coverage.py / recut-sloc.py / tree-sloc.py; v1 stays
-behind flags for comparability, and every excluded table span is published
-in `excluded-tables.json` for review. Adopted headline (this capture):
-SLOC 18,544 — any 84.50%, kani 6.98%, fuzz 2.65%, regress 83.22%; tree
-denominator 640,701. The v1 numbers throughout this file are the
-pre-ruling record. Details (`proofs/coverage/SLOC-RULE-V2.md`): v2 = v1
-minus the lines no instrument can meaningfully map — pure control-flow syntax (`} else {`,
-`loop {`, `unsafe {`, bodiless match-arm heads) AND declaration lines
-(`use`/`mod`, attributes incl. `#[derive]`, struct/enum/union definition
-lines, single-line consts/statics at any nesting depth, impl/trait
-headers, `thread_local!` blocks, `macro_rules!` scaffolding) — the
-classification every established coverage tool (llvm-cov line tables,
-gcov/lcov, coverage.py, Istanbul, JaCoCo) already embodies, and which
-under v1 read permanently uncovered. Every shape's verdict was measured
-on rustc 1.96 llvm output, not assumed; asserts (including
-`debug_assert!`, which stays mapped even with debug-assertions off) and
-macro template bodies stay. Under v2 the 7-crate `any` headline moves
-72.12% -> 81.09% (SLOC 21,986 -> 19,325; 2,475 permanently-red lines
-reclassified). `merge-coverage.py --sloc-rule v2` for captures,
-`recut-sloc.py` to re-cut ANY existing capture (including the full-tree
-run) as pure post-processing, `tree-sloc.py --sloc-rule v2` for the tree
-census (tree: 883,248 -> 779,276). The rule statement, the per-tool
-research, the per-shape measurement tables, the instrument line-table
-precedence, the rendered-output audit, and the generated-tables decision
-table live in SLOC-RULE-V2.md.
 
 Region-to-line mapping caveats:
 - Kani reports source **regions** (spans). Every SLOC line intersecting
@@ -383,23 +401,6 @@ before a capture, or the census will report kaniraw files it did not
 expect. Any harness that produced no coverage must appear in
 `--allow-unmeasured` with a reason, or the merge exits 3 and writes no
 summary.
-
-(`summary.json.head_sha` records the sha of the tree the instruments
-ran against; the scope crates at that sha are what the per-file line
-numbers refer to.)
-
-### 5. Viewer bundle
-
-    python3 tools/coverage-viewer/generate.py --from-real proofs/coverage
-
-Re-emits `tools/coverage-viewer/site/data/` (meta/summary/per-crate
-detail) from `proofs/coverage/`, cross-checking every per-file and
-total count against `summary.json` (it exits nonzero on any mismatch),
-and snapshots each scope source file at `head_sha` under
-`site/data/src/` so the file view's gutter marks stay aligned with the
-measured line numbers after the working tree drifts. View with
-`python3 -m http.server` from the repo root, then open
-`/tools/coverage-viewer/site/index.html`.
 
 ## summary.json schema (contract for the viewer)
 
