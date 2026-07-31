@@ -111,8 +111,14 @@ def main(out):
               "DecodeNumberField", "DecodeTimezone", "DecodeTimezoneAbbrev",
               "ClearTimeZoneAbbrevCache", "DecodeSpecial", "DecodeUnits",
               "DateTimeParseError", "datebsearch", "EncodeTimezone",
-              "EncodeDateOnly", "EncodeTimeOnly"]:
+              "EncodeDateOnly", "EncodeTimeOnly", "AppendTimestampSeconds",
+              "EncodeDateTime"]:
         sec(f"src/backend/utils/adt/datetime.c {f}", extract_fn(dt, f))
+
+    # timestamp.c ISO week/year calendar helpers (datetime_engine_diff target)
+    for f in ["isoweek2j", "isoweek2date", "isoweekdate2date", "date2isoweek",
+              "date2isoyear", "date2isoyearday"]:
+        sec(f"src/backend/utils/adt/timestamp.c {f}", extract_fn(ts, f))
 
     # datetime.c interval engine (interval_engine_diff target)
     for f in ["ClearPgItmIn", "int64_multiply_add", "AdjustFractMicroseconds",

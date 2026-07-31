@@ -1,8 +1,9 @@
 /*
  * Vendored PostgreSQL C: date / time / timetz text I/O + constructors +
- * part() — differential-fuzz oracle for the datetime_io_diff target
- * (100%-coverage campaign; crate crates/backend/utils/adt/adt_date, parse
- * engine crates/backend/utils/adt/adt_datetime).
+ * part() — differential-fuzz oracle for the datetime_io_diff,
+ * interval_engine_diff and datetime_engine_diff targets (100%-coverage
+ * campaign; crate crates/backend/utils/adt/adt_date, parse engine
+ * crates/backend/utils/adt/adt_datetime).
  *
  * Provenance (all bodies VERBATIM, extracted mechanically by
  * csrc/extract_verbatim.py into csrc/pg_datetime_verbatim.inc which this
@@ -22,11 +23,14 @@
  *     DecodeTimezoneAbbrev, DecodeSpecial, DecodeUnits, ValidateDate,
  *     DateTimeParseError, datebsearch, date2j/j2date/j2day, ParseFraction,
  *     ParseFractionalSecond, AppendSeconds, EncodeTimezone, EncodeDateOnly,
- *     EncodeTimeOnly, DetermineTimeZoneOffset(+Internal),
+ *     EncodeTimeOnly, AppendTimestampSeconds, EncodeDateTime,
+ *     DetermineTimeZoneOffset(+Internal),
  *     DetermineTimeZoneAbbrevOffset(+Internal), TimeZoneAbbrevIsKnown,
  *     ClearTimeZoneAbbrevCache, and the token tables datetktbl/deltatktbl/
  *     day_tab/months/days + lookup caches.
- *   - src/backend/utils/adt/timestamp.c: dt2time, GetEpochTime.
+ *   - src/backend/utils/adt/timestamp.c: dt2time, GetEpochTime, interval2itm,
+ *     and the ISO week/year calendar helpers isoweek2j, isoweek2date,
+ *     isoweekdate2date, date2isoweek, date2isoyear, date2isoyearday.
  *   - src/common/string.c: strtoint. src/backend/utils/adt/numutils.c:
  *     pg_ultostr, pg_ultostr_zeropad. src/backend/parser/scansup.c:
  *     downcase_truncate_identifier, downcase_identifier.
@@ -172,7 +176,8 @@ pg_leftmost_one_pos32(uint32 word)
 #define INTSTYLE_POSTGRES_VERBOSE	1
 #define INTSTYLE_SQL_STANDARD		2
 #define INTSTYLE_ISO_8601			3
-int			IntervalStyle = INTSTYLE_POSTGRES;
+/* _Thread_local for the same reason as DateStyle/DateOrder below. */
+_Thread_local int IntervalStyle = INTSTYLE_POSTGRES;
 
 /* ---- src/include/common/int.h overflow helpers — VERBATIM
  * (HAVE__BUILTIN_OP_OVERFLOW arms) ---- */
@@ -217,9 +222,20 @@ pg_neg_s32_overflow(int32 a, int32 *result)
 #endif
 }
 
-/* ---- GUC globals (globals.c) — set per exec by the driver entries ---- */
-int			DateStyle = USE_ISO_DATES;
-int			DateOrder = DATEORDER_MDY;
+/*
+ * ---- GUC globals (globals.c) — set per exec by the driver entries ----
+ *
+ * _Thread_local, not plain globals: these model per-backend GUC state, and
+ * pgrust is thread-per-backend, so the shipped Rust side holds them in
+ * thread_local! cells (adt_datetime/src/settings.rs). Process-global C copies
+ * were observably WRONG under the multi-threaded `cargo test` rails — one
+ * test's pg_dt_reset() clobbered another's style between its reset and its
+ * read, manufacturing "divergences" that were pure cross-test interference.
+ * (libFuzzer runs one thread per process, so no campaign verdict was affected;
+ * this makes the test rails trustworthy and matches the Rust storage class.)
+ */
+_Thread_local int DateStyle = USE_ISO_DATES;
+_Thread_local int DateOrder = DATEORDER_MDY;
 
 /* ---- error shims ---- */
 
@@ -553,6 +569,7 @@ static bool TimeZoneAbbrevIsKnown(const char *abbr, pg_tz *tzp,
 								  bool *isfixed, int *offset, int *isdst);
 static const datetkn *datebsearch(const char *key, const datetkn *base, int nel);
 static char *EncodeTimezone(char *str, int tz, int style);
+static char *AppendTimestampSeconds(char *cp, struct pg_tm *tm, fsec_t fsec);
 static int	ParseFraction(char *cp, double *frac);
 static int	ParseFractionalSecond(char *cp, fsec_t *fsec);
 
@@ -877,4 +894,77 @@ pg_diff_encode_interval(int64 time, int32 day, int32 month, int istyle,
 	*itm_year = itm.tm_year;
 	EncodeInterval(&itm, istyle, buf);
 	return 0;
+}
+
+/*
+ * ---- datetime_engine_diff entries (EncodeDateTime + ISO week/year) ----
+ *
+ * EncodeDateTime's only SQL callers (timestamp_out/timestamptz_out) live in
+ * adt_timestamp, which this campaign lane has not claimed, so it is compared
+ * at the engine level: the pg_tm is staged FIELD BY FIELD from the fuzz input
+ * (identically on both sides) and handed to both encoders. tm_mon is fenced
+ * to 1..MONTHS_PER_YEAR by the driver, which is EncodeDateTime's own declared
+ * contract (datetime.c:4468 `Assert(tm->tm_mon >= 1 && tm->tm_mon <=
+ * MONTHS_PER_YEAR)`) — outside it C indexes months[]/days[] out of bounds.
+ */
+int
+pg_diff_encode_datetime(int32 year, int32 mon, int32 mday,
+						int32 hour, int32 min, int32 sec, int32 isdst,
+						int64 fsec, int print_tz, int32 tz, const char *tzn,
+						int style, int order, char *buf, int32 *out_wday)
+{
+	struct pg_tm tm;
+
+	pg_dt_reset(style, order);
+	if (setjmp(pg_dt_jmp))
+		return pg_diff_errcode;
+	memset(&tm, 0, sizeof(tm));
+	tm.tm_year = year;
+	tm.tm_mon = mon;
+	tm.tm_mday = mday;
+	tm.tm_hour = hour;
+	tm.tm_min = min;
+	tm.tm_sec = sec;
+	tm.tm_isdst = isdst;
+	EncodeDateTime(&tm, fsec, print_tz ? true : false, tz, tzn, style, buf);
+	/* the USE_POSTGRES_DATES arm writes tm_wday back — a compared field */
+	*out_wday = tm.tm_wday;
+	return 0;
+}
+
+int
+pg_diff_date2isoweek(int32 year, int32 mon, int32 mday)
+{
+	return date2isoweek(year, mon, mday);
+}
+
+int
+pg_diff_date2isoyear(int32 year, int32 mon, int32 mday)
+{
+	return date2isoyear(year, mon, mday);
+}
+
+int
+pg_diff_date2isoyearday(int32 year, int32 mon, int32 mday)
+{
+	return date2isoyearday(year, mon, mday);
+}
+
+int
+pg_diff_isoweek2j(int32 year, int32 week)
+{
+	return isoweek2j(year, week);
+}
+
+void
+pg_diff_isoweek2date(int32 woy, int32 *year, int32 *mon, int32 *mday)
+{
+	isoweek2date(woy, (int *) year, (int *) mon, (int *) mday);
+}
+
+void
+pg_diff_isoweekdate2date(int32 isoweek, int32 wday,
+						 int32 *year, int32 *mon, int32 *mday)
+{
+	isoweekdate2date(isoweek, wday, (int *) year, (int *) mon, (int *) mday);
 }

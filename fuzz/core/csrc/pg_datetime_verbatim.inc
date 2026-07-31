@@ -3165,6 +3165,334 @@ EncodeTimeOnly(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, int style, 
 	*str = '\0';
 }
 
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c AppendTimestampSeconds ==== */
+
+static char *
+AppendTimestampSeconds(char *cp, struct pg_tm *tm, fsec_t fsec)
+{
+	return AppendSeconds(cp, tm->tm_sec, fsec, MAX_TIMESTAMP_PRECISION, true);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/datetime.c EncodeDateTime ==== */
+
+void
+EncodeDateTime(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, const char *tzn, int style, char *str)
+{
+	int			day;
+
+	Assert(tm->tm_mon >= 1 && tm->tm_mon <= MONTHS_PER_YEAR);
+
+	/*
+	 * Negative tm_isdst means we have no valid time zone translation.
+	 */
+	if (tm->tm_isdst < 0)
+		print_tz = false;
+
+	switch (style)
+	{
+		case USE_ISO_DATES:
+		case USE_XSD_DATES:
+			/* Compatible with ISO-8601 date formats */
+			str = pg_ultostr_zeropad(str,
+									 (tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
+			*str++ = '-';
+			str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
+			*str++ = '-';
+			str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
+			*str++ = (style == USE_ISO_DATES) ? ' ' : 'T';
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
+			*str++ = ':';
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
+			*str++ = ':';
+			str = AppendTimestampSeconds(str, tm, fsec);
+			if (print_tz)
+				str = EncodeTimezone(str, tz, style);
+			break;
+
+		case USE_SQL_DATES:
+			/* Compatible with Oracle/Ingres date formats */
+			if (DateOrder == DATEORDER_DMY)
+			{
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
+				*str++ = '/';
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
+			}
+			else
+			{
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
+				*str++ = '/';
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
+			}
+			*str++ = '/';
+			str = pg_ultostr_zeropad(str,
+									 (tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
+			*str++ = ' ';
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
+			*str++ = ':';
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
+			*str++ = ':';
+			str = AppendTimestampSeconds(str, tm, fsec);
+
+			/*
+			 * Note: the uses of %.*s in this function would be risky if the
+			 * timezone names ever contain non-ASCII characters, since we are
+			 * not being careful to do encoding-aware clipping.  However, all
+			 * TZ abbreviations in the IANA database are plain ASCII.
+			 */
+			if (print_tz)
+			{
+				if (tzn)
+				{
+					sprintf(str, " %.*s", MAXTZLEN, tzn);
+					str += strlen(str);
+				}
+				else
+					str = EncodeTimezone(str, tz, style);
+			}
+			break;
+
+		case USE_GERMAN_DATES:
+			/* German variant on European style */
+			str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
+			*str++ = '.';
+			str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
+			*str++ = '.';
+			str = pg_ultostr_zeropad(str,
+									 (tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
+			*str++ = ' ';
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
+			*str++ = ':';
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
+			*str++ = ':';
+			str = AppendTimestampSeconds(str, tm, fsec);
+
+			if (print_tz)
+			{
+				if (tzn)
+				{
+					sprintf(str, " %.*s", MAXTZLEN, tzn);
+					str += strlen(str);
+				}
+				else
+					str = EncodeTimezone(str, tz, style);
+			}
+			break;
+
+		case USE_POSTGRES_DATES:
+		default:
+			/* Backward-compatible with traditional Postgres abstime dates */
+			day = date2j(tm->tm_year, tm->tm_mon, tm->tm_mday);
+			tm->tm_wday = j2day(day);
+			memcpy(str, days[tm->tm_wday], 3);
+			str += 3;
+			*str++ = ' ';
+			if (DateOrder == DATEORDER_DMY)
+			{
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
+				*str++ = ' ';
+				memcpy(str, months[tm->tm_mon - 1], 3);
+				str += 3;
+			}
+			else
+			{
+				memcpy(str, months[tm->tm_mon - 1], 3);
+				str += 3;
+				*str++ = ' ';
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
+			}
+			*str++ = ' ';
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
+			*str++ = ':';
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
+			*str++ = ':';
+			str = AppendTimestampSeconds(str, tm, fsec);
+			*str++ = ' ';
+			str = pg_ultostr_zeropad(str,
+									 (tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
+
+			if (print_tz)
+			{
+				if (tzn)
+				{
+					sprintf(str, " %.*s", MAXTZLEN, tzn);
+					str += strlen(str);
+				}
+				else
+				{
+					/*
+					 * We have a time zone, but no string version. Use the
+					 * numeric form, but be sure to include a leading space to
+					 * avoid formatting something which would be rejected by
+					 * the date/time parser later. - thomas 2001-10-19
+					 */
+					*str++ = ' ';
+					str = EncodeTimezone(str, tz, style);
+				}
+			}
+			break;
+	}
+
+	if (tm->tm_year <= 0)
+	{
+		memcpy(str, " BC", 3);	/* Don't copy NUL */
+		str += 3;
+	}
+	*str = '\0';
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c isoweek2j ==== */
+
+int
+isoweek2j(int year, int week)
+{
+	int			day0,
+				day4;
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	return ((week - 1) * 7) + (day4 - day0);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c isoweek2date ==== */
+
+void
+isoweek2date(int woy, int *year, int *mon, int *mday)
+{
+	j2date(isoweek2j(*year, woy), year, mon, mday);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c isoweekdate2date ==== */
+
+void
+isoweekdate2date(int isoweek, int wday, int *year, int *mon, int *mday)
+{
+	int			jday;
+
+	jday = isoweek2j(*year, isoweek);
+	/* convert Gregorian week start (Sunday=1) to ISO week start (Monday=1) */
+	if (wday > 1)
+		jday += wday - 2;
+	else
+		jday += 6;
+	j2date(jday, year, mon, mday);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c date2isoweek ==== */
+
+int
+date2isoweek(int year, int mon, int mday)
+{
+	float8		result;
+	int			day0,
+				day4,
+				dayn;
+
+	/* current day */
+	dayn = date2j(year, mon, mday);
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	/*
+	 * We need the first week containing a Thursday, otherwise this day falls
+	 * into the previous year for purposes of counting weeks
+	 */
+	if (dayn < day4 - day0)
+	{
+		day4 = date2j(year - 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+	}
+
+	result = (dayn - (day4 - day0)) / 7 + 1;
+
+	/*
+	 * Sometimes the last few days in a year will fall into the first week of
+	 * the next year, so check for this.
+	 */
+	if (result >= 52)
+	{
+		day4 = date2j(year + 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		if (dayn >= day4 - day0)
+			result = (dayn - (day4 - day0)) / 7 + 1;
+	}
+
+	return (int) result;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c date2isoyear ==== */
+
+int
+date2isoyear(int year, int mon, int mday)
+{
+	float8		result;
+	int			day0,
+				day4,
+				dayn;
+
+	/* current day */
+	dayn = date2j(year, mon, mday);
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	/*
+	 * We need the first week containing a Thursday, otherwise this day falls
+	 * into the previous year for purposes of counting weeks
+	 */
+	if (dayn < day4 - day0)
+	{
+		day4 = date2j(year - 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		year--;
+	}
+
+	result = (dayn - (day4 - day0)) / 7 + 1;
+
+	/*
+	 * Sometimes the last few days in a year will fall into the first week of
+	 * the next year, so check for this.
+	 */
+	if (result >= 52)
+	{
+		day4 = date2j(year + 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		if (dayn >= day4 - day0)
+			year++;
+	}
+
+	return year;
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c date2isoyearday ==== */
+
+int
+date2isoyearday(int year, int mon, int mday)
+{
+	return date2j(year, mon, mday) - isoweek2j(date2isoyear(year, mon, mday), 1) + 1;
+}
+
 /* ==== VERBATIM: src/backend/utils/adt/datetime.c ClearPgItmIn ==== */
 
 static inline void
