@@ -268,26 +268,10 @@ fn read_varlena_data<'a>(d: Datum) -> &'a [u8] {
     unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data()
 }
 
-/// KNOWN-DIVERGENCE-2 carve (fuzz/DIVERGENCES-tsvector_core.md): position
-/// numbers >= 2^31 wrap through C's atoi but saturate in Rust. Skip inputs
-/// carrying any digit-run above the int32 range until adjudicated.
-fn has_overflowing_number(text: &[u8]) -> bool {
-    let mut val: u64 = 0;
-    let mut in_run = false;
-    for &b in text {
-        if b.is_ascii_digit() {
-            val = if in_run { val.saturating_mul(10) } else { 0 }
-                .saturating_add((b - b'0') as u64);
-            in_run = true;
-            if val > i32::MAX as u64 {
-                return true;
-            }
-        } else {
-            in_run = false;
-        }
-    }
-    false
-}
+// DIVERGENCE-2 carve RETIRED 2026-07-31: adjudicated pgrust-bug and FIXED in
+// parser.rs (C atoi wrap semantics reproduced exactly; ground-truthed on
+// postgres:18.3 — 'b:20069458489'::tsvector = 'b':8761). Position digit-runs
+// of every magnitude are back on the strict image plane.
 
 /// UTF-8 + NUL-free text gate (server cstring precondition; header comment).
 fn take_text(payload: &[u8]) -> Option<(&[u8], CString)> {
@@ -295,9 +279,6 @@ fn take_text(payload: &[u8]) -> Option<(&[u8], CString)> {
         return None;
     }
     std::str::from_utf8(payload).ok()?;
-    if has_overflowing_number(payload) {
-        return None;
-    }
     let c = CString::new(payload).unwrap();
     Some((payload, c))
 }
@@ -502,14 +483,25 @@ fn arm_recv(payload: &[u8]) {
     assert_ne!(crc, -2, "C output buffer overflow: harness bug");
     match (&rres, crc) {
         (Ok(rimg), 0) => {
-            // KNOWN-DIVERGENCE-1 (fuzz/DIVERGENCES-tsvector_core.md): on the
-            // unsorted-wire (needSort) path C sorts the WordEntry array IN
-            // PLACE (lexeme storage keeps wire order); Rust REBUILDS storage
-            // in sorted order. Datum bytes differ; decoded content must not.
+            // KNOWN-DIVERGENCE-1 FIXED 2026-07-31 (io.rs needSort now sorts
+            // entry words in place, storage keeps wire order — C parity,
+            // ground-truthed via binary COPY + pageinspect). STRICT image
+            // plane, with ONE remaining ratified non-surface: within-tie
+            // entry order for DUPLICATE lexemes (C qsort_arg unstable vs
+            // Rust sort_unstable — different unstable algorithms). On byte
+            // mismatch require (a) sorted-multiset equality AND (b) the
+            // decoded content actually contains duplicate lexemes.
             if rimg[..] != *cout.bytes() {
+                let dup = {
+                    let v = TsVec { payload: rimg };
+                    let mut lex: Vec<&[u8]> =
+                        (0..v.size()).map(|i| v.lexeme(v.entry(i))).collect();
+                    lex.sort();
+                    lex.windows(2).any(|w| w[0] == w[1])
+                };
                 assert!(
-                    tsvec_semantic_eq(rimg, cout.bytes()),
-                    "tsvectorrecv SEMANTIC divergence (beyond known layout skew): rust {:02x?} vs C {:02x?} (wire {:02x?})",
+                    dup && tsvec_semantic_eq(rimg, cout.bytes()),
+                    "tsvectorrecv divergence (beyond duplicate-lexeme tie order): rust {:02x?} vs C {:02x?} (wire {:02x?})",
                     rimg, cout.bytes(), payload
                 );
             }

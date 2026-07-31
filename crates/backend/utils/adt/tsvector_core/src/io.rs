@@ -274,22 +274,37 @@ pub fn tsvector_recv_core<'mcx>(
     if !needs_sort {
         return b.finish(mcx);
     }
-    // Rare wire case: rebuild via sort on a decoded view.
-    let img = b.finish(mcx)?;
-    let v = TsVec { payload: &img[4..] };
-    let mut idx: PgVec<usize> = vec_with_capacity_in(mcx, v.size())?;
-    idx.extend(0..v.size());
-    idx.sort_by(|&a, &bb| {
-        match ts_compare_string(v.lexeme(v.entry(a)), v.lexeme(v.entry(bb)), false) {
+    // Rare wire case — C (tsvector.c:550-552): qsort_arg over ONLY the
+    // WordEntry array (compareentry against STRPTR); the lexeme/position
+    // STORAGE keeps wire order. Ground-truthed on postgres:18.3 via binary
+    // COPY + pageinspect 2026-07-31: entries sorted, storage in wire order.
+    // Within-tie order for DUPLICATE lexemes is qsort-implementation-defined
+    // in C (unstable) — ratified non-surface, sorted-multiset gate on the
+    // harness side (GL-PARMERGE-1 precedent).
+    let mut img = b.finish(mcx)?;
+    let n = {
+        let v = TsVec { payload: &img[4..] };
+        v.size()
+    };
+    const ENTRIES_AT: usize = 8; // 4B header pad + 4B size, then entries
+    let str_at = ENTRIES_AT + n * 4;
+    let mut entries: PgVec<WordEntry> = vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let off = ENTRIES_AT + i * 4;
+        entries.push(WordEntry(u32::from_ne_bytes(img[off..off + 4].try_into().unwrap())));
+    }
+    entries.sort_unstable_by(|&ea, &eb| {
+        let la = &img[str_at + ea.pos()..str_at + ea.pos() + ea.len()];
+        let lb = &img[str_at + eb.pos()..str_at + eb.pos() + eb.len()];
+        match ts_compare_string(la, lb, false) {
             n if n < 0 => core::cmp::Ordering::Less,
             0 => core::cmp::Ordering::Equal,
             _ => core::cmp::Ordering::Greater,
         }
     });
-    let mut b2 = TsVecBuilder::with_capacity(mcx, v.size(), img.len())?;
-    for &i in &idx {
-        let e = v.entry(i);
-        b2.push_raw(v.lexeme(e), v.posblock(e))?;
+    for (i, e) in entries.iter().enumerate() {
+        let off = ENTRIES_AT + i * 4;
+        img[off..off + 4].copy_from_slice(&e.0.to_ne_bytes());
     }
-    b2.finish(mcx)
+    Ok(img)
 }

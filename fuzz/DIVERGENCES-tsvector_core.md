@@ -72,3 +72,35 @@ binary input without dedup — the result violates the ts_type.h sortedness
 Harness handling: the recv semantic plane is a SORTED-MULTISET gate over
 (lexeme, positions) pairs (GL-PARMERGE-1 within-tie precedent); position
 LISTS stay order-strict.
+
+---
+
+## ADJUDICATION (lane coordinator, 2026-07-31 — Docker postgres:18.3, Debian aarch64)
+
+- **DIVERGENCE-2: CONFIRMED pgrust-bug, FIXED.** Real PG 18.3:
+  `SELECT 'b:20069458489'::tsvector` → `'b':8761`;
+  `'a b:89,00020069458489'` → `'a' 'b':89,8761`. pgrust saturated to 16383.
+  Fix: parser.rs InPosInfo now reproduces `(int)strtol` exactly (i64
+  saturating accumulate = strtol LONG_MAX saturation, truncating cast to
+  i32 = the (int) wrap, signed LIMITPOS, 14-bit mask). Regression tests
+  `tsvector_position_atoi_wrap` + corpus seeds `seed-regr-atoi-*`
+  (incl. `b:4294967296` → wrong-position error, `b:99…9`(20 digits) →
+  strtol-saturation band → 16383). Harness carve `has_overflowing_number`
+  RETIRED — strict image plane restored. Same atoi shape flagged to
+  p1-laneaf for the tsquery parser.
+- **KNOWN-DIVERGENCE-1: CONFIRMED pgrust representation bug, FIXED.**
+  Ground-truth: binary-COPY'd the unsorted wire message into postgres:18.3,
+  read the tuple with pageinspect: datum = entries SORTED (aa→pos2, bb→pos0),
+  storage in WIRE order (`"bbaa"`). pgrust rebuilt storage sorted. Fix:
+  io.rs tsvector_recv_core needSort path now sorts ONLY the WordEntry words
+  in place (C tsvector.c:550-552 parity). Regression test
+  `tsvector_recv_needsort_storage_wire_order` + seed
+  `seed-regr-needsort-wireorder`. Harness recv plane tightened to strict
+  image compare.
+- **DIVERGENCE-1b: RATIFIED NON-SURFACE (carve stands, narrowed).** Within-tie
+  entry order for DUPLICATE lexemes on the needSort path: C qsort_arg vs
+  Rust sort_unstable are different unstable algorithms; GL-PARMERGE-1
+  within-tie precedent. Harness now requires byte-equality UNLESS the
+  decoded content has duplicate lexemes AND the sorted-multiset gate passes.
+  (Duplicate lexemes from binary input violate the sortedness/uniqueness
+  contract identically in both engines — upstream-parity.)

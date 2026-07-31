@@ -134,3 +134,42 @@ fn match_single_operand() {
     };
     assert!(!ts_match_vq_core(mcx, v, empty_q).unwrap());
 }
+
+// Regression: C atoi wrap semantics on tsvector positions (DIVERGENCE-2,
+// p1-laneae; ground-truthed postgres:18.3 2026-07-31).
+#[test]
+fn tsvector_position_atoi_wrap() {
+    // (int)20069458489 wraps negative; & 0x3fff = 8761 (real PG: 'b':8761).
+    assert_eq!(roundtrip("b:20069458489"), "'b':8761");
+    assert_eq!(roundtrip("a b:89,00020069458489"), "'a' 'b':89,8761");
+    // (int)4294967296 == 0 -> "wrong position info" error, exactly as C.
+    assert!(parse_err("b:4294967296").starts_with("wrong position info"));
+    // strtol saturation band (>= 2^63): LONG_MAX -> (int)-1 -> & 0x3fff = 16383.
+    assert_eq!(roundtrip("b:99999999999999999999"), "'b':16383");
+    // Plain clamp band stays: 16384..2^31-1 -> 16383.
+    assert_eq!(roundtrip("b:16384"), "'b':16383");
+    assert_eq!(roundtrip("b:2147483647"), "'b':16383");
+}
+
+// Regression: recv needSort keeps STORAGE in wire order, sorts entries only
+// (KNOWN-DIVERGENCE-1; ground-truthed via binary COPY + pageinspect).
+#[test]
+fn tsvector_recv_needsort_storage_wire_order() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    // wire: nentries=2, "bb" (npos 0), "aa" (npos 0) — out of order.
+    let wire: &[u8] = &[0, 0, 0, 2, b'b', b'b', 0, 0, 0, b'a', b'a', 0, 0, 0];
+    let mut vec = ::mcx::vec_with_capacity_in::<u8>(mcx, wire.len()).expect("cap");
+    ::mcx::vec_append_bytes(&mut vec, wire).expect("append");
+    let mut buf = ::stringinfo::StringInfo::from_vec(vec).expect("si");
+    let img = crate::io::tsvector_recv_core(mcx, &mut buf).expect("recv ok");
+    let v = TsVec { payload: &img[4..] };
+    assert_eq!(v.size(), 2);
+    // entries sorted: aa first...
+    assert_eq!(v.lexeme(v.entry(0)), b"aa");
+    assert_eq!(v.lexeme(v.entry(1)), b"bb");
+    // ...but storage keeps wire order "bbaa" (C parity: entry(aa).pos = 2).
+    assert_eq!(v.entry(0).pos(), 2);
+    assert_eq!(v.entry(1).pos(), 0);
+    assert_eq!(v.strdata(), b"bbaa");
+}

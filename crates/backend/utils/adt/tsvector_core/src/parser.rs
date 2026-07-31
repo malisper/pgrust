@@ -3,7 +3,9 @@ use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_SYNTAX_ERROR,
 };
 
-use crate::layout::{limitpos, wep_getpos, wep_getweight, wep_setpos, wep_setweight, WordEntryPos};
+use crate::layout::{
+    wep_getpos, wep_getweight, wep_setpos, wep_setweight, WordEntryPos, MAXENTRYPOS,
+};
 
 pub const P_TSV_OPR_IS_DELIM: i32 = 1 << 0;
 pub const P_TSV_IS_TSQUERY: i32 = 1 << 1;
@@ -211,14 +213,29 @@ impl<'s, 'e, 'mcx> TsvParser<'s, 'e, 'mcx> {
                 }
                 St::InPosInfo => {
                     if !self.at_end() && c.is_ascii_digit() {
-                        let mut v: u32 = 0;
+                        // C (tsvector_parser.c:329): WEP_SETPOS(pos, LIMITPOS(atoi(buf))).
+                        // atoi = (int)strtol: strtol saturates at LONG_MAX on
+                        // overflow, then the (int) cast TRUNCATES (wraps) —
+                        // ground-truthed on postgres:18.3 2026-07-31:
+                        // 'b:20069458489'::tsvector = 'b':8761. LIMITPOS is a
+                        // SIGNED int compare, so wrapped-negative values pass
+                        // through and WEP_SETPOS keeps their low 14 bits.
+                        let mut v: i64 = 0;
                         let mut i = self.off;
                         while i < self.input.len() && self.input[i].is_ascii_digit() {
-                            v = v.saturating_mul(10).saturating_add((self.input[i] - b'0') as u32);
+                            v = v
+                                .saturating_mul(10)
+                                .saturating_add((self.input[i] - b'0') as i64);
                             i += 1;
                         }
+                        let vi = v as i32; // C (int) cast: truncating
+                        let clamped: u16 = if vi >= MAXENTRYPOS as i32 {
+                            (MAXENTRYPOS - 1) as u16
+                        } else {
+                            vi as u16 // WEP_SETPOS masks to 14 bits below
+                        };
                         let mut p: WordEntryPos = 0;
-                        wep_setpos(&mut p, limitpos(v));
+                        wep_setpos(&mut p, clamped);
                         if wep_getpos(p) == 0 {
                             return ereturn(
                                 self.esc.as_deref_mut(),
