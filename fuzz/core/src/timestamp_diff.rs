@@ -974,6 +974,22 @@ fn ts_recv_arm(payload: &[u8]) {
         adt_timestamp::timestamp_recv(&mut si, typmod)
     };
     check_i64("timestamp_recv", cerr, cval, &r);
+
+    // fc plane: recv wrappers take the live StringInfo pointer (recv ABI).
+    let mut vec2 = mcx::PgVec::new_in(cx.mcx());
+    vec2.try_reserve_exact(wire.len() + 1).unwrap();
+    vec2.extend_from_slice(wire);
+    let mut si2 = stringinfo::StringInfo::from_vec(vec2).unwrap();
+    let f: PGFunction = if tz == 1 { tsb::fc_timestamptz_recv } else { tsb::fc_timestamp_recv };
+    let fc = fc_call(
+        f,
+        [
+            Datum::from_usize(&mut si2 as *mut _ as usize),
+            Datum::from_i32(0),
+            Datum::from_i32(typmod),
+        ],
+    );
+    fc_check_i64("timestamp_recv", &r, fc);
 }
 
 fn ts_send_arm(payload: &[u8]) {
@@ -994,6 +1010,16 @@ fn ts_send_arm(payload: &[u8]) {
         cw,
         b.data()
     );
+
+    // fc plane: wrapper's varlena payload equals the core image.
+    let fc = fc_call(tsb::fc_timestamp_send, [Datum::from_i64(ts)]);
+    let d = fc.0.expect("fc_timestamp_send cannot fail");
+    // SAFETY: live 4B-header varlena in the fc-call context.
+    let hdr = unsafe { std::slice::from_raw_parts(d.as_usize() as *const u8, 4) };
+    let vlen = (u32::from_le_bytes(hdr.try_into().unwrap()) >> 2) as usize;
+    // SAFETY: payload follows the header.
+    let pay = unsafe { std::slice::from_raw_parts((d.as_usize() + 4) as *const u8, vlen - 4) };
+    assert!(pay == cw, "timestamp_send FC-PLANE image mismatch");
 }
 
 fn interval_recv_arm(payload: &[u8]) {
