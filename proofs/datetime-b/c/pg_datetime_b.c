@@ -3810,3 +3810,17 @@ pg_hlp_check_date_token_tables(void)
 {
 	return CheckDateTokenTables() ? 1 : 0;
 }
+
+int
+pg_hlp_float_time_overflows(int hour, int min, double sec)
+{
+	return pg_float_time_overflows(hour, min, sec) ? 1 : 0;
+}
+
+int
+pg_hlp_check_date_token_table_one(int which)
+{
+	if (which == 0)
+		return CheckDateTokenTable("datetktbl", datetktbl, szdatetktbl) ? 1 : 0;
+	return CheckDateTokenTable("deltatktbl", deltatktbl, szdeltatktbl) ? 1 : 0;
+}

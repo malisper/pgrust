@@ -3191,7 +3191,8 @@ mod hlp {
         DateTkn, DTK_M, INTERVAL_MASK, IS_VALID_JULIAN, MICROSECOND, MILLISECOND, SECOND,
     };
     use adt_datetime::decode::{
-        datebsearch, dt2time, time_overflows, CheckDateTokenTables, DecodeSpecial, DecodeUnits,
+        datebsearch, dt2time, float_time_overflows, time_overflows, CheckDateTokenTable,
+        CheckDateTokenTables, DecodeSpecial, DecodeUnits,
     };
     use adt_datetime::tables::{DATETKTBL, DELTATKTBL};
     use std::os::raw::{c_char, c_int};
@@ -3223,6 +3224,8 @@ mod hlp {
         fn pg_hlp_decode_special(field: c_int, lowtoken: *const c_char, val: *mut c_int) -> c_int;
         fn pg_hlp_decode_units(field: c_int, lowtoken: *const c_char, val: *mut c_int) -> c_int;
         fn pg_hlp_check_date_token_tables() -> c_int;
+        fn pg_hlp_check_date_token_table_one(which: c_int) -> c_int;
+        fn pg_hlp_float_time_overflows(hour: c_int, min: c_int, sec: f64) -> c_int;
     }
 
     /// Full valid shift domain (see module header) + the composite masks.
@@ -3587,9 +3590,92 @@ mod hlp {
         assert!(unsafe { pg_hlp_check_date_token_tables() } == 1);
     }
 
+    /// Per-table variant: each SHIPPED table individually (the composite
+    /// row above ANDs them, so a single-table regression could in principle
+    /// hide behind the other's verdict).
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn check_date_token_table_one_concrete() {
+        assert!(CheckDateTokenTable(&DATETKTBL));
+        assert!(unsafe { pg_hlp_check_date_token_table_one(0) } == 1);
+        assert!(CheckDateTokenTable(&DELTATKTBL));
+        assert!(unsafe { pg_hlp_check_date_token_table_one(1) } == 1);
+    }
+
+    /// float_time_overflows int-field plane: hour/min FULL symbolic with
+    /// `sec` pinned to a literal cell, so the rint(sec * USECS_PER_SEC)
+    /// 53-bit face stays concrete while every integer range arm and the
+    /// (hour*60+min)*60*1e6 total-time arm is quantified. Literal pins, not
+    /// assume-pins: a symbolic-index concrete grid folds per cell.
+    #[kani::proof]
+    fn eq_float_time_overflows_intfields() {
+        const SECS: &[f64] = &[0.0, 1.0, 59.999999, 60.0, 60.000001, -0.0000001, 0.5];
+        let idx: usize = kani::any();
+        kani::assume(idx < SECS.len());
+        let sec = SECS[idx];
+        let (h, m): (i32, i32) = (kani::any(), kani::any());
+        assert!(
+            float_time_overflows(h, m, sec)
+                == (unsafe { pg_hlp_float_time_overflows(h, m, sec) } != 0)
+        );
+    }
+
+    /// float_time_overflows `sec` plane: concrete (hour, min) cells x a
+    /// literal `sec` grid covering NaN, both infinities, the rint
+    /// ties-to-even boundary, the 60s cap and negative underflow. FULL
+    /// symbolic f64 `sec` is a 53-bit WALL per TRIAGE (rint over a
+    /// symbolic double); the datetime_io_diff CGF target owns the bulk
+    /// domain (make_time / make_timestamp arms).
+    #[kani::proof]
+    fn eq_float_time_overflows_sec_cells() {
+        const SECS: &[f64] = &[
+            0.0,
+            -0.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0000005,
+            0.0000015,
+            59.9999995,
+            60.0,
+            60.0000004,
+            60.0000005,
+            -1.0,
+            -0.0000004,
+            86400.0,
+            1e300,
+        ];
+        let si: usize = kani::any();
+        kani::assume(si < SECS.len());
+        let sec = SECS[si];
+        let cell: u8 = kani::any();
+        kani::assume(cell < 4);
+        let (h, m) = match cell {
+            0 => (0, 0),
+            1 => (24, 0),
+            2 => (23, 59),
+            _ => (24, 59),
+        };
+        assert!(
+            float_time_overflows(h, m, sec)
+                == (unsafe { pg_hlp_float_time_overflows(h, m, sec) } != 0)
+        );
+    }
+
     /// Negative control (MUST FAIL, default solver): j2day off-by-one skew.
     #[kani::proof]
     fn control_hlp_j2day_skew() {
         assert!(j2day(5) == unsafe { pg_hlp_j2day(5) } + 1);
+    }
+
+    /// Negative control (MUST FAIL): float_time_overflows with the `sec`
+    /// rounding cell shifted one ulp-class, proving the sec plane above is
+    /// not vacuous (its verdict does depend on the pinned value).
+    #[kani::proof]
+    fn control_hlp_float_time_overflows_sec_skew() {
+        assert!(
+            float_time_overflows(24, 0, 60.0000005)
+                == (unsafe { pg_hlp_float_time_overflows(24, 0, 0.0) } != 0)
+        );
     }
 }
