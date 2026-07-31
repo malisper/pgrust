@@ -140,12 +140,19 @@ fn b64_family(payload: &[u8]) {
         "pg_b64_decode DIVERGENCE input={payload:?}: rust rc={rn} c rc={cn}"
     );
 
-    // Round-trip decode of the encoded form (valid-path corpus pressure).
-    if rn >= 0 {
-        // already compared; nothing further
+    // Decode, short dst: the three per-byte overflow arms error + zero dst
+    // on both sides (reachable only when dstlen < dec_len).
+    if rn > 0 {
+        let short = rn - 1;
+        let mut r_dst = vec![0xAAu8; short as usize];
+        let mut c_dst = vec![0xAAu8; short as usize];
+        let rs = pg_b64::pg_b64_decode(payload, len, &mut r_dst, short);
+        let cs = unsafe { pg_hashenc_b64_decode(payload.as_ptr(), len, c_dst.as_mut_ptr(), short) };
+        assert!(
+            rs == cs && rs == -1 && r_dst == c_dst,
+            "pg_b64_decode short-dst DIVERGENCE input={payload:?}: rust rc={rs} c rc={cs}"
+        );
     }
-    let enc = &r_dst; // silence unused when dcap==0
-    let _ = enc;
 }
 
 fn md5_family(payload: &[u8]) {
@@ -442,6 +449,34 @@ fn to_ascii_family(payload: &[u8]) {
     }
 }
 
+/// fc_to_ascii_default: GetDatabaseEncoding() is session state (default
+/// PG_UTF8 in-harness -> C's FEATURE_NOT_SUPPORTED arm); checked as
+/// self-consistency against the enc-parameterized oracle at the same
+/// resolved encoding (see module-header carve).
+fn to_ascii_default_family(payload: &[u8]) {
+    if payload.contains(&0) {
+        return;
+    }
+    let ctx = MemoryContext::new("hashenc");
+    let img = image(payload);
+    let enc = mbutils::GetDatabaseEncoding();
+    let mut c_out = vec![0u8; payload.len()];
+    let c_rc = unsafe { pg_hashenc_to_ascii(payload.as_ptr(), payload.len(), c_out.as_mut_ptr(), enc) };
+    match call1(adt_ascii::fc_to_ascii_default, &ctx, &img) {
+        Ok(d) => {
+            let out = unsafe { varlena_bytes(d) };
+            assert!(c_rc == 0, "fc_to_ascii_default verdict DIVERGENCE enc={enc}");
+            assert_eq!(out, &c_out[..], "fc_to_ascii_default DIVERGENCE enc={enc}");
+        }
+        Err(e) => {
+            assert!(
+                c_rc == 1 && e.sqlstate == ERRCODE_FEATURE_NOT_SUPPORTED,
+                "fc_to_ascii_default error-plane DIVERGENCE enc={enc}"
+            );
+        }
+    }
+}
+
 fn strlcpy_family(payload: &[u8]) {
     let Some((&szb, src)) = payload.split_first() else { return };
     let destsiz = (szb as usize) % 40;
@@ -486,7 +521,11 @@ pub fn hashenc_diff(data: &[u8]) {
         4..=8 => sha_family(sel, payload),
         9 | 10 => hmac_family(payload),
         11 => scram_family(payload),
-        12 | 13 => to_ascii_family(payload),
+        12 => to_ascii_family(payload),
+        13 => {
+            to_ascii_family(payload);
+            to_ascii_default_family(payload);
+        }
         14 => strlcpy_family(payload),
         _ => crc_family(payload),
     }
@@ -495,6 +534,23 @@ pub fn hashenc_diff(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CI replay rail: every committed corpus unit replays clean through the
+    /// differential on stable (the banked corpus is the regression suite —
+    /// any C/Rust divergence or harness panic fails this test per-commit).
+    #[test]
+    fn hashenc_corpus_replay() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/hashenc_diff");
+        let mut n = 0usize;
+        for entry in std::fs::read_dir(dir).expect("committed corpus present") {
+            let p = entry.unwrap().path();
+            if p.is_file() {
+                hashenc_diff(&std::fs::read(&p).unwrap());
+                n += 1;
+            }
+        }
+        assert!(n > 500, "corpus unexpectedly small: {n} units");
+    }
 
     /// Deterministic seed sweep: every family, assorted shapes. A failure
     /// here is a real C/Rust divergence (or harness defect) on stable.
