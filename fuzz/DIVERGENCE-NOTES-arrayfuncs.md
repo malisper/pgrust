@@ -118,3 +118,59 @@ seed committed in fuzz/corpus/arrayfuncs_diff/.
   past the overflow threshold (a >19-digit dimension previously
   overflowed the i64 accumulator — debug-build panic; verdict plane
   unchanged).
+
+# ROUND 2 (extension pass, 2026-07-31) — builtin-table findings
+
+## KNOWN-DIV-4: deconstruct_array_builtin accepts 5 element types C rejects
+
+- Arm: 6 (deconstruct) with BUILTIN-TABLE MODE (mode bit 2).
+- Witness seeds: fuzz/corpus/arrayfuncs_diff/seed-builtin-e{4,5,7,11}
+  (int8, float4, name, xid).
+- C carries TWO DIFFERENT hardcoded tables in the same file:
+    * construct_array_builtin   (arrayfuncs.c 3380..3492): 12 rows —
+      char, cstring, float4, float8, int2, int4, int8, name,
+      oid|regtype, text, tid, xid.
+    * deconstruct_array_builtin (arrayfuncs.c 3696..3764): 8 rows —
+      char, cstring, float8, int2, int4, oid, text, tid.
+      NO float4, int8, name, regtype, xid.
+  Its default: arm is `elog(ERROR, "type %u not supported by
+  deconstruct_array_builtin()")` — a real, recoverable error (XX000).
+- The crate has ONE shared `construct.rs builtin_meta` (13 effective rows)
+  used by `deconstruct_array_builtin`, so pgrust SUCCEEDS on float4/int8/
+  name/regtype/xid where C ERRORS. Verdict-plane divergence.
+- Reachability: deconstruct_array_builtin is called from catalog-facing
+  code with hard-wired element types, so no SQL statement reaches the
+  extra rows today; it is a latent conformance gap (and arguably a
+  deliberate superset). Owner call: either mirror C's narrower table or
+  document the widening.
+- Driver handling: the arm asserts EXACTLY this shape (C class 9, Rust Ok)
+  for the 5 superset rows, and does full three-plane parity for the 8 rows
+  both sides share. The oracle is unweakened: C's elog(ERROR) is mapped to
+  the error plane (class 9 = XX000, elog.c's default sqlstate) rather than
+  abort(), which is what makes the divergence observable at all.
+
+## KNOWN-DIV-5: builtin_meta PANICS where C elog(ERROR)s
+
+- The crate's `builtin_meta` ends in `panic!("type {other} not supported by
+  construct/deconstruct_array_builtin()")`; C's two tables end in
+  `elog(ERROR, ...)`, which is a catchable ereport (XX000), not an abort.
+- Concretely reachable difference: BOOLOID is in NEITHER C table and NOT in
+  the crate's table — C would raise XX000, pgrust panics (in release too;
+  `panic!`, not `debug_assert!`). Any future caller passing an unlisted oid
+  crashes the backend instead of erroring the statement.
+- Driver handling: a panic cannot be compared past, so the builtin routes
+  are gated to metas inside the respective C table; the divergence is
+  carried here rather than by weakening either side. Owner fix: return a
+  PgError with ERRCODE_INTERNAL_ERROR instead of panicking.
+
+## PLATFORM CARVE (not a divergence): 1-byte byval element value plane
+
+- C's fetch_att 1-byte arm is CharGetDatum(*(const char *)T); plain `char`
+  is SIGNED on macOS/arm64 and x86-64 Linux but UNSIGNED on Linux aarch64,
+  which is where the CI cluster campaign runs. The same input therefore yields
+  Datum 0xffff_ffff_ffff_ff80 locally and 0x80 on the CI cluster for element
+  byte 0x80.
+- The driver compares 1-byte byval metas (esel 2 "char", esel 10 bool) at
+  u8 width — the width the TYPE defines — and asserts the full Datum word
+  for every other width. Documented in the target header; this is C
+  platform variance, not a pgrust deviation.

@@ -15,9 +15,43 @@
 //!   7 = 22023 invalid_parameter_value
 //!   8 = 22003 numeric_value_out_of_range
 //!
-//! Input layout: [sel][esel][payload]; sel % 11 picks the arm, esel % 2 the
-//! element type (0 = int4, 1 = text; arm 9 uses esel % 3 with 1 = float8 and
-//! 2 = text-through-the-variable-width path). Array images for arms 1..8 are
+//! Input layout: [sel][esel][payload]; sel % 11 picks the arm. `esel` selects
+//! the pinned ELEMENT META, shared with the C oracle's pg_afx_metatab
+//! (pg_type.dat values @ this stamp):
+//!   0 int4 | 1 text | 2 "char" | 3 int2 | 4 int8 | 5 float4 | 6 float8
+//!   7 name (byref fixed-len 64) | 8 oid | 9 tid (byref fixed-len 6)
+//!   10 bool | 11 xid | 12 cstring (-2)
+//! Selectors 2..12 drive the IMAGE-OPS arms only (2..8); those C/Rust bodies
+//! never call an element input/output function. Arms 0/1 (array_in/array_out)
+//! clamp to 0/1, the only selectors with in/out procs; arm 9 uses esel % 3
+//! with 1 = float8 and 2 = text-through-the-variable-width path.
+//!
+//! MODE BYTE: image-ops arms 2..7 read a mode byte after the image. Bit 0 =
+//! FIXED-LENGTH CONTAINER (pass a positive arraytyplen = elmlen * k, byval
+//! metas only — drives the fixed-length branches and the two
+//! "…of fixed-length arrays not implemented" 0A000 arms). Bit 1 = WIDE
+//! BOUNDS (subscripts/bounds drawn as full-range i32 instead of i8 — drives
+//! the 54000 "array size exceeds the maximum allowed" overflow arms). Bit 2
+//! on the deconstruct arm = BUILTIN-TABLE MODE (route through
+//! deconstruct_array_builtin so the hardcoded meta table is itself
+//! dual-executed against construct.rs builtin_meta). Bit 2 on the construct
+//! arm = BUILTIN-TABLE MODE too: mode bits 2|3 route construct through
+//! construct_array (bit 2 alone) or construct_array_builtin (bits 2+3), so
+//! BOTH of C's hardcoded meta tables are dual-executed. C carries TWO
+//! DIFFERENT tables — construct_array_builtin accepts 12 element types,
+//! deconstruct_array_builtin only 8 (no float4/int8/name/regtype/xid) —
+//! while the crate shares one builtin_meta for both. See KNOWN-DIV-4.
+//!
+//! PLATFORM CARVE (1-byte metas, esel 2 and 10): C's fetch_att 1-byte arm is
+//! CharGetDatum(*(const char *)T) — `char` signedness is
+//! implementation-defined (PG documents the variance and uses `signed char` /
+//! `unsigned char` casts explicitly where it matters). It is SIGNED on
+//! macOS/arm64 and on x86-64 Linux, but UNSIGNED on Linux aarch64, which is
+//! where the CI cluster campaign runs. The value plane for 1-byte byval metas
+//! therefore compares the LOW 8 BITS (u8 width) — the width the type
+//! actually defines — and the upper Datum bits are not asserted for those
+//! two selectors only. Every other width asserts the full Datum word.
+//! Array images for arms 1..8 are
 //! BUILT on the Rust side from the payload with the crate's own
 //! construct_md_array (bounded: ndim <= 3, dims <= 2 per dim — except 1-D
 //! arrays get up to 32 elements so null-bitmap copies cross byte
@@ -50,6 +84,18 @@
 //!                         selector (normal / wrong-elemtype / 2-D / with
 //!                         NULL) driving all three error arms + values.
 //!
+//! WIDE-BOUNDS DOMAIN BOUND: with bit 1 set, bounds are full-range i32 but
+//! the arms that would ALLOCATE before the overflow check are fenced. Both
+//! sides run their pg_sub/add_s32_overflow (Rust: overflowing_sub/add)
+//! checks BEFORE any palloc of the new image, so the 54000 arms are reached
+//! without a huge allocation. The one path that sizes an allocation from
+//! bounds without an intervening overflow check is a 1-D set_element/
+//! set_slice EXTENSION whose new dim is large but not overflowing (e.g.
+//! indx[0] = 2^30): C would palloc ~GB. The driver therefore rejects wide
+//! candidates whose implied new dimension exceeds PG_AFX_WIDE_DIM_CAP
+//! (1<<20) while staying inside i32 — i.e. it drives exactly the OVERFLOW
+//! arms, not the merely-large ones. Documented rather than silently clamped.
+//!
 //! DRIVER PRECONDITION CARVE (documented in the oracle header): the C
 //! oracle reads out of bounds on corrupt array headers (as C does), so
 //! every image handed to C is a well-formed plain 4B-header image built by
@@ -74,6 +120,18 @@
 //!   - width_bucket_array over collation-sensitive text (non-C collations):
 //!     locale machinery is out of pure phase-1 scope; the C-collation
 //!     memcmp path is driven.
+//!   - array_in/array_out for element metas 2..12: would need a full
+//!     in/out proc per type (adt_int int2/int8, float4/float8 out, name,
+//!     tid, bool). Those element codecs are OTHER crates' lanes; the array
+//!     level is already driven for both a byval and a byref codec. The
+//!     image-ops arms cover every meta.
+//!   - io.rs call1_armed (lines 18-23): NOT reachable from this target's
+//!     drive path. array_in's element dispatch goes through
+//!     types_fmgr::input_function_call_safe, and array_out's through
+//!     call1_armed ONLY from the `fc_*` builtins wrapper layer
+//!     (builtins.rs), which this target carves (needs catalog-backed
+//!     get_type_io_data). Reported as a builtins-carve line, not closed
+//!     here.
 
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgVec};
@@ -85,12 +143,16 @@ use types_error::{
 };
 use types_fmgr::{ErrorSaveNode, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, LocalFcinfo};
 
+use arrayfuncs::construct::builtin_meta;
 use arrayfuncs::{
     array_contains_nulls, array_get_element, array_get_integer_typmods, array_get_slice,
     array_in, array_out, array_set_element, array_set_slice, construct_md_array,
     deconstruct_array, ArrayIoMeta, MAXDIM,
 };
-use types_core::{C_COLLATION_OID, CSTRINGOID, FLOAT8OID, INT4OID, TEXTOID};
+use types_core::{
+    BOOLOID, CHAROID, C_COLLATION_OID, CSTRINGOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
+    INT8OID, NAMEOID, OIDOID, Oid, TEXTOID, TIDOID, XIDOID,
+};
 use types_error::PgResult;
 
 extern "C" {
@@ -116,6 +178,7 @@ extern "C" {
         len: usize,
         nsub: i32,
         indx: *const i32,
+        arraytyplen: i32,
         out_val: *mut u64,
         out_ptr: *mut *const u8,
         out_size: *mut usize,
@@ -130,6 +193,7 @@ extern "C" {
         lower: *mut i32,
         upper_provided: *const u8,
         lower_provided: *const u8,
+        arraytyplen: i32,
         out_img: *mut *const u8,
         out_len: *mut usize,
     ) -> i32;
@@ -142,6 +206,7 @@ extern "C" {
         elem: *const u8,
         elem_len: usize,
         elem_isnull: i32,
+        arraytyplen: i32,
         out_img: *mut *const u8,
         out_len: *mut usize,
     ) -> i32;
@@ -156,6 +221,7 @@ extern "C" {
         lower_provided: *const u8,
         src: *const u8,
         src_len: usize,
+        arraytyplen: i32,
         out_img: *mut *const u8,
         out_len: *mut usize,
     ) -> i32;
@@ -164,6 +230,7 @@ extern "C" {
         img: *const u8,
         len: usize,
         allow_nulls: i32,
+        builtin_mode: i32,
         out_vals: *mut *const u64,
         out_nulls: *mut *const u8,
         out_n: *mut i32,
@@ -177,6 +244,7 @@ extern "C" {
         ndims: i32,
         dims: *const i32,
         lbs: *const i32,
+        wrapper_1d: i32,
         out_img: *mut *const u8,
         out_len: *mut usize,
     ) -> i32;
@@ -204,33 +272,127 @@ extern "C" {
 // crates/backend/utils/adt/arrayfuncs/src/tests.rs:20-110 drives).
 // ---------------------------------------------------------------------------
 
-fn meta_int4() -> ArrayIoMeta {
+/// Pinned element-meta table; MUST stay row-for-row identical to the C
+/// oracle's pg_afx_metatab (pg_type.dat values @ 62d6c7d3df).
+/// (oid, typlen, typbyval, typalign)
+const METATAB: [(Oid, i32, bool, u8); NSEL] = [
+    (INT4OID, 4, true, b'i'),      // 0  int4
+    (TEXTOID, -1, false, b'i'),    // 1  text
+    (CHAROID, 1, true, b'c'),      // 2  "char"
+    (INT2OID, 2, true, b's'),      // 3  int2
+    (INT8OID, 8, true, b'd'),      // 4  int8
+    (FLOAT4OID, 4, true, b'i'),    // 5  float4
+    (FLOAT8OID, 8, true, b'd'),    // 6  float8
+    (NAMEOID, 64, false, b'c'),    // 7  name (byref fixed-len)
+    (OIDOID, 4, true, b'i'),       // 8  oid
+    (TIDOID, 6, false, b's'),      // 9  tid (byref fixed-len)
+    (BOOLOID, 1, true, b'c'),      // 10 bool
+    (XIDOID, 4, true, b'i'),       // 11 xid
+    (CSTRINGOID, -2, false, b'c'), // 12 cstring
+];
+const NSEL: usize = 13;
+
+/// Element types whose in/out procs this target shims (arms 0/1 only).
+const NSEL_IO: i32 = 2;
+
+fn meta_for(elemsel: i32) -> ArrayIoMeta {
+    let (oid, typlen, typbyval, typalign) = METATAB[elemsel as usize];
     ArrayIoMeta {
-        element_type: INT4OID,
-        typlen: 4,
-        typbyval: true,
-        typalign: b'i',
+        element_type: oid,
+        typlen,
+        typbyval,
+        typalign,
         typdelim: b',',
-        typioparam: INT4OID,
-    }
-}
-fn meta_text() -> ArrayIoMeta {
-    ArrayIoMeta {
-        element_type: TEXTOID,
-        typlen: -1,
-        typbyval: false,
-        typalign: b'i',
-        typdelim: b',',
-        typioparam: TEXTOID,
+        typioparam: oid,
     }
 }
 
-fn meta_for(elemsel: i32) -> ArrayIoMeta {
-    if elemsel == 0 {
-        meta_int4()
+/// Bytes the driver supplies per element for this meta (fixed widths exact,
+/// variable widths bounded small).
+fn elem_width(elemsel: i32, r: &mut Rdr<'_>) -> usize {
+    let (_, typlen, _, _) = METATAB[elemsel as usize];
+    if typlen > 0 {
+        typlen as usize
     } else {
-        meta_text()
+        (r.u8() % 9) as usize
     }
+}
+
+/// Build one element Datum for `elemsel` from `bytes` (already elem_width
+/// long for fixed types). byval goes through the crate's own fetch_att so the
+/// word shape is the crate's, never the driver's.
+fn make_elem<'mcx>(mcx: Mcx<'mcx>, elemsel: i32, bytes: &[u8]) -> Datum {
+    let (_, typlen, typbyval, _) = METATAB[elemsel as usize];
+    if typbyval {
+        let mut word = [0u8; 8];
+        word[..typlen as usize].copy_from_slice(&bytes[..typlen as usize]);
+        return arrayfuncs::foundation::fetch_att(word.as_ptr(), true, typlen);
+    }
+    match typlen {
+        -1 => build_varlena(mcx, bytes),
+        -2 => {
+            // cstring: NUL-terminated, and never an embedded NUL (the C side
+            // would truncate at it, which is a driver-encoding artifact, not
+            // a behavior difference).
+            let mut v: std::vec::Vec<u8> =
+                bytes.iter().copied().map(|b| if b == 0 { b'.' } else { b }).collect();
+            v.push(0);
+            let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, v.len()).expect("alloc");
+            buf.extend_from_slice(&v);
+            let d = Datum::from_usize(buf.as_ptr() as usize);
+            core::mem::forget(buf);
+            d
+        }
+        n => {
+            // fixed-length byref (name 64, tid 6): raw blob
+            let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, n as usize).expect("alloc");
+            buf.extend_from_slice(&bytes[..n as usize]);
+            let d = Datum::from_usize(buf.as_ptr() as usize);
+            core::mem::forget(buf);
+            d
+        }
+    }
+}
+
+/// Compare one element Datum against the C oracle's word/bytes for `elemsel`.
+/// See the PLATFORM CARVE note in the module header for the 1-byte metas.
+fn assert_elem_eq(elemsel: i32, rd: Datum, cval: u64, cptr: *const u8, csize: usize, ctx: &str) {
+    let (_, typlen, typbyval, _) = METATAB[elemsel as usize];
+    if typbyval {
+        if typlen == 1 {
+            // PLATFORM CARVE: C `char` signedness differs between the local
+            // host (signed) and the CI cluster's Linux aarch64 (unsigned).
+            assert!(
+                rd.as_usize() as u8 == cval as u8,
+                "{ctx} DIVERGENCE (value, u8 width) esel={elemsel}: C={cval:#x} Rust={:#x}",
+                rd.as_usize(),
+            );
+        } else {
+            assert!(
+                rd.as_usize() as u64 == cval,
+                "{ctx} DIVERGENCE (value) esel={elemsel}: C={cval:#x} Rust={:#x}",
+                rd.as_usize(),
+            );
+        }
+        return;
+    }
+    let cb = unsafe { core::slice::from_raw_parts(cptr, csize) };
+    let p = rd.as_usize() as *const u8;
+    let n = match typlen {
+        -1 => arrayfuncs::foundation::varsize_any(p),
+        -2 => unsafe { core::ffi::CStr::from_ptr(p as *const core::ffi::c_char) }
+            .to_bytes()
+            .len()
+            + 1,
+        w => w as usize,
+    };
+    let rb = unsafe { core::slice::from_raw_parts(p, n) };
+    assert!(
+        rb == cb,
+        "{ctx} DIVERGENCE (byref bytes) esel={elemsel}: C={} Rust={}",
+        hex(cb),
+        hex(rb),
+    );
 }
 
 fn build_varlena<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> Datum {
@@ -273,6 +435,7 @@ fn fc_mytextout(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
 }
 
 fn in_proc(elemsel: i32) -> FmgrInfo {
+    assert!(elemsel < NSEL_IO, "in_proc for an image-ops-only meta");
     if elemsel == 0 {
         FmgrInfo::new(adt_int::builtins::fc_int4in, 42, 1, true, false)
     } else {
@@ -280,6 +443,7 @@ fn in_proc(elemsel: i32) -> FmgrInfo {
     }
 }
 fn out_proc(elemsel: i32) -> FmgrInfo {
+    assert!(elemsel < NSEL_IO, "out_proc for an image-ops-only meta");
     if elemsel == 0 {
         FmgrInfo::new(adt_int::builtins::fc_int4out, 43, 1, true, false)
     } else {
@@ -304,6 +468,8 @@ fn class_of(e: &PgError) -> i32 {
         7
     } else if ss == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE {
         8
+    } else if ss == types_error::ERRCODE_INTERNAL_ERROR {
+        9
     } else {
         0 // unmapped: always a divergence against the oracle's classes
     }
@@ -350,14 +516,19 @@ impl<'a> Rdr<'a> {
 }
 
 /// Build a well-formed array image from the payload with the crate's own
-/// construct_md_array (bounded; see module header). Returns None only if
-/// construction failed, which for these bounded inputs would itself be a
-/// bug — asserted below.
-fn build_image<'mcx>(
+/// construct_md_array (bounded; see module header). Also returns the raw
+/// element bytes/lens/nulls in the encoding the C oracle's construct entry
+/// expects, so an identical image can be built on the C side when needed.
+fn build_image<'mcx>(mcx: Mcx<'mcx>, elemsel: i32, r: &mut Rdr<'_>) -> PgVec<'mcx, u8> {
+    build_image_full(mcx, elemsel, r).0
+}
+
+#[allow(clippy::type_complexity)]
+fn build_image_full<'mcx>(
     mcx: Mcx<'mcx>,
     elemsel: i32,
     r: &mut Rdr<'_>,
-) -> PgVec<'mcx, u8> {
+) -> (PgVec<'mcx, u8>, std::vec::Vec<u8>, std::vec::Vec<i32>, std::vec::Vec<u8>) {
     let ndim = (r.u8() % 4) as i32; // 0..=3
     let mut dims = [0i32; MAXDIM];
     let mut lbs = [1i32; MAXDIM];
@@ -372,42 +543,128 @@ fn build_image<'mcx>(
     let nitems: i64 = if ndim == 0 {
         0
     } else {
-        dims[..ndim as usize].iter().map(|&d| d as i64).product()
+        dims[..ndim as usize]
+            .iter()
+            .fold(1i64, |acc, &d| acc.saturating_mul(d as i64))
     };
     let nitems = nitems as usize;
     let nullbits = r.u64le();
     let mut elems: std::vec::Vec<Datum> = std::vec::Vec::with_capacity(nitems);
     let mut nulls: std::vec::Vec<bool> = std::vec::Vec::with_capacity(nitems);
+    let mut c_data: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut c_lens: std::vec::Vec<i32> = std::vec::Vec::new();
+    let mut c_nulls: std::vec::Vec<u8> = std::vec::Vec::new();
     for i in 0..nitems {
         let isnull = (nullbits >> (i % 64)) & 1 == 1;
         nulls.push(isnull);
+        c_nulls.push(isnull as u8);
         if isnull {
             elems.push(Datum::null());
+            c_lens.push(0);
             continue;
         }
-        match elemsel {
-            0 => elems.push(Datum::from_i32(r.i32le())),
-            1 => {
-                let n = (r.u8() % 9) as usize;
-                let b = r.bytes(n);
-                elems.push(build_varlena(mcx, &b));
-            }
-            _ => {
-                // float8 (width_bucket thresholds)
-                let bits = r.u64le();
-                elems.push(Datum::from_usize(bits as usize));
-            }
-        }
+        let w = elem_width(elemsel, r);
+        let b = r.bytes(w);
+        elems.push(make_elem(mcx, elemsel, &b));
+        c_lens.push(b.len() as i32);
+        c_data.extend_from_slice(&b);
     }
-    let (elmtype, elmlen, elmbyval, elmalign) = match elemsel {
-        0 => (INT4OID, 4, true, b'i'),
-        1 => (TEXTOID, -1, false, b'i'),
-        _ => (FLOAT8OID, 8, true, b'd'),
-    };
-    construct_md_array(
+    let (elmtype, elmlen, elmbyval, elmalign) = METATAB[elemsel as usize];
+    let img = construct_md_array(
         mcx, &elems, Some(&nulls), ndim, &dims, &lbs, elmtype, elmlen, elmbyval, elmalign,
     )
-    .expect("bounded build_image inputs must construct")
+    .expect("bounded build_image inputs must construct");
+    (img, c_data, c_lens, c_nulls)
+}
+
+/// Mode byte for the image-ops arms (see module header).
+#[derive(Clone, Copy)]
+struct Mode {
+    fixed: bool,
+    wide: bool,
+    alt: bool,
+    alt2: bool,
+}
+
+/// Implied-new-dimension cap for wide bounds: above this a 1-D extension
+/// would ask C's palloc for a huge block before any overflow check fires
+/// (module header WIDE-BOUNDS DOMAIN BOUND).
+const WIDE_DIM_CAP: i64 = 1 << 20;
+
+fn read_mode(elemsel: i32, r: &mut Rdr<'_>) -> Mode {
+    let m = r.u8();
+    let (_, _, byval, _) = METATAB[elemsel as usize];
+    Mode {
+        // fixed-length containers are byval-only in practice (C computes
+        // arraytyplen / elmlen and stores in place); byref metas would need a
+        // container type that does not exist in pg_type.
+        fixed: m & 1 == 1 && byval,
+        wide: m & 2 == 2,
+        alt: m & 4 == 4,
+        alt2: m & 8 == 8,
+    }
+}
+
+/// Element oids C's deconstruct_array_builtin table accepts (arrayfuncs.c
+/// 3696..3764) — a STRICT SUBSET of construct_array_builtin's 12 rows.
+const C_DECONSTRUCT_BUILTIN_OIDS: [Oid; 8] =
+    [CHAROID, CSTRINGOID, FLOAT8OID, INT2OID, INT4OID, OIDOID, TEXTOID, TIDOID];
+
+/// Element oids C's construct_array_builtin table accepts (arrayfuncs.c
+/// 3380..3492) — 12 rows; identical to the crate's builtin_meta rows.
+const C_CONSTRUCT_BUILTIN_OIDS: [Oid; 12] = [
+    CHAROID, CSTRINGOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, NAMEOID, OIDOID,
+    TEXTOID, TIDOID, XIDOID,
+];
+
+/// KNOWN-DIV-5 (fuzz/DIVERGENCE-NOTES-arrayfuncs.md): bool is in NEITHER C
+/// builtin table, and the crate's builtin_meta PANICS on an unlisted oid
+/// where C elog(ERROR)s (recoverable, class 9). A panic cannot be compared
+/// past, so the builtin routes skip metas outside the respective C table and
+/// the divergence is carried in the notes file instead of weakening either
+/// side.
+fn builtin_route_ok(oid: Oid, deconstruct: bool) -> bool {
+    if deconstruct {
+        C_DECONSTRUCT_BUILTIN_OIDS.contains(&oid) || C_CONSTRUCT_BUILTIN_OIDS.contains(&oid)
+    } else {
+        C_CONSTRUCT_BUILTIN_OIDS.contains(&oid)
+    }
+}
+
+/// arraytyplen for the fixed-length container mode: elmlen * k, k in 1..=8.
+fn fixed_typlen(elemsel: i32, r: &mut Rdr<'_>) -> i32 {
+    let (_, elmlen, _, _) = METATAB[elemsel as usize];
+    elmlen * ((r.u8() % 8) as i32 + 1)
+}
+
+/// A subscript/bound: i8-derived normally, full-range i32 in wide mode.
+fn subscript(mode: Mode, r: &mut Rdr<'_>) -> i32 {
+    if mode.wide {
+        r.i32le()
+    } else {
+        (r.u8() as i8) as i32
+    }
+}
+
+/// Reject wide candidates that are merely LARGE (huge allocation on both
+/// sides) rather than overflowing: see WIDE-BOUNDS DOMAIN BOUND.
+fn wide_alloc_safe(img: &[u8], nsub: usize, idx: &[i32]) -> bool {
+    let (ndim, dims, lbs) = arrayfuncs::read_dims_lbounds(img);
+    if ndim != 1 || nsub != 1 {
+        return true; // multi-dim paths error before sizing anything
+    }
+    let (d0, l0) = (dims[0] as i64, lbs[0] as i64);
+    let i0 = idx[0] as i64;
+    let newdim = if i0 < l0 {
+        d0 + (l0 - i0)
+    } else if i0 >= d0 + l0 {
+        d0 + (i0 - (d0 + l0) + 1)
+    } else {
+        d0
+    };
+    // in-i32 and large => skip; overflowing (outside i32) => keep, that is
+    // exactly the 54000 arm we want.
+    !(newdim > WIDE_DIM_CAP && newdim <= i32::MAX as i64)
 }
 
 fn cerr() -> i32 {
@@ -520,13 +777,14 @@ pub fn arrayfuncs_diff(data: &[u8]) {
     let Some((&esel_raw, payload)) = rest.split_first() else {
         return;
     };
-    let esel = (esel_raw % 2) as i32;
+    let esel = (esel_raw as usize % NSEL) as i32;
     let ctx = MemoryContext::new_bump("arrayfuncs_diff");
     let mcx = ctx.mcx();
     let mut r = Rdr { d: payload, pos: 0 };
     match sel % 11 {
-        0 => array_in_diff(mcx, esel, payload),
-        1 => array_out_diff(mcx, esel, &mut r, payload),
+        // arms 0/1 need element in/out procs: clamp to the two shimmed metas
+        0 => array_in_diff(mcx, esel % NSEL_IO, payload),
+        1 => array_out_diff(mcx, esel % NSEL_IO, &mut r, payload),
         2 => get_element_diff(mcx, esel, &mut r, payload),
         3 => get_slice_diff(mcx, esel, &mut r, payload),
         4 => set_element_diff(mcx, esel, &mut r, payload),
@@ -668,10 +926,17 @@ fn array_out_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
 
 fn get_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let img = build_image(mcx, esel, r);
+    let mode = read_mode(esel, r);
+    let arraytyplen = if mode.fixed { fixed_typlen(esel, r) } else { -1 };
     let nsub = (r.u8() % 7) as usize; // 0..=6
     let mut indx = [0i32; MAXDIM];
     for v in indx.iter_mut().take(nsub) {
-        *v = (r.u8() as i8) as i32;
+        *v = subscript(mode, r);
+    }
+    // fixed-length containers read arraytyplen bytes from the datum start:
+    // the image must be at least that long (C reads the raw blob).
+    if mode.fixed && img.len() < arraytyplen as usize {
+        return;
     }
     let mut cval: u64 = 0;
     let mut cptr: *const u8 = core::ptr::null();
@@ -684,6 +949,7 @@ fn get_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
             img.len(),
             nsub as i32,
             indx.as_ptr(),
+            arraytyplen,
             &mut cval,
             &mut cptr,
             &mut csize,
@@ -695,7 +961,7 @@ fn get_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let (rd, risnull) = array_get_element(
         &img,
         &indx[..nsub],
-        -1,
+        arraytyplen,
         meta.typlen,
         meta.typbyval,
         meta.typalign,
@@ -708,29 +974,17 @@ fn get_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
         risnull,
     );
     if !risnull {
-        if esel == 0 {
-            // KNOWN-DIV-2 FIXED (fuzz/DIVERGENCE-NOTES-arrayfuncs.md):
-            // foundation.rs fetch_att now sign-extends like C's
-            // Int32GetDatum; full Datum-word parity is asserted.
-            assert!(
-                rd.as_usize() as u64 == cval,
-                "array_get_element DIVERGENCE (value) esel=0 payload={}: \
-                 C={cval:#x} Rust={:#x}",
-                hex(payload),
-                rd.as_usize(),
-            );
-        } else {
-            let cb = unsafe { core::slice::from_raw_parts(cptr, csize) };
-            let rb = varlena_bytes(rd);
-            assert!(
-                rb == cb,
-                "array_get_element DIVERGENCE (bytes) esel=1 payload={}: \
-                 C={} Rust={}",
-                hex(payload),
-                hex(cb),
-                hex(rb),
-            );
-        }
+        // KNOWN-DIV-2 FIXED: fetch_att sign-extends like C's Int32GetDatum,
+        // so full Datum-word parity is asserted for every width except the
+        // 1-byte platform carve (module header).
+        assert_elem_eq(
+            esel,
+            rd,
+            cval,
+            cptr,
+            csize,
+            &format!("array_get_element payload={}", hex(payload)),
+        );
     }
 }
 
@@ -738,13 +992,16 @@ fn get_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
 // Arm 3: array_get_slice
 // ---------------------------------------------------------------------------
 
-fn slice_bounds(r: &mut Rdr<'_>) -> (usize, [i32; MAXDIM], [i32; MAXDIM], [bool; MAXDIM], [bool; MAXDIM]) {
+fn slice_bounds(
+    mode: Mode,
+    r: &mut Rdr<'_>,
+) -> (usize, [i32; MAXDIM], [i32; MAXDIM], [bool; MAXDIM], [bool; MAXDIM]) {
     let nsub = (r.u8() % 7) as usize;
     let mut upper = [0i32; MAXDIM];
     let mut lower = [0i32; MAXDIM];
     for i in 0..nsub {
-        lower[i] = (r.u8() as i8) as i32;
-        upper[i] = (r.u8() as i8) as i32;
+        lower[i] = subscript(mode, r);
+        upper[i] = subscript(mode, r);
     }
     let bits = r.u8();
     let mut upb = [false; MAXDIM];
@@ -758,7 +1015,9 @@ fn slice_bounds(r: &mut Rdr<'_>) -> (usize, [i32; MAXDIM], [i32; MAXDIM], [bool;
 
 fn get_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let img = build_image(mcx, esel, r);
-    let (nsub, upper, lower, upb, lob) = slice_bounds(r);
+    let mode = read_mode(esel, r);
+    let arraytyplen = if mode.fixed { fixed_typlen(esel, r) } else { -1 };
+    let (nsub, upper, lower, upb, lob) = slice_bounds(mode, r);
     let mut cup = upper;
     let mut clo = lower;
     let cupb: [u8; MAXDIM] = core::array::from_fn(|i| upb[i] as u8);
@@ -775,6 +1034,7 @@ fn get_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
             clo.as_mut_ptr(),
             cupb.as_ptr(),
             clob.as_ptr(),
+            arraytyplen,
             &mut cimg,
             &mut clen,
         )
@@ -790,7 +1050,7 @@ fn get_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
         &mut rlo,
         &upb,
         &lob,
-        -1,
+        arraytyplen,
         meta.typlen,
         meta.typalign,
     );
@@ -835,21 +1095,23 @@ fn get_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
 
 fn set_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let img = build_image(mcx, esel, r);
+    let mode = read_mode(esel, r);
+    let arraytyplen = if mode.fixed { fixed_typlen(esel, r) } else { -1 };
     let nsub = (r.u8() % 7) as usize;
     let mut indx = [0i32; MAXDIM];
     for v in indx.iter_mut().take(nsub) {
-        *v = (r.u8() as i8) as i32;
+        *v = subscript(mode, r);
     }
     let isnull = r.u8() & 1 == 1;
-    let (elem_bytes, rdatum): (std::vec::Vec<u8>, Datum) = if esel == 0 {
-        let v = r.i32le();
-        (v.to_le_bytes().to_vec(), Datum::from_i32(v))
-    } else {
-        let n = (r.u8() % 9) as usize;
-        let b = r.bytes(n);
-        let d = build_varlena(mcx, &b);
-        (b, d)
-    };
+    let w = elem_width(esel, r);
+    let elem_bytes = r.bytes(w);
+    let rdatum = make_elem(mcx, esel, &elem_bytes);
+    if mode.fixed && img.len() < arraytyplen as usize {
+        return;
+    }
+    if mode.wide && !wide_alloc_safe(&img, nsub, &indx) {
+        return; // merely-large extension: see WIDE-BOUNDS DOMAIN BOUND
+    }
 
     let mut cimg: *const u8 = core::ptr::null();
     let mut clen: usize = 0;
@@ -863,6 +1125,7 @@ fn set_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
             elem_bytes.as_ptr(),
             elem_bytes.len(),
             isnull as i32,
+            arraytyplen,
             &mut cimg,
             &mut clen,
         )
@@ -874,7 +1137,7 @@ fn set_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
         &indx[..nsub],
         if isnull { Datum::null() } else { rdatum },
         isnull,
-        -1,
+        arraytyplen,
         meta.typlen,
         meta.typbyval,
         meta.typalign,
@@ -917,13 +1180,24 @@ fn set_element_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
 fn set_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let img = build_image(mcx, esel, r);
     let src = build_image(mcx, esel, r);
-    let (nsub0, upper, lower, upb, lob) = slice_bounds(r);
+    let mode = read_mode(esel, r);
+    let arraytyplen = if mode.fixed { fixed_typlen(esel, r) } else { -1 };
+    let (nsub0, upper, lower, upb, lob) = slice_bounds(mode, r);
     // DOMAIN CARVE: nSubscripts >= 1. C's ndim==1 arm carries
     // Assert(nSubscripts == 1) — a debug-only caller contract (SQL
     // subscripting always supplies >= 1 subscript); the shipped Rust keeps
     // that contract as an unconditional assert!, so nsub==0 panics Rust
     // while NDEBUG C proceeds. Recorded in DIVERGENCE-NOTES-arrayfuncs.md.
     let nsub = nsub0.max(1);
+    if mode.fixed && img.len() < arraytyplen as usize {
+        return;
+    }
+    if mode.wide && !wide_alloc_safe(&img, nsub, &lower) {
+        return; // merely-large extension: see WIDE-BOUNDS DOMAIN BOUND
+    }
+    if mode.wide && !wide_alloc_safe(&img, nsub, &upper) {
+        return;
+    }
     let mut cup = upper;
     let mut clo = lower;
     let cupb: [u8; MAXDIM] = core::array::from_fn(|i| upb[i] as u8);
@@ -942,6 +1216,7 @@ fn set_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
             clob.as_ptr(),
             src.as_ptr(),
             src.len(),
+            arraytyplen,
             &mut cimg,
             &mut clen,
         )
@@ -958,7 +1233,7 @@ fn set_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
         &upb,
         &lob,
         &src,
-        -1,
+        arraytyplen,
         meta.typlen,
         meta.typbyval,
         meta.typalign,
@@ -1000,7 +1275,36 @@ fn set_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
 
 fn deconstruct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let img = build_image(mcx, esel, r);
+    let mode = read_mode(esel, r);
     let allow_nulls = r.u8() & 1 == 1;
+    // BUILTIN-TABLE MODE: route both sides through the *_builtin entry so the
+    // hardcoded (elmlen, elmbyval, elmalign) table is dual-executed
+    // (construct.rs builtin_meta vs the pasted C switch).
+    let builtin = mode.alt && builtin_route_ok(METATAB[esel as usize].0, true);
+    let c_supports = C_DECONSTRUCT_BUILTIN_OIDS.contains(&METATAB[esel as usize].0);
+    if builtin && !c_supports {
+        // KNOWN-DIV-4 (fuzz/DIVERGENCE-NOTES-arrayfuncs.md): the crate's
+        // shared builtin_meta accepts 5 element types C's
+        // deconstruct_array_builtin rejects with elog(ERROR) (class 9).
+        // Pinned to exactly that shape: C errors class 9, Rust succeeds.
+        let mut cv2: *const u64 = core::ptr::null();
+        let mut cn2: *const u8 = core::ptr::null();
+        let mut cc2: i32 = 0;
+        let cst2 = unsafe {
+            pg_diff_deconstruct_array(
+                esel, img.as_ptr(), img.len(), 1, 1, &mut cv2, &mut cn2, &mut cc2,
+            )
+        };
+        let meta2 = meta_for(esel);
+        let rres2 =
+            arrayfuncs::deconstruct_array_builtin(mcx, &img, meta2.element_type, true);
+        assert!(
+            cst2 == 9 && rres2.is_ok(),
+            "KNOWN-DIV-4 shape changed esel={esel}: C st={cst2} Rust ok={}",
+            rres2.is_ok(),
+        );
+        return;
+    }
     let mut cvals: *const u64 = core::ptr::null();
     let mut cnulls: *const u8 = core::ptr::null();
     let mut cn: i32 = 0;
@@ -1010,20 +1314,25 @@ fn deconstruct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
             img.as_ptr(),
             img.len(),
             allow_nulls as i32,
+            builtin as i32,
             &mut cvals,
             &mut cnulls,
             &mut cn,
         )
     };
     let meta = meta_for(esel);
-    let rres = deconstruct_array(
-        mcx,
-        &img,
-        meta.typlen,
-        meta.typbyval,
-        meta.typalign,
-        allow_nulls,
-    );
+    let rres = if builtin {
+        arrayfuncs::deconstruct_array_builtin(mcx, &img, meta.element_type, allow_nulls)
+    } else {
+        deconstruct_array(
+            mcx,
+            &img,
+            meta.typlen,
+            meta.typbyval,
+            meta.typalign,
+            allow_nulls,
+        )
+    };
     match (rres, cst) {
         (Ok((relems, rnulls)), 0) => {
             assert!(
@@ -1044,25 +1353,33 @@ fn deconstruct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
                 if rnulls[i] {
                     continue;
                 }
-                if esel == 0 {
-                    // KNOWN-DIV-2 FIXED: full Datum-word parity (see notes file).
-                    assert!(
-                        relems[i].as_usize() as u64 == cv[i],
-                        "deconstruct_array DIVERGENCE (elem[{i}]) esel=0 payload={}: \
-                         C={:#x} Rust={:#x}",
-                        hex(payload),
-                        cv[i],
-                        relems[i].as_usize(),
-                    );
+                // KNOWN-DIV-2 FIXED: full Datum-word parity except the 1-byte
+                // platform carve (module header). byref widths compare bytes.
+                let (_, typlen, typbyval, _) = METATAB[esel as usize];
+                let (cptr, csize) = if typbyval {
+                    (core::ptr::null(), 0usize)
                 } else {
-                    let cb = varlena_bytes(Datum::from_usize(cv[i] as usize));
-                    let rb = varlena_bytes(relems[i]);
-                    assert!(
-                        rb == cb,
-                        "deconstruct_array DIVERGENCE (elem[{i}] bytes) esel=1 payload={}",
-                        hex(payload),
-                    );
-                }
+                    let p = cv[i] as usize as *const u8;
+                    let n = match typlen {
+                        -1 => arrayfuncs::foundation::varsize_any(p),
+                        -2 => unsafe {
+                            core::ffi::CStr::from_ptr(p as *const core::ffi::c_char)
+                        }
+                        .to_bytes()
+                        .len()
+                            + 1,
+                        w => w as usize,
+                    };
+                    (p, n)
+                };
+                assert_elem_eq(
+                    esel,
+                    relems[i],
+                    cv[i],
+                    cptr,
+                    csize,
+                    &format!("deconstruct_array[{i}] builtin={builtin} payload={}", hex(payload)),
+                );
             }
         }
         (Err(e), c) if c != 0 => {
@@ -1088,6 +1405,17 @@ fn deconstruct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
 // ---------------------------------------------------------------------------
 
 fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
+    let mode = read_mode(esel, r);
+    // 1-D WRAPPER MODE: bit 2 = construct_array (nulls unsupported,
+    // dims[0] = nelems, lbs[0] = 1); bits 2+3 = construct_array_builtin
+    // (C looks the meta up in its own 12-row table).
+    let wrapper: i32 = match (mode.alt, mode.alt2) {
+        // builtin route only for metas inside C's construct table (see
+        // builtin_route_ok / KNOWN-DIV-5)
+        (true, true) if builtin_route_ok(METATAB[esel as usize].0, false) => 2,
+        (true, _) => 1,
+        _ => 0,
+    };
     let raw = r.u8();
     let ndims: i32 = if raw >= 250 {
         -(((raw % 7) as i32) + 1)
@@ -1101,12 +1429,46 @@ fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
         dims[i] = (r.u8() % 3) as i32;
         lbs[i] = r.i32le(); // FULL-RANGE: drives ArrayCheckBounds overflow
     }
+    // WIDE mode on this arm: full-range dims too, driving ArrayGetNItems'
+    // int64-widened product overflow (54000) before any allocation.
+    if mode.wide {
+        for i in 0..nd_use {
+            dims[i] = r.i32le();
+        }
+    }
+    // Saturating product: wide dims overflow i64 too, and the count only
+    // decides how many elements to materialize (both sides reject oversized
+    // dims in ArrayGetNItems before touching the element array).
     let nitems: i64 = if ndims <= 0 || ndims as usize > MAXDIM {
         0
     } else {
-        dims[..nd_use].iter().map(|&d| d as i64).product()
+        dims[..nd_use]
+            .iter()
+            .fold(1i64, |acc, &d| acc.saturating_mul(d as i64))
     };
-    let nitems = nitems as usize;
+    // Element-materialization contract: C's construct_md_array reads ALL
+    // nelems datums in its size pass, and only dims that ArrayGetNItemsSafe
+    // itself rejects (any dim < 0, or product > MaxArraySize = 134217727)
+    // are safe to leave unmaterialized. A product in 4097..=MaxArraySize is
+    // ACCEPTED by both sides, so leaving it hollow made C read
+    // unmaterialized memory (replay SEGV 2026-07-31) — clamp such dims down
+    // instead so the product stays materializable.
+    const MAX_ARRAY_SIZE: i64 = 0x3fffffff / 8;
+    let rejected = dims[..nd_use].iter().any(|&d| d < 0) || nitems > MAX_ARRAY_SIZE;
+    let nitems = if rejected {
+        0
+    } else if nitems > 4096 {
+        // Fold accepted-but-large dims back into the small domain (3^7 =
+        // 2187 <= 4096) and recompute, so dims-product == materialized count.
+        for d in dims[..nd_use].iter_mut() {
+            *d = d.rem_euclid(3);
+        }
+        dims[..nd_use]
+            .iter()
+            .fold(1i64, |acc, &d| acc.saturating_mul(d as i64)) as usize
+    } else {
+        nitems as usize
+    };
     let nullbits = r.u64le();
     let mut elems: std::vec::Vec<Datum> = std::vec::Vec::new();
     let mut nulls: std::vec::Vec<bool> = std::vec::Vec::new();
@@ -1114,29 +1476,21 @@ fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let mut c_elem_lens: std::vec::Vec<i32> = std::vec::Vec::new();
     let mut c_nulls: std::vec::Vec<u8> = std::vec::Vec::new();
     for i in 0..nitems {
-        let isnull = (nullbits >> (i % 64)) & 1 == 1;
+        // construct_array (wrapper mode) does not support nulls: C passes a
+        // NULL nulls[] there, so keep every element non-null in that mode.
+        let isnull = wrapper == 0 && (nullbits >> (i % 64)) & 1 == 1;
         nulls.push(isnull);
         c_nulls.push(isnull as u8);
         if isnull {
             elems.push(Datum::null());
-            if esel == 0 {
-                c_elem_data.extend_from_slice(&[0; 4]);
-            } else {
-                c_elem_lens.push(0);
-            }
+            c_elem_lens.push(0);
             continue;
         }
-        if esel == 0 {
-            let v = r.i32le();
-            elems.push(Datum::from_i32(v));
-            c_elem_data.extend_from_slice(&v.to_le_bytes());
-        } else {
-            let n = (r.u8() % 9) as usize;
-            let b = r.bytes(n);
-            elems.push(build_varlena(mcx, &b));
-            c_elem_lens.push(b.len() as i32);
-            c_elem_data.extend_from_slice(&b);
-        }
+        let w = elem_width(esel, r);
+        let b = r.bytes(w);
+        elems.push(make_elem(mcx, esel, &b));
+        c_elem_lens.push(b.len() as i32);
+        c_elem_data.extend_from_slice(&b);
     }
 
     let mut cimg: *const u8 = core::ptr::null();
@@ -1145,44 +1499,47 @@ fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
         pg_diff_construct_md_array(
             esel,
             c_elem_data.as_ptr(),
-            if esel == 0 {
-                core::ptr::null()
-            } else {
-                c_elem_lens.as_ptr()
-            },
+            c_elem_lens.as_ptr(),
             c_nulls.as_ptr(),
             nitems as i32,
             ndims,
             dims.as_ptr(),
             lbs.as_ptr(),
+            wrapper,
             &mut cimg,
             &mut clen,
         )
     };
-    let (elmtype, elmlen, elmbyval) = if esel == 0 {
-        (INT4OID, 4, true)
+    let (elmtype, elmlen, elmbyval, elmalign) = METATAB[esel as usize];
+    let rres = if wrapper == 2 {
+        // The crate has NO construct_array_builtin; its equivalent is
+        // construct_array over builtin_meta(elmtype). Composing them here
+        // dual-executes builtin_meta against C's 12-row construct table.
+        let (bl, bb, ba) = builtin_meta(elmtype);
+        arrayfuncs::construct_array(mcx, &elems, elmtype, bl, bb, ba)
+    } else if wrapper == 1 {
+        arrayfuncs::construct_array(mcx, &elems, elmtype, elmlen, elmbyval, elmalign)
     } else {
-        (TEXTOID, -1, false)
+        construct_md_array(
+            mcx,
+            &elems,
+            Some(&nulls),
+            ndims,
+            &dims,
+            &lbs,
+            elmtype,
+            elmlen,
+            elmbyval,
+            elmalign,
+        )
     };
-    let rres = construct_md_array(
-        mcx,
-        &elems,
-        Some(&nulls),
-        ndims,
-        &dims,
-        &lbs,
-        elmtype,
-        elmlen,
-        elmbyval,
-        b'i',
-    );
     match (rres, cst) {
         (Ok(rimg), 0) => {
             let cb = unsafe { core::slice::from_raw_parts(cimg, clen) };
             assert!(
                 &rimg[..] == cb,
-                "construct_md_array DIVERGENCE (image) esel={esel} payload={}: \
-                 C={} Rust={}",
+                "construct_md_array DIVERGENCE (image) esel={esel} wrapper={wrapper} \
+                 payload={}: C={} Rust={}",
                 hex(payload),
                 hex(cb),
                 hex(&rimg),
@@ -1237,9 +1594,11 @@ fn contains_nulls_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8])
 fn width_bucket_diff(mcx: Mcx<'_>, wsel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     // Thresholds image: element type per wsel. build_image elemsel: 0=int4,
     // 1=text, 2=float8 — remap (wsel 1 = float8 -> build 2; wsel 2 = text).
+    // thresholds element type per wsel: int4 (fixed path) / float8
+    // (dedicated path) / text (variable path).
     let build_sel = match wsel {
         0 => 0,
-        1 => 2,
+        1 => 6, // float8 row of METATAB
         _ => 1,
     };
     let img = build_image(mcx, build_sel, r);

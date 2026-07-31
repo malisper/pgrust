@@ -62,6 +62,7 @@
  *       6 = ERRCODE_NULL_VALUE_NOT_ALLOWED      (22004)
  *       7 = ERRCODE_INVALID_PARAMETER_VALUE     (22023)
  *       8 = ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE  (22003)
+ *       9 = ERRCODE_INTERNAL_ERROR              (XX000, elog's default)
  *   - palloc/palloc0/repalloc/pfree/pstrdup -> growable TLS pointer arena
  *     (models PG's memory-context reset; every pg_diff_* entry calls
  *     pg_afx_arena_reset() first so error-path longjmps cannot leak — the
@@ -71,10 +72,26 @@
  *   - fmgr: PG_FUNCTION_ARGS entry points (array_in, array_out,
  *     width_bucket_array) are unwrapped to plain C signatures; the
  *     my_extra/ArrayMetaState typcache lookup blocks are EXCISED and
- *     replaced by pinned element metadata selected by `elemsel`
- *     (0 = int4: typlen 4, byval, align 'i', delim ','; 1 = text:
- *     typlen -1, byref, align 'i', delim ','), exactly the values
- *     pg_type.dat carries for those types. Excised regions are marked
+ *     replaced by pinned element metadata selected by `elemsel`, exactly
+ *     the values pg_type.dat @ this stamp carries for each type:
+ *       0 int4   (23, len 4, byval, 'i', delim ',')
+ *       1 text   (25, len -1, byref, 'i', delim ',')
+ *       2 char   (18, len 1, byval, 'c')
+ *       3 int2   (21, len 2, byval, 's')
+ *       4 int8   (20, len 8, byval, 'd')
+ *       5 float4 (700, len 4, byval, 'i')
+ *       6 float8 (701, len 8, byval, 'd')
+ *       7 name   (19, len 64 = NAMEDATALEN, byREF fixed-length, 'c')
+ *       8 oid    (26, len 4, byval, 'i')
+ *       9 tid    (27, len 6 = sizeof(ItemPointerData), byref, 's')
+ *      10 bool   (16, len 1, byval, 'c')
+ *      11 xid    (28, len 4, byval, 'i')
+ *      12 cstring(2275, len -2, byref, 'c')
+ *     Selectors 2..12 drive the IMAGE-OPS arms only (get/set element and
+ *     slice, deconstruct, construct, contains_nulls, and the builtin-table
+ *     mode); those C bodies never call an element input/output function, so
+ *     no new in/out procs are shimmed. Selectors 0/1 are the only ones the
+ *     array_in/array_out arms use. Excised regions are marked
  *     "SHIM: pinned element meta" with the excised source lines cited.
  *   - InputFunctionCallSafe -> direct call: int4 -> pasted
  *     pg_strtoint32_safe wrapped to Datum; text -> 4-byte-varlena-header
@@ -99,11 +116,22 @@
  *     flat-array arms of utils/array.h (328..343) and utils/arrayaccess.h
  *     (33..139); the expanded-header arms are dead under the driver
  *     precondition above.
- *   - deconstruct_array_builtin: reduced to the CSTRINGOID arm its only
- *     caller here (ArrayGetIntegerTypmods) uses; elmlen -2 / byval false /
- *     align 'c' transcribed from the pasted switch (arrayfuncs.c 3697..).
- *   - Assert/AssertMacro -> no-op (NDEBUG parity); elog(ERROR,...) ->
- *     abort() (only unreachable internal-error sites are pasted).
+ *   - deconstruct_array_builtin: pasted VERBATIM (arrayfuncs.c
+ *     3696..3764) so its hardcoded elmlen/elmbyval/elmalign TABLE is itself
+ *     dual-executed against the crate's construct.rs builtin_meta, rather
+ *     than aliased to the pinned-meta shim. FLOAT8PASSBYVAL = 1 (every
+ *     supported LP64 target). Its default: arm calls elog(ERROR) -> abort();
+ *     Its default: arm is a live error path (class 9) — NOTE C carries TWO
+ *     DIFFERENT tables: construct_array_builtin (3380..3492) accepts 12
+ *     element types while deconstruct_array_builtin (3696..3764) accepts
+ *     only 8 (no FLOAT4/INT8/NAME/REGTYPE/XID). Both are pasted so the
+ *     asymmetry itself is dual-executed against the crate's single shared
+ *     builtin_meta.
+ *   - Assert/AssertMacro -> no-op (NDEBUG parity); elog(ERROR,...) records
+ *     class 9 (ERRCODE_INTERNAL_ERROR / XX000, elog.c's default sqlstate
+ *     when no errcode() is given) and longjmps, exactly like ereport(ERROR):
+ *     the *_builtin tables' default: arms are live, reachable error paths,
+ *     not unreachable internal sites.
  *   - Array_nulls GUC pasted at its default (true), matching the Rust
  *     crate's fixed behavior.
  *   - Every global symbol pasted here is renamed with a pg_afx_ prefix at
@@ -215,10 +243,28 @@ typedef struct Node Node;
 #define TYPALIGN_SHORT 's'
 #define TYPALIGN_INT 'i'
 #define TYPALIGN_DOUBLE 'd'
+#define BOOLOID 16
+#define CHAROID 18
+#define NAMEOID 19
+#define INT8OID 20
+#define INT2OID 21
 #define INT4OID 23
 #define TEXTOID 25
+#define OIDOID 26
+#define TIDOID 27
+#define XIDOID 28
+#define FLOAT4OID 700
 #define FLOAT8OID 701
 #define CSTRINGOID 2275
+/* pg_config.h on every supported LP64 target */
+#define FLOAT8PASSBYVAL 1
+/* c.h / itemptr.h: NAMEDATALEN 64, sizeof(ItemPointerData) 6 */
+typedef struct ItemPointerData
+{
+	uint16		bi_hi;
+	uint16		bi_lo;
+	uint16		ip_posid;
+}			ItemPointerData;
 
 /* utils/memutils.h */
 #define MaxAllocSize	((Size) 0x3fffffff) /* 1 gigabyte - 1 */
@@ -273,7 +319,13 @@ pg_afx_raise(void)
 #define ereport(level, ...) do { (void) (__VA_ARGS__); pg_afx_raise(); } while (0)
 #define ereturn(escontext, ret, ...) do { (void) (__VA_ARGS__); pg_afx_raise(); } while (0)
 #define errsave(escontext, ...) do { (void) (__VA_ARGS__); pg_afx_raise(); } while (0)
-#define elog(level, ...) abort()	/* only internal-error sites pasted */
+/* elog(ERROR, ...) is a REAL PostgreSQL error (sqlstate XX000
+ * internal_error, elog.c's default when no errcode() is supplied), not an
+ * abort: mapping it to the error plane is what the comparator must see. The
+ * *_builtin tables' default: arms are the live example. */
+#define ERRCODE_INTERNAL_ERROR 9
+#define elog(level, ...) \
+	do { pg_diff_errcode = ERRCODE_INTERNAL_ERROR; pg_afx_raise(); } while (0)
 
 /* ---- palloc arena (growable; see header) ---- */
 static _Thread_local void **pg_afx_arena;
@@ -1744,30 +1796,49 @@ typedef struct ArrayMetaState
 	FmgrInfo	proc;
 } ArrayMetaState;
 
-/* SHIM: pinned element metadata (pg_type.dat values for int4/text). */
+/* SHIM: pinned element metadata table. Every row is the (typlen, typbyval,
+ * typalign) triple pg_type.dat @ 62d6c7d3df carries for that type; NAMEDATALEN
+ * is 64 and sizeof(ItemPointerData) is 6 on every supported target.
+ * PG_AFX_NSEL rows; selectors 0/1 keep their original meaning so the banked
+ * corpus stays meaningful. */
+#define PG_AFX_NSEL 13
+static const struct
+{
+	Oid			oid;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+}			pg_afx_metatab[PG_AFX_NSEL] = {
+	{INT4OID, 4, true, TYPALIGN_INT},		/* 0  int4 */
+	{TEXTOID, -1, false, TYPALIGN_INT},		/* 1  text */
+	{CHAROID, 1, true, TYPALIGN_CHAR},		/* 2  "char" */
+	{INT2OID, 2, true, TYPALIGN_SHORT},		/* 3  int2 */
+	{INT8OID, 8, true, TYPALIGN_DOUBLE},	/* 4  int8 */
+	{FLOAT4OID, 4, true, TYPALIGN_INT},		/* 5  float4 */
+	{FLOAT8OID, 8, true, TYPALIGN_DOUBLE},	/* 6  float8 */
+	{NAMEOID, 64, false, TYPALIGN_CHAR},	/* 7  name (byref fixed-len) */
+	{OIDOID, 4, true, TYPALIGN_INT},		/* 8  oid */
+	{TIDOID, 6, false, TYPALIGN_SHORT},		/* 9  tid (byref fixed-len) */
+	{BOOLOID, 1, true, TYPALIGN_CHAR},		/* 10 bool */
+	{XIDOID, 4, true, TYPALIGN_INT},		/* 11 xid */
+	{CSTRINGOID, -2, false, TYPALIGN_CHAR},	/* 12 cstring */
+};
+
 static void
 pg_afx_fill_meta(ArrayMetaState *m, int elemsel)
 {
-	if (elemsel == 0)
-	{
-		m->element_type = INT4OID;
-		m->typlen = 4;
-		m->typbyval = true;
-		m->typalign = TYPALIGN_INT;
-		m->typdelim = ',';
-		m->typioparam = INT4OID;
-	}
-	else
-	{
-		m->element_type = TEXTOID;
-		m->typlen = -1;
-		m->typbyval = false;
-		m->typalign = TYPALIGN_INT;
-		m->typdelim = ',';
-		m->typioparam = TEXTOID;
-	}
+	if (elemsel < 0 || elemsel >= PG_AFX_NSEL)
+		abort();				/* driver contract */
+	m->element_type = pg_afx_metatab[elemsel].oid;
+	m->typlen = pg_afx_metatab[elemsel].typlen;
+	m->typbyval = pg_afx_metatab[elemsel].typbyval;
+	m->typalign = pg_afx_metatab[elemsel].typalign;
+	m->typdelim = ',';			/* every type above carries typdelim ',' */
+	m->typioparam = m->element_type;
 	m->typiofunc = InvalidOid;
-	m->proc.elemsel = elemsel;
+	/* in/out procs exist for int4 (0) and text (1) only; the image-ops arms
+	 * never call them (see header). */
+	m->proc.elemsel = elemsel <= 1 ? elemsel : -1;
 }
 
 /* SHIM cstring_to_text equivalent: plain 4B-header varlena (plumbing). */
@@ -1796,8 +1867,10 @@ InputFunctionCallSafe(FmgrInfo *flinfo, char *str, Oid typioparam,
 	}
 	if (flinfo->elemsel == 0)
 		*result = Int32GetDatum(pg_strtoint32_safe(str, escontext));
-	else
+	else if (flinfo->elemsel == 1)
 		*result = pg_afx_make_text(str, strlen(str));
+	else
+		abort();				/* image-ops selector reached an io proc */
 	return true;
 }
 
@@ -1812,6 +1885,8 @@ OutputFunctionCall(FmgrInfo *flinfo, Datum d)
 		pg_ltoa(DatumGetInt32(d), buf);
 		return buf;
 	}
+	else if (flinfo->elemsel != 1)
+		abort();				/* image-ops selector reached an io proc */
 	else
 	{
 		char	   *v = DatumGetPointer(d);
@@ -1961,6 +2036,15 @@ pg_afx_array_set_element_expanded(Datum arraydatum, int nSubscripts,
 	abort();
 }
 ArrayType  *construct_empty_array(Oid elmtype);
+ArrayType  *construct_array(Datum *elems, int nelems, Oid elmtype,
+							int elmlen, bool elmbyval, char elmalign);
+ArrayType  *construct_array_builtin(Datum *elems, int nelems, Oid elmtype);
+#define construct_array_builtin pg_afx_construct_array_builtin
+/* catalog/pg_type_d.h + c.h shapes the builtin tables reference */
+#define REGTYPEOID 2206
+#define NAMEDATALEN 64
+typedef uint32 TransactionId;
+typedef float float4;
 static int	width_bucket_array_float8(Datum operand, ArrayType *thresholds);
 static int	width_bucket_array_fixed(Datum operand, ArrayType *thresholds,
 									 Oid collation, TypeCacheEntry *typentry);
@@ -4882,21 +4966,208 @@ width_bucket_array(Datum operand, ArrayType *thresholds, int elemsel)
 	PG_RETURN_INT32(result);
 }
 
-/*
- * SHIM deconstruct_array_builtin: reduced to the CSTRINGOID arm of the
- * arrayfuncs.c 3697..3765 switch (the only element type its only caller
- * here, ArrayGetIntegerTypmods, ever passes): elmlen -2, elmbyval false,
- * elmalign TYPALIGN_CHAR (values verbatim from that switch).
- */
+/* ==== VERBATIM: deconstruct_array_builtin (hardcoded meta TABLE, dual-executed) (arrayfuncs.c lines 3696..3764 @ 62d6c7d3df) ==== */
 void
-deconstruct_array_builtin(ArrayType *array, Oid elmtype,
+deconstruct_array_builtin(ArrayType *array,
+						  Oid elmtype,
 						  Datum **elemsp, bool **nullsp, int *nelemsp)
 {
-	if (elmtype != CSTRINGOID)
-		abort();				/* oracle drives cstring[] only */
-	deconstruct_array(array, elmtype, -2, false, TYPALIGN_CHAR,
-					  elemsp, nullsp, nelemsp);
+	int			elmlen;
+	bool		elmbyval;
+	char		elmalign;
+
+	switch (elmtype)
+	{
+		case CHAROID:
+			elmlen = 1;
+			elmbyval = true;
+			elmalign = TYPALIGN_CHAR;
+			break;
+
+		case CSTRINGOID:
+			elmlen = -2;
+			elmbyval = false;
+			elmalign = TYPALIGN_CHAR;
+			break;
+
+		case FLOAT8OID:
+			elmlen = sizeof(float8);
+			elmbyval = FLOAT8PASSBYVAL;
+			elmalign = TYPALIGN_DOUBLE;
+			break;
+
+		case INT2OID:
+			elmlen = sizeof(int16);
+			elmbyval = true;
+			elmalign = TYPALIGN_SHORT;
+			break;
+
+		case INT4OID:
+			elmlen = sizeof(int32);
+			elmbyval = true;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		case OIDOID:
+			elmlen = sizeof(Oid);
+			elmbyval = true;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		case TEXTOID:
+			elmlen = -1;
+			elmbyval = false;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		case TIDOID:
+			elmlen = sizeof(ItemPointerData);
+			elmbyval = false;
+			elmalign = TYPALIGN_SHORT;
+			break;
+
+		default:
+			elog(ERROR, "type %u not supported by deconstruct_array_builtin()", elmtype);
+			/* keep compiler quiet */
+			elmlen = 0;
+			elmbyval = false;
+			elmalign = 0;
+	}
+
+	deconstruct_array(array, elmtype, elmlen, elmbyval, elmalign, elemsp, nullsp, nelemsp);
 }
+
+/* ==== VERBATIM: construct_array (1-D wrapper) (arrayfuncs.c lines 3360..3374 @ 62d6c7d3df) ==== */
+ArrayType *
+construct_array(Datum *elems, int nelems,
+				Oid elmtype,
+				int elmlen, bool elmbyval, char elmalign)
+{
+	int			dims[1];
+	int			lbs[1];
+
+	dims[0] = nelems;
+	lbs[0] = 1;
+
+	return construct_md_array(elems, NULL, 1, dims, lbs,
+							  elmtype, elmlen, elmbyval, elmalign);
+}
+
+
+/* ==== VERBATIM: construct_array_builtin (hardcoded meta TABLE, 12 rows) (arrayfuncs.c lines 3380..3492 @ 62d6c7d3df) ==== */
+ArrayType *
+construct_array_builtin(Datum *elems, int nelems, Oid elmtype)
+{
+	int			elmlen;
+	bool		elmbyval;
+	char		elmalign;
+
+	switch (elmtype)
+	{
+		case CHAROID:
+			elmlen = 1;
+			elmbyval = true;
+			elmalign = TYPALIGN_CHAR;
+			break;
+
+		case CSTRINGOID:
+			elmlen = -2;
+			elmbyval = false;
+			elmalign = TYPALIGN_CHAR;
+			break;
+
+		case FLOAT4OID:
+			elmlen = sizeof(float4);
+			elmbyval = true;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		case FLOAT8OID:
+			elmlen = sizeof(float8);
+			elmbyval = FLOAT8PASSBYVAL;
+			elmalign = TYPALIGN_DOUBLE;
+			break;
+
+		case INT2OID:
+			elmlen = sizeof(int16);
+			elmbyval = true;
+			elmalign = TYPALIGN_SHORT;
+			break;
+
+		case INT4OID:
+			elmlen = sizeof(int32);
+			elmbyval = true;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		case INT8OID:
+			elmlen = sizeof(int64);
+			elmbyval = FLOAT8PASSBYVAL;
+			elmalign = TYPALIGN_DOUBLE;
+			break;
+
+		case NAMEOID:
+			elmlen = NAMEDATALEN;
+			elmbyval = false;
+			elmalign = TYPALIGN_CHAR;
+			break;
+
+		case OIDOID:
+		case REGTYPEOID:
+			elmlen = sizeof(Oid);
+			elmbyval = true;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		case TEXTOID:
+			elmlen = -1;
+			elmbyval = false;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		case TIDOID:
+			elmlen = sizeof(ItemPointerData);
+			elmbyval = false;
+			elmalign = TYPALIGN_SHORT;
+			break;
+
+		case XIDOID:
+			elmlen = sizeof(TransactionId);
+			elmbyval = true;
+			elmalign = TYPALIGN_INT;
+			break;
+
+		default:
+			elog(ERROR, "type %u not supported by construct_array_builtin()", elmtype);
+			/* keep compiler quiet */
+			elmlen = 0;
+			elmbyval = false;
+			elmalign = 0;
+	}
+
+	return construct_array(elems, nelems, elmtype, elmlen, elmbyval, elmalign);
+}
+
+/*
+ * construct_md_array	--- simple method for constructing an array object
+ *							with arbitrary dimensions and possible NULLs
+ *
+ * elems: array of Datum items to become the array contents
+ * nulls: array of is-null flags (can be NULL if no nulls)
+ * ndims: number of dimensions
+ * dims: integer array with size of each dimension
+ * lbs: integer array with lower bound of each dimension
+ * elmtype, elmlen, elmbyval, elmalign: info for the datatype of the items
+ *
+ * A palloc'd ndims-D array object is constructed and returned.  Note that
+ * elem values will be copied into the object even if pass-by-ref type.
+ * Also note the result will be 0-D not ndims-D if any dims[i] = 0.
+ *
+ * NOTE: it would be cleaner to look up the elmlen/elmbval/elmalign info
+ * from the system catalogs, given the elmtype.  However, the caller is
+ * in a better position to cache this info across multiple uses, or even
+ * to hard-wire values if the element type is hard-wired.
+ */
 
 /* ==== VERBATIM: ArrayGetIntegerTypmods (arrayutils.c lines 227..264 @ 62d6c7d3df) ==== */
 /*
@@ -4995,9 +5266,23 @@ pg_afx_elem_params(int elemsel, int *elmlen, bool *elmbyval, char *elmalign)
 	*elmalign = m.typalign;
 }
 
+/* Byref element bytes for an out-param: fixed-length byref types (name,
+ * tid) have no length header, so the driver passes elmlen; varlena (-1)
+ * uses VARSIZE_ANY and cstring (-2) uses strlen+1 — exactly
+ * att_addlength_pointer's three cases. */
+static size_t
+pg_afx_byref_size(int elmlen, const unsigned char *p)
+{
+	if (elmlen > 0)
+		return (size_t) elmlen;
+	if (elmlen == -1)
+		return VARSIZE_ANY(p);
+	return strlen((const char *) p) + 1;
+}
+
 int
 pg_diff_array_get_element(int elemsel, const unsigned char *img, size_t len,
-						  int nsub, const int *indx,
+						  int nsub, const int *indx, int arraytyplen,
 						  uint64_t *out_val, unsigned char **out_ptr,
 						  size_t *out_size, int *out_isnull)
 {
@@ -5015,12 +5300,13 @@ pg_diff_array_get_element(int elemsel, const unsigned char *img, size_t len,
 	memcpy(img_copy, img, len);
 	memcpy(indx_copy, indx, nsub * sizeof(int));
 	r = array_get_element(PointerGetDatum(img_copy), nsub, indx_copy,
-						  -1, elmlen, elmbyval, elmalign, &isnull);
+						  arraytyplen, elmlen, elmbyval, elmalign, &isnull);
 	*out_isnull = isnull ? 1 : 0;
 	if (!isnull && !elmbyval)
 	{
 		*out_ptr = (unsigned char *) DatumGetPointer(r);
-		*out_size = VARSIZE_ANY(DatumGetPointer(r));
+		*out_size = pg_afx_byref_size(elmlen,
+									  (unsigned char *) DatumGetPointer(r));
 		*out_val = 0;
 	}
 	else
@@ -5036,7 +5322,7 @@ int
 pg_diff_array_get_slice(int elemsel, const unsigned char *img, size_t len,
 						int nsub, int *upper, int *lower,
 						const unsigned char *upperProvided,
-						const unsigned char *lowerProvided,
+						const unsigned char *lowerProvided, int arraytyplen,
 						unsigned char **out_img, size_t *out_len)
 {
 	int			elmlen;
@@ -5058,31 +5344,55 @@ pg_diff_array_get_slice(int elemsel, const unsigned char *img, size_t len,
 		lob[i] = lowerProvided[i] != 0;
 	}
 	r = array_get_slice(PointerGetDatum(img_copy), nsub, upper, lower,
-						upb, lob, -1, elmlen, elmbyval, elmalign);
+						upb, lob, arraytyplen, elmlen, elmbyval, elmalign);
 	*out_img = (unsigned char *) DatumGetPointer(r);
 	*out_len = VARSIZE(DatumGetPointer(r));
 	return 0;
 }
 
-/* elem: for int4, 4 little-endian bytes; for text, the payload bytes. */
+/*
+ * Build one element Datum from driver bytes. byval types: the low elmlen
+ * bytes fetched through the SAME fetch_att the pasted C bodies use, so the
+ * word shape (sign/zero extension per width) is C's, never the driver's.
+ * text (-1): 4B varlena. cstring (-2): NUL-terminated copy. Fixed-length
+ * byref (name 64, tid 6): raw elmlen-byte blob.
+ */
 static Datum
 pg_afx_elem_datum(int elemsel, const unsigned char *elem, size_t elem_len)
 {
-	if (elemsel == 0)
-	{
-		int32		v;
+	int			elmlen = pg_afx_metatab[elemsel].typlen;
+	bool		elmbyval = pg_afx_metatab[elemsel].typbyval;
 
-		memcpy(&v, elem, 4);
-		return Int32GetDatum(v);
+	if (elmbyval)
+	{
+		unsigned char word[8] = {0};
+
+		memcpy(word, elem, (size_t) elmlen);
+		return fetch_att(word, true, elmlen);
 	}
-	return pg_afx_make_text((const char *) elem, elem_len);
+	if (elmlen == -1)
+		return pg_afx_make_text((const char *) elem, elem_len);
+	if (elmlen == -2)
+	{
+		char	   *v = palloc(elem_len + 1);
+
+		memcpy(v, elem, elem_len);
+		v[elem_len] = '\0';
+		return PointerGetDatum(v);
+	}
+	{
+		char	   *v = palloc((size_t) elmlen);
+
+		memcpy(v, elem, (size_t) elmlen);
+		return PointerGetDatum(v);
+	}
 }
 
 int
 pg_diff_array_set_element(int elemsel, const unsigned char *img, size_t len,
 						  int nsub, const int *indx,
 						  const unsigned char *elem, size_t elem_len,
-						  int elem_isnull,
+						  int elem_isnull, int arraytyplen,
 						  unsigned char **out_img, size_t *out_len)
 {
 	int			elmlen;
@@ -5102,9 +5412,12 @@ pg_diff_array_set_element(int elemsel, const unsigned char *img, size_t len,
 		dv = pg_afx_elem_datum(elemsel, elem, elem_len);
 	r = array_set_element(PointerGetDatum(img_copy), nsub, indx_copy,
 						  dv, elem_isnull != 0,
-						  -1, elmlen, elmbyval, elmalign);
+						  arraytyplen, elmlen, elmbyval, elmalign);
 	*out_img = (unsigned char *) DatumGetPointer(r);
-	*out_len = VARSIZE(DatumGetPointer(r));
+	/* fixed-length container result is a bare arraytyplen-byte blob, not a
+	 * varlena (C: array_set_element palloc(arraytyplen) + memcpy). */
+	*out_len = arraytyplen > 0 ? (size_t) arraytyplen
+		: VARSIZE(DatumGetPointer(r));
 	return 0;
 }
 
@@ -5114,6 +5427,7 @@ pg_diff_array_set_slice(int elemsel, const unsigned char *img, size_t len,
 						const unsigned char *upperProvided,
 						const unsigned char *lowerProvided,
 						const unsigned char *src, size_t src_len,
+						int arraytyplen,
 						unsigned char **out_img, size_t *out_len)
 {
 	int			elmlen;
@@ -5139,7 +5453,7 @@ pg_diff_array_set_slice(int elemsel, const unsigned char *img, size_t len,
 	}
 	r = array_set_slice(PointerGetDatum(img_copy), nsub, upper, lower,
 						upb, lob, PointerGetDatum(src_copy), false,
-						-1, elmlen, elmbyval, elmalign);
+						arraytyplen, elmlen, elmbyval, elmalign);
 	*out_img = (unsigned char *) DatumGetPointer(r);
 	*out_len = VARSIZE(DatumGetPointer(r));
 	return 0;
@@ -5147,7 +5461,7 @@ pg_diff_array_set_slice(int elemsel, const unsigned char *img, size_t len,
 
 int
 pg_diff_deconstruct_array(int elemsel, const unsigned char *img, size_t len,
-						  int allow_nulls,
+						  int allow_nulls, int builtin_mode,
 						  uint64_t **out_vals, unsigned char **out_nulls,
 						  int *out_n)
 {
@@ -5166,10 +5480,17 @@ pg_diff_deconstruct_array(int elemsel, const unsigned char *img, size_t len,
 	pg_afx_elem_params(elemsel, &elmlen, &elmbyval, &elmalign);
 	img_copy = palloc(len);
 	memcpy(img_copy, img, len);
-	deconstruct_array((ArrayType *) img_copy,
-					  elemsel == 0 ? INT4OID : TEXTOID,
-					  elmlen, elmbyval, elmalign,
-					  &elems, allow_nulls ? &nulls : NULL, &nelems);
+	if (builtin_mode)
+		/* the hardcoded-table entry: C looks the meta up itself */
+		deconstruct_array_builtin((ArrayType *) img_copy,
+								  pg_afx_metatab[elemsel].oid,
+								  &elems, allow_nulls ? &nulls : NULL,
+								  &nelems);
+	else
+		deconstruct_array((ArrayType *) img_copy,
+						  pg_afx_metatab[elemsel].oid,
+						  elmlen, elmbyval, elmalign,
+						  &elems, allow_nulls ? &nulls : NULL, &nelems);
 	vals = palloc(sizeof(uint64_t) * (nelems ? nelems : 1));
 	nl = palloc(nelems ? nelems : 1);
 	for (i = 0; i < nelems; i++)
@@ -5193,6 +5514,7 @@ pg_diff_construct_md_array(int elemsel, const unsigned char *elem_data,
 						   const int *elem_lens,
 						   const unsigned char *nulls, int nitems,
 						   int ndims, const int *dims, const int *lbs,
+						   int wrapper_1d,
 						   unsigned char **out_img, size_t *out_len)
 {
 	Datum	   *elems;
@@ -5217,26 +5539,35 @@ pg_diff_construct_md_array(int elemsel, const unsigned char *elem_data,
 		}
 		if (nl)
 			nl[i] = false;
-		if (elemsel == 0)
-		{
-			elems[i] = pg_afx_elem_datum(0, elem_data + 4 * i, 4);
-		}
-		else
-		{
-			elems[i] = pg_afx_elem_datum(1, elem_data + off,
-										 (size_t) elem_lens[i]);
-			off += (size_t) elem_lens[i];
-		}
+		/* uniform encoding: elem_lens[i] bytes per element, concatenated
+		 * (fixed-width types get their exact width from the driver). */
+		elems[i] = pg_afx_elem_datum(elemsel, elem_data + off,
+									 (size_t) elem_lens[i]);
+		off += (size_t) elem_lens[i];
 	}
 	if (ndims > 0 && ndims <= MAXDIM)
 	{
 		memcpy(dims_copy, dims, ndims * sizeof(int));
 		memcpy(lbs_copy, lbs, ndims * sizeof(int));
 	}
-	r = construct_md_array(elems, nl, ndims, dims_copy, lbs_copy,
-						   elemsel == 0 ? INT4OID : TEXTOID,
-						   elemsel == 0 ? 4 : -1,
-						   elemsel == 0, TYPALIGN_INT);
+	if (wrapper_1d == 2)
+		/* construct_array_builtin: C looks the meta up in its own 12-row
+		 * table (dual-executed against construct.rs builtin_meta) */
+		r = construct_array_builtin(elems, nitems,
+									pg_afx_metatab[elemsel].oid);
+	else if (wrapper_1d)
+		/* construct_array: 1-D wrapper, nulls unsupported (C passes NULL) */
+		r = construct_array(elems, nitems,
+							pg_afx_metatab[elemsel].oid,
+							pg_afx_metatab[elemsel].typlen,
+							pg_afx_metatab[elemsel].typbyval,
+							pg_afx_metatab[elemsel].typalign);
+	else
+		r = construct_md_array(elems, nl, ndims, dims_copy, lbs_copy,
+							   pg_afx_metatab[elemsel].oid,
+							   pg_afx_metatab[elemsel].typlen,
+							   pg_afx_metatab[elemsel].typbyval,
+							   pg_afx_metatab[elemsel].typalign);
 	*out_img = (unsigned char *) r;
 	*out_len = VARSIZE(r);
 	return 0;
