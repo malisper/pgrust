@@ -721,6 +721,7 @@ mod tests {
     /// nightly fuzz campaign).
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/datetime_io_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/datetime_io_diff missing") {
@@ -741,6 +742,7 @@ mod tests {
 
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         // in-arms: style byte + (typmod) + text; ok and error shapes
         for style in 0u8..15 {
             datetime_io_diff(&arm(0, &[style, b'2', b'0', b'2', b'4', b'-', b'1', b'-', b'5']));
@@ -812,6 +814,7 @@ mod tests {
     #[test]
     #[ignore]
     fn probe_tzname_leak() {
+        let _serial = crate::c_oracle_serial();
         // Warm.
         for i in 0..1000u32 {
             let mut p = vec![4];

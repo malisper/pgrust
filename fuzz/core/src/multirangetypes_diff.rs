@@ -1160,6 +1160,12 @@ fn install_seams() {
 }
 
 pub fn multirangetypes_diff(data: &[u8]) {
+    // Skip when a foreign module owns the typcache env — see the identical
+    // guard in rangetypes_diff (rowtypes_diff convention; RESIDUE: composite
+    // fixture would retire this).
+    if syscache_seams::lookup_pg_type_typcache_shape::is_installed() {
+        return;
+    }
     install_seams();
     report_tie_fallbacks();
     let Some((&sel, rest)) = data.split_first() else {
@@ -2021,6 +2027,13 @@ mod tests {
     /// fires is worse than a known gap.
     #[test]
     fn gap_closing_arms_all_fire() {
+        let _serial = crate::c_oracle_serial();
+        if syscache_seams::lookup_pg_type_typcache_shape::is_installed() {
+            // Foreign module owns the typcache env: drivers no-op (see the
+            // entry guard), so arm-vacuity cannot be asserted in the shared
+            // binary. Run `cargo test <module>` filtered for the real rail.
+            return;
+        }
         let b = (
             soft_mode_count(),
             soft_captured_count(),
@@ -2058,6 +2071,7 @@ mod tests {
     /// Every arm x every instantiation.
     #[test]
     fn all_arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         for sel in 0..11u8 {
             for typ in 0..3u8 {
                 for pad in [0u8, 1, 7, 0x40, 0xff] {
@@ -2069,6 +2083,7 @@ mod tests {
 
     #[test]
     fn text_io_literals() {
+        let _serial = crate::c_oracle_serial();
         for lit in [
             &b"{}"[..],
             b"{[1,2)}",
@@ -2103,6 +2118,13 @@ mod tests {
     /// byte-equal for byval).
     #[test]
     fn numeric_representation_tie_D1() {
+        let _serial = crate::c_oracle_serial();
+        if syscache_seams::lookup_pg_type_typcache_shape::is_installed() {
+            // Foreign module owns the typcache env: drivers no-op (see the
+            // entry guard), so arm-vacuity cannot be asserted in the shared
+            // binary. Run `cargo test <module>` filtered for the real rail.
+            return;
+        }
         let before = numeric_tie_fallback_count();
         // nummultirange (t=2) literals that ACTUALLY diverge: 3+ value groups
         // with dscale variety, ordered so C's unstable qsort keeps a different
@@ -2144,6 +2166,7 @@ mod tests {
     /// coverage and exec volume cannot detect their absence.
     #[test]
     fn single_field_witness_pairs() {
+        let _serial = crate::c_oracle_serial();
         // arm 2 sub-selector 2 = the constructor2 canonicalize path.
         // after [sel,typ]: [subsel][n][flags,lo,hi][flags,lo,hi]...
         let base: [u8; 9] = [2, 0, 2, 2, 0x02, 3, 7, 0x02, 9];
@@ -2182,6 +2205,7 @@ mod tests {
 
     #[test]
     fn operator_bundles() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             // two 2-range multiranges: overlapping / disjoint / equal
             run(&[4, t, 2, 0x02, 1, 4, 0x02, 6, 9, 2, 0x02, 3, 7, 0x02, 8, 11]);
@@ -2194,6 +2218,7 @@ mod tests {
 
     #[test]
     fn setops_hash_merge_internals() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             run(&[7, t, 2, 0x02, 1, 5, 0x02, 7, 9, 2, 0x02, 3, 8, 0x02, 10, 12]);
             run(&[8, t, 2, 0x02, 1, 5, 0x02, 7, 9, 1, 2, 3, 4, 5, 6, 7, 8]);
@@ -2206,6 +2231,7 @@ mod tests {
 
     #[test]
     fn ctor_arms() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             run(&[2, t, 0]); // constructor0
             run(&[2, t, 1, 0, 0x02, 1, 5]); // constructor1
@@ -2218,6 +2244,7 @@ mod tests {
 
     #[test]
     fn binary_io_wire() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             run(&[1, t, 0, 0, 0, 0]); // range_count = 0
             run(&[1, t, 0, 0]); // truncated count
@@ -2235,6 +2262,7 @@ mod carrier_tests {
     /// either would silently hand the wrong rettype to every constructor.
     #[test]
     fn rettype_carriers_track_pins() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3 {
             assert_eq!(MR_RETTYPE[t].rettype, PINS[t].mltrngtypid, "MR_RETTYPE[{t}]");
             assert_eq!(RNG_RETTYPE[t].rettype, PINS[t].rngtypid, "RNG_RETTYPE[{t}]");

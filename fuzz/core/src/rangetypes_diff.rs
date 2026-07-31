@@ -976,6 +976,19 @@ fn install_seams() {
 }
 
 pub fn rangetypes_diff(data: &[u8]) {
+    // This harness's contract is "the typcache seam never fires" (fn_extra
+    // memos everywhere). In the SHARED cargo-test binary another lane's
+    // module (array_userfuncs_diff / rowtypes_diff) may own
+    // lookup_pg_type_typcache_shape with a fixture that cannot resolve this
+    // lane's pinned range oids, and residual lookups then produce false
+    // "type does not exist" divergences. Same convention as rowtypes_diff:
+    // whichever module owns the env wins; our drivers become no-ops there
+    // (run `cargo test rangetypes_diff` for the full rail; fuzz binaries
+    // are one-target-per-process and unaffected). RESIDUE: a composite
+    // typcache fixture covering all lanes' pins would retire this skip.
+    if syscache_seams::lookup_pg_type_typcache_shape::is_installed() {
+        return;
+    }
     install_seams();
     maybe_report_stats();
     let Some((&sel, rest)) = data.split_first() else {
@@ -2108,6 +2121,7 @@ mod tests {
 
     #[test]
     fn smoke_text_io() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             run(0, t, b"[1,2)");
             run(0, t, b"empty");
@@ -2128,6 +2142,7 @@ mod tests {
 
     #[test]
     fn smoke_ctors_accessors() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             let mut p = vec![0u8, b'[', b')'];
             p.extend_from_slice(&[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0]);
@@ -2145,6 +2160,7 @@ mod tests {
 
     #[test]
     fn smoke_ops_setops_hash_elem() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             for f1 in [0u8, 1, 2, 4, 6, 8, 0x10, 0x18, 0x80, 0x20, 0x40, 0xff] {
                 let mut p = vec![f1, f1 ^ 0x06];
@@ -2161,6 +2177,7 @@ mod tests {
 
     #[test]
     fn smoke_canonical_subdiff() {
+        let _serial = crate::c_oracle_serial();
         for ct in 0..3u8 {
             for f in [0u8, 2, 4, 6, 1, 8, 0x10] {
                 let mut p = vec![f];
@@ -2186,6 +2203,7 @@ mod tests {
 
     #[test]
     fn smoke_binary_io() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3u8 {
             run(1, t, &[0x01]);
             run(1, t, &[0x00]);
@@ -2207,6 +2225,7 @@ mod tests {
     /// field's contribution to eq/cmp/hash verdicts is witnessed.
     #[test]
     fn witness_pairs() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..2u8 {
             let base: &[u8] = &[1, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0];
             let lower_delta: &[u8] = &[2, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0];
@@ -2240,6 +2259,13 @@ mod vacuity {
     /// Every counter here must ADVANCE over a fixed input set.
     #[test]
     fn gap_closing_arms_all_fire() {
+        let _serial = crate::c_oracle_serial();
+        if syscache_seams::lookup_pg_type_typcache_shape::is_installed() {
+            // Foreign module owns the typcache env: drivers no-op (see the
+            // entry guard), so arm-vacuity cannot be asserted in the shared
+            // binary. Run `cargo test <module>` filtered for the real rail.
+            return;
+        }
         let before = STATS.with(|s| {
             let st = s.borrow();
             (
@@ -2323,6 +2349,13 @@ mod vacuity {
     /// this fails instead of the campaign going vacuously green.
     #[test]
     fn both_layouts_reach_every_instantiation() {
+        let _serial = crate::c_oracle_serial();
+        if syscache_seams::lookup_pg_type_typcache_shape::is_installed() {
+            // Foreign module owns the typcache env: drivers no-op (see the
+            // entry guard), so arm-vacuity cannot be asserted in the shared
+            // binary. Run `cargo test <module>` filtered for the real rail.
+            return;
+        }
         STATS.with(|s| *s.borrow_mut() = BuildStats::default());
         // ordered bound payloads per instantiation (lower <= upper, so the
         // constructor accepts them; a swapped pair legitimately declines)
@@ -2379,6 +2412,13 @@ mod vacuity {
     /// does not). Guards against the ctor path silently degrading to the hand one.
     #[test]
     fn numrange_layouts_differ() {
+        let _serial = crate::c_oracle_serial();
+        if syscache_seams::lookup_pg_type_typcache_shape::is_installed() {
+            // Foreign module owns the typcache env: drivers no-op (see the
+            // entry guard), so arm-vacuity cannot be asserted in the shared
+            // binary. Run `cargo test <module>` filtered for the real rail.
+            return;
+        }
         let ctx = MemoryContext::new("layouts");
         let mcx = ctx.mcx();
         let lo = Bound::Num(mint_numeric(mcx, b"1.5").unwrap());
@@ -2411,6 +2451,7 @@ mod packed_short {
     /// not expand or truncate it — and range_out/send must render it the same.
     #[test]
     fn short_header_bounds_round_trip() {
+        let _serial = crate::c_oracle_serial();
         let ctx = MemoryContext::new("short");
         let mcx = ctx.mcx();
         let lo = Bound::Num(mint_numeric(mcx, b"1.5").unwrap());
@@ -2452,6 +2493,7 @@ mod carriers {
     /// Pin the correspondence.
     #[test]
     fn rettype_carriers_match_pins() {
+        let _serial = crate::c_oracle_serial();
         for t in 0..3 {
             assert_eq!(
                 RNG_RETTYPE[t].rettype, PINS[t].rngtypid,
@@ -2467,6 +2509,7 @@ mod carriers {
     /// the CI cluster caught (24 bytes leaked per ops_flinfo call).
     #[test]
     fn ops_flinfo_carrier_is_static() {
+        let _serial = crate::c_oracle_serial();
         let a = ops_flinfo(0);
         let b = ops_flinfo(0);
         let pa = a.fn_expr.as_ref().unwrap().downcast_ref::<AggFnArgTypes>().unwrap()
@@ -2496,6 +2539,7 @@ mod shared_errclass_table {
     /// must get the same number from both.
     #[test]
     fn cross_target_err_class_agreement() {
+        let _serial = crate::c_oracle_serial();
         let shared = [
             ("NUMERIC_VALUE_OUT_OF_RANGE", te::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
             ("INVALID_TEXT_REPRESENTATION", te::ERRCODE_INVALID_TEXT_REPRESENTATION),
@@ -2548,6 +2592,7 @@ mod soft_isnull_contract {
     /// compared at full strength by arm_text_in_soft and asserted here too.
     #[test]
     fn soft_isnull_is_the_only_deviation() {
+        let _serial = crate::c_oracle_serial();
         // (literal, expect_soft, c_class, c_isnull_on_soft_edge)
         let cases = [
             ("garbage", true, 2, 1),   // range_parse edge      -> C isnull=1

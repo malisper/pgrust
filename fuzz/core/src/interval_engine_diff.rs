@@ -341,6 +341,7 @@ mod tests {
 
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/interval_engine_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/interval_engine_diff missing") {
@@ -361,6 +362,7 @@ mod tests {
 
     #[test]
     fn arms_smoke() {
+        let _serial = crate::c_oracle_serial();
         for st in 0u8..4 {
             for r in 0u8..13 {
                 for text in ["1 year 2 months 3 days", "@ 1 hour ago", "-1 4:05:06",

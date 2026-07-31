@@ -340,6 +340,7 @@ mod tests {
 
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/datetime_engine_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/datetime_engine_diff missing") {
@@ -385,6 +386,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_encode_datetime() {
+        let _serial = crate::c_oracle_serial();
         for so in 0u8..15 {
             for flags in 0u8..4 {
                 for tzn in [&b""[..], b"GMT", b"UTC", b"America/Los_Angeles", b"+05"] {
@@ -408,6 +410,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_iso_family() {
+        let _serial = crate::c_oracle_serial();
         let years = [
             0, 1, -1, 1970, 2000, 2026, -4713, 294276, 1, i32::MAX, i32::MIN, i32::MAX - 1,
         ];
@@ -434,6 +437,7 @@ mod tests {
     /// corpus at full line coverage for exactly this reason.
     #[test]
     fn single_field_difference_witnesses() {
+        let _serial = crate::c_oracle_serial();
         for so in 0u8..15 {
             for field in 0..7 {
                 for delta in [1i32, -1, 2, -2, 10, -10] {

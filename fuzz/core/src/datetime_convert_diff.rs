@@ -621,6 +621,7 @@ mod tests {
 
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/datetime_convert_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/datetime_convert_diff missing") {
@@ -673,6 +674,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_timestamp_conversions() {
+        let _serial = crate::c_oracle_serial();
         for arm in [0u8, 1u8] {
             for ts in TS_GRID {
                 datetime_convert_diff(&ts_arm(arm, ts));
@@ -686,6 +688,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_date_timestamptz() {
+        let _serial = crate::c_oracle_serial();
         for d in [
             0i32,
             1,
@@ -709,6 +712,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_interval_arith() {
+        let _serial = crate::c_oracle_serial();
         const IVS: [(i64, i32, i32); 8] = [
             (0, 0, 0),
             (1, 0, 0),
@@ -735,6 +739,7 @@ mod tests {
     /// class). Each case here is one whose C verdict is known non-trivially.
     #[test]
     fn arms_are_not_vacuous() {
+        let _serial = crate::c_oracle_serial();
         super::super::datetime_io_diff::init_env_for_siblings();
 
         // timestamp_time on +infinity returns SQL NULL, on 0 a real time.
@@ -807,6 +812,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_tz_abbrev() {
+        let _serial = crate::c_oracle_serial();
         for tok in [
             &b"aaa"[..],
             b"bbb",
@@ -848,6 +854,7 @@ mod tests {
     /// state that left decode.rs 250-313 at zero hits in the first place.
     #[test]
     fn tz_abbrev_arms_are_not_vacuous() {
+        let _serial = crate::c_oracle_serial();
         super::super::datetime_io_diff::init_env_for_siblings();
         install_pinned_abbrevs();
 

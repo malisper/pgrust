@@ -1582,6 +1582,7 @@ mod tests {
 
     #[test]
     fn smoke_io_in_out_send() {
+        let _serial = crate::c_oracle_serial();
         for s in [
             "123.45", "0", "-0.001", "NaN", "Infinity", "-inf", "1e10", "1e-100",
             "  42  ", "0x1f", "0b101", "0o17", "1_000_000", "abc", "1..2", "9e99999",
@@ -1596,6 +1597,7 @@ mod tests {
 
     #[test]
     fn smoke_io_recv_raw() {
+        let _serial = crate::c_oracle_serial();
         // sel 1, typmod -1, then raw wire bytes: valid 1-digit numeric
         let mut d = vec![1u8];
         d.extend_from_slice(&(-1i32).to_be_bytes());
@@ -1619,6 +1621,7 @@ mod tests {
 
     #[test]
     fn smoke_ops_arith_cmp_math() {
+        let _serial = crate::c_oracle_serial();
         let a = operand(0, 1, 2, &[123, 4500]);
         let b = operand(1, 0, 0, &[7]);
         let nan = operand(2, 0, 0, &[]);
@@ -1652,6 +1655,7 @@ mod tests {
 
     #[test]
     fn smoke_ops_conv_hash_agg() {
+        let _serial = crate::c_oracle_serial();
         let a = operand(0, 1, 2, &[123, 4500]);
         let big = operand(0, 10, 0, &[9999, 9999, 9999]);
         for sel in [31u8, 32, 33, 34, 35, 41] {

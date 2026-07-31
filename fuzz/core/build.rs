@@ -216,6 +216,16 @@ fn main() {
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         numericfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
+    // wave-3 train sweep: numericfam's verbatim hashfn.c exports collide
+    // with pg_hashfn_io.c (p1-laneh) under one binary — same class as the
+    // jsonbfam/hashfn.c rename below (GNU ld hard error on Linux rails).
+    for s in [
+        "hash_bytes", "hash_bytes_extended", "hash_bytes_uint32",
+        "hash_bytes_uint32_extended", "string_hash", "tag_hash",
+        "uint32_hash",
+    ] {
+        numericfam.define(s, format!("nfam_{s}").as_str());
+    }
     numericfam
         .file("csrc/numericfam/pg_numeric_oracle.c")
         .file("csrc/numericfam/vendor/common/hashfn.c")
@@ -443,6 +453,21 @@ fn main() {
         "hash_numeric", "hash_numeric_extended", "hashchar",
         "hashcharextended", "jsonb_in", "numeric_eq", "numeric_cmp",
         "int64_to_numeric",
+        // wave-3 train sweep (2026-07-31): these exports of the jsonpath
+        // family's minimal numeric extract and exec-env sentinels collided
+        // with the numericfam oracle (p1-laneu) and the dtio oracle
+        // (p1-lanel2) once all three lanes shared one binary — dtio calls
+        // were binding jsonpathexec's ABORTING datetime-carve sentinel
+        // stubs. Every duplicate found by the nm sweep gets the prefix.
+        "float4_numeric", "float8_numeric", "int2_numeric", "int4_numeric",
+        "int8_numeric", "numeric_abs", "numeric_add_opt_error",
+        "numeric_ceil", "numeric_div_opt_error", "numeric_floor",
+        "numeric_int4_opt_error", "numeric_int8_opt_error",
+        "numeric_is_inf", "numeric_is_nan", "numeric_mod_opt_error",
+        "numeric_mul_opt_error", "numeric_sub_opt_error", "numeric_trunc",
+        "numerictypmodin",
+        "date_timestamptz", "timestamp_date", "timestamp_time",
+        "timestamptz_date", "timestamptz_time", "timestamptz_timetz",
     ];
     let mut jsonpath = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
@@ -552,6 +577,15 @@ fn main() {
         dtio.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     dtio.define("strtoint", "dtio_impl_strtoint");
+    // wave-3 train sweep: dtio's vendored numutils/numeric extracts collide
+    // with the main oracle lib's pg_numutils.o and numericfam's oracle under
+    // one binary (GNU ld hard-errors; ld64 first-definition-wins silently).
+    for s in [
+        "pg_ultoa_n", "pg_ultostr", "pg_ultostr_zeropad",
+        "int64_to_numeric", "int64_div_fast_to_numeric",
+    ] {
+        dtio.define(s, format!("dtio_impl_{s}").as_str());
+    }
     dtio.file("csrc/pg_datetime_io_io.c")
         .include("csrc/shim")
         .include("csrc/pgdt")

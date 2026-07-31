@@ -452,7 +452,17 @@ pub use multirangetypes_diff::multirangetypes_diff;
 pub fn install_detoast_seam_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        detoast_seams::detoast_attr::set(detoast::detoast_attr);
+        // First-wins across ALL lanes sharing the test binary (json/jsonb/
+        // array harnesses install this seam too; installs are serialized by
+        // c_oracle_serial in tests). Every installed impl is the identity
+        // copy for the inline images these harnesses exchange, so losing
+        // the race is fine — and set() must stay unpanicked so this Once
+        // never poisons.
+        if !detoast_seams::detoast_attr::is_installed() {
+            let _ = std::panic::catch_unwind(|| {
+                detoast_seams::detoast_attr::set(detoast::detoast_attr)
+            });
+        }
     });
 }
 // numericfam (p1-laneu adt/numeric campaign): whole-numeric.c oracle,

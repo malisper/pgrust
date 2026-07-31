@@ -1647,6 +1647,7 @@ mod tests {
 
     #[test]
     fn seed_corpus_replays_clean() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/datetime_closeout_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/datetime_closeout_diff missing") {
@@ -1676,6 +1677,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_extract_date() {
+        let _serial = crate::c_oracle_serial();
         for d in DATES {
             for u in UNITS {
                 let mut p = d.to_le_bytes().to_vec();
@@ -1693,6 +1695,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_time_parts() {
+        let _serial = crate::c_oracle_serial();
         for t in [0i64, 1, 45_296_789_000, 86_400_000_000, 86_399_999_999, 43_200_000_000] {
             for u in UNITS {
                 let mut p = t.to_le_bytes().to_vec();
@@ -1712,6 +1715,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_recv() {
+        let _serial = crate::c_oracle_serial();
         // valid date wire (4 bytes BE), valid time (8 bytes), valid timetz
         // (12), interval (16), short/garbage frames
         let frames: [&[u8]; 8] = [
@@ -1733,6 +1737,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_in() {
+        let _serial = crate::c_oracle_serial();
         for which in 0u8..6 {
             for text in [
                 &b"2024-01-05"[..],
@@ -1767,6 +1772,7 @@ mod tests {
     /// 251-252 is defensive-c-parity unreachable — see the module header.)
     #[test]
     fn date_in_soft_parse_error() {
+        let _serial = crate::c_oracle_serial();
         super::super::datetime_io_diff::init_env_for_siblings();
         set_date_style(USE_ISO_DATES);
         set_date_order(DATEORDER_YMD);
@@ -1796,6 +1802,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_out_convert() {
+        let _serial = crate::c_oracle_serial();
         for ts in [0i64, 1, -1, i64::MAX, i64::MIN, 9_662 * 86_400_000_000] {
             datetime_closeout_diff(&a5(0, ts, 0, (3_600_000_000, 1, 2), 2.5));
         }
@@ -1807,6 +1814,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_cmp() {
+        let _serial = crate::c_oracle_serial();
         let mut p = Vec::new();
         for pair in [(0i64, 0i64), (1, 2), (-1, 1), (i64::MAX, i64::MIN), (5, 5)] {
             p.clear();
@@ -1828,6 +1836,7 @@ mod tests {
 
     #[test]
     fn arms_smoke_typmod_inrange() {
+        let _serial = crate::c_oracle_serial();
         for b0 in 0u8..8 {
             for flags in 0u8..4 {
                 for v in [-3i32, -1, 0, 3, 6, 7, 9] {
@@ -1872,6 +1881,7 @@ mod tests {
     /// C-side verdict.
     #[test]
     fn arms_are_not_vacuous() {
+        let _serial = crate::c_oracle_serial();
         super::super::datetime_io_diff::init_env_for_siblings();
 
         // extract_date('epoch', date 0) = 946684800 as a plain integer
