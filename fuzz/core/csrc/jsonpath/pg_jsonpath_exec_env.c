@@ -284,6 +284,17 @@ hashcharextended(FunctionCallInfo fcinfo)
 	PG_JSONPATH_UNREACHABLE_ABORT("hashcharextended (GIN/hash opclass)");
 }
 
+List *
+list_delete_first(List *list)
+{
+	/* only caller is jsonb_path_query_internal's SRF per-call path (the
+	 * MultiFuncCall carve) — init_MultiFuncCall aborts before this can run */
+	PG_JSONPATH_UNREACHABLE_ABORT("list_delete_first (SRF carve)");
+}
+
+/* JsonValueListGetList is exec-internal; the SRF wrapper's list_head use is
+ * satisfied by the vendored pg_list.h inline. */
+
 int
 pg_strncoll(const char *arg1, ssize_t len1, const char *arg2, ssize_t len2,
 			pg_locale_t locale)
@@ -558,8 +569,10 @@ pg_diff_image_common(Datum (*fn) (FunctionCallInfo),
  * getIthJsonbValueFromContainer + JsonbValueToJsonb are VERBATIM
  * (jsonb_util.c). For scalars/objects/arrays this is exactly the SRF's
  * per-item image (PostgreSQL serializes each found item to a standalone
- * jsonb); the driver's unit tier locks this equivalence against docker
- * ground truth.
+ * jsonb); the driver's unit tier locks this equivalence against the Rust
+ * row-collection core on every regress vector, and the crate's own tests
+ * lock those rows against regress expected output (README-TODO records
+ * the docker spot checks).
  *
  * Output framing: *items_out = arena buffer of concatenated
  * [u32 native-endian image_len][image bytes] records; *count_out = number

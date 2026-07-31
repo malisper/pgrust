@@ -305,6 +305,9 @@ fn seed_corpus_replays_clean() {
         }
     }
     assert!(n >= 30, "expected >=30 seeds, found {n}");
+    let total = EXEC_TOTAL.load(Ordering::Relaxed);
+    let carved = CARVE_HITS.load(Ordering::Relaxed);
+    println!("corpus replay: {n} seeds, {total} in-domain execs, {carved} datetime-carve hits");
 }
 
 /// Witness pairs (single-dimension deltas — seeding obligation): the same

@@ -1,0 +1,1 @@
++ax $[*] ? (@ like_regex "a{1,"a":fla "m")[nul 1, "&ab\nadc"]
