@@ -544,3 +544,7 @@ pub use tsvector_core_diff::tsvector_core_diff;
 // tsrank_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-tsrank_diff.md.
 pub mod tsrank_diff;
 pub use tsrank_diff::tsrank_diff;
+
+// int_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-int_diff.md.
+pub mod int_diff;
+pub use int_diff::int_diff;
