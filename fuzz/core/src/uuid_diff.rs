@@ -26,28 +26,39 @@
 //!                    key vs the C uuid_abbrev_convert pure kernel per call,
 //!                    plus uuid_abbrev_abort gate execution/invariants.
 //!
+//! FC-WRAPPER PLANE: each arm additionally routes its (already core-vs-C
+//! checked) input through the crate's builtins.rs fc_* wrapper via a native
+//! types_fmgr::LocalFcinfo frame and asserts wrapper ≡ core (Datum value /
+//! returned bytes / error verdict + sqlstate). C-parity keeps being carried
+//! by the core comparison; the plane makes the wrapper lines execute every
+//! iteration with an in-harness oracle. Executed: fc_uuid_in (hard + soft
+//! ErrorSaveNode shapes), fc_uuid_out, fc_uuid_lt/le/eq/ge/gt/ne/cmp,
+//! fc_uuid_hash, fc_uuid_hash_extended, fc_uuid_extract_version,
+//! fc_uuid_extract_timestamp, fc_uuid_recv, fc_uuid_send.
+//!
 //! SKIPPED (stateful, excluded(state)-class rows; no differential possible):
 //!   - gen_random_uuid / uuidv7 / uuidv7_interval /
-//!     get_real_time_ns_ascending: PRNG (pg_strong_random) and wall-clock +
-//!     backend-private monotonic TLS. The pure core behind uuidv7* —
+//!     get_real_time_ns_ascending — and their fc_gen_random_uuid / fc_uuidv7
+//!     / fc_uuidv7_interval wrappers: PRNG (pg_strong_random) and wall-clock
+//!     + backend-private monotonic TLS. The pure core behind uuidv7* —
 //!     generate_uuidv7 — IS covered (arm 6) via the C oracle's rand8 seam.
 //!     uuidv7_interval additionally needs adt_datetime::Interval, not a
 //!     decoder_fuzz dependency.
-//!   - builtins.rs fc_* wrappers: need fmgr Fcinfo machinery (types_fmgr),
-//!     not constructible from this crate; core entry points are driven
-//!     instead (the wrappers are regress-covered).
 //!   - abbrev abort's HyperLogLog estimate is state accumulated across
 //!     calls; the abort gates are executed and checked against the
 //!     deterministic expectations of fixed corpora (not a C differential —
-//!     vendoring PG's hyperloglog.c is out of this target's scope).
+//!     vendoring PG's hyperloglog.c is out of this target's scope). No fc
+//!     wrapper exists for abbrev (uuid_sortsupport is unregistered).
 
 use std::ffi::{c_char, CString};
 
 use adt_uuid::abbrev::UuidAbbrevState;
 use adt_uuid::{PgUuid, UUID_LEN, UUID_OUT_LEN};
+use datum::{Datum, NullableDatum};
 use mcx::MemoryContext;
 use stringinfo::StringInfo;
-use types_error::{SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION};
+use types_error::{PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION};
+use types_fmgr::{ErrorSaveNode, LocalFcinfo, PGFunction};
 
 extern "C" {
     fn pg_diff_uuid_in(source: *const c_char, out: *mut u8) -> i32;
@@ -72,6 +83,42 @@ extern "C" {
 
 /// Oracle errcode class for 22P02 (see csrc/pg_uuid_io.c section 4).
 const C_ERR_INVALID_TEXT: i32 = 1;
+
+// ---------------------------------------------------------------------------
+// fc-wrapper plane plumbing (native LocalFcinfo, real mcx — the proofs
+// wrapper-level pattern run without kani).
+// ---------------------------------------------------------------------------
+
+/// Invoke an fc_* wrapper over non-null args; returns (result, isnull flag).
+fn fc_call<const N: usize>(
+    f: PGFunction,
+    m: mcx::Mcx<'_>,
+    args: [Datum; N],
+) -> (PgResult<Datum>, bool) {
+    let mut fcinfo = LocalFcinfo::<N>::new(0);
+    // SAFETY: the context owning `m` outlives this single call (caller scope).
+    unsafe { fcinfo.set_result_mcx(m) };
+    for (i, a) in args.into_iter().enumerate() {
+        fcinfo.args[i] = NullableDatum::value(a);
+    }
+    let r = f(None, &mut fcinfo);
+    (r, fcinfo.isnull)
+}
+
+/// First `n` bytes behind a by-ref result Datum. Caller contract: `d` came
+/// from a wrapper that returned an `n`-byte-or-longer allocation still live
+/// in the arming context (or thread-local out scratch).
+fn datum_bytes<'a>(d: Datum, n: usize) -> &'a [u8] {
+    // SAFETY: caller contract above.
+    unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, n) }
+}
+
+/// A StringInfo image over `bytes` in `m` (None = alloc failure: skip plane).
+fn make_si<'a>(m: mcx::Mcx<'a>, bytes: &[u8]) -> Option<StringInfo<'a>> {
+    let mut vec = mcx::vec_with_capacity_in::<u8>(m, bytes.len()).ok()?;
+    mcx::vec_append_bytes(&mut vec, bytes).ok()?;
+    StringInfo::from_vec(vec).ok()
+}
 
 fn take16(payload: &[u8]) -> Option<PgUuid> {
     let head = payload.get(..UUID_LEN)?;
@@ -146,6 +193,45 @@ fn in_diff(payload: &[u8]) {
         let saved = sc.error().expect("details_wanted context must save the error");
         assert_eq!(saved.sqlstate, ERRCODE_INVALID_TEXT_REPRESENTATION);
     }
+
+    // fc-wrapper plane: fc_uuid_in, hard shape (no escontext) ...
+    let cx = MemoryContext::new("uuid_fc");
+    let m = cx.mcx();
+    let din = Datum::from_usize(cs.as_ptr() as usize);
+    match fc_call::<1>(adt_uuid::builtins::fc_uuid_in, m, [din]).0 {
+        Ok(d) => assert!(
+            cst == 0 && datum_bytes(d, UUID_LEN) == cval,
+            "fc_uuid_in vs core DIVERGENCE input={:?}",
+            String::from_utf8_lossy(payload)
+        ),
+        Err(e) => assert!(
+            cst == 1 && e.sqlstate == ERRCODE_INVALID_TEXT_REPRESENTATION,
+            "fc_uuid_in error-shape DIVERGENCE input={:?} sqlstate={:?}",
+            String::from_utf8_lossy(payload),
+            e.sqlstate
+        ),
+    }
+    // ... then the soft shape through a real ErrorSaveNode on the frame.
+    let mut node = ErrorSaveNode::new(true);
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    // SAFETY: `cx` outlives this single call.
+    unsafe { fcinfo.set_result_mcx(m) };
+    fcinfo.context = node.fm_node_ptr();
+    fcinfo.args[0] = NullableDatum::value(din);
+    let d = adt_uuid::builtins::fc_uuid_in(None, &mut fcinfo)
+        .expect("fc_uuid_in with escontext must not hard-error");
+    assert_eq!(
+        node.ctx.error_occurred(),
+        cst != 0,
+        "fc_uuid_in soft verdict DIVERGENCE input={:?}",
+        String::from_utf8_lossy(payload)
+    );
+    if cst == 0 {
+        assert_eq!(datum_bytes(d, UUID_LEN), cval, "fc_uuid_in soft value DIVERGENCE");
+    } else {
+        let saved = node.ctx.error().expect("fc soft context must save the error");
+        assert_eq!(saved.sqlstate, ERRCODE_INVALID_TEXT_REPRESENTATION);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +249,22 @@ fn out_diff(payload: &[u8]) {
         "uuid_out DIVERGENCE uuid={u:02x?}: C={:?} Rust={:?}",
         String::from_utf8_lossy(&cbuf[..UUID_OUT_LEN]),
         String::from_utf8_lossy(&rbuf[..rlen])
+    );
+
+    // fc-wrapper plane: fc_uuid_out (thread-local cstring scratch Datum).
+    let cx = MemoryContext::new("uuid_fc");
+    let d = fc_call::<1>(
+        adt_uuid::builtins::fc_uuid_out,
+        cx.mcx(),
+        [Datum::from_usize(u.as_ptr() as usize)],
+    )
+    .0
+    .expect("fc_uuid_out cannot fail");
+    let img = datum_bytes(d, UUID_OUT_LEN + 1);
+    assert!(
+        img[..UUID_OUT_LEN] == rbuf && img[UUID_OUT_LEN] == 0,
+        "fc_uuid_out vs core DIVERGENCE uuid={u:02x?}: fc={:?}",
+        String::from_utf8_lossy(&img[..UUID_OUT_LEN])
     );
 }
 
@@ -190,6 +292,38 @@ fn cmp_diff(payload: &[u8]) {
         let cop = c(i as i32 + 1) != 0;
         assert_eq!(cop, *r, "uuid bool-op {i} DIVERGENCE a={a:02x?} b={b:02x?}");
     }
+
+    // fc-wrapper plane: the six bool wrappers + fc_uuid_cmp (exact value —
+    // wrapper and core share the same memcmp result on this build).
+    let cx = MemoryContext::new("uuid_fc");
+    let m = cx.mcx();
+    let (da, db) = (
+        Datum::from_usize(a.as_ptr() as usize),
+        Datum::from_usize(b.as_ptr() as usize),
+    );
+    use adt_uuid::builtins as fcb;
+    let fc_ops: [(&str, PGFunction); 6] = [
+        ("lt", fcb::fc_uuid_lt),
+        ("le", fcb::fc_uuid_le),
+        ("eq", fcb::fc_uuid_eq),
+        ("ge", fcb::fc_uuid_ge),
+        ("gt", fcb::fc_uuid_gt),
+        ("ne", fcb::fc_uuid_ne),
+    ];
+    for ((name, f), expect) in fc_ops.into_iter().zip(rust) {
+        let d = fc_call::<2>(f, m, [da, db]).0.expect("bool wrapper cannot fail");
+        assert_eq!(
+            d.as_bool(),
+            expect,
+            "fc_uuid_{name} vs core DIVERGENCE a={a:02x?} b={b:02x?}"
+        );
+    }
+    let d = fc_call::<2>(fcb::fc_uuid_cmp, m, [da, db]).0.expect("cmp wrapper cannot fail");
+    assert_eq!(
+        d.as_i32(),
+        adt_uuid::uuid_internal_cmp(&a, &b),
+        "fc_uuid_cmp vs core DIVERGENCE a={a:02x?} b={b:02x?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +334,16 @@ fn hash_diff(payload: &[u8]) {
     let Some(u) = take16(payload) else { return };
     let ch = unsafe { pg_diff_uuid_hash(u.as_ptr()) };
     assert_eq!(ch, adt_uuid::uuid_hash(&u), "uuid_hash DIVERGENCE uuid={u:02x?}");
+
+    // fc-wrapper plane: fc_uuid_hash / fc_uuid_hash_extended per seed.
+    let cx = MemoryContext::new("uuid_fc");
+    let m = cx.mcx();
+    let du = Datum::from_usize(u.as_ptr() as usize);
+    let d = fc_call::<1>(adt_uuid::builtins::fc_uuid_hash, m, [du])
+        .0
+        .expect("fc_uuid_hash cannot fail");
+    assert_eq!(d.as_u32(), ch, "fc_uuid_hash vs core DIVERGENCE uuid={u:02x?}");
+
     let mut seeds = vec![0u64];
     if let Some(sb) = payload.get(UUID_LEN..UUID_LEN + 8) {
         seeds.push(u64::from_le_bytes(sb.try_into().unwrap()));
@@ -210,6 +354,18 @@ fn hash_diff(payload: &[u8]) {
             ce,
             adt_uuid::uuid_hash_extended(&u, seed),
             "uuid_hash_extended DIVERGENCE uuid={u:02x?} seed={seed:#x}"
+        );
+        let d = fc_call::<2>(
+            adt_uuid::builtins::fc_uuid_hash_extended,
+            m,
+            [du, Datum::from_u64(seed)],
+        )
+        .0
+        .expect("fc_uuid_hash_extended cannot fail");
+        assert_eq!(
+            d.as_u64(),
+            ce,
+            "fc_uuid_hash_extended vs core DIVERGENCE uuid={u:02x?} seed={seed:#x}"
         );
     }
 }
@@ -245,6 +401,30 @@ fn extract_diff(payload: &[u8]) {
             isnull == 1,
             "uuid_extract_timestamp DIVERGENCE uuid={u:02x?}: C non-null {ct}, Rust NULL"
         ),
+    }
+
+    // fc-wrapper plane: fc_uuid_extract_version / _timestamp (null verdicts
+    // travel through fcinfo.isnull; the value through the Datum).
+    let cx = MemoryContext::new("uuid_fc");
+    let m = cx.mcx();
+    let du = Datum::from_usize(u.as_ptr() as usize);
+    let (r, fcnull) = fc_call::<1>(adt_uuid::builtins::fc_uuid_extract_version, m, [du]);
+    let d = r.expect("fc_uuid_extract_version cannot fail");
+    match rv {
+        Some(v) => assert!(
+            !fcnull && d.as_u16() == v,
+            "fc_uuid_extract_version vs core DIVERGENCE uuid={u:02x?}"
+        ),
+        None => assert!(fcnull, "fc_uuid_extract_version null-verdict DIVERGENCE uuid={u:02x?}"),
+    }
+    let (r, fcnull) = fc_call::<1>(adt_uuid::builtins::fc_uuid_extract_timestamp, m, [du]);
+    let d = r.expect("fc_uuid_extract_timestamp cannot fail");
+    match rt {
+        Some(t) => assert!(
+            !fcnull && d.as_i64() == t,
+            "fc_uuid_extract_timestamp vs core DIVERGENCE uuid={u:02x?}"
+        ),
+        None => assert!(fcnull, "fc_uuid_extract_timestamp null-verdict DIVERGENCE uuid={u:02x?}"),
     }
 }
 
@@ -298,6 +478,27 @@ fn recv_send_diff(payload: &[u8]) {
                 "uuid_send DIVERGENCE uuid={r:02x?}: C={cimg:02x?} Rust={:02x?}",
                 rimg.as_bytes()
             );
+
+            // fc-wrapper plane: fc_uuid_recv over a fresh StringInfo image,
+            // then fc_uuid_send on the decoded value.
+            if let Some(mut msg2) = make_si(mcx, payload) {
+                let d = fc_call::<1>(
+                    adt_uuid::builtins::fc_uuid_recv,
+                    mcx,
+                    [Datum::from_usize(core::ptr::from_mut(&mut msg2) as usize)],
+                )
+                .0
+                .expect("fc_uuid_recv must succeed where core did");
+                assert_eq!(datum_bytes(d, UUID_LEN), r, "fc_uuid_recv vs core DIVERGENCE");
+                let ds = fc_call::<1>(adt_uuid::builtins::fc_uuid_send, mcx, [d])
+                    .0
+                    .expect("fc_uuid_send cannot fail");
+                assert_eq!(
+                    datum_bytes(ds, 20),
+                    rimg.as_bytes(),
+                    "fc_uuid_send vs core DIVERGENCE uuid={r:02x?}"
+                );
+            }
         }
         Err(_) => {
             // Insufficient data: C status 4. (Errcode class: both sides are
@@ -308,6 +509,21 @@ fn recv_send_diff(payload: &[u8]) {
                 "uuid_recv DIVERGENCE len={}: C st {cst} but Rust errored",
                 payload.len()
             );
+
+            // fc-wrapper plane: the wrapper must error exactly where core did.
+            if let Some(mut msg2) = make_si(mcx, payload) {
+                let rr = fc_call::<1>(
+                    adt_uuid::builtins::fc_uuid_recv,
+                    mcx,
+                    [Datum::from_usize(core::ptr::from_mut(&mut msg2) as usize)],
+                )
+                .0;
+                assert!(
+                    rr.is_err(),
+                    "fc_uuid_recv verdict vs core DIVERGENCE len={}",
+                    payload.len()
+                );
+            }
         }
     }
 }
@@ -559,6 +775,48 @@ mod tests {
                 uuid_diff(&d);
             }
         }
+    }
+
+    /// fc-wrapper plane smoke: drive every selector whose arm carries fc_*
+    /// wrapper checks (0 in hard+soft ok/err, 1 out, 2 cmp family, 3 hash +
+    /// hash_extended, 4 extract_version/timestamp incl. NULL verdicts,
+    /// 5 recv ok/err + send), so every executed wrapper runs at least once
+    /// under `cargo test` on stable.
+    #[test]
+    fn fc_plane_smoke() {
+        // Arm 0: fc_uuid_in Ok and Err shapes (hard + soft each).
+        for s in [&b"01020304-0506-7008-800a-0b0c0d0e0f10"[..], b"bogus", b""] {
+            let mut d = vec![0u8];
+            d.extend_from_slice(s);
+            uuid_diff(&d);
+        }
+        // A v7 uuid (version nibble 7, RFC variant): non-NULL extract arms.
+        let mut v7: PgUuid = [0x5a; UUID_LEN];
+        v7[6] = 0x71;
+        v7[8] = 0x8f;
+        // A version-0/variant-0 uuid: NULL extract verdict arms.
+        let nil: PgUuid = [0u8; UUID_LEN];
+        for u in [v7, nil] {
+            for sel in [1u8, 3, 4, 5] {
+                let mut d = vec![sel];
+                d.extend_from_slice(&u);
+                if sel == 3 {
+                    d.extend_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+                }
+                uuid_diff(&d);
+            }
+        }
+        // Arm 2: cmp family on <, ==, > orderings.
+        for (a, b) in [(v7, nil), (v7, v7), (nil, v7)] {
+            let mut d = vec![2u8];
+            d.extend_from_slice(&a);
+            d.extend_from_slice(&b);
+            uuid_diff(&d);
+        }
+        // Arm 5 short-read: fc_uuid_recv error verdict.
+        let mut d = vec![5u8];
+        d.extend_from_slice(&v7[..9]);
+        uuid_diff(&d);
     }
 
     /// The heavy >100k-distinct abbrev mode (0xa5) — run once here so the
