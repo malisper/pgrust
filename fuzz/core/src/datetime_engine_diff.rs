@@ -23,6 +23,12 @@
 //! caller-supplied (tz, tzn) pair, so nothing here touches the zone-name cache
 //! the io target has to ration.
 //!
+//! Domain fences (all three named, all matching a C-side contract or a C-side
+//! undefined behavior — see fold_mon / fold_absable below): tm_mon folded into
+//! EncodeDateTime's own Assert range, and sec / fsec / tz kept off i32::MIN
+//! where the vendored code's abs() is undefined. Nothing real PostgreSQL can
+//! produce is fenced out.
+//!
 //! Comparison planes: the full emitted image bytes (C's NUL-terminated buffer
 //! vs the Rust length-returning writer, compared over the whole prefix), the
 //! `tm_wday` write-back the USE_POSTGRES_DATES arm performs, and the returned
@@ -111,9 +117,14 @@ fn fold_mon(raw: i32) -> i32 {
     (raw.rem_euclid(12)) + 1
 }
 
-/// `abs()` on `INT_MIN` is undefined in C, and `AppendSeconds` applies it to
-/// both `sec` and `fsec`. Folding the sentinel away keeps the oracle defined;
-/// every other value of both fields stays in the compared domain.
+/// `abs()` on `INT_MIN` is undefined in C, and the vendored code applies it to
+/// `sec` and `fsec` (`AppendSeconds`) and to `tz` (`EncodeTimezone`). Folding
+/// the sentinel away keeps the oracle defined; every other value of all three
+/// fields stays in the compared domain. Real PostgreSQL cannot reach the
+/// sentinel on any of them — zone offsets are bounded by ±15:59:59 and
+/// timestamp2tm's seconds by 60 — so nothing observable is fenced out. (Rust's
+/// `unsigned_abs()` is well-defined at the sentinel and simply has no C
+/// behavior to be compared against.)
 fn fold_absable(raw: i32) -> i32 {
     if raw == i32::MIN {
         i32::MIN + 1
@@ -167,7 +178,7 @@ fn encode_datetime_diff(payload: &[u8]) {
     let sec = fold_absable(i32_at(payload, 22));
     let isdst = i32_at(payload, 26);
     let fsec = fold_absable(i32_at(payload, 30));
-    let tz = i32_at(payload, 34);
+    let tz = fold_absable(i32_at(payload, 34));
 
     let tzn_bytes = if have_tzn {
         match fold_tzn(&payload[38..]) {

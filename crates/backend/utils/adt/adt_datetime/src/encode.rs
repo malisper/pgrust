@@ -92,9 +92,17 @@ pub fn EncodeTimezone(buf: &mut [u8], mut p: usize, tz: i32, style: i32) -> usiz
     p
 }
 
+// C is `(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1)` under -fwrapv,
+// so at year == i32::MIN + 1 the negation wraps back to i32::MIN rather than
+// trapping; checked ops here are a ported-in panic (found by
+// datetime_engine_diff).
 #[inline]
 fn display_year(year: i32) -> u32 {
-    (if year > 0 { year } else { -(year - 1) }) as u32
+    (if year > 0 {
+        year
+    } else {
+        year.wrapping_sub(1).wrapping_neg()
+    }) as u32
 }
 
 #[inline]
