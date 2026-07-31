@@ -24,24 +24,35 @@
 //! Every comparison runs under C_COLLATION_OID; the varstr_cmp locale path
 //! (collation-dependent) is out of scope on both sides.
 //!
+//! fc-wrapper plane: every selector arm ALSO routes its input through the
+//! crate's builtins.rs fmgr wrappers (fc_*) on a native LocalFcinfo frame
+//! (the proofs/uuid wrapper-level pattern, run natively with a real
+//! mcx::MemoryContext), asserting wrapper ≡ core (Datum value / result
+//! bytes / error verdict+class). C parity keeps riding the core-vs-C
+//! comparison; the fc plane pins the wrapper glue (arg decode, result
+//! encode, scratch/mcx conventions). hashname/hashnameextended execute at
+//! wrapper grain with in-harness oracles only (the seed-0 identity
+//! `hash_bytes_extended(k,0) as u32 == hash_bytes(k)` plus determinism);
+//! their hash-value C parity is owned by proofs/hash (`hashfn` is not a
+//! fuzz/core dependency).
+//!
 //! Skipped, with reasons:
-//!  - current_user/session_user/current_schema(s): excluded(state) —
-//!    syscache/catalog state, not reachable purely.
-//!  - hashname/hashnameextended: one-line delegations to the `hashfn`
-//!    crate living in builtins.rs; `hashfn` is not a dependency of
-//!    fuzz/core (Cargo.toml is outside this lane's file budget) and the
-//!    hash bodies are proved against vendored C in proofs/hash.
-//!  - builtins.rs fc_* wrappers generally: they need a types_fmgr Fcinfo,
-//!    and types_fmgr/datum are not fuzz/core dependencies; all value logic
-//!    they wrap lives in lib.rs and is driven here at dispatch grain.
+//!  - current_user/session_user/current_schema(s) and their fc_* wrappers
+//!    (fc_current_user, fc_session_user, fc_current_schema,
+//!    fc_current_schemas): excluded(state) — syscache/catalog state, not
+//!    reachable purely.
 //!  - btnamesortsupport: SortSupport plumbing (varstr_sortsupport), no
-//!    pure entry point in the shipped crate.
+//!    pure entry point in the shipped crate and no fc_* wrapper in
+//!    builtins.rs.
 
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::sync::Once;
 
+use datum::{Datum, NullableDatum};
+use name::builtins as nb;
 use types_core::C_COLLATION_OID;
 use types_error::{PgError, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_NAME_TOO_LONG};
+use types_fmgr::{FmgrInfo, LocalFcinfo, PGFunction, PackedVarlena};
 
 extern "C" {
     fn pg_diff_namein(s: *const c_char, result: *mut u8) -> i32;
@@ -124,6 +135,81 @@ fn setup() {
 }
 
 // ---------------------------------------------------------------------------
+// fc-wrapper plane plumbing: one native fmgr call frame per wrapper
+// invocation (deterministic; result allocations ride the caller's arena and
+// die with it, no hot-loop leaks).
+// ---------------------------------------------------------------------------
+
+/// One native fmgr call: N by-value/by-ref arg Datums, optional armed result
+/// mcx, explicit collation. Wrappers under test never return SQL NULL.
+fn fc_call<const N: usize>(
+    f: PGFunction,
+    flinfo: Option<&mut FmgrInfo>,
+    coll: u32,
+    mcx: Option<mcx::Mcx<'_>>,
+    args: [Datum; N],
+) -> types_error::PgResult<Datum> {
+    let mut fcinfo = LocalFcinfo::<N>::new(coll);
+    if let Some(m) = mcx {
+        // SAFETY: the arming context outlives this single call.
+        unsafe { fcinfo.set_result_mcx(m) };
+    }
+    for (i, a) in args.into_iter().enumerate() {
+        fcinfo.args[i] = NullableDatum::value(a);
+    }
+    let r = f(flinfo, &mut fcinfo);
+    if r.is_ok() {
+        assert!(!fcinfo.isnull, "fc wrapper returned SQL NULL unexpectedly");
+    }
+    r
+}
+
+/// NAME arg convention: fixed 64-byte by-ref pointer.
+fn name_datum(block: &[u8; 64]) -> Datum {
+    Datum::from_usize(block.as_ptr() as usize)
+}
+
+/// text/varlena arg construction: inline 4B-uncompressed header + body
+/// (the shipped set_varsize_4b_word encoding; body is capped by MAX_TEXT so
+/// the length always fits).
+fn text_image(body: &[u8]) -> Vec<u8> {
+    let len = (body.len() + 4) as u32;
+    #[cfg(target_endian = "little")]
+    let word = len << 2;
+    #[cfg(target_endian = "big")]
+    let word = len & 0x3FFF_FFFF;
+    let mut img = Vec::with_capacity(body.len() + 4);
+    img.extend_from_slice(&word.to_ne_bytes());
+    img.extend_from_slice(body);
+    img
+}
+
+/// By-ref NAME result readback (fc results are 64-byte blocks).
+fn read_name(d: Datum) -> [u8; 64] {
+    // SAFETY: fc name results point at live 64-byte blocks (fn_extra scratch
+    // or byref_result copies) read before their owner drops.
+    unsafe { *(d.as_usize() as *const [u8; 64]) }
+}
+
+/// Varlena result readback (text/bytea payload bytes).
+fn read_varlena_data<'a>(d: Datum) -> &'a [u8] {
+    // SAFETY: fc varlena results are live inline images in the armed arena,
+    // read before the arena drops.
+    unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data()
+}
+
+/// Infallible bool-returning wrapper vs the already-C-checked core verdict.
+fn fc_expect_bool(fname: &str, f: PGFunction, coll: u32, args: [Datum; 2], want: bool) {
+    let d = fc_call(f, None, coll, None, args)
+        .unwrap_or_else(|e| panic!("{fname} wrapper errored: {}", e.message));
+    assert!(
+        d.as_bool() == want,
+        "{fname} fc-wrapper DIVERGENCE: wrapper={} core={want}",
+        d.as_bool()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Input layout: [selector][payload]; selector % 6 picks the arm:
 //   0 = namein cstring arm (NUL-free text; + nameout, namestrcmp, namestrcpy)
 //   1 = name cmp family over two raw 64-byte blocks (C collation)
@@ -199,6 +285,72 @@ fn namein_arm(payload: &[u8]) {
             &nd.data[..]
         );
     }
+
+    // ---- fc-wrapper plane (wrapper ≡ core) ----
+    // fc_namein: cstring arg; result rides the resolved FmgrInfo's scratch.
+    let mut fl = FmgrInfo::unresolved();
+    let din = fc_call(
+        nb::fc_namein,
+        Some(&mut fl),
+        0,
+        None,
+        [Datum::from_usize(cs.as_ptr() as usize)],
+    )
+    .expect("fc_namein is infallible");
+    assert!(
+        read_name(din) == r.data,
+        "fc_namein vs core DIVERGENCE input={payload:?}"
+    );
+
+    // fc_nameout: cstring result in the thread-local scratch.
+    let dout = fc_call(nb::fc_nameout, None, 0, None, [name_datum(&r.data)])
+        .expect("fc_nameout is infallible");
+    // SAFETY: fc_nameout returns the live NUL-terminated TLS scratch.
+    let out = unsafe { CStr::from_ptr(dout.as_usize() as *const c_char) };
+    assert!(
+        out.to_bytes_with_nul() == &rbuf[..],
+        "fc_nameout vs core DIVERGENCE input={payload:?}"
+    );
+
+    // fc_name_text: NAME -> text (cstring_to_text of the NUL-stopped bytes).
+    let cx = mcx::MemoryContext::new("name_fuzz_fc");
+    let dtext = fc_call(nb::fc_name_text, None, 0, Some(cx.mcx()), [name_datum(&r.data)])
+        .expect("fc_name_text allocation");
+    assert!(
+        read_varlena_data(dtext) == r.name_str(),
+        "fc_name_text vs core DIVERGENCE input={payload:?}"
+    );
+
+    // fc_hashname / fc_hashnameextended: in-harness oracles only (seed-0
+    // low-word identity + determinism); hash-value C parity is proofs/hash's.
+    let h = fc_call(nb::fc_hashname, None, 0, None, [name_datum(&r.data)])
+        .expect("fc_hashname is infallible")
+        .as_u32();
+    let h0 = fc_call(
+        nb::fc_hashnameextended,
+        None,
+        0,
+        None,
+        [name_datum(&r.data), Datum::from_i64(0)],
+    )
+    .expect("fc_hashnameextended is infallible")
+    .as_u64();
+    assert!(
+        h0 as u32 == h,
+        "hashname/hashnameextended seed-0 identity broke input={payload:?}: h={h:#x} ext0={h0:#x}"
+    );
+    let mut sb = [0u8; 8];
+    for (i, &x) in payload.iter().take(8).enumerate() {
+        sb[i] = x;
+    }
+    let seed = Datum::from_u64(u64::from_le_bytes(sb));
+    let h1 = fc_call(nb::fc_hashnameextended, None, 0, None, [name_datum(&r.data), seed])
+        .expect("fc_hashnameextended is infallible")
+        .as_u64();
+    let h2 = fc_call(nb::fc_hashnameextended, None, 0, None, [name_datum(&r.data), seed])
+        .expect("fc_hashnameextended is infallible")
+        .as_u64();
+    assert!(h1 == h2, "fc_hashnameextended nondeterministic input={payload:?}");
 }
 
 /// namelt/le/gt/ge/eq/ne + btnamecmp over two raw 64-byte name blocks under
@@ -241,6 +393,26 @@ fn cmp_arm(payload: &[u8]) {
     assert!(
         cres == rres,
         "btnamecmp DIVERGENCE a={a:?} b={b:?}: C={cres} Rust={rres}"
+    );
+
+    // ---- fc-wrapper plane (wrapper ≡ core, same collation) ----
+    let (da, db) = (name_datum(&a), name_datum(&b));
+    let fc_bools: [(&str, PGFunction); 6] = [
+        ("fc_nameeq", nb::fc_nameeq),
+        ("fc_namene", nb::fc_namene),
+        ("fc_namelt", nb::fc_namelt),
+        ("fc_namele", nb::fc_namele),
+        ("fc_namegt", nb::fc_namegt),
+        ("fc_namege", nb::fc_namege),
+    ];
+    for ((fname, f), (_, core, _)) in fc_bools.iter().zip(cases.iter()) {
+        fc_expect_bool(fname, *f, coll, [da, db], *core);
+    }
+    let d = fc_call(nb::fc_btnamecmp, None, coll, None, [da, db]).expect("fc_btnamecmp");
+    assert!(
+        d.as_i32() == rres,
+        "fc_btnamecmp fc-wrapper DIVERGENCE a={a:?} b={b:?}: wrapper={} core={rres}",
+        d.as_i32()
     );
 
     // namestrcmp against b's NUL-truncated prefix as the C string.
@@ -307,6 +479,42 @@ fn nametext_arm(payload: &[u8]) {
         "bttextnamecmp DIVERGENCE text={text:?} name={:?}: C={cres} Rust={rres}",
         nd.name_str()
     );
+
+    // ---- fc-wrapper plane (wrapper ≡ core, same collation) ----
+    // Text arg: inline 4B-header varlena over the same bytes; NAME arg: the
+    // same namein-built 64-byte block by pointer.
+    let timg = text_image(text);
+    let (dn, dt) = (name_datum(&nd.data), Datum::from_usize(timg.as_ptr() as usize));
+    let fc_bools: [(&str, PGFunction, [Datum; 2]); 12] = [
+        ("fc_nameeqtext", nb::fc_nameeqtext, [dn, dt]),
+        ("fc_namenetext", nb::fc_namenetext, [dn, dt]),
+        ("fc_namelttext", nb::fc_namelttext, [dn, dt]),
+        ("fc_nameletext", nb::fc_nameletext, [dn, dt]),
+        ("fc_namegetext", nb::fc_namegetext, [dn, dt]),
+        ("fc_namegttext", nb::fc_namegttext, [dn, dt]),
+        ("fc_texteqname", nb::fc_texteqname, [dt, dn]),
+        ("fc_textnename", nb::fc_textnename, [dt, dn]),
+        ("fc_textltname", nb::fc_textltname, [dt, dn]),
+        ("fc_textlename", nb::fc_textlename, [dt, dn]),
+        ("fc_textgename", nb::fc_textgename, [dt, dn]),
+        ("fc_textgtname", nb::fc_textgtname, [dt, dn]),
+    ];
+    for ((fname, f, args), (_, core, _)) in fc_bools.iter().zip(bool_cases.iter()) {
+        fc_expect_bool(fname, *f, coll, *args, *core);
+    }
+    let d = fc_call(nb::fc_btnametextcmp, None, coll, None, [dn, dt]).expect("fc_btnametextcmp");
+    let core = name::btnametextcmp(&nd, text, coll).unwrap();
+    assert!(
+        d.as_i32() == core,
+        "fc_btnametextcmp fc-wrapper DIVERGENCE text={text:?}: wrapper={} core={core}",
+        d.as_i32()
+    );
+    let d = fc_call(nb::fc_bttextnamecmp, None, coll, None, [dt, dn]).expect("fc_bttextnamecmp");
+    assert!(
+        d.as_i32() == rres,
+        "fc_bttextnamecmp fc-wrapper DIVERGENCE text={text:?}: wrapper={} core={rres}",
+        d.as_i32()
+    );
 }
 
 /// nameconcatoid: `_{oid}` suffix, truncating the NAME part (mbcliplen'd)
@@ -340,6 +548,22 @@ fn concatoid_arm(payload: &[u8]) {
         nd.name_str(),
         &cres[..],
         &r.data[..]
+    );
+
+    // ---- fc-wrapper plane (wrapper ≡ core) ----
+    let cx = mcx::MemoryContext::new("name_fuzz_fc");
+    let d = fc_call(
+        nb::fc_nameconcatoid,
+        None,
+        0,
+        Some(cx.mcx()),
+        [name_datum(&nd.data), Datum::from_oid(oid)],
+    )
+    .expect("fc_nameconcatoid allocation");
+    assert!(
+        read_name(d) == r.data,
+        "fc_nameconcatoid vs core DIVERGENCE name={:?} oid={oid}",
+        nd.name_str()
     );
 }
 
@@ -381,6 +605,31 @@ fn sendrecv_arm(payload: &[u8]) {
         }
     }
 
+    // fc_namerecv over its own StringInfo image of the same wire payload
+    // (wrapper ≡ C-checked outcome ≡ core).
+    let mut si2 = match stringinfo::StringInfo::new_in(mcx) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if si2.append_bytes(payload).is_err() {
+        return;
+    }
+    let dsi = Datum::from_usize(core::ptr::from_mut(&mut si2) as usize);
+    match fc_call(nb::fc_namerecv, None, 0, Some(mcx), [dsi]) {
+        Ok(d) => assert!(
+            cres >= 0 && cerr == 0 && read_name(d) == cimg,
+            "fc_namerecv DIVERGENCE payload={payload:?}: C=(res {cres}, err {cerr})"
+        ),
+        Err(e) => {
+            let rerr = rust_err_class(&e);
+            assert!(
+                cres == -1 && cerr == rerr,
+                "fc_namerecv DIVERGENCE payload={payload:?}: C=(res {cres}, err {cerr}) wrapper=Err({rerr} {})",
+                e.message
+            );
+        }
+    }
+
     // send/out plane over a namein-built name (cstring contract: NUL-free).
     if !payload.contains(&0) {
         let nd = name::namein(payload);
@@ -400,6 +649,14 @@ fn sendrecv_arm(payload: &[u8]) {
             &cout[..clen],
             &ov[..]
         );
+
+        // fc_namesend (wrapper ≡ core bytea image).
+        let d = fc_call(nb::fc_namesend, None, 0, Some(mcx), [name_datum(&nd.data)])
+            .expect("fc_namesend is infallible on identity encoding");
+        assert!(
+            read_varlena_data(d) == bytea.data(),
+            "fc_namesend vs core DIVERGENCE input={payload:?}"
+        );
     }
 }
 
@@ -418,6 +675,23 @@ fn text_name_arm(payload: &[u8]) {
         "text_name DIVERGENCE input={payload:?}: C(len={clen})={:?} Rust={:?}",
         &cimg[..],
         &r.data[..]
+    );
+
+    // ---- fc-wrapper plane: fc_text_name over the same explicit-length
+    // bytes as a real text varlena (wrapper ≡ core) ----
+    let cx = mcx::MemoryContext::new("name_fuzz_fc");
+    let timg = text_image(payload);
+    let d = fc_call(
+        nb::fc_text_name,
+        None,
+        0,
+        Some(cx.mcx()),
+        [Datum::from_usize(timg.as_ptr() as usize)],
+    )
+    .expect("fc_text_name allocation");
+    assert!(
+        read_name(d) == r.data,
+        "fc_text_name vs core DIVERGENCE input={payload:?}"
     );
 }
 
@@ -611,6 +885,39 @@ mod tests {
         let clen = unsafe { pg_diff_namein(cs.as_ptr(), cimg.as_mut_ptr()) };
         assert_eq!(clen, 62);
         assert_eq!(r.data, cimg);
+    }
+
+    /// fc-wrapper plane smoke: every new fc arm executes over seeds — arm 0
+    /// (fc_namein/out/name_text/hashname/hashnameextended), arm 1 (the six
+    /// fc name cmps + fc_btnamecmp), arm 2 (the twelve name↔text fc ops +
+    /// both fc cmp entry points), arm 3 (fc_nameconcatoid), arm 4
+    /// (fc_namerecv Ok + Err + fc_namesend), arm 5 (fc_text_name).
+    #[test]
+    fn fc_wrapper_plane_smoke() {
+        for id in ident_corpus() {
+            drive(0, &id);
+            drive(4, &id);
+            drive(5, &id);
+        }
+        // cmp arm needs two 64-byte blocks
+        let mut p = [0u8; 128];
+        p[..3].copy_from_slice(b"abc");
+        p[64..67].copy_from_slice(b"abd");
+        drive(1, &p);
+        drive(1, &[0x5a; 128]); // no NUL anywhere
+        // name-vs-text arm
+        let mut q = vec![5u8];
+        q.extend_from_slice(b"alpha");
+        q.extend_from_slice(b"alphab");
+        drive(2, &q);
+        drive(2, &[0]); // empty name, empty text
+        // concatoid arm
+        let mut c = 123456789u32.to_le_bytes().to_vec();
+        c.extend_from_slice(&[b'n'; 63]);
+        drive(3, &c);
+        // recv error plane (>=64 wire payload -> 42622 through the wrapper too)
+        drive(4, &vec![b'e'; 80]);
+        drive(4, &[0xf8; 10]); // invalid UTF-8 -> 22021 through the wrapper too
     }
 
     /// Fuzz-shaped byte soup through every selector: the whole driver must

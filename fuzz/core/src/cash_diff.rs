@@ -33,9 +33,18 @@
 //!   7 cash_mul_int4*
 //! (*) division arms carry the MIN/-1 carve below. The int8_mul_cash /
 //! int4_mul_cash / int2_mul_cash / flt8_mul_cash / flt4_mul_cash swapped
-//! arg-order builtins reduce to the same commutative cores driven here.
-//! Skipped: cash_numeric / numeric_cash (parked DigitBuf proofs-ledger
-//! rows; the numeric comparison plane is owned by that lane).
+//! arg-order builtins reduce to the same commutative cores driven here (and
+//! their fc_* wrappers execute in the fc plane with swapped Datum args).
+//! Skipped: cash_numeric / numeric_cash and their fc_cash_numeric /
+//! fc_numeric_cash wrappers (parked DigitBuf proofs-ledger rows; the
+//! numeric comparison plane is owned by that lane).
+//!
+//! fc-wrapper plane: every selector arm ALSO routes its input through the
+//! crate's builtins.rs fmgr wrappers (fc_*) on a native LocalFcinfo frame
+//! (the proofs/uuid wrapper-level pattern, run natively with a real
+//! mcx::MemoryContext), asserting wrapper ≡ the already-C-checked outcome
+//! (i64/f64-bits/byte-image values, error verdict + class). Cash args ride
+//! as i64 Datums; cash_in takes a cstring Datum with no soft-error context.
 //!
 //! KNOWN-DIVERGENCE CARVE (proofs ledger rows 865/867/3345): cash_div_int2/
 //! int4/int8 at c == i64::MIN, divisor == -1. C cash_div_int64 lacks the
@@ -45,12 +54,15 @@
 //! EXACTLY that one cell per division arm; the comparator is at full
 //! strength everywhere else.
 
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, CStr, CString};
 
+use adt_cash::builtins as cb;
+use datum::{Datum, NullableDatum};
 use types_error::{
     PgError, ERRCODE_DIVISION_BY_ZERO, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROTOCOL_VIOLATION,
 };
+use types_fmgr::{FmgrInfo, LocalFcinfo, PGFunction, PackedVarlena};
 
 extern "C" {
     fn pg_diff_cash_in(str_: *const c_char, err: *mut i32) -> i64;
@@ -126,6 +138,68 @@ fn le_i64(b: &[u8]) -> i64 {
     i64::from_le_bytes(b[..8].try_into().unwrap())
 }
 
+// ---------------------------------------------------------------------------
+// fc-wrapper plane plumbing (deterministic; result allocations ride the
+// caller's arena and die with it, no hot-loop leaks).
+// ---------------------------------------------------------------------------
+
+/// One native fmgr call: N value-arg Datums, optional armed result mcx.
+/// Wrappers under test never return SQL NULL.
+fn fc_call<const N: usize>(
+    f: PGFunction,
+    flinfo: Option<&mut FmgrInfo>,
+    mcx: Option<mcx::Mcx<'_>>,
+    args: [Datum; N],
+) -> types_error::PgResult<Datum> {
+    let mut fcinfo = LocalFcinfo::<N>::new(0);
+    if let Some(m) = mcx {
+        // SAFETY: the arming context outlives this single call.
+        unsafe { fcinfo.set_result_mcx(m) };
+    }
+    for (i, a) in args.into_iter().enumerate() {
+        fcinfo.args[i] = NullableDatum::value(a);
+    }
+    let r = f(flinfo, &mut fcinfo);
+    if r.is_ok() {
+        assert!(!fcinfo.isnull, "fc wrapper returned SQL NULL unexpectedly");
+    }
+    r
+}
+
+/// Three-plane wrapper check for i64-Datum-returning fc arms against the
+/// already-core-checked C outcome (wrapper ≡ C ≡ core).
+fn fc_check_i64<const N: usize>(
+    name: &str,
+    f: PGFunction,
+    args: [Datum; N],
+    cerr: i32,
+    cval: i64,
+    dbg: &str,
+) {
+    match fc_call(f, None, None, args) {
+        Ok(d) => assert!(
+            cerr == 0 && d.as_i64() == cval,
+            "{name} fc-wrapper DIVERGENCE {dbg}: C=(err {cerr}, {cval}) wrapper=Ok({})",
+            d.as_i64()
+        ),
+        Err(e) => {
+            let rerr = rust_err_class(&e);
+            assert!(
+                cerr == rerr,
+                "{name} fc-wrapper DIVERGENCE {dbg}: C err {cerr} vs wrapper err {rerr} ({})",
+                e.message
+            );
+        }
+    }
+}
+
+/// Varlena result readback (text/bytea payload bytes).
+fn read_varlena_data<'a>(d: Datum) -> &'a [u8] {
+    // SAFETY: fc varlena results are live inline images in the armed arena,
+    // read before the arena drops.
+    unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data()
+}
+
 pub fn cash_diff(data: &[u8]) {
     let Some((&sel, rest)) = data.split_first() else {
         return;
@@ -156,6 +230,16 @@ pub fn cash_diff(data: &[u8]) {
                     );
                 }
             }
+            // fc-wrapper plane: fc_cash_in over the same cstring (esc = None,
+            // hard-error path; wrapper ≡ C ≡ core).
+            fc_check_i64(
+                "fc_cash_in",
+                cb::fc_cash_in,
+                [Datum::from_usize(cs.as_ptr() as usize)],
+                cerr,
+                cval,
+                &format!("input={s:?}"),
+            );
         }
         // ---- cash_out: exact byte-image parity (points/grouping arms) ----
         1 => {
@@ -174,6 +258,16 @@ pub fn cash_diff(data: &[u8]) {
                 std::str::from_utf8(&cbuf[..clen]),
                 std::str::from_utf8(&rbuf[..rlen])
             );
+            // fc-wrapper plane: fc_cash_out cstring image (TLS scratch).
+            let d = fc_call(cb::fc_cash_out, None, None, [Datum::from_i64(v)])
+                .expect("fc_cash_out C-locale");
+            // SAFETY: fc_cash_out returns the live NUL-terminated TLS scratch.
+            let out = unsafe { CStr::from_ptr(d.as_usize() as *const c_char) };
+            assert!(
+                out.to_bytes() == &rbuf[..rlen],
+                "fc_cash_out vs core DIVERGENCE value={v}: wrapper={:?}",
+                out
+            );
         }
         // ---- cash_words: exact text-image parity ----
         2 => {
@@ -191,6 +285,13 @@ pub fn cash_diff(data: &[u8]) {
                 std::str::from_utf8(&cbuf[..clen]),
                 std::str::from_utf8(text.data())
             );
+            // fc-wrapper plane: fc_cash_words text image (wrapper ≡ core).
+            let d = fc_call(cb::fc_cash_words, None, Some(cx.mcx()), [Datum::from_i64(v)])
+                .expect("fc_cash_words is infallible");
+            assert!(
+                read_varlena_data(d) == text.data(),
+                "fc_cash_words vs core DIVERGENCE value={v}"
+            );
         }
         // ---- cash_pl / cash_mi ----
         3 => {
@@ -201,6 +302,9 @@ pub fn cash_diff(data: &[u8]) {
             let mut cval = 0i64;
             let cerr = unsafe { pg_diff_cash_pl(a, b, &mut cval) };
             compare_i64("cash_pl", cerr, cval, adt_cash::cash_pl(a, b), &format!("a={a} b={b}"));
+            let dbg = format!("a={a} b={b}");
+            let (da, db) = (Datum::from_i64(a), Datum::from_i64(b));
+            fc_check_i64("fc_cash_pl", cb::fc_cash_pl, [da, db], cerr, cval, &dbg);
         }
         4 => {
             if rest.len() < 16 {
@@ -210,6 +314,9 @@ pub fn cash_diff(data: &[u8]) {
             let mut cval = 0i64;
             let cerr = unsafe { pg_diff_cash_mi(a, b, &mut cval) };
             compare_i64("cash_mi", cerr, cval, adt_cash::cash_mi(a, b), &format!("a={a} b={b}"));
+            let dbg = format!("a={a} b={b}");
+            let (da, db) = (Datum::from_i64(a), Datum::from_i64(b));
+            fc_check_i64("fc_cash_mi", cb::fc_cash_mi, [da, db], cerr, cval, &dbg);
         }
         // ---- cash_mul_int8 / cash_div_int8 (i64 core) ----
         5 => {
@@ -226,6 +333,10 @@ pub fn cash_diff(data: &[u8]) {
                 adt_cash::cash_mul_int64(c, i),
                 &format!("c={c} i={i}"),
             );
+            let dbg = format!("c={c} i={i}");
+            let (dc, di) = (Datum::from_i64(c), Datum::from_i64(i));
+            fc_check_i64("fc_cash_mul_int8", cb::fc_cash_mul_int8, [dc, di], cerr, cval, &dbg);
+            fc_check_i64("fc_int8_mul_cash", cb::fc_int8_mul_cash, [di, dc], cerr, cval, &dbg);
         }
         6 => {
             if rest.len() < 16 {
@@ -241,6 +352,15 @@ pub fn cash_diff(data: &[u8]) {
                     Some(C_ERR_OUT_OF_RANGE),
                     "carved MIN/-1 cell must stay a 22003 error in pgrust"
                 );
+                // The wrapper carries the same carved verdict (oracle
+                // still never called on this cell).
+                assert_eq!(
+                    fc_call(cb::fc_cash_div_int8, None, None, [Datum::from_i64(c), Datum::from_i64(i)])
+                        .err()
+                        .map(|e| rust_err_class(&e)),
+                    Some(C_ERR_OUT_OF_RANGE),
+                    "carved MIN/-1 cell must stay 22003 through fc_cash_div_int8"
+                );
                 return;
             }
             let mut cval = 0i64;
@@ -250,6 +370,14 @@ pub fn cash_diff(data: &[u8]) {
                 cerr,
                 cval,
                 adt_cash::cash_div_int64(c, i),
+                &format!("c={c} i={i}"),
+            );
+            fc_check_i64(
+                "fc_cash_div_int8",
+                cb::fc_cash_div_int8,
+                [Datum::from_i64(c), Datum::from_i64(i)],
+                cerr,
+                cval,
                 &format!("c={c} i={i}"),
             );
         }
@@ -269,6 +397,10 @@ pub fn cash_diff(data: &[u8]) {
                 adt_cash::cash_mul_int64(c, i as i64),
                 &format!("c={c} i={i}"),
             );
+            let dbg = format!("c={c} i={i}");
+            let (dc, di) = (Datum::from_i64(c), Datum::from_i32(i));
+            fc_check_i64("fc_cash_mul_int4", cb::fc_cash_mul_int4, [dc, di], cerr, cval, &dbg);
+            fc_check_i64("fc_int4_mul_cash", cb::fc_int4_mul_cash, [di, dc], cerr, cval, &dbg);
         }
         8 => {
             if rest.len() < 12 {
@@ -282,6 +414,13 @@ pub fn cash_diff(data: &[u8]) {
                     adt_cash::cash_div_int64(c, i as i64).err().map(|e| rust_err_class(&e)),
                     Some(C_ERR_OUT_OF_RANGE),
                 );
+                assert_eq!(
+                    fc_call(cb::fc_cash_div_int4, None, None, [Datum::from_i64(c), Datum::from_i32(i)])
+                        .err()
+                        .map(|e| rust_err_class(&e)),
+                    Some(C_ERR_OUT_OF_RANGE),
+                    "carved MIN/-1 cell must stay 22003 through fc_cash_div_int4"
+                );
                 return;
             }
             let mut cval = 0i64;
@@ -291,6 +430,14 @@ pub fn cash_diff(data: &[u8]) {
                 cerr,
                 cval,
                 adt_cash::cash_div_int64(c, i as i64),
+                &format!("c={c} i={i}"),
+            );
+            fc_check_i64(
+                "fc_cash_div_int4",
+                cb::fc_cash_div_int4,
+                [Datum::from_i64(c), Datum::from_i32(i)],
+                cerr,
+                cval,
                 &format!("c={c} i={i}"),
             );
         }
@@ -310,6 +457,10 @@ pub fn cash_diff(data: &[u8]) {
                 adt_cash::cash_mul_int64(c, s as i64),
                 &format!("c={c} s={s}"),
             );
+            let dbg = format!("c={c} s={s}");
+            let (dc, ds) = (Datum::from_i64(c), Datum::from_i16(s));
+            fc_check_i64("fc_cash_mul_int2", cb::fc_cash_mul_int2, [dc, ds], cerr, cval, &dbg);
+            fc_check_i64("fc_int2_mul_cash", cb::fc_int2_mul_cash, [ds, dc], cerr, cval, &dbg);
         }
         10 => {
             if rest.len() < 10 {
@@ -323,6 +474,13 @@ pub fn cash_diff(data: &[u8]) {
                     adt_cash::cash_div_int64(c, s as i64).err().map(|e| rust_err_class(&e)),
                     Some(C_ERR_OUT_OF_RANGE),
                 );
+                assert_eq!(
+                    fc_call(cb::fc_cash_div_int2, None, None, [Datum::from_i64(c), Datum::from_i16(s)])
+                        .err()
+                        .map(|e| rust_err_class(&e)),
+                    Some(C_ERR_OUT_OF_RANGE),
+                    "carved MIN/-1 cell must stay 22003 through fc_cash_div_int2"
+                );
                 return;
             }
             let mut cval = 0i64;
@@ -332,6 +490,14 @@ pub fn cash_diff(data: &[u8]) {
                 cerr,
                 cval,
                 adt_cash::cash_div_int64(c, s as i64),
+                &format!("c={c} s={s}"),
+            );
+            fc_check_i64(
+                "fc_cash_div_int2",
+                cb::fc_cash_div_int2,
+                [Datum::from_i64(c), Datum::from_i16(s)],
+                cerr,
+                cval,
                 &format!("c={c} s={s}"),
             );
         }
@@ -351,6 +517,10 @@ pub fn cash_diff(data: &[u8]) {
                 adt_cash::cash_mul_float8(c, f),
                 &format!("c={c} f={f:e}[{:016x}]", f.to_bits()),
             );
+            let dbg = format!("c={c} f={f:e}[{:016x}]", f.to_bits());
+            let (dc, df) = (Datum::from_i64(c), Datum::from_f64(f));
+            fc_check_i64("fc_cash_mul_flt8", cb::fc_cash_mul_flt8, [dc, df], cerr, cval, &dbg);
+            fc_check_i64("fc_flt8_mul_cash", cb::fc_flt8_mul_cash, [df, dc], cerr, cval, &dbg);
         }
         12 => {
             if rest.len() < 16 {
@@ -365,6 +535,14 @@ pub fn cash_diff(data: &[u8]) {
                 cerr,
                 cval,
                 adt_cash::cash_div_float8(c, f),
+                &format!("c={c} f={f:e}[{:016x}]", f.to_bits()),
+            );
+            fc_check_i64(
+                "fc_cash_div_flt8",
+                cb::fc_cash_div_flt8,
+                [Datum::from_i64(c), Datum::from_f64(f)],
+                cerr,
+                cval,
                 &format!("c={c} f={f:e}[{:016x}]", f.to_bits()),
             );
         }
@@ -384,6 +562,10 @@ pub fn cash_diff(data: &[u8]) {
                 adt_cash::cash_mul_float8(c, f as f64),
                 &format!("c={c} f={f:e}[{:08x}]", f.to_bits()),
             );
+            let dbg = format!("c={c} f={f:e}[{:08x}]", f.to_bits());
+            let (dc, df) = (Datum::from_i64(c), Datum::from_f32(f));
+            fc_check_i64("fc_cash_mul_flt4", cb::fc_cash_mul_flt4, [dc, df], cerr, cval, &dbg);
+            fc_check_i64("fc_flt4_mul_cash", cb::fc_flt4_mul_cash, [df, dc], cerr, cval, &dbg);
         }
         14 => {
             if rest.len() < 12 {
@@ -398,6 +580,14 @@ pub fn cash_diff(data: &[u8]) {
                 cerr,
                 cval,
                 adt_cash::cash_div_float8(c, f as f64),
+                &format!("c={c} f={f:e}[{:08x}]", f.to_bits()),
+            );
+            fc_check_i64(
+                "fc_cash_div_flt4",
+                cb::fc_cash_div_flt4,
+                [Datum::from_i64(c), Datum::from_f32(f)],
+                cerr,
+                cval,
                 &format!("c={c} f={f:e}[{:08x}]", f.to_bits()),
             );
         }
@@ -419,6 +609,22 @@ pub fn cash_diff(data: &[u8]) {
                     assert!(
                         cerr == rerr,
                         "cash_div_cash DIVERGENCE a={a} b={b}: C err {cerr} vs Rust err {rerr} ({})",
+                        e.message
+                    );
+                }
+            }
+            // fc-wrapper plane: f64-Datum result, exact bits.
+            match fc_call(cb::fc_cash_div_cash, None, None, [Datum::from_i64(a), Datum::from_i64(b)]) {
+                Ok(d) => assert!(
+                    cerr == 0 && d.as_f64().to_bits() == cval.to_bits(),
+                    "fc_cash_div_cash DIVERGENCE a={a} b={b}: C=(err {cerr}, {cval:e}) wrapper=Ok({:e})",
+                    d.as_f64()
+                ),
+                Err(e) => {
+                    let rerr = rust_err_class(&e);
+                    assert!(
+                        cerr == rerr,
+                        "fc_cash_div_cash DIVERGENCE a={a} b={b}: C err {cerr} vs wrapper err {rerr} ({})",
                         e.message
                     );
                 }
@@ -445,6 +651,30 @@ pub fn cash_diff(data: &[u8]) {
                     "cashsmaller {a} {b}"
                 );
             }
+            // ---- fc-wrapper plane (wrapper ≡ core; all infallible) ----
+            let (da, db) = (Datum::from_i64(a), Datum::from_i64(b));
+            let fc_bools: [(&str, PGFunction, bool); 6] = [
+                ("fc_cash_eq", cb::fc_cash_eq, adt_cash::cash_eq(a, b)),
+                ("fc_cash_ne", cb::fc_cash_ne, adt_cash::cash_ne(a, b)),
+                ("fc_cash_lt", cb::fc_cash_lt, adt_cash::cash_lt(a, b)),
+                ("fc_cash_le", cb::fc_cash_le, adt_cash::cash_le(a, b)),
+                ("fc_cash_gt", cb::fc_cash_gt, adt_cash::cash_gt(a, b)),
+                ("fc_cash_ge", cb::fc_cash_ge, adt_cash::cash_ge(a, b)),
+            ];
+            for (fname, f, want) in fc_bools {
+                let d = fc_call(f, None, None, [da, db]).expect("cash cmp wrappers are infallible");
+                assert!(
+                    d.as_bool() == want,
+                    "{fname} fc-wrapper DIVERGENCE a={a} b={b}: wrapper={} core={want}",
+                    d.as_bool()
+                );
+            }
+            let d = fc_call(cb::fc_cash_cmp, None, None, [da, db]).expect("fc_cash_cmp");
+            assert_eq!(d.as_i32(), adt_cash::cash_cmp(a, b), "fc_cash_cmp {a} {b}");
+            let d = fc_call(cb::fc_cashlarger, None, None, [da, db]).expect("fc_cashlarger");
+            assert_eq!(d.as_i64(), adt_cash::cashlarger(a, b), "fc_cashlarger {a} {b}");
+            let d = fc_call(cb::fc_cashsmaller, None, None, [da, db]).expect("fc_cashsmaller");
+            assert_eq!(d.as_i64(), adt_cash::cashsmaller(a, b), "fc_cashsmaller {a} {b}");
         }
         // ---- int4_cash / int8_cash (via int8mul, "bigint out of range") ----
         17 => {
@@ -455,6 +685,14 @@ pub fn cash_diff(data: &[u8]) {
             let mut cval = 0i64;
             let cerr = unsafe { pg_diff_int4_cash(a, &mut cval) };
             compare_i64("int4_cash", cerr, cval, adt_cash::int4_cash(a), &format!("amount={a}"));
+            fc_check_i64(
+                "fc_int4_cash",
+                cb::fc_int4_cash,
+                [Datum::from_i32(a)],
+                cerr,
+                cval,
+                &format!("amount={a}"),
+            );
         }
         18 => {
             if rest.len() < 8 {
@@ -464,6 +702,14 @@ pub fn cash_diff(data: &[u8]) {
             let mut cval = 0i64;
             let cerr = unsafe { pg_diff_int8_cash(a, &mut cval) };
             compare_i64("int8_cash", cerr, cval, adt_cash::int8_cash(a), &format!("amount={a}"));
+            fc_check_i64(
+                "fc_int8_cash",
+                cb::fc_int8_cash,
+                [Datum::from_i64(a)],
+                cerr,
+                cval,
+                &format!("amount={a}"),
+            );
         }
         // ---- cash_recv: big-endian wire decode incl. short-message error ----
         19 => {
@@ -488,6 +734,19 @@ pub fn cash_diff(data: &[u8]) {
                 adt_cash::cash_recv(&mut si),
                 &format!("msg={msg:02x?}"),
             );
+            // fc-wrapper plane over its own StringInfo image of the same
+            // wire bytes (wrapper ≡ C ≡ core).
+            let Ok(mut vec2) = mcx::vec_with_capacity_in::<u8>(mcx, msg.len()) else {
+                return;
+            };
+            if mcx::vec_append_bytes(&mut vec2, msg).is_err() {
+                return;
+            }
+            let Ok(mut si2) = stringinfo::StringInfo::from_vec(vec2) else {
+                return;
+            };
+            let dsi = Datum::from_usize(core::ptr::from_mut(&mut si2) as usize);
+            fc_check_i64("fc_cash_recv", cb::fc_cash_recv, [dsi], cerr, cval, &format!("msg={msg:02x?}"));
         }
         // ---- cash_send: big-endian wire image + recv∘send == id ----
         _ => {
@@ -515,6 +774,14 @@ pub fn cash_diff(data: &[u8]) {
             if let Ok(mut si) = stringinfo::StringInfo::from_vec(vec) {
                 assert_eq!(adt_cash::cash_recv(&mut si).ok(), Some(v), "cash send/recv roundtrip");
             };
+            // fc-wrapper plane: fc_cash_send bytea image (wrapper ≡ C ≡ core).
+            let d = fc_call(cb::fc_cash_send, None, Some(mcx), [Datum::from_i64(v)])
+                .expect("fc_cash_send is infallible");
+            assert!(
+                read_varlena_data(d) == cimg,
+                "fc_cash_send DIVERGENCE value={v}: C={cimg:02x?} wrapper={:02x?}",
+                read_varlena_data(d)
+            );
         }
     }
 }
@@ -700,6 +967,45 @@ mod tests {
         drive(19, &[0x80, 0, 0, 0, 0, 0, 0, 0]); /* i64::MIN */
         drive(19, &[0xff; 12]);
         drive(19, &[0, 0, 0, 0, 0, 0, 0, 42, 9, 9]);
+    }
+
+    /// fc-wrapper plane smoke: every fc arm executes over seeds — value,
+    /// error (overflow / div-zero / 22P02 / short-recv 08P01), and swapped
+    /// arg-order wrappers included.
+    #[test]
+    fn fc_wrapper_plane_smoke() {
+        // fc_cash_in ok + 22P02
+        drive(0, b"$1,234.56");
+        drive(0, b"abc");
+        for &v in &[0i64, -1, 123456789, i64::MAX, i64::MIN] {
+            drive(1, &v.to_le_bytes()); // fc_cash_out
+            drive(2, &v.to_le_bytes()); // fc_cash_words
+            drive(17, &(v as i32).to_le_bytes()); // fc_int4_cash
+            drive(18, &v.to_le_bytes()); // fc_int8_cash
+            drive(20, &v.to_le_bytes()); // fc_cash_send
+        }
+        // pair arms: ok cell + overflow cell + div-by-zero cell
+        for (a, b) in [(1000i64, 3i64), (i64::MAX, 2), (1000, 0)] {
+            let mut p = a.to_le_bytes().to_vec();
+            p.extend_from_slice(&b.to_le_bytes());
+            for sel in [3u8, 4, 5, 6, 7, 8, 9, 10, 15, 16] {
+                drive(sel, &p);
+            }
+        }
+        // float arms: ok + overflow (inf) + NaN 22P02-class + div-zero
+        for f in [1.5f64, f64::INFINITY, f64::NAN, 0.0] {
+            let mut p = 1000i64.to_le_bytes().to_vec();
+            p.extend_from_slice(&f.to_le_bytes());
+            drive(11, &p);
+            drive(12, &p);
+            let mut p4 = 1000i64.to_le_bytes().to_vec();
+            p4.extend_from_slice(&(f as f32).to_le_bytes());
+            drive(13, &p4);
+            drive(14, &p4);
+        }
+        // fc_cash_recv ok + short-message 08P01
+        drive(19, &[0, 0, 0, 0, 0, 0, 0, 42]);
+        drive(19, &[0; 7]);
     }
 
     /// The carved MIN/-1 division cell stays pinned: pgrust must keep
