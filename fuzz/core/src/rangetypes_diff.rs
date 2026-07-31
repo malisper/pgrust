@@ -463,8 +463,13 @@ fn mint_numeric(mcx: mcx::Mcx<'_>, lit: &[u8]) -> Option<Vec<u8>> {
             Some(Datum::from_i32(-1)),
         ],
     );
-    let d = out.result.ok()?;
-    Some(datum_varlena_bytes(d).to_vec())
+    match out.result {
+        Ok(d) => Some(datum_varlena_bytes(d).to_vec()),
+        Err(_) => {
+            STATS.with(|s| s.borrow_mut().mint_failed += 1);
+            None
+        }
+    }
 }
 
 /// One bound for one instantiation.
@@ -597,6 +602,135 @@ fn wf_flags(raw: u8) -> u8 {
 /// Oracle class for "the C body returned SQL NULL" (see PG_DIFF_ISNULL in
 /// csrc/pg_rangetypes_io.c). The nullness plane is COMPARED, never skipped.
 const C_ISNULL: i32 = 97;
+
+
+// ---------------------------------------------------------------------------
+// Image builders: TWO layouts, deliberately
+// ---------------------------------------------------------------------------
+//
+// The hand builder below writes byref bounds with their 4-byte varlena header
+// and pads to element alignment. PG's `datum_write` does NOT do that for a
+// PACKABLE element: numeric is typstorage 'm', so a small bound is converted
+// to a 1-BYTE SHORT header with NO alignment. Measured for `numrange [1.5,2.5)`:
+//
+//   serializer : 5c000000 420f0000 0f 80800100 8813 0f 80800200 8813 02
+//   hand-built : 7c000000 420f0000 28000000 80800100 8813 0000 28000000 ...
+//
+// Both images are read IDENTICALLY by both sides (verified: the C accessors
+// entry returns ret=0 with all per-call errcodes 0 and hands back exactly the
+// 4-byte-header bounds), so the hand builder is not malformed — but it never
+// produces the packed-short layout that real stored ranges carry, leaving
+// fetch_att / att_addlength_pointer / att_align_pointer's VARATT_IS_1B arms
+// unexercised. That is a COVERAGE GAP, not a correctness defect.
+//
+// So both layouts are fuzzed, chosen by a payload bit:
+//   * `build_image`      — arbitrary flags byte (all 256 for byval), the
+//                          full range_deserialize flags lattice;
+//   * `build_image_ctor` — bytes straight out of the SHIPPED
+//                          fc_range_constructor3, i.e. exactly what
+//                          `numrange(1.5, 2.5, '[)')` stores, packed short
+//                          headers included. Builder/serializer skew is
+//                          structurally impossible on this path.
+// (Credit: the constructor-built path is the sibling multirange lane's fix.)
+
+/// Build a range image through the SHIPPED constructor, so its layout is
+/// whatever `range_serialize`/`datum_write` actually emit. `None` = the
+/// constructor rejected the pair (lower > upper) or returned SQL NULL.
+fn build_image_ctor(
+    t: usize,
+    flags_txt: [u8; 2],
+    lo: &Bound,
+    up: &Bound,
+    null_lo: bool,
+    null_up: bool,
+    mcx: mcx::Mcx<'_>,
+) -> Option<Vec<u8>> {
+    let mut tv = vec![0u8; 6];
+    tv[0..4].copy_from_slice(&datum::set_varsize_4b(6));
+    tv[4..6].copy_from_slice(&flags_txt);
+    let mut fl = ops_flinfo(t);
+    let r = fc_call(
+        rb::fc_range_constructor3,
+        Some(&mut fl),
+        mcx,
+        [
+            if null_lo { None } else { Some(lo.rust_datum()) },
+            if null_up { None } else { Some(up.rust_datum()) },
+            Some(Datum::from_usize(tv.as_ptr() as usize)),
+        ],
+    );
+    let d = r.result.ok()?;
+    if r.isnull {
+        return None;
+    }
+    Some(datum_varlena_bytes(d).to_vec())
+}
+
+/// Legal 2-byte flags text for the constructor path.
+fn ctor_flags_txt(raw: u8) -> [u8; 2] {
+    [
+        if raw & 1 != 0 { b'[' } else { b'(' },
+        if raw & 2 != 0 { b']' } else { b')' },
+    ]
+}
+
+/// ANTI-VACUITY COUNTERS. A builder that silently declined to construct
+/// anything would hand back a clean run that proved nothing (the gate-blindness
+/// class), so each layout/instantiation actually compared is counted and the
+/// tests assert the counts are non-zero. `PGRUST_FUZZ_RT_STATS=1` dumps them.
+#[derive(Default)]
+pub struct BuildStats {
+    /// hand-built images compared, per instantiation
+    pub hand: [u64; 3],
+    /// constructor-built images compared, per instantiation
+    pub ctor: [u64; 3],
+    /// constructor calls that declined (lower > upper, or SQL NULL)
+    pub ctor_declined: u64,
+    /// numrange bounds that failed to mint from the payload literal
+    pub mint_failed: u64,
+}
+
+thread_local! {
+    pub static STATS: core::cell::RefCell<BuildStats> =
+        core::cell::RefCell::new(BuildStats::default());
+}
+
+fn note_hand(t: usize) {
+    STATS.with(|s| s.borrow_mut().hand[t] += 1);
+}
+
+fn note_ctor(t: usize) {
+    STATS.with(|s| s.borrow_mut().ctor[t] += 1);
+}
+
+/// One image for an arm, in one of the two layouts. `None` = skip this exec.
+fn image_for(
+    t: usize,
+    layout_ctor: bool,
+    flags: u8,
+    lo: &Bound,
+    up: &Bound,
+    mcx: mcx::Mcx<'_>,
+) -> Option<Vec<u8>> {
+    if layout_ctor {
+        // infinite bounds ride as SQL NULL args, matching the SQL surface
+        let null_lo = flags & rt::RANGE_LB_INF != 0;
+        let null_up = flags & rt::RANGE_UB_INF != 0;
+        match build_image_ctor(t, ctor_flags_txt(flags >> 1), lo, up, null_lo, null_up, mcx) {
+            Some(img) => {
+                note_ctor(t);
+                Some(img)
+            }
+            None => {
+                STATS.with(|s| s.borrow_mut().ctor_declined += 1);
+                None
+            }
+        }
+    } else {
+        note_hand(t);
+        Some(build_image(t, flags, lo, up))
+    }
+}
 
 /// Compare a C entry outcome (ret + image bytes) with a Rust fc outcome
 /// producing a range image. Planes: nullness, error class, image bytes.
@@ -849,11 +983,12 @@ fn arm_ctor(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>, three: bool) {
 
 fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let mut rd = Rd(payload, 0);
-    let flags = rd.u8();
+    let sel = rd.u8();
+    let (flags, layout_ctor) = (sel, sel & 0x80 != 0);
     let lo = Bound::decode(t, &mut rd, mcx);
     let up = Bound::decode(t, &mut rd, mcx);
     let (Some(lo), Some(up)) = (lo, up) else { return };
-    let img = build_image(t, flags, &lo, &up);
+    let Some(img) = image_for(t, layout_ctor, flags, &lo, &up, mcx) else { return };
     let mut lob = vec![0u8; OUTCAP];
     let mut upb = vec![0u8; OUTCAP];
     let (mut lol, mut lon, mut upl, mut upn) = (0i32, 0i32, 0i32, 0i32);
@@ -965,6 +1100,7 @@ fn arm_ops(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let mut rd = Rd(payload, 0);
     let flags1 = rd.u8();
     let flags2 = rd.u8();
+    let layout_ctor = flags1 & 0x80 != 0;
     let lo1 = Bound::decode(t, &mut rd, mcx);
     let up1 = Bound::decode(t, &mut rd, mcx);
     let lo2 = Bound::decode(t, &mut rd, mcx);
@@ -972,8 +1108,8 @@ fn arm_ops(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let (Some(lo1), Some(up1), Some(lo2), Some(up2)) = (lo1, up1, lo2, up2) else {
         return;
     };
-    let img1 = build_image(t, flags1, &lo1, &up1);
-    let img2 = build_image(t, flags2, &lo2, &up2);
+    let Some(img1) = image_for(t, layout_ctor, flags1, &lo1, &up1, mcx) else { return };
+    let Some(img2) = image_for(t, layout_ctor, flags2, &lo2, &up2, mcx) else { return };
     let mut cres = [0i32; 15];
     let mut cerrs = [0i32; 15];
     // PER-OPERATOR errcodes: range_adjacent can legitimately raise 22003 via
@@ -1041,7 +1177,7 @@ fn arm_elem(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let up = Bound::decode(t, &mut rd, mcx);
     let el = Bound::decode(t, &mut rd, mcx);
     let (Some(lo), Some(up), Some(el)) = (lo, up, el) else { return };
-    let img = build_image(t, flags, &lo, &up);
+    let Some(img) = image_for(t, flags & 0x80 != 0, flags, &lo, &up, mcx) else { return };
     let (ev, en) = el.c_args();
     let (mut c1, mut c2) = (0i32, 0i32);
     let (mut e1, mut e2) = (0i32, 0i32);
@@ -1101,8 +1237,9 @@ fn arm_setops(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let (Some(lo1), Some(up1), Some(lo2), Some(up2)) = (lo1, up1, lo2, up2) else {
         return;
     };
-    let img1 = build_image(t, flags1, &lo1, &up1);
-    let img2 = build_image(t, flags2, &lo2, &up2);
+    let layout_ctor = flags1 & 0x80 != 0;
+    let Some(img1) = image_for(t, layout_ctor, flags1, &lo1, &up1, mcx) else { return };
+    let Some(img2) = image_for(t, layout_ctor, flags2, &lo2, &up2, mcx) else { return };
     let fcs: [(&str, PGFunction); 4] = [
         ("union", rb::fc_range_union),
         ("intersect", rb::fc_range_intersect),
@@ -1142,12 +1279,15 @@ fn arm_hash(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     // CONTAIN_EMPTY (0x80) masked: a GiST-internal bit never present in
     // stored ranges, and C's `(uint32) flags` hash sign-extends it on
     // signed-char hosts (Apple arm64) — a platform artifact, not a surface.
-    let flags = rd.u8() & 0x7f;
+    let raw = rd.u8();
+    let flags = raw & 0x7f;
+    // the layout bit cannot ride 0x80 here (masked above), so take its own byte
+    let layout_ctor = rd.u8() & 1 != 0;
     let seed = rd.i64() as u64;
     let lo = Bound::decode(t, &mut rd, mcx);
     let up = Bound::decode(t, &mut rd, mcx);
     let (Some(lo), Some(up)) = (lo, up) else { return };
-    let img = build_image(t, flags, &lo, &up);
+    let Some(img) = image_for(t, layout_ctor, flags, &lo, &up, mcx) else { return };
     let mut ch = 0u32;
     let cret = unsafe { pg_diff_hash_range(img.as_ptr(), &mut ch) };
     assert!(cret == 0, "hash_range: C errored ({cret})");
@@ -1426,5 +1566,135 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod vacuity {
+    use super::*;
+
+    /// ANTI-VACUITY GATE. A clean fuzz run proves nothing if the builders quietly
+    /// declined to construct anything, so this drives both layouts across all
+    /// three instantiations and asserts every cell was actually built and
+    /// compared. If a future change makes numrange images stop being produced,
+    /// this fails instead of the campaign going vacuously green.
+    #[test]
+    fn both_layouts_reach_every_instantiation() {
+        STATS.with(|s| *s.borrow_mut() = BuildStats::default());
+        // ordered bound payloads per instantiation (lower <= upper, so the
+        // constructor accepts them; a swapped pair legitimately declines)
+        fn bounds(t: u8) -> Vec<u8> {
+            match t {
+                0 => {
+                    let mut v = Vec::new();
+                    for x in [1i32, 9, 2, 8, 5] {
+                        v.extend_from_slice(&x.to_le_bytes());
+                    }
+                    v
+                }
+                1 => {
+                    let mut v = Vec::new();
+                    for x in [1i64, 9, 2, 8, 5] {
+                        v.extend_from_slice(&x.to_le_bytes());
+                    }
+                    v
+                }
+                _ => b"\x031.5 \x032.5 \x031.0 \x032.0 \x031.2 ".to_vec(),
+            }
+        }
+        for t in 0..3u8 {
+            for layout in [0x00u8, 0x80u8] {
+                let b = bounds(t);
+                // arms 4/5/6/7 read [flags1][flags2?] then bounds
+                for sel in [5u8, 7, 6, 4] {
+                    let mut v = vec![sel, t, 0x03 | layout, 0x03 | layout];
+                    v.extend_from_slice(&b);
+                    rangetypes_diff(&v);
+                }
+                // hash: [flags][layout byte][8-byte seed][bounds]
+                let mut v = vec![8u8, t, 0x03, layout >> 7];
+                v.extend_from_slice(&[0u8; 8]);
+                v.extend_from_slice(&b);
+                rangetypes_diff(&v);
+            }
+        }
+        STATS.with(|s| {
+            let st = s.borrow();
+            for t in 0..3 {
+                assert!(st.hand[t] > 0, "no HAND-built images compared at t={t}: vacuous");
+                assert!(st.ctor[t] > 0, "no CTOR-built images compared at t={t}: vacuous");
+            }
+            eprintln!(
+                "hand={:?} ctor={:?} ctor_declined={} mint_failed={}",
+                st.hand, st.ctor, st.ctor_declined, st.mint_failed
+            );
+        });
+    }
+
+    /// The two layouts must genuinely DIFFER for a byref element (that is the
+    /// whole point: the constructor path packs short headers, the hand builder
+    /// does not). Guards against the ctor path silently degrading to the hand one.
+    #[test]
+    fn numrange_layouts_differ() {
+        let ctx = MemoryContext::new("layouts");
+        let mcx = ctx.mcx();
+        let lo = Bound::Num(mint_numeric(mcx, b"1.5").unwrap());
+        let up = Bound::Num(mint_numeric(mcx, b"2.5").unwrap());
+        let hand = build_image(2, rt::RANGE_LB_INC, &lo, &up);
+        let ctor = build_image_ctor(2, [b'[', b')'], &lo, &up, false, false, mcx).unwrap();
+        assert!(
+            hand != ctor,
+            "numrange hand and ctor layouts are identical — the packed-short \
+             path is no longer being covered"
+        );
+        // the constructor image is the SHORT-header one: strictly smaller
+        assert!(
+            ctor.len() < hand.len(),
+            "ctor image {} bytes vs hand {} bytes: expected packed-short to be smaller",
+            ctor.len(),
+            hand.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod packed_short {
+    use super::*;
+
+    /// PACKED-SHORT ACCESSOR/OUT PATHS. Constructor-built numrange images store
+    /// bounds with 1-byte short headers; `range_lower`/`range_upper` hand back a
+    /// pointer INTO the image, i.e. a packed-short datum that the shipped code
+    /// returns as-is. Both sides must copy it out by VARSIZE_ANY (short size),
+    /// not expand or truncate it — and range_out/send must render it the same.
+    #[test]
+    fn short_header_bounds_round_trip() {
+        let ctx = MemoryContext::new("short");
+        let mcx = ctx.mcx();
+        let lo = Bound::Num(mint_numeric(mcx, b"1.5").unwrap());
+        let up = Bound::Num(mint_numeric(mcx, b"2.5").unwrap());
+        let img = build_image_ctor(2, [b'[', b')'], &lo, &up, false, false, mcx).unwrap();
+        // the bound really is short-header (low bit set on its first byte)
+        let first_bound_byte = img[8];
+        assert!(
+            first_bound_byte & 0x01 == 0x01,
+            "expected a packed-short bound header, got {first_bound_byte:#04x}"
+        );
+        // drive the accessor + out + hash + ops arms over it; each compares
+        // C against the shipped wrappers internally and panics on any skew
+        for sel in [4u8, 5, 6, 7, 8] {
+            let mut v = vec![sel, 2u8];
+            v.push(0x83); // ctor layout, '[' ')'
+            if sel == 8 {
+                v.push(1);
+                v.extend_from_slice(&[0u8; 8]);
+            } else {
+                v.push(0x83);
+            }
+            v.extend_from_slice(b"\x031.5 \x032.5 \x031.0 \x032.0 \x031.2 ");
+            rangetypes_diff(&v);
+        }
+        // and the text/binary io arms over a literal that stores short bounds
+        rangetypes_diff(&[0u8, 2].iter().copied().chain(b"[1.5,2.5)".iter().copied()).collect::<Vec<_>>());
     }
 }

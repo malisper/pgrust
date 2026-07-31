@@ -967,6 +967,12 @@ typedef struct TypeCacheEntry
 	char		typstorage;
 	char		typtype;
 	struct TypeCacheEntry *rngelemtype;
+	/* MULTIRANGE EXTENSION (p1-laneac, plumbing only): the real typcache entry
+	 * carries rngtype for multirange types, and the verbatim multirangetypes.c
+	 * bodies in pg_multirangetypes_io.c (sibling target, which #includes this
+	 * file to share its statics) read it. Additive field, unread by every
+	 * range-side body. EMITTED BY THE ASSEMBLER so it survives regeneration. */
+	struct TypeCacheEntry *rngtype;
 	Oid			rng_collation;
 	FmgrInfo	rng_cmp_proc_finfo;
 	FmgrInfo	rng_canonical_finfo;
