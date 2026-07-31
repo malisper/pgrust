@@ -545,11 +545,21 @@ fn build_image_full<'mcx>(
     elemsel: i32,
     r: &mut Rdr<'_>,
 ) -> (PgVec<'mcx, u8>, std::vec::Vec<u8>, std::vec::Vec<i32>, std::vec::Vec<u8>) {
-    let ndim = (r.u8() % 4) as i32; // 0..=3
+    let nd_byte = r.u8();
+    let ndim = (nd_byte % 4) as i32; // 0..=3 (low bits: stable for the bank)
+    // High bit picks the dim scale: 0..2 (may collapse to the empty array) or
+    // 1..4 (always non-empty, and big enough that an interior slice leaves a
+    // non-zero `dist` — the multi-dim seek/copy branches in slice_size,
+    // extract_slice and insert_slice).
+    let big = nd_byte & 0x80 != 0;
     let mut dims = [0i32; MAXDIM];
     let mut lbs = [1i32; MAXDIM];
     for i in 0..ndim as usize {
-        dims[i] = (r.u8() % 3) as i32;
+        dims[i] = if big {
+            (r.u8() % 4) as i32 + 1
+        } else {
+            (r.u8() % 3) as i32
+        };
         lbs[i] = (r.u8() as i8) as i32;
     }
     if ndim == 1 {
@@ -867,8 +877,11 @@ fn array_in_diff(mcx: Mcx<'_>, esel: i32, payload: &[u8]) {
         ),
     }
 
-    // Rust-side-only consistency plane: soft (ErrorSaveNode) vs hard.
-    let mut node = ErrorSaveNode::new(true);
+    // Rust-side-only consistency plane: soft (ErrorSaveNode) vs hard. The
+    // details_wanted=false shape is driven too (it takes the
+    // mark_error_occurred branch instead of save()).
+    let details = !s.is_empty() && s[0] & 1 == 0;
+    let mut node = ErrorSaveNode::new(details);
     let mut proc2 = in_proc(esel);
     let soft = array_in(mcx, text, &meta, &mut proc2, -1, Some(&mut node));
     match (&hard, &soft) {
@@ -884,6 +897,10 @@ fn array_in_diff(mcx: Mcx<'_>, esel: i32, payload: &[u8]) {
                 node.ctx.error_occurred(),
                 "array_in soft path lost the error input={text:?}"
             );
+            // details_wanted=false records only the flag, no PgError
+            if !details {
+                assert!(node.ctx.error().is_none());
+            }
             if let Some(se) = node.ctx.error() {
                 assert!(
                     se.sqlstate() == e.sqlstate(),
@@ -1012,12 +1029,42 @@ fn slice_bounds(
     mode: Mode,
     r: &mut Rdr<'_>,
 ) -> (usize, [i32; MAXDIM], [i32; MAXDIM], [bool; MAXDIM], [bool; MAXDIM]) {
+    slice_bounds_for(mode, r, None)
+}
+
+/// With `img`, a coin flip draws INTERIOR bounds (a strict sub-rectangle of
+/// the array) instead of free bounds: only a strict sub-rectangle leaves a
+/// non-zero step distance, which is what reaches the multi-dim
+/// seek/copy/bitmap-copy branches of slice_size / extract_slice /
+/// insert_slice. Free bounds stay in the mix for the truncate/empty paths.
+fn slice_bounds_for(
+    mode: Mode,
+    r: &mut Rdr<'_>,
+    img: Option<&[u8]>,
+) -> (usize, [i32; MAXDIM], [i32; MAXDIM], [bool; MAXDIM], [bool; MAXDIM]) {
     let nsub = (r.u8() % 7) as usize;
     let mut upper = [0i32; MAXDIM];
     let mut lower = [0i32; MAXDIM];
-    for i in 0..nsub {
-        lower[i] = subscript(mode, r);
-        upper[i] = subscript(mode, r);
+    let interior = img.is_some() && !mode.wide && r.u8() & 1 == 1;
+    if interior {
+        let (ndim, dims, lbs) = arrayfuncs::read_dims_lbounds(img.unwrap());
+        for i in 0..nsub {
+            if i < ndim as usize && dims[i] > 0 {
+                let span = dims[i];
+                let a = (r.u8() as i32).rem_euclid(span);
+                let b = (r.u8() as i32).rem_euclid(span);
+                lower[i] = lbs[i] + a.min(b);
+                upper[i] = lbs[i] + a.max(b);
+            } else {
+                lower[i] = subscript(mode, r);
+                upper[i] = subscript(mode, r);
+            }
+        }
+    } else {
+        for i in 0..nsub {
+            lower[i] = subscript(mode, r);
+            upper[i] = subscript(mode, r);
+        }
     }
     let bits = r.u8();
     let mut upb = [false; MAXDIM];
@@ -1033,7 +1080,7 @@ fn get_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let img = build_image(mcx, esel, r);
     let mode = read_mode(esel, r);
     let arraytyplen = if mode.fixed { fixed_typlen(esel, r) } else { -1 };
-    let (nsub, upper, lower, upb, lob) = slice_bounds(mode, r);
+    let (nsub, upper, lower, upb, lob) = slice_bounds_for(mode, r, Some(&img));
     let mut cup = upper;
     let mut clo = lower;
     let cupb: [u8; MAXDIM] = core::array::from_fn(|i| upb[i] as u8);
@@ -1198,7 +1245,7 @@ fn set_slice_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
     let src = build_image(mcx, esel, r);
     let mode = read_mode(esel, r);
     let arraytyplen = if mode.fixed { fixed_typlen(esel, r) } else { -1 };
-    let (nsub0, upper, lower, upb, lob) = slice_bounds(mode, r);
+    let (nsub0, upper, lower, upb, lob) = slice_bounds_for(mode, r, Some(&img));
     // DOMAIN CARVE: nSubscripts >= 1. C's ndim==1 arm carries
     // Assert(nSubscripts == 1) — a debug-only caller contract (SQL
     // subscripting always supplies >= 1 subscript); the shipped Rust keeps
@@ -1587,7 +1634,42 @@ fn construct_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
 // ---------------------------------------------------------------------------
 
 fn contains_nulls_diff(mcx: Mcx<'_>, esel: i32, r: &mut Rdr<'_>, payload: &[u8]) {
-    let img = build_image(mcx, esel, r);
+    let built = build_image(mcx, esel, r);
+    // A construct_md_array image only carries a null bitmap when it actually
+    // has a null, so the "bitmap present but every bit set" shape — the one
+    // that exercises the bit-scan loop all the way to its `false` return — is
+    // only reachable by OVERWRITING the nulls of an array that had them.
+    // Chain array_set_element for that, then feed the result to both sides.
+    let overwrite = r.u8() & 1 == 1;
+    let img = if overwrite && arrayfuncs::arr_hasnull(&built) {
+        let (ndim, dims, lbs) = arrayfuncs::read_dims_lbounds(&built);
+        let meta0 = meta_for(esel);
+        let mut cur: PgVec<u8> = built;
+        if ndim == 1 && dims[0] > 0 {
+            let w = elem_width(esel, r);
+            let b = read_elem_bytes(esel, w, r);
+            let d = make_elem(mcx, esel, &b);
+            for k in 0..dims[0] {
+                match array_set_element(
+                    mcx,
+                    &cur,
+                    &[lbs[0] + k],
+                    d,
+                    false,
+                    -1,
+                    meta0.typlen,
+                    meta0.typbyval,
+                    meta0.typalign,
+                ) {
+                    Ok(next) => cur = next,
+                    Err(_) => break,
+                }
+            }
+        }
+        cur
+    } else {
+        built
+    };
     let cst = unsafe { pg_diff_array_contains_nulls(img.as_ptr(), img.len()) };
     let rv = array_contains_nulls(&img);
     let cv = match cst {
