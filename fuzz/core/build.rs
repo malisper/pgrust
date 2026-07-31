@@ -101,6 +101,29 @@ fn main() {
     // hashenc_diff oracle (p1-lanee): verbatim src/common + ascii/crc TUs.
     // The src/common files build -DFRONTEND (identical logic; malloc
     // allocator, exactly a real frontend libpgcommon build).
+    //
+    // LINK-ORDER LAW (p1-laneaj, 2026-07-31): the glue archive REFERENCES
+    // symbols the fe archive PROVIDES, and cargo passes native static libs
+    // to the linker in emission order. Strict left-to-right linkers
+    // (binutils ld on Linux stable builds) require referencer-before-
+    // provider, so glue MUST be compiled/emitted before fe. macOS ld64 and
+    // the cargo-fuzz nightly link path tolerate either order, which is why
+    // laptop `cargo test` never caught the inversion.
+    let mut hashenc_glue = cc::Build::new();
+    for s in CRYPTO_SHARED_SYMS.iter().chain(HASHENC_EXTRA_SYMS) {
+        hashenc_glue.define(s, format!("hashenc_impl_{s}").as_str());
+    }
+    hashenc_glue
+        .file("csrc/hashenc/pg_crc32c_sb8.c")
+        .file("csrc/hashenc/pg_crc.c")
+        .file("csrc/hashenc/pg_hashenc_ascii.c")
+        .file("csrc/hashenc/pg_hashenc_glue.c")
+        .include("csrc/hashenc/shim")
+        .include("csrc/hashenc/include")
+        .include("csrc/hashenc")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .compile("pg_difffuzz_hashenc");
     let mut hashenc = cc::Build::new();
     for s in CRYPTO_SHARED_SYMS.iter().chain(HASHENC_EXTRA_SYMS) {
         hashenc.define(s, format!("hashenc_impl_{s}").as_str());
@@ -119,21 +142,6 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .compile("pg_difffuzz_hashenc_fe");
-    let mut hashenc_glue = cc::Build::new();
-    for s in CRYPTO_SHARED_SYMS.iter().chain(HASHENC_EXTRA_SYMS) {
-        hashenc_glue.define(s, format!("hashenc_impl_{s}").as_str());
-    }
-    hashenc_glue
-        .file("csrc/hashenc/pg_crc32c_sb8.c")
-        .file("csrc/hashenc/pg_crc.c")
-        .file("csrc/hashenc/pg_hashenc_ascii.c")
-        .file("csrc/hashenc/pg_hashenc_glue.c")
-        .include("csrc/hashenc/shim")
-        .include("csrc/hashenc/include")
-        .include("csrc/hashenc")
-        .flag_if_supported("-fno-strict-aliasing")
-        .flag_if_supported("-fwrapv")
-        .compile("pg_difffuzz_hashenc");
     // cryptofam_diff oracle (p1-lanef): verbatim 18.3 crypto/hash family,
     // FRONTEND arms (malloc/free, no CHECK_FOR_INTERRUPTS), own shim include
     // tree so the main shim postgres.h never leaks into these units.
