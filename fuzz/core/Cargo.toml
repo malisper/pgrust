@@ -80,23 +80,16 @@ guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_di
 adt_json = { path = "../../crates/backend/utils/adt/json" }  # json_diff (scaffold.py)
 arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }  # arrayfuncs_diff (scaffold.py)
 adt_int = { path = "../../crates/backend/utils/adt/int" }    # arrayfuncs_diff element io
-detoast = { path = "../../crates/backend/access/common/detoast" }  # arrayfuncs_diff width_bucket arg seam
 fmgr_core = { path = "../../crates/backend/utils/fmgr/fmgr_core" }        # arrayfuncs_diff width_bucket cmp finfo
 syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }  # arrayfuncs_diff pinned typcache fixture
 indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }   # arrayfuncs_diff pinned opclass fixture
 types_tuple = { path = "../../crates/_support/types/types_tuple" }        # NameData for the fixture
 # numutils_diff (p1-laneaj adt/numutils batch):
 numutils = { path = "../../crates/backend/utils/adt/numutils" }
-guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
 adt_oracle_compat = { path = "../../crates/backend/utils/adt/oracle_compat" }  # oraclefam_diff (scaffold.py)
 adt_rowtypes = { path = "../../crates/backend/utils/adt/rowtypes" }  # rowtypes_diff (scaffold.py)
 array_userfuncs = { path = "../../crates/backend/utils/adt/array_userfuncs" }  # array_userfuncs_diff (scaffold.py)
 # array_userfuncs_diff seam pins + shipped comparators/foundation:
-adt_int = { path = "../../crates/backend/utils/adt/int" }
-arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }
-types_tuple = { path = "../../crates/_support/types/types_tuple" }
-syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }
-indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }
 fmgr_seams = { path = "../../crates/backend/utils/fmgr/fmgr_seams" }
 detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
 pg_prng = { path = "../../crates/common/pg_prng" }
@@ -107,14 +100,8 @@ heaptuple = { path = "../../crates/backend/access/common/heaptuple" }
 namespace_seams = { path = "../../crates/backend/catalog/namespace_seams" }
 adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }  # jsonbio_diff (scaffold.py)
 # jsonbops_diff (p1-lanev): text[]-arg detoast + C-collation string cmp seam
-detoast = { path = "../../crates/backend/access/common/detoast" }
-detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
 pg_locale_seams = { path = "../../crates/backend/utils/adt/pg_locale_seams" }
-datum = { path = "../../crates/_support/types/datum" }  # fc-wrapper plane (scaffold.py)
-types_fmgr = { path = "../../crates/_support/types/fmgr" }  # fc-wrapper plane (scaffold.py)
-pg_prng = { path = "../../crates/common/pg_prng" }  # pg_prng_diff (scaffold.py)
 arrayutils = { path = "../../crates/backend/utils/adt/arrayutils" }  # arrayutils_diff (scaffold.py)
-hashfn = { path = "../../crates/common/hashfn" }  # hashfn_diff (scaffold.py)
 adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }  # timestamp_diff (scaffold.py)
 
 adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }  # timestamp_diff

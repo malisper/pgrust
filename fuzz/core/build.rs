@@ -16,10 +16,8 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
-        // COMPILE GATE (json_diff, scaffold.py): uncomment ONLY after every
-        // SCAFFOLD-TODO #error paste site in csrc/pg_json_io.c is filled
-        // with verbatim vendored C (README-TODO-json_diff.md step 1).
-        // .file("csrc/pg_json_io.c")
+        // json_diff oracle lives in the dedicated jsonfam cc::Build below
+        // (own shim include tree; pg_jsonfam_-prefixed symbols).
         // arrayfuncs_diff oracle (p1-lanex): verbatim 18.3 arrayfuncs.c core
         // + arrayutils/numutils helpers; pg_afx_-prefixed symbols (see the
         // file header for provenance + shims).
