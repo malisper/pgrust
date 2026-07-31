@@ -841,6 +841,179 @@ mod tests {
         jsonpath_diff(&[2u8, varsel].iter().copied().chain(text.bytes()).collect::<Vec<_>>());
     }
 
+    /// TIMING ATTRIBUTION for the CI cluster slow-units (run manually):
+    ///   cargo test --release --manifest-path fuzz/Cargo.toml -p decoder_fuzz \
+    ///     timing_slow_unit -- --ignored --nocapture
+    /// Times C-oracle jsonpath_in and shipped-Rust jsonpath_in SEPARATELY on
+    /// the exact source text of CI cluster slow-unit
+    /// 899856ad3a5f72f09a52598b9bc434076004cd93 (campaign
+    /// pgrust-fuzz-campaign-1785518461-61c1-18958, 52.5 s/exec instrumented).
+    #[test]
+    #[ignore]
+    fn timing_slow_unit_attribution() {
+        let text: &[u8] =
+            include_bytes!("../../testdata/jsonpath-slow/slow-unit-899856ad-text.bin");
+        setup();
+
+        let t0 = std::time::Instant::now();
+        let (cv, _) = c_in(text, false);
+        let c_dur = t0.elapsed();
+
+        let cx = mcx::MemoryContext::new("jsonpath_timing");
+        let m = cx.mcx();
+        let t1 = std::time::Instant::now();
+        let (rv, _) = rust_in(m, text, false);
+        let r_dur = t1.elapsed();
+
+        eprintln!("C    jsonpath_in: {c_dur:?} verdict={cv:?}");
+        eprintln!("Rust jsonpath_in: {r_dur:?} verdict={rv:?}");
+    }
+
+    /// SCALING LAW for like_regex compile cost (run manually):
+    ///   cargo test --release --manifest-path fuzz/Cargo.toml -p decoder_fuzz \
+    ///     timing_scaling_family -- --ignored --nocapture
+    /// For each synthetic pattern family, prints a (N, C seconds, Rust
+    /// seconds) table for jsonpath_in over
+    ///   $ ? (@ like_regex "(<unit repeated N times>)+")
+    /// `artifact-unit` is the repeated unit minimized out of CI cluster slow-unit
+    /// 899856ad3a5f72f09a52598b9bc434076004cd93; the other families are the
+    /// same tokens with pieces removed (they do NOT blow up — the blowup needs
+    /// the whole unit). The N list can be overridden with $JP_NS. The exact
+    /// same family is run against real PostgreSQL 18.3 by
+    /// fuzz/jsonpath_parse_scaling.sh, so the three engines are comparable.
+    #[test]
+    #[ignore]
+    fn timing_scaling_family() {
+        setup();
+        let ns: Vec<usize> = match std::env::var("JP_NS") {
+            Ok(s) => s.split_whitespace().map(|t| t.parse().unwrap()).collect(),
+            Err(_) => vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 1024],
+        };
+        // (name, unit) — unit is SOURCE text (jsonpath string escapes apply).
+        let families: &[(&str, &str)] = &[
+            ("artifact-unit", r"^^^^|\\\\\?\^^^\\Y||pawt@r"),
+            ("unit-no-backslash", "^^^^|Y||pawt@r"),
+            ("bars", "a|b|ab"),
+            ("carets", "^"),
+        ];
+        for (name, unit) in families {
+            eprintln!("family {name}: unit={unit:?}");
+            for &n in &ns {
+                let pat = unit.repeat(n);
+                let text = format!("$ ? (@ like_regex \"({pat})+\")");
+                if text.len() > 65536 {
+                    break;
+                }
+                let t0 = std::time::Instant::now();
+                let (cv, _) = c_in(text.as_bytes(), false);
+                let c_dur = t0.elapsed();
+                let cx = mcx::MemoryContext::new("jsonpath_scaling");
+                let m = cx.mcx();
+                let t1 = std::time::Instant::now();
+                let (rv, _) = rust_in(m, text.as_bytes(), false);
+                let r_dur = t1.elapsed();
+                eprintln!(
+                    "  N={n:4} len={:5}  C={:>12.6}s ({cv:?})  Rust={:>12.6}s ({rv:?})  ratio={:.2}",
+                    text.len(),
+                    c_dur.as_secs_f64(),
+                    r_dur.as_secs_f64(),
+                    r_dur.as_secs_f64() / c_dur.as_secs_f64().max(1e-9),
+                );
+            }
+        }
+    }
+
+    /// GRAMMAR-ONLY scaling (no like_regex, so zero regex compilation): the
+    /// hypothesis that gram.rs's `Ok(None)` returns constitute BACKTRACKING
+    /// with re-parse (and therefore exponential blowup on ambiguous shapes)
+    /// predicts super-linear growth here. Run manually:
+    ///   cargo test --release --manifest-path fuzz/Cargo.toml -p decoder_fuzz \
+    ///     timing_grammar_only -- --ignored --nocapture
+    /// (Measured: linear on every shape, C-ratio ~1-2x. `Ok(None)` in gram.rs
+    /// is a TERMINAL failure that propagates to parsejsonpath — no alternative
+    /// is ever retried at the same input position, so the parser is strict LL(1)
+    /// and linear. See fuzz/FINDING-jsonpath-parse-complexity.md.)
+    #[test]
+    #[ignore]
+    fn timing_grammar_only() {
+        setup();
+        let ns: Vec<usize> = match std::env::var("JP_NS") {
+            Ok(s) => s.split_whitespace().map(|t| t.parse().unwrap()).collect(),
+            Err(_) => vec![32, 64, 128, 256, 512, 1024, 2048],
+        };
+        // Shapes chosen for prefix ambiguity / alternation pressure in the
+        // grammar itself: nested parens (accessor-vs-predicate ambiguity),
+        // repeated filters, unary chains, ambiguous accessor/method keywords,
+        // and a prefix that only fails at the very last token.
+        let shapes: &[(&str, fn(usize) -> String)] = &[
+            ("nested-paren", |n| format!("{}$.a{}", "(".repeat(n), ")".repeat(n))),
+            ("filter-chain", |n| format!("$ {}", "? (@.a > 1) ".repeat(n))),
+            ("unary-chain", |n| format!("${}1", "-+".repeat(n))),
+            ("method-keywords", |n| format!("${}", ".time".repeat(n))),
+            ("index-list", |n| format!("$[{}0]", "0,".repeat(n))),
+            ("or-chain", |n| format!("$ ? ({})", vec!["@.a == 1"; n].join(" || "))),
+            // fails on the final token: worst case for any retry-on-failure
+            ("late-failure", |n| format!("{}$.a{}", "(".repeat(n), ")".repeat(n - 1))),
+        ];
+        for (name, gen) in shapes {
+            eprintln!("shape {name}");
+            for &n in &ns {
+                let text = gen(n);
+                if text.len() > 200_000 {
+                    break;
+                }
+                let t0 = std::time::Instant::now();
+                let (cv, _) = c_in(text.as_bytes(), false);
+                let c_dur = t0.elapsed();
+                let cx = mcx::MemoryContext::new("jsonpath_grammar_scaling");
+                let m = cx.mcx();
+                let t1 = std::time::Instant::now();
+                let (rv, _) = rust_in(m, text.as_bytes(), false);
+                let r_dur = t1.elapsed();
+                eprintln!(
+                    "  N={n:5} len={:7}  C={:>12.6}s ({cv:?})  Rust={:>12.6}s ({rv:?})  ratio={:.2}",
+                    text.len(),
+                    c_dur.as_secs_f64(),
+                    r_dur.as_secs_f64(),
+                    r_dur.as_secs_f64() / c_dur.as_secs_f64().max(1e-9),
+                );
+            }
+        }
+    }
+
+    /// Ad-hoc timing driver (run manually): times C and Rust jsonpath_in on
+    /// each FILE (raw source text) listed in $JP_TIME_FILES (colon-separated).
+    ///   JP_TIME_FILES=/path/a:/path/b cargo test --release \
+    ///     --manifest-path fuzz/Cargo.toml -p decoder_fuzz timing_files -- \
+    ///     --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn timing_files() {
+        let Ok(files) = std::env::var("JP_TIME_FILES") else {
+            eprintln!("JP_TIME_FILES not set; skipping");
+            return;
+        };
+        setup();
+        for f in files.split(':') {
+            let text = std::fs::read(f).expect("readable input file");
+            let t0 = std::time::Instant::now();
+            let (cv, _) = c_in(&text, false);
+            let c_dur = t0.elapsed();
+            let cx = mcx::MemoryContext::new("jsonpath_timing_files");
+            let m = cx.mcx();
+            let t1 = std::time::Instant::now();
+            let (rv, _) = rust_in(m, &text, false);
+            let r_dur = t1.elapsed();
+            eprintln!(
+                "{f}: len={:5}  C={:>12.6}s ({cv:?})  Rust={:>12.6}s ({rv:?})  ratio={:.2}",
+                text.len(),
+                c_dur.as_secs_f64(),
+                r_dur.as_secs_f64(),
+                r_dur.as_secs_f64() / c_dur.as_secs_f64().max(1e-9),
+            );
+        }
+    }
+
     /// Replay every checked-in seed (catches shim/link errors before the
     /// nightly fuzz campaign).
     #[test]
