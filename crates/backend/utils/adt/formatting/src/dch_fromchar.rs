@@ -760,7 +760,8 @@ enum ScanInt {
     /// line. We report the true out-of-range-ness so that guard can fire, the
     /// same rejection `from_char_parse_int_len` (formatting.c:2272) applies to
     /// every other numeric DCH field. DELIBERATE divergence from C's observed
-    /// glibc behavior — see notes/DIVERGENCES.md.
+    /// glibc behavior — recorded on ledger oids 1778/1780 in
+    /// proofs/USER_FACING_FUNCTIONS.tsv; see notes/y-yyy-range-lane.md.
     OutOfRange,
 }
 
