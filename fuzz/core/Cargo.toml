@@ -26,6 +26,13 @@ wchar = { path = "../../crates/common/wchar" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+# Lane-0B differential targets (100%-coverage campaign):
+adt_uuid = { path = "../../crates/backend/utils/adt/uuid" }
+adt_mac = { path = "../../crates/backend/utils/adt/mac" }
+adt_mac8 = { path = "../../crates/backend/utils/adt/mac8" }
+name = { path = "../../crates/backend/utils/adt/name" }
+adt_cash = { path = "../../crates/backend/utils/adt/cash" }
+ryu = { path = "../../crates/common/ryu" }
 
 [build-dependencies]
 cc = "1"

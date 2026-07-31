@@ -34,6 +34,11 @@ extern "C" {
     // threads raced on the old shared global) and stable Rust cannot bind
     // a C thread-local as an extern static.
     fn pg_diff_errcode_get() -> i32;
+    // Vendored PG 18.3 Ryu (csrc/ryu/): exported non-static, callable
+    // directly for the ryu-crate `*_buf` NUL-terminating wrapper arms the
+    // server float-out path never calls (lane-0B, common/ryu done-gate).
+    fn double_to_shortest_decimal_buf(f: f64, result: *mut c_char) -> i32;
+    fn float_to_shortest_decimal_buf(f: f32, result: *mut c_char) -> i32;
 }
 
 /// Oracle error classes (see the errcode shims in csrc/pg_float_io.c and
@@ -149,13 +154,55 @@ pub fn float_in_diff(data: &[u8]) {
 // ---------------------------------------------------------------------------
 //
 // Input layout: [selector][raw bits...]. selector bit0: 0 = float8out
-// (8 bytes), 1 = float4out (4 bytes). Extra bytes ignored so libFuzzer can
-// grow/shrink freely.
+// (8 bytes), 1 = float4out (4 bytes). selector bit1 (lane-0B): additionally
+// drive the ryu-crate `*_to_shortest_decimal_buf` NUL-terminating wrappers
+// (pub API the server float-out path never calls) against the vendored C
+// Ryu's identical wrappers — byte image + returned index + NUL terminator
+// parity. Extra bytes ignored so libFuzzer can grow/shrink freely.
 
 pub fn float_out_diff(data: &[u8]) {
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
+    if sel & 2 != 0 {
+        // DOUBLE_SHORTEST_DECIMAL_LEN = 25, FLOAT_SHORTEST_DECIMAL_LEN = 16.
+        let mut cbuf = [0xaau8; 32];
+        let mut rbuf = [0xaau8; 32];
+        if sel & 1 == 0 {
+            if rest.len() < 8 {
+                return;
+            }
+            let v = f64::from_le_bytes(rest[..8].try_into().unwrap());
+            let clen = unsafe { double_to_shortest_decimal_buf(v, cbuf.as_mut_ptr().cast()) };
+            let rlen = ryu::double_to_shortest_decimal_buf(v, &mut rbuf);
+            assert!(
+                clen as usize == rlen && cbuf[..=rlen] == rbuf[..=rlen] && rbuf[rlen] == 0,
+                "ryu d2s_buf DIVERGENCE bits={:016x}: C(len={})={:?} Rust(len={})={:?}",
+                v.to_bits(),
+                clen,
+                std::str::from_utf8(&cbuf[..clen.max(0) as usize]),
+                rlen,
+                std::str::from_utf8(&rbuf[..rlen])
+            );
+        } else {
+            if rest.len() < 4 {
+                return;
+            }
+            let v = f32::from_le_bytes(rest[..4].try_into().unwrap());
+            let clen = unsafe { float_to_shortest_decimal_buf(v, cbuf.as_mut_ptr().cast()) };
+            let rlen = ryu::float_to_shortest_decimal_buf(v, &mut rbuf);
+            assert!(
+                clen as usize == rlen && cbuf[..=rlen] == rbuf[..=rlen] && rbuf[rlen] == 0,
+                "ryu f2s_buf DIVERGENCE bits={:08x}: C(len={})={:?} Rust(len={})={:?}",
+                v.to_bits(),
+                clen,
+                std::str::from_utf8(&cbuf[..clen.max(0) as usize]),
+                rlen,
+                std::str::from_utf8(&rbuf[..rlen])
+            );
+        }
+        return;
+    }
     let mut cbuf = [0u8; 32];
     if sel & 1 == 0 {
         if rest.len() < 8 {
