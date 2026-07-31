@@ -369,3 +369,87 @@ pg_bool_int4(int arg)
 	else
 		return 1;
 }
+
+/* ==================================================================== */
+/* WAVE (2026-07-30): boolsend (pg_proc oid 2437) / booltext (2971).    */
+/*                                                                      */
+/* Provenance (REL_18_STABLE, fetched 2026-07-30):                      */
+/*   src/backend/utils/adt/bool.c    (boolsend, booltext bodies)        */
+/*   src/backend/libpq/pqformat.c    (pq_begintypsend, pq_sendbyte,     */
+/*                                    pq_endtypsend semantics)          */
+/*                                                                      */
+/* SHIMS (plumbing only, never logic; the proofs/uuid pg_uuid_send      */
+/* wire conventions):                                                   */
+/*   W1. fmgr PG_FUNCTION_ARGS unwrapped -> plain int arg (shim 2:      */
+/*       bool crosses the FFI boundary as int).                         */
+/*   W2. pq_begintypsend + pq_sendbyte + pq_endtypsend -> caller-       */
+/*       provided out buffer; SET_VARSIZE = 4-byte little-endian        */
+/*       varlena header (total_len << 2), payload after it. Returns     */
+/*       the total image length.                                        */
+/*   W3. booltext's cstring_to_text(str) -> the same caller-buffer      */
+/*       varlena image ((VARHDRSZ + strlen) << 2 LE header + bytes);    */
+/*       the str selection ("true"/"false") is verbatim.                */
+/* ==================================================================== */
+
+/* bool.c boolsend: pq_begintypsend + pq_sendbyte(arg1 ? 1 : 0)
+ * + pq_endtypsend -> 5-byte image (4B header + 1 payload byte) */
+int32_t
+pg_boolsend(int b_arg, unsigned char *out /* [5] */ )
+{
+	bool		arg1 = (bool) b_arg;	/* shim W1 */
+	uint32_t	hdr = (uint32_t) 5 << 2;	/* shim W2 */
+
+	out[4] = (unsigned char) (arg1 ? 1 : 0);	/* pq_sendbyte, verbatim value */
+	out[0] = (unsigned char) (hdr & 0xFF);
+	out[1] = (unsigned char) ((hdr >> 8) & 0xFF);
+	out[2] = (unsigned char) ((hdr >> 16) & 0xFF);
+	out[3] = (unsigned char) ((hdr >> 24) & 0xFF);
+	return 5;
+}
+
+/* bool.c booltext: cstring_to_text("true"/"false"); selection verbatim,
+ * text packing per shim W3. Returns the total image length (8 or 9). */
+int32_t
+pg_booltext(int b_arg, unsigned char *out /* [9] */ )
+{
+	bool		arg1 = (bool) b_arg;	/* shim W1 */
+	const char *str;
+	int			len = 0;
+	uint32_t	hdr;
+	int			i;
+
+	if (arg1)
+		str = "true";
+	else
+		str = "false";
+
+	/* shim W3: cstring_to_text -> caller-buffer varlena image */
+	while (str[len] != '\0')
+		len++;
+	hdr = (uint32_t) (4 + len) << 2;
+	out[0] = (unsigned char) (hdr & 0xFF);
+	out[1] = (unsigned char) ((hdr >> 8) & 0xFF);
+	out[2] = (unsigned char) ((hdr >> 16) & 0xFF);
+	out[3] = (unsigned char) ((hdr >> 24) & 0xFF);
+	for (i = 0; i < len; i++)
+		out[4 + i] = (unsigned char) str[i];
+	return 4 + len;
+}
+
+/*
+ * booland_statefunc / boolor_statefunc — bool.c:300-303 / :309-312 verbatim
+ * (Stamp 18.3, 62d6c7d3df). SHIM: PG_FUNCTION_ARGS unwrapping -> plain int
+ * (0/1) args/return, same convention as pg_booleq above (shim 2 in the
+ * provenance header).
+ */
+int
+pg_booland_statefunc(int a1, int a2)
+{
+	return (a1 != 0) && (a2 != 0);
+}
+
+int
+pg_boolor_statefunc(int a1, int a2)
+{
+	return (a1 != 0) || (a2 != 0);
+}

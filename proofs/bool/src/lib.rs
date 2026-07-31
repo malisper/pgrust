@@ -36,6 +36,8 @@ mod ffi {
         pub fn pg_boolgt(a1: c_int, a2: c_int) -> c_int;
         pub fn pg_boolle(a1: c_int, a2: c_int) -> c_int;
         pub fn pg_boolge(a1: c_int, a2: c_int) -> c_int;
+        pub fn pg_booland_statefunc(a1: c_int, a2: c_int) -> c_int;
+        pub fn pg_boolor_statefunc(a1: c_int, a2: c_int) -> c_int;
     }
 }
 
@@ -370,5 +372,272 @@ mod harnesses {
         let (a, b): (bool, bool) = (kani::any(), kani::any());
         let c = unsafe { ffi::pg_boolle(a as c_int, b as c_int) };
         assert_eq!(c != 0, adt_bool::boollt(a, b));
+    }
+}
+
+// ===========================================================================
+// WAVE (2026-07-30): boolsend (2437) / booltext (2971).
+// C side: the WAVE wire section appended to c/pg_bool.c (shims W1-W3 there).
+//
+//   - boolsend: WRAPPER-level at the shipped fmgr entry point
+//     (adt_bool::builtins::fc_boolsend) over a real result-mcx LocalFcinfo
+//     frame (pg_lsn_send precedent; proof_support mcx-stubs recipe, theorem
+//     "modulo static-buffer allocator model").  Symbolic bool input; full
+//     5-byte wire image (4B LE varlena header + payload byte) + length
+//     compared.
+//   - booltext: WRAPPER-level at fc_booltext, same frame recipe; full
+//     varlena image of cstring_to_text(b"true"/b"false") compared over the
+//     branch's exact image length (8 for true, 9 for false).
+//   - control_boolsend_negate: MUST FAIL (C fed !b) — non-vacuity witness
+//     for the send-image comparison.  DEFAULT solver, per suite rule.
+//
+// These harnesses additionally need `-Z stubbing` and the mcx-stub run
+// recipe: timeout 30 cargo kani -Z c-ffi -Z stubbing --c-lib c/pg_bool.c \
+//   --harness wave_sendtext::<h> --exact
+// ===========================================================================
+
+#[cfg(kani)]
+mod wave_sendtext {
+    use datum::{Datum, NullableDatum};
+    use proof_support::{mcx_stubs, stubs};
+    use types_fmgr::LocalFcinfo;
+
+    extern "C" {
+        fn pg_boolsend(b_arg: core::ffi::c_int, out: *mut u8) -> i32;
+        fn pg_booltext(b_arg: core::ffi::c_int, out: *mut u8) -> i32;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    // RVR lesson: grow/deallocate stubs mandatory whenever the core can
+    // reach vec_append_bytes' try_reserve/grow branch.
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_boolsend() {
+        let b: bool = kani::any();
+        let mut cbuf = [0u8; 5];
+        let clen = unsafe { pg_boolsend(b as core::ffi::c_int, cbuf.as_mut_ptr()) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-bool-send");
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call (forgotten, never freed).
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_bool(b));
+        let d = match adt_bool::builtins::fc_boolsend(None, &mut f) {
+            Ok(d) => {
+                kani::cover!(true, "boolsend Ok arm reachable");
+                d
+            }
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("boolsend errored")
+            }
+        };
+        let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 5) };
+        assert!(clen == 5);
+        let mut i = 0;
+        while i < 5 {
+            assert!(img[i] == cbuf[i]);
+            i += 1;
+        }
+        core::mem::forget(ctx);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_booltext() {
+        let b: bool = kani::any();
+        let mut cbuf = [0u8; 9];
+        let clen = unsafe { pg_booltext(b as core::ffi::c_int, cbuf.as_mut_ptr()) };
+
+        // Branch-exact image length: 4B header + "true"(4) / "false"(5).
+        let want: usize = if b { 8 } else { 9 };
+        assert!(clen as usize == want);
+
+        let ctx = mcx::MemoryContext::new_bump("kani-bool-text");
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call (forgotten, never freed).
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_bool(b));
+        let d = match adt_bool::builtins::fc_booltext(None, &mut f) {
+            Ok(d) => {
+                kani::cover!(true, "booltext Ok arm reachable");
+                d
+            }
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("booltext errored")
+            }
+        };
+        let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, want) };
+        let mut i = 0;
+        while i < want {
+            assert!(img[i] == cbuf[i]);
+            i += 1;
+        }
+        core::mem::forget(ctx);
+    }
+
+    /// Per-branch literal cells for booltext. The symbolic-bool harness
+    /// above walls in the CNF phase (CI cluster 2026-07-30: symex completes,
+    /// 31226 VCCs, rss-kill at 40GB in propositional reduction, jobs
+    /// -32917 and -42528) — the 2-valued image length makes every image
+    /// byte a mux; a literal bool prunes (literal-cells law). Union of
+    /// the two cells = the full bool domain.
+    macro_rules! booltext_cell {
+        ($($name:ident: $bval:expr, $want:expr;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(12)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $name() {
+                let b: bool = $bval;
+                let want: usize = $want;
+                let mut cbuf = [0u8; 9];
+                let clen = unsafe { pg_booltext(b as core::ffi::c_int, cbuf.as_mut_ptr()) };
+                assert!(clen as usize == want);
+
+                let ctx = mcx::MemoryContext::new_bump("kani-bool-text");
+                let mut f = LocalFcinfo::<1>::new(0);
+                // SAFETY: ctx outlives the call (forgotten, never freed).
+                unsafe { f.set_result_mcx(ctx.mcx()) };
+                f.args[0] = NullableDatum::value(Datum::from_bool(b));
+                let d = match adt_bool::builtins::fc_booltext(None, &mut f) {
+                    Ok(d) => {
+                        kani::cover!(true, "booltext Ok arm reachable");
+                        d
+                    }
+                    Err(e) => {
+                        core::mem::forget(e);
+                        panic!("booltext errored")
+                    }
+                };
+                let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, want) };
+                let mut i = 0;
+                while i < want {
+                    assert!(img[i] == cbuf[i]);
+                    i += 1;
+                }
+                core::mem::forget(ctx);
+            }
+        )*};
+    }
+
+    booltext_cell! {
+        eq_booltext_true: true, 8;
+        eq_booltext_false: false, 9;
+    }
+
+    /// MUST FAIL (send-image control): C is fed the NEGATED bool. DEFAULT
+    /// solver (controls validate by counterexample; kissat does not
+    /// terminate usefully on failing harnesses).
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn control_boolsend_negate() {
+        let b: bool = kani::any();
+        let mut cbuf = [0u8; 5];
+        let _ = unsafe { pg_boolsend(!b as core::ffi::c_int, cbuf.as_mut_ptr()) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-bool-send-ctl");
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_bool(b));
+        let d = match adt_bool::builtins::fc_boolsend(None, &mut f) {
+            Ok(d) => d,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("boolsend errored")
+            }
+        };
+        let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 5) };
+        let mut i = 0;
+        while i < 5 {
+            assert!(img[i] == cbuf[i]); // expected failure at the payload byte
+            i += 1;
+        }
+        core::mem::forget(ctx);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// wrapper_fc: entry-point proofs for the fc_bool2! macro-generated fmgr
+// wrappers (p1-lane0a 2026-07-30). The cores are proved above (full-bool2);
+// these lift the theorem to the SHIPPED fc_* entry points (arg unpack +
+// core + Datum pack) — and are the measured-coverage carriers for the
+// macro-invocation declaration lines (builtins.rs fc_bool2! block), which
+// no lcov instrument can attribute (fuzz coverage lands on the macro
+// definition body; see proofs/coverage/macro_attrib.py).
+// ---------------------------------------------------------------------------
+#[cfg(kani)]
+mod wrapper_fc {
+    use super::ffi;
+    use core::ffi::c_int;
+    use datum::Datum;
+    use types_fmgr::LocalFcinfo;
+
+    fn drive(f: types_fmgr::PGFunction, a: bool, b: bool) -> bool {
+        let mut fcinfo = LocalFcinfo::<2>::new(0);
+        fcinfo.set_arg(0, Datum::from_bool(a));
+        fcinfo.set_arg(1, Datum::from_bool(b));
+        match f(None, &mut fcinfo) {
+            Ok(d) => d.as_bool(),
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("fc bool cmp wrapper errored")
+            }
+        }
+    }
+
+    macro_rules! fc_eq_harness {
+        ($($h:ident: $fc:ident / $c:ident;)*) => {$(
+            #[kani::proof]
+            fn $h() {
+                let (a, b): (bool, bool) = (kani::any(), kani::any());
+                let c = unsafe { ffi::$c(a as c_int, b as c_int) };
+                assert_eq!(c != 0, drive(adt_bool::builtins::$fc, a, b));
+            }
+        )*};
+    }
+
+    fc_eq_harness! {
+        eq_fc_booleq: fc_booleq / pg_booleq;
+        eq_fc_boolne: fc_boolne / pg_boolne;
+        eq_fc_boollt: fc_boollt / pg_boollt;
+        eq_fc_boolgt: fc_boolgt / pg_boolgt;
+        eq_fc_boolle: fc_boolle / pg_boolle;
+        eq_fc_boolge: fc_boolge / pg_boolge;
+        eq_fc_booland_statefunc: fc_booland_statefunc / pg_booland_statefunc;
+        eq_fc_boolor_statefunc: fc_boolor_statefunc / pg_boolor_statefunc;
+    }
+
+    /// Must-fail control: the wrapper comparator must FIRE on an intended
+    /// skew (fc_booleq driven against C boolNE).
+    #[kani::proof]
+    fn control_fc_booleq_vs_c_boolne_must_fail() {
+        let (a, b): (bool, bool) = (kani::any(), kani::any());
+        let c = unsafe { ffi::pg_boolne(a as c_int, b as c_int) };
+        assert!((c != 0) == drive(adt_bool::builtins::fc_booleq, a, b));
     }
 }

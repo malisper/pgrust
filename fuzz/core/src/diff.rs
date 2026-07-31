@@ -34,6 +34,11 @@ extern "C" {
     // threads raced on the old shared global) and stable Rust cannot bind
     // a C thread-local as an extern static.
     fn pg_diff_errcode_get() -> i32;
+    // Vendored PG 18.3 Ryu (csrc/ryu/): exported non-static, callable
+    // directly for the ryu-crate `*_buf` NUL-terminating wrapper arms the
+    // server float-out path never calls (lane-0B, common/ryu done-gate).
+    fn double_to_shortest_decimal_buf(f: f64, result: *mut c_char) -> i32;
+    fn float_to_shortest_decimal_buf(f: f32, result: *mut c_char) -> i32;
 }
 
 /// Oracle error classes (see the errcode shims in csrc/pg_float_io.c and
@@ -149,13 +154,55 @@ pub fn float_in_diff(data: &[u8]) {
 // ---------------------------------------------------------------------------
 //
 // Input layout: [selector][raw bits...]. selector bit0: 0 = float8out
-// (8 bytes), 1 = float4out (4 bytes). Extra bytes ignored so libFuzzer can
-// grow/shrink freely.
+// (8 bytes), 1 = float4out (4 bytes). selector bit1 (lane-0B): additionally
+// drive the ryu-crate `*_to_shortest_decimal_buf` NUL-terminating wrappers
+// (pub API the server float-out path never calls) against the vendored C
+// Ryu's identical wrappers — byte image + returned index + NUL terminator
+// parity. Extra bytes ignored so libFuzzer can grow/shrink freely.
 
 pub fn float_out_diff(data: &[u8]) {
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
+    if sel & 2 != 0 {
+        // DOUBLE_SHORTEST_DECIMAL_LEN = 25, FLOAT_SHORTEST_DECIMAL_LEN = 16.
+        let mut cbuf = [0xaau8; 32];
+        let mut rbuf = [0xaau8; 32];
+        if sel & 1 == 0 {
+            if rest.len() < 8 {
+                return;
+            }
+            let v = f64::from_le_bytes(rest[..8].try_into().unwrap());
+            let clen = unsafe { double_to_shortest_decimal_buf(v, cbuf.as_mut_ptr().cast()) };
+            let rlen = ryu::double_to_shortest_decimal_buf(v, &mut rbuf);
+            assert!(
+                clen as usize == rlen && cbuf[..=rlen] == rbuf[..=rlen] && rbuf[rlen] == 0,
+                "ryu d2s_buf DIVERGENCE bits={:016x}: C(len={})={:?} Rust(len={})={:?}",
+                v.to_bits(),
+                clen,
+                std::str::from_utf8(&cbuf[..clen.max(0) as usize]),
+                rlen,
+                std::str::from_utf8(&rbuf[..rlen])
+            );
+        } else {
+            if rest.len() < 4 {
+                return;
+            }
+            let v = f32::from_le_bytes(rest[..4].try_into().unwrap());
+            let clen = unsafe { float_to_shortest_decimal_buf(v, cbuf.as_mut_ptr().cast()) };
+            let rlen = ryu::float_to_shortest_decimal_buf(v, &mut rbuf);
+            assert!(
+                clen as usize == rlen && cbuf[..=rlen] == rbuf[..=rlen] && rbuf[rlen] == 0,
+                "ryu f2s_buf DIVERGENCE bits={:08x}: C(len={})={:?} Rust(len={})={:?}",
+                v.to_bits(),
+                clen,
+                std::str::from_utf8(&cbuf[..clen.max(0) as usize]),
+                rlen,
+                std::str::from_utf8(&rbuf[..rlen])
+            );
+        }
+        return;
+    }
     let mut cbuf = [0u8; 32];
     if sel & 1 == 0 {
         if rest.len() < 8 {
@@ -484,6 +531,39 @@ mod tests {
                 d.extend_from_slice(&bits.to_le_bytes());
                 float_out_diff(&d);
             }
+        }
+    }
+
+    /// Lane-0B ryu `*_buf` wrapper arm (selector bit1): stable-build smoke
+    /// over the same corpora as float_out_corpus, plus the trailing-zero /
+    /// round-even shapes the shortest-repr edge arms need.
+    #[test]
+    fn ryu_buf_corpus() {
+        for &bits in F64_BITS_CORPUS {
+            let mut d = vec![2u8];
+            d.extend_from_slice(&bits.to_le_bytes());
+            float_out_diff(&d);
+            let mut d4 = vec![3u8];
+            d4.extend_from_slice(&((bits >> 32) as u32).to_le_bytes());
+            float_out_diff(&d4);
+        }
+        for e in 0..=255u32 {
+            for m in [0u32, 1, 0x7fffff] {
+                let bits = (e << 23) | m;
+                let mut d = vec![3u8];
+                d.extend_from_slice(&bits.to_le_bytes());
+                float_out_diff(&d);
+            }
+        }
+        // exact powers of ten / trailing-zero mantissas (vm trailing-zeros
+        // loop + round-even arms), both widths
+        for v in [1e2f64, 5e2, 1.25e3, 1e15, 1e16, 2.5, 0.5, 123.0, 500.0] {
+            let mut d = vec![2u8];
+            d.extend_from_slice(&v.to_le_bytes());
+            float_out_diff(&d);
+            let mut d4 = vec![3u8];
+            d4.extend_from_slice(&(v as f32).to_le_bytes());
+            float_out_diff(&d4);
         }
     }
 

@@ -715,7 +715,8 @@ pub fn ValidateDate(fmask: i32, isjulian: bool, is2digits: bool, bc: bool, tm: &
         // (date2j("5874898") is already near i32::MAX) must wrap, not
         // panic — the MONTH/DAY range checks below reject the wrapped
         // values exactly as C does (datetime_io_diff local run, input
-        // "5874898-301"; same family as the date2j/j2date/dt2time notes).
+        // "5874898-301"; fuzz witness p1-laney '5874898-201'::timestamptz,
+        // real 18.3 answers 22008; same family as the date2j/j2date notes).
         j2date(
             date2j(tm.tm_year, 1, 1).wrapping_add(tm.tm_yday).wrapping_sub(1),
             &mut tm.tm_year,
@@ -2503,13 +2504,309 @@ pub fn DecodeInterval(
     0
 }
 
-/// C strtod prefix parse: value and byte offset just past the parsed number.
-// C strtod via the float crate's exact model (decimal + C99 hex floats +
-// inf/nan words + glibc ERANGE semantics). The previous hand-rolled decimal
-// scan silently rejected hex forms ("P0X1DT1H" is 29 years in C) — found by
-// interval_engine_diff differential fuzz, confirmed against PostgreSQL 18.3.
-fn strtod_prefix(s: &[u8]) -> Option<(f64, usize, bool)> {
-    adt_float::io::strtod_c(s)
+// C strtod prefix parse (hex forms "P0X1DT1H" = 29 years in C found by
+// interval_engine_diff differential fuzz; refined by p1-laney's model below,
+// taken at the lane merge as the CI-confirmed version).
+/// Platform-`strtod` model: value, consumed length, and the errno==ERANGE
+/// flag. ParseISO8601Number's contract is "anything that strtod() would
+/// take" (datetime.c:3887) — that includes C99 hex floats ('P0X8Y' is
+/// 8 years on real 18.3; fuzz witness p1-laney) and inf/nan specials —
+/// and its errno!=0 check makes over/underflow DTERR_BAD_FORMAT, not
+/// FIELD_OVERFLOW ('P1Y2E314' is 22007 on real 18.3, 22015 here before
+/// this model; fuzz witness p1-laney). ERANGE per glibc/macOS strtod:
+/// overflow to ±inf, or underflow to zero-or-subnormal from a nonzero
+/// mantissa. No leading-whitespace skip (the caller's first-byte guard
+/// already excludes it).
+fn strtod_model(s: &[u8]) -> Option<(f64, usize, bool)> {
+    if let Some(tok) = adt_float::scan_number(s) {
+        // SAFETY-free slice: scan_number consumed ASCII only.
+        let token = &s[..tok.len];
+        let is_hex = matches!(tok.kind, adt_float::NumKind::Hex);
+        let val = match tok.kind {
+            adt_float::NumKind::Decimal => {
+                core::str::from_utf8(token).ok()?.parse::<f64>().ok()?
+            }
+            adt_float::NumKind::Hex => adt_float::parse_hex_float(token),
+        };
+        // ERANGE per glibc/macOS strtod (verified identical): overflow to
+        // ±inf; underflow to zero from a nonzero mantissa; INEXACT
+        // subnormal. An EXACTLY representable subnormal sets no error —
+        // 'P0x1p-1073'::interval is 00:00:00 on real 18.3 (fuzz witness
+        // p1-laney), so hex tokens get an exactness check. Decimal tokens
+        // cannot hit that case: the shortest exact decimal expansion of
+        // any subnormal needs ~1074 significant digits, far past every
+        // caller's input budget, so inexactness is implied.
+        let sub = val != 0.0 && val.abs() < f64::MIN_POSITIVE;
+        // glibc detects tininess BEFORE rounding (verified against real
+        // 18.3: 'P0x1.fffffffffffffp-1023Y' is 22007 there — the true
+        // value is below DBL_MIN even though it rounds UP to DBL_MIN);
+        // macOS strtod flags after rounding. The shipped model follows
+        // glibc, the oracle platform of record.
+        let tiny_boundary =
+            val.abs() == f64::MIN_POSITIVE && token_true_value_below_dblmin(token, is_hex);
+        let erange = val.is_infinite()
+            || (tok.nonzero && val == 0.0)
+            || (sub && !(is_hex && hex_subnormal_exact(token, val)))
+            || tiny_boundary;
+        return Some((val, tok.len, erange));
+    }
+    // ±inf/±infinity/±nan(...) — strtod accepts these with errno 0; the
+    // range check downstream turns them into DTERR_FIELD_OVERFLOW exactly
+    // as C does ('P-infY' is 22015 on real 18.3).
+    adt_float::special_float8(s).map(|(v, n)| (v, n, false))
+}
+
+/// Is this C99 hex-float token EXACTLY the subnormal `val`? (strtod flags
+/// ERANGE only on inexact underflow.) token value = M * 2^E with M the
+/// significant hex digits and E from the digit positions + p-exponent;
+/// `val` = k * 2^-1074 with k the subnormal mantissa bits. Exact iff
+/// M * 2^(E+1074) == k over the integers.
+fn hex_subnormal_exact(token: &[u8], val: f64) -> bool {
+    let mut i = 0usize;
+    if token[i] == b'+' || token[i] == b'-' {
+        i += 1;
+    }
+    i += 2; /* 0x / 0X (scan_number guarantees) */
+    // fixed digit buffer sized past every caller's input cap (200 bytes);
+    // a longer token is treated inexact.
+    let mut digits = [0u8; 256];
+    let mut ndig = 0usize;
+    let mut frac_len: i64 = 0;
+    let mut in_frac = false;
+    while i < token.len() {
+        match token[i] {
+            b'.' => in_frac = true,
+            b'p' | b'P' => break,
+            c => {
+                let d = (c as char).to_digit(16).unwrap() as u8;
+                if ndig == digits.len() {
+                    return false;
+                }
+                digits[ndig] = d;
+                ndig += 1;
+                if in_frac {
+                    frac_len += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    let digits = &digits[..ndig];
+    let mut pexp: i64 = 0;
+    if i < token.len() && (token[i] == b'p' || token[i] == b'P') {
+        let neg = token.get(i + 1) == Some(&b'-');
+        if neg || token.get(i + 1) == Some(&b'+') {
+            i += 1;
+        }
+        i += 1;
+        while i < token.len() && token[i].is_ascii_digit() {
+            pexp = (pexp * 10 + (token[i] - b'0') as i64).min(1 << 40);
+            i += 1;
+        }
+        if neg {
+            pexp = -pexp;
+        }
+    }
+    let Some(first) = digits.iter().position(|&d| d != 0) else {
+        return false; /* zero mantissa: not a subnormal producer */
+    };
+    let last = digits.iter().rposition(|&d| d != 0).unwrap();
+    let sig = &digits[first..=last];
+    if sig.len() > 28 {
+        return false; /* > 112 significant bits: cannot be a 52-bit k */
+    }
+    let mut m: u128 = 0;
+    for &d in sig {
+        m = m * 16 + d as u128;
+    }
+    // trailing zero digits between last nonzero and the point contribute
+    // 16^(digits.len()-1-last); frac digits contribute 16^-frac_len.
+    let e = pexp + 4 * ((digits.len() as i64 - 1 - last as i64) - frac_len);
+    let k = val.abs().to_bits() as u128; /* subnormal: exponent field 0 */
+    let sh = e + 1074;
+    if sh >= 0 {
+        sh < 76 && (m << sh) >> sh == m && (m << sh) == k
+    } else {
+        // m * 2^-n == k: m must carry n zero low bits
+        let n = (-sh) as u32;
+        n < 128 && m.trailing_zeros() >= n.min(127) && (m >> n) == k
+    }
+}
+
+/// Is the token's mathematically-true value strictly below DBL_MIN
+/// (2^-1022)? Only consulted when the ROUNDED value equals ±DBL_MIN, so
+/// glibc's tininess-before-rounding ERANGE can be reproduced exactly.
+fn token_true_value_below_dblmin(token: &[u8], is_hex: bool) -> bool {
+    let mut i = 0usize;
+    if token[i] == b'+' || token[i] == b'-' {
+        i += 1;
+    }
+    if is_hex {
+        // value = M * 2^E; below 2^-1022 iff the leading nonzero digit's
+        // top-bit weight is <= -1023.
+        let t = &token[i + 2..]; /* past 0x/0X */
+        let mut int_len = 0i64;
+        for &c in t {
+            if c == b'.' || c == b'p' || c == b'P' {
+                break;
+            }
+            int_len += 1;
+        }
+        let mut seen = false;
+        let mut weight = 0i64;
+        let mut lead = 0u32;
+        let mut idx = 0i64;
+        let mut consumed = 0usize;
+        for &c in t {
+            consumed += 1;
+            match c {
+                b'.' => continue,
+                b'p' | b'P' => {
+                    consumed -= 1;
+                    break;
+                }
+                c => {
+                    let d = (c as char).to_digit(16).unwrap();
+                    if !seen && d != 0 {
+                        seen = true;
+                        lead = d;
+                        weight = 4 * (int_len - 1 - idx);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        if !seen {
+            return false;
+        }
+        let mut pexp: i64 = 0;
+        let mut i = i + 2 + consumed;
+        if i < token.len() && (token[i] == b'p' || token[i] == b'P') {
+            let neg = token.get(i + 1) == Some(&b'-');
+            if neg || token.get(i + 1) == Some(&b'+') {
+                i += 1;
+            }
+            i += 1;
+            while i < token.len() && token[i].is_ascii_digit() {
+                pexp = (pexp * 10 + (token[i] - b'0') as i64).min(1 << 40);
+                i += 1;
+            }
+            if neg {
+                pexp = -pexp;
+            }
+        }
+        let msb = weight + (32 - lead.leading_zeros() as i64 - 1) + pexp;
+        msb <= -1023
+    } else {
+        // decimal: exact big-integer compare of D*10^exp against 2^-1022,
+        // i.e. D * 2^1022 vs 10^k (k = -exp). D has <= ~200 digits.
+        let mut digs: Vec<u32> = Vec::new();
+        let mut frac = 0i64;
+        let mut in_frac = false;
+        let mut exp10: i64 = 0;
+        while i < token.len() {
+            match token[i] {
+                b'.' => in_frac = true,
+                b'e' | b'E' => {
+                    let neg = token.get(i + 1) == Some(&b'-');
+                    if neg || token.get(i + 1) == Some(&b'+') {
+                        i += 1;
+                    }
+                    i += 1;
+                    let mut e = 0i64;
+                    while i < token.len() && token[i].is_ascii_digit() {
+                        e = (e * 10 + (token[i] - b'0') as i64).min(1 << 40);
+                        i += 1;
+                    }
+                    exp10 = if neg { -e } else { e };
+                    break;
+                }
+                c => {
+                    digs.push((c - b'0') as u32);
+                    if in_frac {
+                        frac += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        let exp = exp10 - frac;
+        if digs.iter().all(|&d| d == 0) {
+            return false;
+        }
+        if exp >= 0 {
+            return false; /* an integer >= 1 */
+        }
+        let k = (-exp) as u32;
+        if k > 500 {
+            return true; /* way below (caller already knows it rounded to DBL_MIN, but harmless) */
+        }
+        // bignum in u64 limbs (little-endian base 2^64)
+        fn mul_small(a: &mut Vec<u64>, m: u64) {
+            let mut carry: u128 = 0;
+            for l in a.iter_mut() {
+                let v = (*l as u128) * (m as u128) + carry;
+                *l = v as u64;
+                carry = v >> 64;
+            }
+            while carry > 0 {
+                a.push(carry as u64);
+                carry >>= 64;
+            }
+        }
+        fn add_small(a: &mut [u64], m: u64) {
+            let mut carry = m as u128;
+            for l in a.iter_mut() {
+                let v = *l as u128 + carry;
+                *l = v as u64;
+                carry = v >> 64;
+                if carry == 0 {
+                    break;
+                }
+            }
+            debug_assert!(carry == 0);
+        }
+        let mut d: Vec<u64> = vec![0];
+        for &g in &digs {
+            mul_small(&mut d, 10);
+            d.push(0);
+            add_small(&mut d, g as u64);
+            while d.len() > 1 && *d.last().unwrap() == 0 {
+                d.pop();
+            }
+        }
+        // d <<= 1022
+        let limb_shift = 1022 / 64;
+        let bit_shift = 1022 % 64;
+        let mut left: Vec<u64> = vec![0; limb_shift];
+        let mut carry = 0u64;
+        for &l in &d {
+            left.push((l << bit_shift) | carry);
+            carry = if bit_shift == 0 { 0 } else { l >> (64 - bit_shift) };
+        }
+        if carry != 0 {
+            left.push(carry);
+        }
+        let mut right: Vec<u64> = vec![1];
+        for _ in 0..k {
+            mul_small(&mut right, 10);
+        }
+        while left.len() > 1 && *left.last().unwrap() == 0 {
+            left.pop();
+        }
+        while right.len() > 1 && *right.last().unwrap() == 0 {
+            right.pop();
+        }
+        if left.len() != right.len() {
+            return left.len() < right.len();
+        }
+        for (l, r) in left.iter().rev().zip(right.iter().rev()) {
+            if l != r {
+                return l < r;
+            }
+        }
+        false /* exactly equal: not below */
+    }
 }
 
 fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f64) -> i32 {
@@ -2519,11 +2816,11 @@ fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f6
     {
         return DTERR_BAD_FORMAT;
     }
-    let Some((val, e, range_err)) = strtod_prefix(s) else {
+    let Some((val, e, erange)) = strtod_model(s) else {
         return DTERR_BAD_FORMAT;
     };
     // C checks errno != 0 (ERANGE) before the value-range fence
-    if e == 0 || range_err {
+    if e == 0 || erange {
         return DTERR_BAD_FORMAT;
     }
     *end = e;

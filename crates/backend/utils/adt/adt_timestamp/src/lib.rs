@@ -1188,14 +1188,18 @@ pub fn timestamp_trunc(units: &[u8], timestamp: Timestamp) -> PgResult<Timestamp
         return Err(unit_not_supported(lowunits, false));
     }
 
-    if !trunc_unit_supported(val) {
-        return Err(unit_not_supported(lowunits, false));
-    }
-
     let mut tm = pg_tm::default();
     let mut fsec: fsec_t = 0;
     if timestamp2tm(timestamp, None, &mut tm, &mut fsec, None, None).is_err() {
         return Err(timestamp_out_of_range());
+    }
+
+    // C checks unit support as the switch default AFTER timestamp2tm
+    // (timestamp.c:4730): out-of-range wins over unit-not-supported.
+    // SQL-invisible (the type invariant keeps timestamp2tm from failing
+    // on stored values) but kept C-exact; fuzz witness p1-laney.
+    if !trunc_unit_supported(val) {
+        return Err(unit_not_supported(lowunits, false));
     }
 
     trunc_apply(val, &mut tm, &mut fsec, None);
@@ -1228,15 +1232,17 @@ pub fn timestamptz_trunc_internal(
         return Err(unit_not_supported(lowunits, true));
     }
 
-    if !trunc_unit_supported(val) {
-        return Err(unit_not_supported(lowunits, true));
-    }
-
     let mut tm = pg_tm::default();
     let mut fsec: fsec_t = 0;
     let mut tz = 0;
     if timestamp2tm(timestamp, Some(&mut tz), &mut tm, &mut fsec, None, Some(tzp)).is_err() {
         return Err(timestamp_out_of_range());
+    }
+
+    // As timestamp_trunc: C's unit-support check is the switch default
+    // AFTER timestamp2tm (timestamp.c timestamptz_trunc_internal).
+    if !trunc_unit_supported(val) {
+        return Err(unit_not_supported(lowunits, true));
     }
 
     let mut redotz = false;

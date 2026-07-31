@@ -129,18 +129,18 @@ bytea-varbit	eq_byteaout_hex	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_varbit.c	gr
 bytea-varbit	eq_bit_cmp	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_varbit.c --solver kissat	green	per-commit	1	SIGN equality only (ratified)
 bytea-varbit	eq_pad_last	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_varbit.c --solver kissat	green	per-commit	1	valid-varbit fence
 bytea-varbit	control_esc_enc_len_off_by_one	-Z c-ffi -Z stubbing --c-lib c/pg_bytea_varbit.c	must-fail	defect-witness	0.6	DEFAULT solver; verified failing 0.6s 2026-07-28
-cash	eq_cash_eq	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
-cash	eq_cash_ne	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
-cash	eq_cash_lt	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
-cash	eq_cash_le	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
-cash	eq_cash_gt	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
-cash	eq_cash_ge	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
-cash	eq_cash_cmp	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
-cash	eq_cashlarger	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.17	eq_op2!
-cash	eq_cashsmaller	-Z c-ffi --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.17	eq_op2!
+cash	eq_cash_eq	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
+cash	eq_cash_ne	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
+cash	eq_cash_lt	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
+cash	eq_cash_le	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
+cash	eq_cash_gt	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
+cash	eq_cash_ge	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
+cash	eq_cash_cmp	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.15	eq_op2!
+cash	eq_cashlarger	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.17	eq_op2!
+cash	eq_cashsmaller	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	0.17	eq_op2!
 cash	eq_cash_pl	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	2.5	fallible_op!; needs -Z stubbing
 cash	eq_cash_mi	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat	green	per-commit	2.5	fallible_op!
-cash	control_cash_lt_vs_c_le	-Z c-ffi --c-lib c/pg_cash.c	must-fail	defect-witness	?	DEFAULT solver mandatory
+cash	control_cash_lt_vs_c_le	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c	must-fail	defect-witness	?	DEFAULT solver mandatory
 casts	eq_i2toi4	-Z c-ffi --c-lib c/pg_casts.c --solver kissat	green	per-commit	6.7	infallible_int!; family band 0.2-6.7s
 casts	eq_int48	-Z c-ffi --c-lib c/pg_casts.c --solver kissat	green	per-commit	6.7	infallible_int!
 casts	eq_int28	-Z c-ffi --c-lib c/pg_casts.c --solver kissat	green	per-commit	6.7	infallible_int!
@@ -1424,29 +1424,29 @@ typcache-inst	proofs::eq_range_adjacent_int4range	-Z c-ffi -Z stubbing --c-lib c
 typcache-inst	proofs::control_array_lt_vs_c_le	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	DEFAULT solver
 typcache-inst	proofs::control_array_seam_skew	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	seam-skew control
 typcache-inst	proofs::control_range_lt_vs_c_le	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	DEFAULT solver
-unicode-cat	eq_unicode_category	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	107	INFERRED recipe; ~107s category-table binary search
-unicode-cat	eq_prop_alphabetic	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_lowercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_uppercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_cased	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_case_ignorable	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_white_space	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_hex_digit	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_join_control	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isdigit_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe; posix arm fast
-unicode-cat	eq_isdigit_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe; category-search cost
-unicode-cat	eq_isalpha	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isalnum_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isalnum_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isupper	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_islower	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isblank	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isgraph	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isprint	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_ispunct_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_ispunct_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isspace	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	control_lower_vs_upper_must_fail	-Z c-ffi --c-lib c/pg_unicode_category.c	must-fail	defect-witness	?	DEFAULT solver (suite convention)
+unicode-cat	eq_unicode_category	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	128	~107s category-table binary search; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_alphabetic	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	21	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_lowercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	9	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_uppercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	8	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_cased	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	146	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_case_ignorable	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	9	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_white_space	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_hex_digit	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_join_control	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isdigit_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	1	posix arm fast; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isdigit_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	113	category-search cost; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalpha	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	19	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalnum_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	26	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalnum_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	251	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isupper	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	20	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_islower	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	20	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isblank	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	171	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isgraph	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	201	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isprint	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	550	recipe confirmed; CI cluster 600s-timeout (packed conc), local kissat green 549.6s 2026-07-30
+unicode-cat	eq_ispunct_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	230	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_ispunct_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	170	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isspace	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	10	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	control_lower_vs_upper_must_fail	-Z c-ffi --c-lib c/pg_unicode_category.c	must-fail	defect-witness	10	DEFAULT solver (suite convention); CI cluster expected-fail-ok 2026-07-30
 utf8	islegal_len1	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	INFERRED recipe; 0.3-0.6s
 utf8	islegal_len2	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	0.3-0.6s
 utf8	islegal_len3	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	0.3-0.6s
@@ -2358,104 +2358,107 @@ aclcheck	proofs::spot_table_list	-Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --
 aclcheck	proofs::spot_table_references	-Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; runqueue triage: green; "REFERENCES"
 aclcheck	proofs::spot_table_select_wgo	-Z c-ffi -Z stubbing --c-lib c/pg_aclcheck.c --solver kissat --no-assertion-reach-checks --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; runqueue triage: green; "SELECT WITH GRANT OPTION"
 brin-minmax	proofs::eq_uuid_add_value_nulls	-Z c-ffi -Z stubbing --c-lib c/pg_brin_minmax.c --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::control_cash_out_lconv_skew	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::control_int8_cash_lconv_skew	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_cash_by_zero	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_cash_grid	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_cash_pow2	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_flt4_grid	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_flt8_grid	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_int2_band16	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_int4_band16	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_int8_band16	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_int8_by_neg1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_div_int8_by_zero	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len0	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len2	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len2_fd0	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len2_fd1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len2_fd10	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len2_fd5	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len2_fdbig	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len2_fdneg	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len3	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len4	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len5	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_in_len6	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_mul_flt4_grid	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_mul_flt8_c_zero	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_mul_flt8_f_zero	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_mul_flt8_grid	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_mul_int2	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_mul_int4	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_mul_int8	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_band1e5_len	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_fd0	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_fd1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_fd10	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_fd5	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_fdbig	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_fdneg	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_group1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_group6	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_neg_p0	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_neg_p1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_neg_p2	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_neg_p3	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_neg_p4	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_neg_pdef	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_pos_p0	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_pos_p2	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_pos_p4	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_spot_max	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_spot_min	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_spot_neg1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_out_spot_zero	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_recv	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_recv_short	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_send	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_groups	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_max	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_min	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_neg	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_one_cent	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_one_dollar	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_teens	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_cash_words_spot_zero	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_flt4_mul_cash_grid	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_flt8_mul_cash_grid	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int2_mul_cash	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd0	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd10	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd2	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd3	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd4	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd5	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd6	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd7	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd8	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fd9	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fdbig	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_cash_fdneg	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int4_mul_cash	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd0	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd10	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd2	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd3	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd4	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd5	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd6	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd7	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd8	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fd9	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fdbig	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_cash_fdneg	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::eq_int8_mul_cash	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::int_cash_fd_cells_cover	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
-cash	proofs::rust_panics_cash_div_min_by_neg1	-Z c-ffi --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::control_cash_out_lconv_skew	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::control_int8_cash_lconv_skew	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_div_cash_by_zero	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_div_cash_grid	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_div_cash_pow2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_div_flt4_grid	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_div_flt8_grid	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_div_int2_band16	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	release-gate	90.2	local run 2026-07-31 (cash MIN/-1 ratification lane); -Z stubbing REQUIRED
+cash	proofs::eq_cash_div_int4_band16	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	release-gate	64.7	local run 2026-07-31 (cash MIN/-1 ratification lane); -Z stubbing REQUIRED
+cash	proofs::eq_cash_div_int8_band16	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	release-gate	67.3	local run 2026-07-31 (cash MIN/-1 ratification lane); -Z stubbing REQUIRED (kani::stub in harness; dark-sweep inferred flags lacked it)
+cash	proofs::eq_cash_div_int8_by_neg1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	per-commit	2.2	local run 2026-07-31; fenced c!=MIN, C-parity on the /-1 plane; -Z stubbing REQUIRED
+cash	proofs::eq_cash_div_int8_by_zero	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	per-commit	4.0	local run 2026-07-31; -Z stubbing REQUIRED
+cash	proofs::eq_cash_in_len0	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len2_fd0	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len2_fd1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len2_fd10	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len2_fd5	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len2_fdbig	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len2_fdneg	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len3	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len4	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len5	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_in_len6	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_mul_flt4_grid	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_mul_flt8_c_zero	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_mul_flt8_f_zero	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_mul_flt8_grid	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_mul_int2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_mul_int4	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_mul_int8	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_band1e5_len	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_fd0	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_fd1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_fd10	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_fd5	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_fdbig	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_fdneg	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_group1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_group6	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_neg_p0	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_neg_p1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_neg_p2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_neg_p3	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_neg_p4	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_neg_pdef	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_pos_p0	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_pos_p2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_pos_p4	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_spot_max	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_spot_min	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_spot_neg1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_out_spot_zero	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_recv	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_recv_short	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_send	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_groups	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_max	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_min	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_neg	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_one_cent	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_one_dollar	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_teens	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_cash_words_spot_zero	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_flt4_mul_cash_grid	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_flt8_mul_cash_grid	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int2_mul_cash	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd0	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd10	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd3	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd4	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd5	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd6	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd7	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd8	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fd9	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fdbig	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_cash_fdneg	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int4_mul_cash	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd0	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd10	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd3	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd4	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd5	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd6	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd7	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd8	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fd9	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fdbig	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_cash_fdneg	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::eq_int8_mul_cash	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::int_cash_fd_cells_cover	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::rust_panics_cash_div_min_by_neg1	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; no runqueue row (flags inferred from family siblings)
+cash	proofs::proved_cash_div_min_by_neg1_22003_int8	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	per-commit	3.5	RATIFIED divergence theorem (2026-07-31 Michael option 1, ledger rows 865/867/3345): MIN/-1 -> 22003 per int8div precedent; Rust-only (C UB on this cell); replaces rust_panics_cash_div_min_by_neg1; local run 2026-07-31
+cash	proofs::proved_cash_div_min_by_neg1_22003_int4	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	per-commit	2.0	RATIFIED divergence theorem (2026-07-31 Michael option 1, ledger rows 865/867/3345): MIN/-1 -> 22003 per int8div precedent; Rust-only (C UB on this cell); replaces rust_panics_cash_div_min_by_neg1; local run 2026-07-31
+cash	proofs::proved_cash_div_min_by_neg1_22003_int2	-Z c-ffi -Z stubbing --c-lib c/pg_cash.c --solver kissat --exact	green	per-commit	1.4	RATIFIED divergence theorem (2026-07-31 Michael option 1, ledger rows 865/867/3345): MIN/-1 -> 22003 per int8div precedent; Rust-only (C UB on this cell); replaces rust_panics_cash_div_min_by_neg1; local run 2026-07-31
 datetime-b	proofs::control_interval_avg_serialize_swap	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c -Z concrete-playback --concrete-playback=print --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; runqueue triage: must-fail; expect: VERIFICATION FAILED (day/month swap skew; DEFAULT solver)
 datetime-b	proofs::control_make_date_day_skew	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c -Z concrete-playback --concrete-playback=print --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; runqueue triage: must-fail; expect: VERIFICATION FAILED w/ decodable counterexample (DEFAULT solver)
 datetime-b	proofs::control_time_scale_typmod_skew	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c -Z concrete-playback --concrete-playback=print --exact	unmeasured	unmeasured	?	DARK-SWEEP 2026-07-30 registered unrun; runqueue triage: must-fail; expect: VERIFICATION FAILED w/ decodable counterexample (DEFAULT solver)
@@ -3167,3 +3170,123 @@ datetime-b	hlp::eq_timetz_pm_iv_notfinite	-Z c-ffi -Z stubbing --c-lib c/pg_date
 datetime-b	hlp::eq_timetz_pm_iv_one	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c	green	per-commit	10	literal-cell spot of the time/timetz +- interval divider chain (full-domain ladders are recorded walls); local 0.1-0.4s; FLEET-CONFIRMED pgrust-kani-suite-1785508360-23da-32595 @ cb26440b5b wall 10s
 datetime-b	hlp::eq_timetz_pm_iv_zero	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c	green	per-commit	10	literal-cell spot of the time/timetz +- interval divider chain (full-domain ladders are recorded walls); local 0.1-0.4s; FLEET-CONFIRMED pgrust-kani-suite-1785508360-23da-32595 @ cb26440b5b wall 10s
 datetime-b	hlp::control_time_pl_interval_no_wrap	-Z c-ffi -Z stubbing --c-lib c/pg_datetime_b.c	must-fail	per-commit	20	MUST-FAIL CONTROL for the +-interval family: asserts the un-wrapped value (C's `if (result < 0) result += USECS_PER_DAY` removed). Observed FAILED on `assertion failed: r == wrong` locally; non-vacuity witness for the 24 cells; FLEET-CONFIRMED pgrust-kani-suite-1785508360-23da-32595 @ cb26440b5b wall 20s
+strfam	eq_wifexited	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	6	p1-lanec 2026-07-30: shipped libc-crate binding vs host sys/wait.h macro, full symbolic i32
+strfam	eq_wexitstatus	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	full symbolic i32
+strfam	eq_wifsignaled	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	full symbolic i32
+strfam	eq_wtermsig	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	full symbolic i32
+strfam	eq_wait_result_is_signal	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	vs VERBATIM wait_error.c; signum fenced (i32::MIN+128, i32::MAX-128) — 128+signum overflow is C UB outside it
+strfam	eq_wait_result_is_any_signal	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	vs VERBATIM wait_error.c; full symbolic (i32, bool)
+strfam	eq_wait_result_to_exit_code	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	vs VERBATIM wait_error.c; full symbolic i32
+strfam	eq_forkname_chars_main	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	literal cell vs VERBATIM forkNames[0], byte-for-byte + terminator
+strfam	eq_forkname_chars_fsm	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	literal cell vs forkNames[1]
+strfam	eq_forkname_chars_vm	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	literal cell vs forkNames[2]
+strfam	eq_forkname_chars_init	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	literal cell vs forkNames[3]
+strfam	cover_forkname_chars_split	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	union-coverage harness over the 4-cell case-split
+strfam	eq_isspace_c_locale	-Z c-ffi --c-lib c/pg_strfam_kani.c --solver kissat	green	per-commit	1	full u8 vs the ruled C-locale set {09-0d,20}
+strfam	control_negative_is_signal_drops_shell_arm	-Z c-ffi --c-lib c/pg_strfam_kani.c	must-fail	defect-witness	1	DEFAULT solver; FAILED-as-required on the intended assert (shell 128+signum arm dropped; verified 2026-07-30)
+bool	wave_sendtext::eq_boolsend	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	green	release-gate	80	ledger 2437; w3-sendrecv 2026-07-30; c8g.16xl CI cluster conc17 (job -32917/-42528); DEFAULT solver (kissat loops on many-property harnesses)
+bool	wave_sendtext::eq_booltext_true	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	green	release-gate	66	ledger 2971; local load 9.5
+bool	wave_sendtext::eq_booltext_false	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	green	release-gate	72	local load 8.8
+bool	wave_sendtext::eq_booltext	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	wall-recorded	calibration	340	symbolic-bool image harness: CNF wall (rss-kill at 40GB cap on CI cluster); literal cells above are the gate
+bool	wave_sendtext::control_boolsend_negate	-Z c-ffi -Z stubbing --c-lib c/pg_bool.c	must-fail	defect-witness	80	
+char	wave5::eq_charrecv_core_d0	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	40	ledger 2434; local load ~9
+char	wave5::eq_charrecv_core_d1	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	45	
+char	wave5::eq_charrecv_core_d2	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	47	
+char	wave5::eq_charrecv_core_d3	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	46	
+char	wave5::eq_charrecv_core_d4	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	47	
+char	wave5::eq_charrecv_core	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	wall-recorded	calibration	231	symbolic-dlen CNF wall (rss-kill 40GB CI cluster); cells d0-d4 are the gate
+char	wave5::eq_charsend	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	green	release-gate	80	ledger 2435
+char	wave5::control_charsend_skew	-Z c-ffi -Z stubbing --c-lib csrc/char_shim.c --c-lib csrc/char_wire.c	must-fail	defect-witness	80	
+mac	w3_send::eq_macaddr_send	-Z c-ffi -Z stubbing --c-lib csrc/mac_shim.c	green	release-gate	100	ledger 2495; w3-sendrecv 2026-07-30; c8g.16xl CI cluster conc17 (job -32917/-42528); DEFAULT solver (kissat loops on many-property harnesses)
+mac	w3_send::control_macaddr_send_skew	-Z c-ffi -Z stubbing --c-lib csrc/mac_shim.c	must-fail	defect-witness	100	
+mac8	w3_send::eq_macaddr8_send	-Z c-ffi -Z stubbing --c-lib csrc/mac8_shim.c	green	release-gate	100	ledger 3447
+mac8	w3_send::control_macaddr8_send_skew	-Z c-ffi -Z stubbing --c-lib csrc/mac8_shim.c	must-fail	defect-witness	110	
+xid8snap	sendrecv::eq_snapshot_max_nxip	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	per-commit	30	ledger 2941/5057; C-vs-Rust nxip cap constant x-check
+xid8snap	sendrecv::eq_snapshot_recv_d0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	20	
+xid8snap	sendrecv::eq_snapshot_recv_d2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d3	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	
+xid8snap	sendrecv::eq_snapshot_recv_d4	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d12	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	
+xid8snap	sendrecv::eq_snapshot_recv_d19	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::eq_snapshot_recv_d20n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	210	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d20n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	210	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d28n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	180	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d36n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	190	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::eq_snapshot_recv_d36n2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	wall-recorded	calibration	210	Ok-image plane: CNF wall at 40GB cap; kissat terminates FAILED but undecoded (playback unreachable) — native 1.2M-frame differential (tests/native_snapshot_recv.rs) green; CBMC byte-pun artifact suspect; DO NOT gate green until decoded
+xid8snap	sendrecv::cover_recv_family	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	Ok + both Err classes cover
+xid8snap	sendrecv::eq_snapshot_send_n0	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	ledger 2942/5058
+xid8snap	sendrecv::eq_snapshot_send_n1	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	40	
+xid8snap	sendrecv::eq_snapshot_send_n2	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	green	release-gate	30	
+xid8snap	sendrecv::control_snapshot_send_skew	-Z c-ffi -Z stubbing --c-lib c/pg_xid8snap.c	must-fail	defect-witness	20	
+crc	proofs::eq_crc32_len0	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	20	ledger 6364
+crc	proofs::eq_crc32_len1	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	20	
+crc	proofs::eq_crc32_len2	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32_len3	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	101	
+crc	proofs::eq_crc32_len4	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	40	
+crc	proofs::eq_crc32_len6	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	51	
+crc	proofs::eq_crc32_len7	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32_len8	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	81	
+crc	proofs::eq_crc32_short_hdr_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	40	
+crc	proofs::eq_crc32c_len0	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	20	ledger 6365
+crc	proofs::eq_crc32c_len1	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	30	
+crc	proofs::eq_crc32c_len2	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	51	
+crc	proofs::eq_crc32c_len3	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	183	ledger 6365; default-solver pathological instance (CI cluster timeout 600/1800s); kissat 183s local load 9.2 — use --solver kissat for this cell
+crc	proofs::eq_crc32c_len4	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	151	
+crc	proofs::eq_crc32c_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	101	
+crc	proofs::eq_crc32c_len6	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	121	
+crc	proofs::eq_crc32c_len7	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	111	
+crc	proofs::eq_crc32c_len8	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	151	
+crc	proofs::eq_crc32c_short_hdr_len5	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	per-commit	71	
+crc	proofs::eq_crc32c_sb8_kernel_len16_aligned	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	release-gate	81	sw sb8 kernel; HW-CRC intrinsic arm out of scope
+crc	proofs::eq_crc32c_sb8_kernel_len13_off1	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	green	release-gate	61	
+crc	proofs::control_crc32_skewed_byte	-Z c-ffi -Z stubbing --c-lib c/pg_crc.c --c-lib c/pg_crc32c_sb8.c	must-fail	defect-witness	10	
+bool	wrapper_fc::eq_fc_booleq	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.8	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolne	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.9	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boollt	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	2.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolgt	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.6	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolle	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.5	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolge	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.6	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_booland_statefunc	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.5	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::eq_fc_boolor_statefunc	-Z c-ffi --c-lib c/pg_bool.c --solver kissat --exact	green	per-commit	1.5	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+bool	wrapper_fc::control_fc_booleq_vs_c_boolne_must_fail	-Z c-ffi --c-lib c/pg_bool.c --exact	must-fail	defect-witness	2	fails on exactly '(c != 0) == drive(...fc_booleq...)'; DEFAULT solver
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_eq	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.2	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_ne	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_lt	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_gt	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_le	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.2	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::eq_fc_pg_lsn_ge	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --solver kissat --exact	green	per-commit	1.1	p1-lane0a 2026-07-30: entry-point lift of proved core (wrapper-level); measured-coverage carrier for the macro-invocation declaration lines (fc_bool2!/fc_lsn_cmp! blocks)
+pg_lsn	wrapper_fc::control_fc_pg_lsn_lt_vs_c_le_must_fail	-Z c-ffi -Z stubbing --c-lib c/pg_pg_lsn.c --exact	must-fail	defect-witness	2	fails on exactly '(c != 0) == drive(...fc_pg_lsn_lt...)'; DEFAULT solver
+hashenc	eq_b64_enc_len	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	7	fence 0..=1.61e9 (below *4 i32 overflow)
+hashenc	eq_b64_dec_len	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	1	fence 0..=7.15e8 (below *3 i32 overflow)
+hashenc	eq_b64_encode_len0	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	symbolic bytes, exact cap
+hashenc	eq_b64_encode_len1	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_encode_len2	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_encode_len3	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_encode_len4	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	5	
+hashenc	eq_b64_encode_len5	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_encode_len6	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	5	
+hashenc	eq_b64_encode_len4_short	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	short dst: -1 + zeroing parity
+hashenc	eq_b64_encode_len6_short	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	short dst: -1 + zeroing parity
+hashenc	eq_b64_decode_len0	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	symbolic bytes incl '='/ws/invalid arms
+hashenc	eq_b64_decode_len1	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_b64_decode_len2	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_b64_decode_len3	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	
+hashenc	eq_b64_decode_len4	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_decode_len5	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_decode_len6	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	3	
+hashenc	eq_b64_decode_len7	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_b64_decode_len8	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	4	
+hashenc	eq_bytes_to_hex	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	full symbolic 16 bytes + NUL terminator
+hashenc	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	symbolic src<=6 + symbolic destsiz<=8, full-buffer compare
+hashenc	control_bytes_to_hex_uppercase_must_fail	-Z c-ffi --c-lib c/pg_hashenc_kani.c	must-fail	per-commit	1	negative control: fails on intended assert (lowercase hex)
+md5-hex	proofs::eq_bytes_to_hex	-Z c-ffi --c-lib c/pg_md5_hex.c	green	per-commit	0.3	full 2^128 domain (bitvector-parallel); DEFAULT solver; unwind(33); p1-lanef 2026-07-30
+md5-hex	proofs::control_bytes_to_hex_detects_corruption	-Z c-ffi --c-lib c/pg_md5_hex.c	must-fail	defect-witness	0.25	fails on exactly r[0]==cs[0] (corrupted nibble); DEFAULT solver; p1-lanef 2026-07-30
+base64	eq_b64_encode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	4	src[u8;6]+len<=6+dstlen<=12 sym; whole-dst-image parity incl error zeroing; unwind(14)
+base64	eq_b64_decode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	release-gate	7	src[u8;8]+len<=8+dstlen<=8 sym; end-flag machine + signedness fence in-domain; unwind(11)
+base64	eq_b64_enc_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced to overflow-free domain 0..=3*(MAX/4)-2
+base64	eq_b64_dec_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced 0..=MAX/3
+base64	control_encode_vs_decode_must_fail	-Z c-ffi --c-lib c/pg_base64.c	must-fail	defect-witness	2	DEFAULT solver (suite convention); fails on intended assert
+name-ascii	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_name_ascii.c --solver kissat	green	per-commit	2	src[u8;8] full sym (incl interior NULs) + destsiz<=8; whole-dest-image parity; unwind(10)
+name-ascii	control_safe_strlcpy_shorter_src_must_fail	-Z c-ffi --c-lib c/pg_name_ascii.c	must-fail	defect-witness	2	DEFAULT solver; fails on intended assert (first cut src[..7] was unobservable at destsiz 8 — rewritten to src[..3])

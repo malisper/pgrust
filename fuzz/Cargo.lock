@@ -934,6 +934,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "archive"
+version = "0.0.0"
+dependencies = [
+ "percentrepl",
+ "types_error",
+]
+
+[[package]]
 name = "array_userfuncs"
 version = "0.1.0"
 dependencies = [
@@ -1593,27 +1601,62 @@ dependencies = [
 name = "decoder_fuzz"
 version = "0.0.0"
 dependencies = [
+ "adt_ascii",
+ "adt_bool",
+ "adt_cash",
+ "adt_char",
  "adt_date",
  "adt_datetime",
  "adt_encode",
  "adt_float",
  "adt_geo",
+ "adt_mac",
+ "adt_mac8",
+ "adt_numeric",
+ "adt_pg_lsn",
+ "adt_pseudotypes",
+ "adt_quote",
  "adt_timestamp",
+ "adt_uuid",
+ "archive",
  "cc",
  "crc32c",
+ "cryptohashfuncs",
  "datum",
  "elog",
  "fd",
  "guc_tables",
+ "hashfn",
+ "keywords",
+ "libc",
  "mbutils",
+ "mbutils_seams",
  "mcx",
+ "name",
+ "percentrepl",
+ "pg_b64",
+ "pg_hmac",
+ "pg_md5",
+ "pg_sha1",
+ "pg_sha2",
+ "pg_string",
  "pgtz",
+ "postgres_seams",
  "pqformat",
+ "relpath",
+ "relpath_seams",
+ "ryu",
+ "scalar_seams",
+ "scram_common",
  "stringinfo",
  "timestamp_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_storage",
+ "unicode_category",
+ "varlena",
+ "wait_error",
  "wchar",
  "xact_seams",
  "xlogreader",
@@ -3220,6 +3263,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "percentrepl"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "types_error",
+]
+
+[[package]]
+name = "pg_b64"
+version = "0.1.0"
+
+[[package]]
 name = "pg_bitutils"
 version = "0.1.0"
 
@@ -3257,6 +3312,13 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "pg_hmac"
+version = "0.1.0"
+dependencies = [
+ "pg_sha2",
 ]
 
 [[package]]
@@ -3328,6 +3390,10 @@ dependencies = [
  "seam_core",
  "types_core",
 ]
+
+[[package]]
+name = "pg_sha1"
+version = "0.0.0"
 
 [[package]]
 name = "pg_sha2"
@@ -4235,6 +4301,18 @@ name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
+
+[[package]]
+name = "scram_common"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "pg_b64",
+ "pg_hmac",
+ "pg_sha2",
+ "postgres_seams",
+ "types_error",
+]
 
 [[package]]
 name = "seam_core"
@@ -5773,6 +5851,13 @@ dependencies = [
  "types_storage",
  "xloginsert_seams",
  "xlogutils_seams",
+]
+
+[[package]]
+name = "wait_error"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

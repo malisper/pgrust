@@ -50,7 +50,10 @@ pub fn j2date(jd: i32, year: &mut i32, month: &mut i32, day: &mut i32) {
     // C computes in unsigned int, which wraps by definition; a checked add
     // here is a ported-in panic for out-of-Julian-range inputs (same family
     // as the date2j -fwrapv note above; found by proofs/datetime-b
-    // hlp::eq_j2date_spots at jd=i32::MAX).
+    // hlp::eq_j2date_spots at jd=i32::MAX, and independently by p1-laney's
+    // fuzz witness '4955-120@BC'::timestamp — a negative jd casts to a huge
+    // u32 and real 18.3 rejects downstream with 22008. Unsigned wrap is
+    // defined in C; match it.
     julian = julian.wrapping_add(60 + quad * 3 + extra / 146097);
     quad = julian / 1461;
     julian -= quad * 1461;

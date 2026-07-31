@@ -34,6 +34,60 @@ mod tests {
         core::str::from_utf8(&buf[..n]).unwrap().into()
     }
 
+    /// Mutation-pilot hardening (lane-0b, 2026-07-30): the crate's byte-exact
+    /// oracle lives in the differential fuzz workspace (fuzz/core), which
+    /// cargo-mutants cannot see — the first pilot left arithmetic mutants
+    /// alive. This in-crate round-trip property (shortest repr must parse
+    /// back to the identical bits; std's FromStr is correctly rounded) kills
+    /// the digit/exponent/arithmetic mutant classes without an external
+    /// oracle. Deterministic xorshift sweep + structured edge patterns.
+    #[test]
+    fn shortest_roundtrip_property() {
+        let mut x = 0x243F6A8885A308D3u64; // deterministic xorshift64
+        let mut dbits: std::vec::Vec<u64> = std::vec::Vec::new();
+        for _ in 0..40_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            dbits.push(x);
+        }
+        for e in 0..=2046u64 {
+            for m in [0u64, 1, 0xF_FFFF_FFFF_FFFF] {
+                dbits.push((e << 52) | m);
+            }
+        }
+        for &bits in &dbits {
+            let v = f64::from_bits(bits);
+            if !v.is_finite() {
+                continue;
+            }
+            let mut buf = [0u8; 32];
+            let n = double_to_shortest_decimal_buf(v, &mut buf);
+            assert!(n < DOUBLE_SHORTEST_DECIMAL_LEN && buf[n] == 0);
+            let s = core::str::from_utf8(&buf[..n]).unwrap();
+            let back: f64 = s.parse().unwrap();
+            assert_eq!(back.to_bits(), v.to_bits(), "d2s roundtrip {bits:016x} via {s:?}");
+        }
+        let mut fbits: std::vec::Vec<u32> = dbits.iter().map(|&b| (b >> 32) as u32).collect();
+        for e in 0..=254u32 {
+            for m in [0u32, 1, 0x7F_FFFF] {
+                fbits.push((e << 23) | m);
+            }
+        }
+        for &bits in &fbits {
+            let v = f32::from_bits(bits);
+            if !v.is_finite() {
+                continue;
+            }
+            let mut buf = [0u8; 32];
+            let n = float_to_shortest_decimal_buf(v, &mut buf);
+            assert!(n < FLOAT_SHORTEST_DECIMAL_LEN && buf[n] == 0);
+            let s = core::str::from_utf8(&buf[..n]).unwrap();
+            let back: f32 = s.parse().unwrap();
+            assert_eq!(back.to_bits(), v.to_bits(), "f2s roundtrip {bits:08x} via {s:?}");
+        }
+    }
+
     #[test]
     fn double_known_values_byte_exact() {
         let cases: &[(f64, &str)] = &[

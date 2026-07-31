@@ -8,15 +8,20 @@
 //! stay parked on the numeric fixed-buffer core refactor (allocating digit
 //! loops — TRIAGE).
 //!
-//! KNOWN DIVERGENCE (adjudication owed, do not silently fix): shipped
-//! cash_div_int64(i64::MIN, -1) PANICS (Rust division overflow, release
-//! included — native replay 2026-07-29), i.e. crash-and-restart per the
-//! panic-fatality ruling; C cash.c has no MIN/-1 guard, and real PostgreSQL
-//! 18.4 on Linux/ARM64 (docker postgres:18, the production architecture)
-//! quietly returns INT64_MIN (money / -1 at the most negative value); on
-//! x86-64 the same C is a SIGFPE crash. See
-//! rust_panics_cash_div_min_by_neg1 (pins the Rust arm) and the fenced
-//! eq_cash_div_int8_by_neg1.
+//! RATIFIED DIVERGENCE (2026-07-31, Michael option 1 — ledger rows
+//! 865/867/3345): cash_div_int64(i64::MIN, -1) raises a clean 22003
+//! ERROR ("money out of range", cash.c's established money-overflow
+//! wording), mirroring the int8div precedent. This is a DELIBERATE
+//! divergence from BOTH C behaviors on that input: C cash.c has no MIN/-1
+//! guard — real PostgreSQL 18.4 on Linux/ARM64 (docker postgres:18)
+//! quietly returns INT64_MIN unchanged (a C bug, reported upstream), and
+//! on x86-64 the same C is a SIGFPE turned into ERROR "floating-point
+//! exception" by the backend handler. Shipped pgrust used to PANIC there
+//! (crash-and-restart, the only backend-killer of the three); the fence
+//! landed 2026-07-29 (9c11877a991). See
+//! proved_cash_div_min_by_neg1_22003_{int2,int4,int8} (pin the ratified
+//! Rust arm, C never called on that cell) and the fenced
+//! eq_cash_div_int8_by_neg1 (C-parity everywhere else on the /-1 plane).
 //!
 //! Rust side: the SHIPPED fmgr wrappers — `adt_cash::builtins::fc_cash_{eq,
 //! ne,lt,le,gt,ge,cmp,pl,mi}` and `fc_cashlarger`/`fc_cashsmaller` — invoked
@@ -345,8 +350,8 @@ mod proofs {
     // (a) 16-bit dividend x full symbolic divisor (division-by-zero arm
     // in-theorem), (b) full dividend / literal -1 fenced off i64::MIN,
     // (c) full dividend / literal 0 (pure error-arm parity), and (d) the
-    // i64::MIN / -1 plane, where shipped Rust PANICS (divergence candidate —
-    // see rust_panics_cash_div_min_by_neg1).
+    // i64::MIN / -1 plane — RATIFIED divergence, Rust-only theorem (C is
+    // platform-UB there): see proved_cash_div_min_by_neg1_22003_*.
 
     macro_rules! div_band16 {
         ($($h:ident: $fc:ident($bty:ty) / $pg:ident;)*) => {$(
@@ -412,18 +417,36 @@ mod proofs {
         }
     }
 
-    /// DIVERGENCE WITNESS (candidate, adjudication owed): shipped
-    /// `cash_div_int64(i64::MIN, -1)` = Rust `i64::MIN / -1` PANICS
-    /// ("attempt to divide with overflow"). C cash_div_int64 has no MIN/-1
-    /// guard: `c / i` there is signed-overflow UB — SIGFPE on x86-64,
-    /// quietly INT64_MIN on ARM64 (ground-truth against docker postgres:18
-    /// per GROUND-TRUTH law before recording). This harness pins the Rust
-    /// arm's behavior; it must keep PASSING (i.e. the panic must keep
-    /// happening) until adjudicated.
-    #[kani::proof]
-    #[kani::should_panic]
-    fn rust_panics_cash_div_min_by_neg1() {
-        let _ = call2(adt_cash::builtins::fc_cash_div_int8, i64::MIN, -1i64);
+    /// RATIFIED DIVERGENCE THEOREM (2026-07-31, Michael option 1; ledger
+    /// rows 865/867/3345): the shipped wrappers on `i64::MIN / -1` return a
+    /// clean Err with sqlstate 22003 (ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+    /// at level ERROR, for every divisor width — the int8div-precedent
+    /// fence (landed 9c11877a991). Rust-only theorem: C cash_div_int64 is
+    /// signed-overflow UB on this cell (SIGFPE→ERROR on x86-64, silent
+    /// INT64_MIN on ARM64), so the oracle is never called here; C-parity on
+    /// the rest of the /-1 plane is eq_cash_div_int8_by_neg1. Replaces the
+    /// pre-ratification should_panic witness rust_panics_cash_div_min_by_neg1.
+    macro_rules! min_div_neg1_22003 {
+        ($($h:ident: $fc:ident, $neg1:expr;)*) => {$(
+            #[kani::proof]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            fn $h() {
+                match call2(adt_cash::builtins::$fc, i64::MIN, $neg1) {
+                    Ok(_) => panic!("MIN/-1 must not produce a value"),
+                    Err(e) => {
+                        assert!(e.sqlstate == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+                        assert!(e.level == ERROR);
+                        core::mem::forget(e);
+                    }
+                }
+            }
+        )*};
+    }
+
+    min_div_neg1_22003! {
+        proved_cash_div_min_by_neg1_22003_int8: fc_cash_div_int8, -1i64;
+        proved_cash_div_min_by_neg1_22003_int4: fc_cash_div_int4, -1i32;
+        proved_cash_div_min_by_neg1_22003_int2: fc_cash_div_int2, -1i16;
     }
 
     // ---------- cash_div_cash (oid 3822): f64 result ----------

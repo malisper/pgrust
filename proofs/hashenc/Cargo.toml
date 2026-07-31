@@ -1,0 +1,12 @@
+[package]
+name = "proof-hashenc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Prove the SHIPPED ports, not copies.
+pg_b64 = { path = "../../crates/common/base64" }
+pg_md5 = { path = "../../crates/common/md5" }
+adt_ascii = { path = "../../crates/backend/utils/adt/adt_ascii" }
+
+[workspace]

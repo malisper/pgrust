@@ -102,4 +102,95 @@ for fid in range(3):
             bytes([fid]) + struct.pack("<dd", a, b))
 PY
 
+# --- char/bool differentials (phase-1 100%-coverage campaign) ----------------
+# Literals harvested mechanically from the vendored 18.3 regress SQL, crossed
+# with every selector; plus hand seeds for the non-text selectors.
+mkdir -p corpus/char_diff corpus/bool_diff
+python3 - <<'PY'
+import re, hashlib, pathlib
+
+# repo root may be the main clone or a .wt-* worktree one level deeper.
+_cands = [pathlib.Path(p) for p in
+          ("../../pgrust-reference/vendor/postgres-src/src/test/regress/sql",
+           "../../../pgrust-reference/vendor/postgres-src/src/test/regress/sql")]
+REGRESS = next(p for p in _cands if p.is_dir())
+
+def harvest(sqlfile, maxlen=24):
+    txt = (REGRESS / sqlfile).read_text(errors="replace")
+    return sorted(set(m[1:-1] for m in re.findall(r"'[^']*'", txt) if len(m) - 2 <= maxlen))
+
+def put(tdir, tag, data):
+    h = hashlib.sha1(data).hexdigest()[:12]
+    (pathlib.Path(tdir) / f"{tag}_{h}").write_bytes(data)
+
+# bool_diff: regress boolean.sql literals across selectors 0 (boolin),
+# 1 (parse_bool_with_len), plus fixed out/cmp/agg shapes.
+for lit in harvest("boolean.sql"):
+    b = lit.encode()
+    put("corpus/bool_diff", "in", bytes([0]) + b)
+    put("corpus/bool_diff", "pb", bytes([1]) + b)
+for b0 in (0, 1, 2, 255):
+    put("corpus/bool_diff", "out", bytes([2, b0, 1]))
+    put("corpus/bool_diff", "cmp", bytes([3, b0, b0 ^ 1]))
+for ops in (b"", b"\x00\x04\x04\x01\x05", b"\x04\x04\x04", b"\x02\x02", b"\x01",
+            b"\x05\x04", b"\x04\x05\x01\x00\x02\x06\x07\x03"):
+    put("corpus/bool_diff", "agg", bytes([4]) + ops)
+
+# char_diff: regress char.sql literals (octal escapes included) across
+# selectors 0 (charin) and 4 (text_char), plus fixed shapes for out/cmp/
+# int/recv.
+for lit in harvest("char.sql"):
+    b = lit.encode()
+    put("corpus/char_diff", "in", bytes([0]) + b)
+    put("corpus/char_diff", "tc", bytes([4]) + b)
+for b0 in (0, 1, 0x41, 0x7F, 0x80, 0xFF):
+    put("corpus/char_diff", "out", bytes([1, b0]))
+    put("corpus/char_diff", "cmp", bytes([2, b0, (b0 + 1) & 0xFF]))
+    put("corpus/char_diff", "rcv", bytes([5, b0]))
+for arg in (-129, -128, -1, 0, 127, 128, 2**31 - 1, -2**31):
+    put("corpus/char_diff", "i4",
+        bytes([3]) + (arg & 0xFFFFFFFF).to_bytes(4, "little"))
+PY
+
 echo "seed corpus written under $(pwd)/corpus/"
+
+# ---- pg_lsn_diff (Lane-0A p1 campaign): selector-stamped seeds ----
+# Layout: [sel%8][payload]; regress literals harvested from
+# vendor/postgres-src/src/test/regress/sql/pg_lsn.sql (Stamp 18.3).
+mkdir -p corpus/pg_lsn_diff
+python3 - <<'PYEOF'
+import os, re, struct
+out = "corpus/pg_lsn_diff"
+def w(name, data):
+    open(os.path.join(out, name), "wb").write(data)
+
+lsn_texts = ["0/0", "0/12345678", "ABCD1234/beef0001", "FFFFFFFF/FFFFFFFF",
+             "16/B374D848", "0/16B3748", "1/2", "0/FF", "", "/", "0/", "/0",
+             "123456789/0", "0/123456789", " 0/0", "0/0 ", "xyz/0"]
+# harvest every 'X/X'-shaped literal from the vendored regress pg_lsn.sql
+reg = "../../pgrust-reference/vendor/postgres-src/src/test/regress/sql/pg_lsn.sql"
+try:
+    sql = open(reg).read()
+    lsn_texts += re.findall(r"'([0-9A-Fa-f]{1,9}/[0-9A-Fa-f]{1,9})'", sql)[:64]
+except OSError:
+    pass
+for i, t in enumerate(dict.fromkeys(lsn_texts)):
+    w(f"in_{i:03}", b"\x00" + t.encode())
+
+vals = [0, 1, 0xFF, 0xFFFFFFFF, 0x100000000, 0xABCD1234BEEF0001,
+        2**64 - 1, 2**63, 2**63 - 1]
+for i, v in enumerate(vals):
+    w(f"out_{i:02}", b"\x01" + struct.pack("<Q", v))
+    w(f"send_{i:02}", b"\x03" + struct.pack(">Q", v))
+for i, (a, b) in enumerate([(a, b) for a in vals[:5] for b in vals[:5]]):
+    w(f"cmp_{i:02}", b"\x02" + struct.pack("<QQ", a, b))
+    w(f"mi_{i:02}", b"\x04" + struct.pack("<QQ", a, b))
+
+nums = ["0", "1", "-1", "10", "0.5", "-0.5", "2.5", "18446744073709551615",
+        "18446744073709551616", "-18446744073709551615", "NaN", "Infinity",
+        "-Infinity", "1e10", "1e-10", "1e1000000", " 42 ", "1_000"]
+for i, n in enumerate(nums):
+    w(f"pli_{i:02}", b"\x05" + struct.pack("<Q", 0xFF) + n.encode())
+    w(f"mii_{i:02}", b"\x06" + struct.pack("<Q", 2**32) + n.encode())
+    w(f"npl_{i:02}", b"\x07" + n.encode())
+PYEOF

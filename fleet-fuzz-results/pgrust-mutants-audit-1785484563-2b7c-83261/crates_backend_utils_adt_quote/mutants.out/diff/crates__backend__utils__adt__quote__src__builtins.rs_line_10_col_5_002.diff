@@ -1,0 +1,23 @@
+--- crates/backend/utils/adt/quote/src/builtins.rs
++++ replace fc_quote_ident -> PgResult<Datum> with PgResult::new(Default::default())
+@@ -2,19 +2,17 @@
+ use ::types_core::Oid;
+ use ::types_error::PgResult;
+ use ::types_fmgr::{
+     varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+ };
+ 
+ pub fn fc_quote_ident(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+     // SAFETY: catalog arg 0 is non-null text (strict fn).
+-    let t = unsafe { fcinfo.arg_varlena_packed(0)? };
+-    let mcx = fcinfo.result_mcx();
+-    Ok(varlena_result(crate::quote_ident(mcx, t.data())?))
++    PgResult::new(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn fc_quote_literal(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+     // SAFETY: catalog arg 0 is non-null text (strict fn).
+     let t = unsafe { fcinfo.arg_varlena_packed(0)? };
+     let mcx = fcinfo.result_mcx();
+     Ok(varlena_result(crate::quote_literal(mcx, t.data())?))
+ }

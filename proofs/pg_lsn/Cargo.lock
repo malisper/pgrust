@@ -151,6 +151,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "numutils",
+ "pg_string",
  "pqformat",
  "stringinfo",
  "typcache",
@@ -803,6 +804,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_string"
+version = "0.0.0"
+dependencies = [
+ "string_seams",
+]
+
+[[package]]
 name = "pg_strong_random"
 version = "0.1.0"
 dependencies = [
@@ -1127,6 +1135,13 @@ dependencies = [
  "types_core",
  "types_error",
  "types_snapshot",
+]
+
+[[package]]
+name = "string_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]

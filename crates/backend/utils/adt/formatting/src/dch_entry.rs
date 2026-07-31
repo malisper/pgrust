@@ -896,4 +896,108 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.message, "date out of range: \"4714-11-23 BC\"");
     }
+
+    // "Y,YYY" is the only numeric DCH field C parses with a raw
+    //   sscanf(s, "%d,%03d%n", &millennia, &years, &nch)
+    // (formatting.c:3589) instead of from_char_parse_int_len. The `%d`
+    // truncates an out-of-int millennia field before the
+    // pg_mul_s32_overflow / pg_add_s32_overflow guard on the next line can
+    // see it, so C silently accepts wrapped magnitudes that its own guard
+    // exists to reject; every sibling field rejects them via
+    // from_char_parse_int_len's `errno == ERANGE || result < INT_MIN ||
+    // result > INT_MAX` check (formatting.c:2272). We accumulate the true
+    // magnitude and let the guard fire.
+    //
+    // DELIBERATE DIVERGENCE (ledger oids 1778/1780; awaiting ratification,
+    // same shape as the ratified macaddr_in row-436 carve): live C 18.3 gives
+    //   to_date('4294969320,024','Y,YYY')  -> 2024024-01-01
+    //   to_date('-4294965272,024','Y,YYY') -> 2024024-01-01
+    //   to_date('4294967296,000','Y,YYY')  -> 0001-01-01 BC
+    // (4294969320 mod 2^32 = 2024), because glibc's strtol saturates at
+    // LONG_MAX and the assignment to int truncates mod 2^32. `%d` overflow
+    // is formally UB in C, so that is a glibc accident, not a specified
+    // behavior. We reject instead.
+    #[test]
+    fn to_date_y_yyy_out_of_range_millennia_rejected() {
+        let ctx = MemoryContext::new("dch-test");
+        let err = |input: &[u8], fmt: &[u8]| {
+            to_date(ctx.mcx(), ::types_core::InvalidOid, input, fmt)
+                .unwrap_err()
+                .message
+                .clone()
+        };
+        const OUT_OF_RANGE: &str = "value for \"Y,YYY\" in source string is out of range";
+
+        // C-divergent cells: |millennia| > INT_MAX, which C's sscanf wraps.
+        assert_eq!(err(b"4294969320,024", b"Y,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"-4294965272,024", b"Y,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"4294967296,000", b"Y,YYY"), OUT_OF_RANGE);
+        // Saturating (not just mod-2^32) magnitudes: glibc strtol clamps to
+        // LONG_MAX, whose low 32 bits are 0xFFFFFFFF, so C yields -1 and
+        // prints 0976-01-01 BC.
+        assert_eq!(err(b"12345678901234567890,024", b"Y,YYY"), OUT_OF_RANGE);
+        // The modifier / suffix / composed-picture routes reach the same
+        // scan and must reject identically.
+        assert_eq!(err(b"4294969320,024", b"FMY,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"4294969320,024th", b"Y,YYYTH"), OUT_OF_RANGE);
+        assert_eq!(err(b"4294969320,024-06-15", b"Y,YYY-MM-DD"), OUT_OF_RANGE);
+
+        // Cells where C's truncation happens to land large enough that its
+        // own guard still fires: these already agreed with C and must stay
+        // on the same message.
+        assert_eq!(err(b"2147483648,000", b"Y,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"99999999999,024", b"Y,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"-99999999999,024", b"Y,YYY"), OUT_OF_RANGE);
+        // In-int millennia whose *product* overflows: C-parity, unchanged.
+        assert_eq!(err(b"2147483647,000", b"Y,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"2147483,648", b"Y,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"2147484,000", b"Y,YYY"), OUT_OF_RANGE);
+        assert_eq!(err(b"-2147484,000", b"Y,YYY"), OUT_OF_RANGE);
+        // Product fits int but the date does not: the later date range check
+        // owns these, not the Y,YYY guard (C-parity).
+        assert_eq!(err(b"2147483,647", b"Y,YYY"), "date out of range: \"2147483,647\"");
+        assert_eq!(err(b"-2147483,647", b"Y,YYY"), "date out of range: \"-2147483,647\"");
+        // matched < 2 stays the invalid-value error, not out-of-range.
+        assert_eq!(err(b"2024", b"Y,YYY"), "invalid value \"2024\" for \"Y,YYY\"");
+        assert_eq!(err(b"-,024", b"Y,YYY"), "invalid value \"-,024\" for \"Y,YYY\"");
+    }
+
+    // In-range Y,YYY behavior is untouched by the out-of-range carve above.
+    // Every tuple is live C PostgreSQL 18.3 output (docker postgres:18.3,
+    // TimeZone=UTC, 2026-07-30); internal year 0 prints as 0001 BC.
+    #[test]
+    fn to_date_y_yyy_in_range_pins_match_c() {
+        let ctx = MemoryContext::new("dch-test");
+        let ymd = |input: &[u8], fmt: &[u8]| {
+            let d = to_date(ctx.mcx(), ::types_core::InvalidOid, input, fmt).unwrap();
+            let (mut y, mut m, mut day) = (0, 0, 0);
+            j2date(d + POSTGRES_EPOCH_JDATE, &mut y, &mut m, &mut day);
+            (y, m, day)
+        };
+        assert_eq!(ymd(b"2,024", b"Y,YYY"), (2024, 1, 1));
+        assert_eq!(ymd(b"0,001", b"Y,YYY"), (1, 1, 1));
+        // Zero-padded millennia field wider than one digit.
+        assert_eq!(ymd(b"0001,000", b"Y,YYY"), (1000, 1, 1));
+        assert_eq!(ymd(b"  2,024", b"Y,YYY"), (2024, 1, 1));
+        assert_eq!(ymd(b"2,024  ", b"Y,YYY"), (2024, 1, 1));
+        assert_eq!(ymd(b"+2,024", b"Y,YYY"), (2024, 1, 1));
+        // -2*1000 + 24 = -1976; C prints 1976-01-01 BC, i.e. j2date year
+        // -1975 (there is no year 0: internal 0 == 1 BC).
+        assert_eq!(ymd(b"-2,024", b"Y,YYY"), (-1975, 1, 1));
+        // Sign inside the %03d field: it counts toward the width-3 cap.
+        assert_eq!(ymd(b"2,+024", b"Y,YYY"), (2002, 1, 1));
+        assert_eq!(ymd(b"2,-024", b"Y,YYY"), (1998, 1, 1));
+        // 1..3 digit year fields, and a 4th digit the width cap drops.
+        assert_eq!(ymd(b"2,24", b"Y,YYY"), (2024, 1, 1));
+        assert_eq!(ymd(b"2,4", b"Y,YYY"), (2004, 1, 1));
+        assert_eq!(ymd(b"2,0245", b"Y,YYY"), (2024, 1, 1));
+        // sscanf's %03d skips leading whitespace without spending width.
+        assert_eq!(ymd(b"2, 024", b"Y,YYY"), (2024, 1, 1));
+        assert_eq!(ymd(b"2,024", b"FMY,YYY"), (2024, 1, 1));
+        assert_eq!(ymd(b"0001,000", b"FMY,YYY"), (1000, 1, 1));
+        assert_eq!(ymd(b"2,024th", b"Y,YYYTH"), (2024, 1, 1));
+        assert_eq!(ymd(b"2,024TH", b"Y,YYYth"), (2024, 1, 1));
+        assert_eq!(ymd(b"2,024", b"Y,YYY-MM-DD"), (2024, 1, 1));
+        assert_eq!(ymd(b"2,024-06-15", b"Y,YYY-MM-DD"), (2024, 6, 15));
+    }
 }

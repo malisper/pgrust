@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  p1-laner quote_diff 10M campaign (adt/quote done-gate)
+
+job_name: pgrust-fuzz-campaign-1785483167-15aa-98588
+job_type: fuzz-campaign
+git_ref: 5420eacd5f37fac8c5599f149de3aefccacd7939
+repo_url: https://github.com/malisper/pgrust.git
+build_kind: fast
+sha: 5420eacd5f37
+started_utc: 2026-07-31T07:33:46Z
+hostname: pgrust-fuzz-campaign-1785483167-15aa-98588-9rsfb

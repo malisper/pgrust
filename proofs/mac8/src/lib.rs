@@ -387,3 +387,106 @@ mod proofs {
         assert!(c == rust); // wrong on purpose: args swapped on the Rust side
     }
 }
+
+// ===========================================================================
+// WAVE W3 (2026-07-30): macaddr8_send (pg_proc oid 3447) — wire row.
+//
+// WRAPPER-level per the eq_pg_lsn_send / eq_uuid_send precedent: the theorem
+// invokes the SHIPPED fmgr entry point adt_mac8::builtins::fc_macaddr8_send
+// on a real LocalFcinfo frame over a real result-mcx (proof_support
+// mcx-stubs recipe; theorem "modulo static-buffer allocator model"), so the
+// arg_fixed datum unwrap, macaddr8_send core (pq_begintypsend + 8x
+// pq_sendbyte + pq_endtypsend) and varlena_result packing are all inside the
+// claim.  The full 12-byte wire image (4B LE varlena header = 12<<2, then
+// the 8 payload bytes) is compared against vendored REL_18_STABLE C
+// (csrc/mac8_shim.c pgc_macaddr8_send; pq_* shimmed to a caller out-buffer).
+// control_macaddr8_send_skew (C fed payload byte 0 ^ 1) MUST FAIL — run it
+// with the DEFAULT solver (kissat never terminates on failing harnesses).
+// ===========================================================================
+
+#[cfg(kani)]
+mod w3_send {
+    use datum::{Datum, NullableDatum};
+    use proof_support::{mcx_stubs, stubs};
+    use types_fmgr::LocalFcinfo;
+
+    extern "C" {
+        fn pgc_macaddr8_send(bin: *const u8, out: *mut u8) -> i32;
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)] // send/copy loops <= 14 iterations
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    // RVR lesson: grow/deallocate stubs mandatory when append paths can
+    // reach try_reserve/grow (real arena + Acct recursion otherwise enters
+    // symex).
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_macaddr8_send() {
+        let b: [u8; 8] = kani::any();
+        let mut cbuf = [0u8; 12];
+        let clen = unsafe { pgc_macaddr8_send(b.as_ptr(), cbuf.as_mut_ptr()) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-mac8-send");
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call (forgotten, never freed).
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_usize(b.as_ptr() as usize));
+        let d = match adt_mac8::builtins::fc_macaddr8_send(None, &mut f) {
+            Ok(d) => d,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("macaddr8_send errored")
+            }
+        };
+        let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 12) };
+        assert!(clen == 12);
+        let mut i = 0;
+        while i < 12 {
+            assert!(img[i] == cbuf[i]);
+            i += 1;
+        }
+        core::mem::forget(ctx);
+    }
+
+    /// MUST FAIL (wire-section control): C is fed payload byte 0 ^ 1.
+    /// DEFAULT solver.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(mcx::Mcx::grow, mcx_stubs::stub_mcx_grow)]
+    #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn control_macaddr8_send_skew() {
+        let b: [u8; 8] = kani::any();
+        let mut skew = b;
+        skew[0] ^= 1;
+        let mut cbuf = [0u8; 12];
+        let _ = unsafe { pgc_macaddr8_send(skew.as_ptr(), cbuf.as_mut_ptr()) };
+
+        let ctx = mcx::MemoryContext::new_bump("kani-mac8-send-ctl");
+        let mut f = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = NullableDatum::value(Datum::from_usize(b.as_ptr() as usize));
+        let d = match adt_mac8::builtins::fc_macaddr8_send(None, &mut f) {
+            Ok(d) => d,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("send errored")
+            }
+        };
+        let img = unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 12) };
+        let mut i = 0;
+        while i < 12 {
+            assert!(img[i] == cbuf[i]); // expected failure at payload byte 0
+            i += 1;
+        }
+        core::mem::forget(ctx);
+    }
+}
