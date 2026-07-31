@@ -1,6 +1,7 @@
 use ::adt_float::{float8_lt, float8in_internal, float8out_internal};
 use ::datum::Varlena;
 use ::mcx::{Mcx, PgVec};
+use ::pg_string::isspace_c_locale;
 use ::stringinfo::StringInfo;
 use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG, PATH_HEADER_SIZE, POLYGON_HEADER_SIZE};
 use ::types_error::{
@@ -59,11 +60,23 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    // C: `while (isspace((unsigned char) *p)) p++;` starting at `from`.  This is
+    // the single whitespace predicate for every geo input function: geo_ops.c
+    // asks the question through `isspace()` in the C locale, whose set is
+    // {HT, LF, VT, FF, CR, SP}.  Rust's `is_ascii_whitespace` is NOT that set
+    // (it omits VT, 0x0b), so it must not stand in here -- see
+    // `pg_string::isspace_c_locale`.
+    #[inline]
+    fn ws_end(&self, mut from: usize) -> usize {
+        while from < self.bytes.len() && isspace_c_locale(self.bytes[from]) {
+            from += 1;
+        }
+        from
+    }
+
     #[inline]
     fn skip_ws(&mut self) {
-        while self.cur().is_ascii_whitespace() {
-            self.advance();
-        }
+        self.pos = self.ws_end(self.pos.min(self.bytes.len()));
     }
 
     #[inline]
@@ -171,10 +184,7 @@ fn path_decode(
         depth += 1;
         cur.advance();
     } else if cur.cur() == LDELIM {
-        let mut peek = cur.pos + 1;
-        while peek < cur.bytes.len() && cur.bytes[peek].is_ascii_whitespace() {
-            peek += 1;
-        }
+        let peek = cur.ws_end(cur.pos + 1);
         let cp_is_ldelim = peek < cur.bytes.len() && cur.bytes[peek] == LDELIM;
         if cp_is_ldelim || cur.last_occurrence_is_here(LDELIM) {
             depth += 1;
@@ -461,11 +471,34 @@ pub fn path_image<'m>(
     Ok(Varlena::from_image(img))
 }
 
-/// Build a POLYGON varlena image; the boundbox is computed from the points.
+/// Build a POLYGON varlena image; the boundbox is computed from the points
+/// (C make_bound_box, as in poly_in/path_poly/circle_poly).
 pub fn poly_image<'m>(
     mcx: Mcx<'m>,
     npts: usize,
+    get: impl FnMut(usize) -> PgResult<Point>,
+) -> PgResult<Varlena<'m>> {
+    poly_image_impl(mcx, npts, get, None)
+}
+
+/// Build a POLYGON varlena image with an explicitly supplied boundbox,
+/// bypassing the make_bound_box recompute. C box_poly (geo_ops.c:4557)
+/// stores box_construct(&box->high, &box->low) rather than recomputing
+/// from the corner points; for -0.0/NaN inputs the two differ.
+pub fn poly_image_with_boundbox<'m>(
+    mcx: Mcx<'m>,
+    npts: usize,
+    get: impl FnMut(usize) -> PgResult<Point>,
+    boundbox: &BOX,
+) -> PgResult<Varlena<'m>> {
+    poly_image_impl(mcx, npts, get, Some(boundbox))
+}
+
+fn poly_image_impl<'m>(
+    mcx: Mcx<'m>,
+    npts: usize,
     mut get: impl FnMut(usize) -> PgResult<Point>,
+    boundbox: Option<&BOX>,
 ) -> PgResult<Varlena<'m>> {
     let total = POLYGON_HEADER_SIZE + npts * POINT_SIZE;
     let mut img: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
@@ -484,7 +517,9 @@ pub fn poly_image<'m>(
         let off = POLYGON_HEADER_SIZE + i * POINT_SIZE;
         img[off..off + POINT_SIZE].copy_from_slice(&p.to_datum_bytes());
     }
-    if npts > 0 {
+    if let Some(bb) = boundbox {
+        img[8..40].copy_from_slice(&bb.to_datum_bytes());
+    } else if npts > 0 {
         let bb = bound_box(&PolyRef::from_payload(&img[4..]));
         img[8..40].copy_from_slice(&bb.to_datum_bytes());
     }
@@ -606,10 +641,7 @@ pub fn circle_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgR
         depth += 1;
         cur.advance();
     } else if cur.cur() == LDELIM {
-        let mut peek = cur.pos + 1;
-        while peek < cur.bytes.len() && cur.bytes[peek].is_ascii_whitespace() {
-            peek += 1;
-        }
+        let peek = cur.ws_end(cur.pos + 1);
         if peek < cur.bytes.len() && cur.bytes[peek] == LDELIM {
             depth += 1;
             cur.pos = peek;

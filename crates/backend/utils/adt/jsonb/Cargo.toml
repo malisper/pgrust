@@ -25,6 +25,7 @@ adt_numeric = { path = "../numeric" }
 arrayfuncs = { path = "../arrayfuncs" }
 datum = { path = "../../../../_support/types/datum" }
 hashfn = { path = "../../../../common/hashfn" }
+pg_string = { path = "../../../../common/string" }
 mbutils = { path = "../../mb/mbutils" }
 mcx = { path = "../../../../_support/mcx" }
 pqformat = { path = "../../../libpq/pqformat" }

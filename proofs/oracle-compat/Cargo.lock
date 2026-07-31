@@ -893,6 +893,7 @@ dependencies = [
  "mcx",
  "pg_database_seams",
  "pg_locale_seams",
+ "pgsync",
  "syscache_seams",
  "types_core",
  "types_error",

@@ -1242,3 +1242,687 @@ fn array_nulls_guc_governs_unquoted_null() {
     crate::set_array_nulls(true);
     assert_eq!(out, r#"{"NULL","NULL"}"#);
 }
+
+// ---- C-locale whitespace conformance for array_in / array_out -------------
+//
+// C's array_in and array_out both decide "is this whitespace?" with
+// scanner_isspace (src/backend/parser/scansup.c), whose set is scan.l's
+// {space} class == the C-locale isspace set {HT, LF, VT, FF, CR, SP}.  Rust's
+// `u8::is_ascii_whitespace` omits VT (0x0b), so any local re-derivation of the
+// set silently drops VT at every position below.  Expectations here are the
+// EXECUTED output of PostgreSQL 18.4 (Debian, aarch64) over a generated case
+// matrix; control characters crossed the wire only as chr(N).  Each row is
+// `id, literal, expected`, where expected is `OK:<hex of array_out bytes>` or
+// `ERR:<sqlstate>`.  The NBSP (U+00A0) and NEL (U+0085) rows are negative
+// controls: they are whitespace to `char::is_whitespace` but not to C.
+mod c_locale_whitespace {
+    use super::*;
+
+    fn hex(b: &[u8]) -> String {
+        let mut s = String::new();
+        for x in b {
+            s.push_str(&format!("{x:02x}"));
+        }
+        s
+    }
+
+    fn run_in(mcx: Mcx<'_>, lit: &str, int4: bool) -> String {
+        let m = if int4 { meta_int4() } else { meta_text() };
+        let mut ip = if int4 { int4_in() } else { text_in() };
+        match array_in(mcx, lit, &m, &mut ip, -1, None) {
+            Err(e) => format!(
+                "ERR:{}",
+                core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap()
+            ),
+            Ok(None) => "ERR:soft".to_string(),
+            Ok(Some(img)) => {
+                let mut op = if int4 { int4_out() } else { text_out() };
+                let o = array_out(mcx, &img, &m, &mut op).unwrap();
+                format!("OK:{}", hex(&o[..o.len() - 1]))
+            }
+        }
+    }
+
+    // array_out an array whose single element is `elem`, then read the literal
+    // back: `OUT:<hex of literal> RT:EQ` when the element survives verbatim.
+    fn run_out(mcx: Mcx<'_>, elem: &str) -> String {
+        let m = meta_text();
+        let d = build_varlena(mcx, elem.as_bytes()).unwrap();
+        let img = construct_array(mcx, &[d], ::types_core::TEXTOID, -1, false, b'i').unwrap();
+        let mut op = text_out();
+        let lit_c = array_out(mcx, &img, &m, &mut op).unwrap();
+        let lit_b = &lit_c[..lit_c.len() - 1];
+        let outhex = hex(lit_b);
+        let lit = core::str::from_utf8(lit_b).unwrap();
+        let mut ip = text_in();
+        match array_in(mcx, lit, &m, &mut ip, -1, None) {
+            Err(e) => format!(
+                "OUT:{outhex} RT:ERR:{}",
+                core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap()
+            ),
+            Ok(None) => format!("OUT:{outhex} RT:ERR:soft"),
+            Ok(Some(back)) => {
+                let (ds, ns) =
+                    deconstruct_array(mcx, &back, -1, false, b'i', true).unwrap();
+                let got: &[u8] = if ds.len() == 1 && !ns[0] { varlena_payload(ds[0]) } else { b"" };
+                if got == elem.as_bytes() {
+                    format!("OUT:{outhex} RT:EQ")
+                } else {
+                    format!("OUT:{outhex} RT:NE:{}", hex(got))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn array_in_text_whitespace_matrix_matches_c() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            ("t_lead_SP", " {a}", "OK:7b617d"),
+            ("t_lead_HT", "\u{9}{a}", "OK:7b617d"),
+            ("t_lead_LF", "\u{a}{a}", "OK:7b617d"),
+            ("t_lead_VT", "\u{b}{a}", "OK:7b617d"),
+            ("t_lead_FF", "\u{c}{a}", "OK:7b617d"),
+            ("t_lead_CR", "\u{d}{a}", "OK:7b617d"),
+            ("t_lead_NBSP", "\u{a0}{a}", "ERR:22P02"),
+            ("t_lead_NEL", "\u{85}{a}", "ERR:22P02"),
+            ("t_trail_SP", "{a} ", "OK:7b617d"),
+            ("t_trail_HT", "{a}\u{9}", "OK:7b617d"),
+            ("t_trail_LF", "{a}\u{a}", "OK:7b617d"),
+            ("t_trail_VT", "{a}\u{b}", "OK:7b617d"),
+            ("t_trail_FF", "{a}\u{c}", "OK:7b617d"),
+            ("t_trail_CR", "{a}\u{d}", "OK:7b617d"),
+            ("t_trail_NBSP", "{a}\u{a0}", "ERR:22P02"),
+            ("t_trail_NEL", "{a}\u{85}", "ERR:22P02"),
+            ("t_after_lbrace_SP", "{ a}", "OK:7b617d"),
+            ("t_after_lbrace_HT", "{\u{9}a}", "OK:7b617d"),
+            ("t_after_lbrace_LF", "{\u{a}a}", "OK:7b617d"),
+            ("t_after_lbrace_VT", "{\u{b}a}", "OK:7b617d"),
+            ("t_after_lbrace_FF", "{\u{c}a}", "OK:7b617d"),
+            ("t_after_lbrace_CR", "{\u{d}a}", "OK:7b617d"),
+            ("t_after_lbrace_NBSP", "{\u{a0}a}", "OK:7bc2a0617d"),
+            ("t_after_lbrace_NEL", "{\u{85}a}", "OK:7bc285617d"),
+            ("t_before_rbrace_SP", "{a }", "OK:7b617d"),
+            ("t_before_rbrace_HT", "{a\u{9}}", "OK:7b617d"),
+            ("t_before_rbrace_LF", "{a\u{a}}", "OK:7b617d"),
+            ("t_before_rbrace_VT", "{a\u{b}}", "OK:7b617d"),
+            ("t_before_rbrace_FF", "{a\u{c}}", "OK:7b617d"),
+            ("t_before_rbrace_CR", "{a\u{d}}", "OK:7b617d"),
+            ("t_before_rbrace_NBSP", "{a\u{a0}}", "OK:7b61c2a07d"),
+            ("t_before_rbrace_NEL", "{a\u{85}}", "OK:7b61c2857d"),
+            ("t_around_delim_SP", "{a , b}", "OK:7b612c627d"),
+            ("t_around_delim_HT", "{a\u{9},\u{9}b}", "OK:7b612c627d"),
+            ("t_around_delim_LF", "{a\u{a},\u{a}b}", "OK:7b612c627d"),
+            ("t_around_delim_VT", "{a\u{b},\u{b}b}", "OK:7b612c627d"),
+            ("t_around_delim_FF", "{a\u{c},\u{c}b}", "OK:7b612c627d"),
+            ("t_around_delim_CR", "{a\u{d},\u{d}b}", "OK:7b612c627d"),
+            ("t_around_delim_NBSP", "{a\u{a0},\u{a0}b}", "OK:7b61c2a02cc2a0627d"),
+            ("t_around_delim_NEL", "{a\u{85},\u{85}b}", "OK:7b61c2852cc285627d"),
+            ("t_in_quotes_SP", "{\"a b\"}", "OK:7b22612062227d"),
+            ("t_in_quotes_HT", "{\"a\u{9}b\"}", "OK:7b22610962227d"),
+            ("t_in_quotes_LF", "{\"a\u{a}b\"}", "OK:7b22610a62227d"),
+            ("t_in_quotes_VT", "{\"a\u{b}b\"}", "OK:7b22610b62227d"),
+            ("t_in_quotes_FF", "{\"a\u{c}b\"}", "OK:7b22610c62227d"),
+            ("t_in_quotes_CR", "{\"a\u{d}b\"}", "OK:7b22610d62227d"),
+            ("t_in_quotes_NBSP", "{\"a\u{a0}b\"}", "OK:7b61c2a0627d"),
+            ("t_in_quotes_NEL", "{\"a\u{85}b\"}", "OK:7b61c285627d"),
+            ("t_after_quote_SP", "{\"a\" ,b}", "OK:7b612c627d"),
+            ("t_after_quote_HT", "{\"a\"\u{9},b}", "OK:7b612c627d"),
+            ("t_after_quote_LF", "{\"a\"\u{a},b}", "OK:7b612c627d"),
+            ("t_after_quote_VT", "{\"a\"\u{b},b}", "OK:7b612c627d"),
+            ("t_after_quote_FF", "{\"a\"\u{c},b}", "OK:7b612c627d"),
+            ("t_after_quote_CR", "{\"a\"\u{d},b}", "OK:7b612c627d"),
+            ("t_after_quote_NBSP", "{\"a\"\u{a0},b}", "ERR:22P02"),
+            ("t_after_quote_NEL", "{\"a\"\u{85},b}", "ERR:22P02"),
+            ("t_quoted_only_SP", "{\" \"}", "OK:7b2220227d"),
+            ("t_quoted_only_HT", "{\"\u{9}\"}", "OK:7b2209227d"),
+            ("t_quoted_only_LF", "{\"\u{a}\"}", "OK:7b220a227d"),
+            ("t_quoted_only_VT", "{\"\u{b}\"}", "OK:7b220b227d"),
+            ("t_quoted_only_FF", "{\"\u{c}\"}", "OK:7b220c227d"),
+            ("t_quoted_only_CR", "{\"\u{d}\"}", "OK:7b220d227d"),
+            ("t_quoted_only_NBSP", "{\"\u{a0}\"}", "OK:7bc2a07d"),
+            ("t_quoted_only_NEL", "{\"\u{85}\"}", "OK:7bc2857d"),
+            ("t_brace_only_SP", "{ }", "OK:7b7d"),
+            ("t_brace_only_HT", "{\u{9}}", "OK:7b7d"),
+            ("t_brace_only_LF", "{\u{a}}", "OK:7b7d"),
+            ("t_brace_only_VT", "{\u{b}}", "OK:7b7d"),
+            ("t_brace_only_FF", "{\u{c}}", "OK:7b7d"),
+            ("t_brace_only_CR", "{\u{d}}", "OK:7b7d"),
+            ("t_brace_only_NBSP", "{\u{a0}}", "OK:7bc2a07d"),
+            ("t_brace_only_NEL", "{\u{85}}", "OK:7bc2857d"),
+            ("t_empty_elem_SP", "{a, ,b}", "ERR:22P02"),
+            ("t_empty_elem_HT", "{a,\u{9},b}", "ERR:22P02"),
+            ("t_empty_elem_LF", "{a,\u{a},b}", "ERR:22P02"),
+            ("t_empty_elem_VT", "{a,\u{b},b}", "ERR:22P02"),
+            ("t_empty_elem_FF", "{a,\u{c},b}", "ERR:22P02"),
+            ("t_empty_elem_CR", "{a,\u{d},b}", "ERR:22P02"),
+            ("t_empty_elem_NBSP", "{a,\u{a0},b}", "OK:7b612cc2a02c627d"),
+            ("t_empty_elem_NEL", "{a,\u{85},b}", "OK:7b612cc2852c627d"),
+            ("t_esc_mid_SP", "{a\\ b}", "OK:7b22612062227d"),
+            ("t_esc_mid_HT", "{a\\\u{9}b}", "OK:7b22610962227d"),
+            ("t_esc_mid_LF", "{a\\\u{a}b}", "OK:7b22610a62227d"),
+            ("t_esc_mid_VT", "{a\\\u{b}b}", "OK:7b22610b62227d"),
+            ("t_esc_mid_FF", "{a\\\u{c}b}", "OK:7b22610c62227d"),
+            ("t_esc_mid_CR", "{a\\\u{d}b}", "OK:7b22610d62227d"),
+            ("t_esc_mid_NBSP", "{a\\\u{a0}b}", "OK:7b61c2a0627d"),
+            ("t_esc_mid_NEL", "{a\\\u{85}b}", "OK:7b61c285627d"),
+            ("t_esc_trail_SP", "{a\\ }", "OK:7b226120227d"),
+            ("t_esc_trail_HT", "{a\\\u{9}}", "OK:7b226109227d"),
+            ("t_esc_trail_LF", "{a\\\u{a}}", "OK:7b22610a227d"),
+            ("t_esc_trail_VT", "{a\\\u{b}}", "OK:7b22610b227d"),
+            ("t_esc_trail_FF", "{a\\\u{c}}", "OK:7b22610c227d"),
+            ("t_esc_trail_CR", "{a\\\u{d}}", "OK:7b22610d227d"),
+            ("t_esc_trail_NBSP", "{a\\\u{a0}}", "OK:7b61c2a07d"),
+            ("t_esc_trail_NEL", "{a\\\u{85}}", "OK:7b61c2857d"),
+            ("t_esc_in_quotes_SP", "{\"a\\ b\"}", "OK:7b22612062227d"),
+            ("t_esc_in_quotes_HT", "{\"a\\\u{9}b\"}", "OK:7b22610962227d"),
+            ("t_esc_in_quotes_LF", "{\"a\\\u{a}b\"}", "OK:7b22610a62227d"),
+            ("t_esc_in_quotes_VT", "{\"a\\\u{b}b\"}", "OK:7b22610b62227d"),
+            ("t_esc_in_quotes_FF", "{\"a\\\u{c}b\"}", "OK:7b22610c62227d"),
+            ("t_esc_in_quotes_CR", "{\"a\\\u{d}b\"}", "OK:7b22610d62227d"),
+            ("t_esc_in_quotes_NBSP", "{\"a\\\u{a0}b\"}", "OK:7b61c2a0627d"),
+            ("t_esc_in_quotes_NEL", "{\"a\\\u{85}b\"}", "OK:7b61c285627d"),
+            ("t_nested_SP", "{{a } ,{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_HT", "{{a\u{9}}\u{9},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_LF", "{{a\u{a}}\u{a},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_VT", "{{a\u{b}}\u{b},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_FF", "{{a\u{c}}\u{c},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_CR", "{{a\u{d}}\u{d},{b}}", "OK:7b7b617d2c7b627d7d"),
+            ("t_nested_NBSP", "{{a\u{a0}}\u{a0},{b}}", "ERR:22P02"),
+            ("t_nested_NEL", "{{a\u{85}}\u{85},{b}}", "ERR:22P02"),
+            ("t_null_ws_SP", "{NULL }", "OK:7b4e554c4c7d"),
+            ("t_null_ws_HT", "{NULL\u{9}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_LF", "{NULL\u{a}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_VT", "{NULL\u{b}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_FF", "{NULL\u{c}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_CR", "{NULL\u{d}}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_NBSP", "{NULL\u{a0}}", "OK:7b4e554c4cc2a07d"),
+            ("t_null_ws_NEL", "{NULL\u{85}}", "OK:7b4e554c4cc2857d"),
+            ("t_null_ws_lead_SP", "{ NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_HT", "{\u{9}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_LF", "{\u{a}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_VT", "{\u{b}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_FF", "{\u{c}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_CR", "{\u{d}NULL}", "OK:7b4e554c4c7d"),
+            ("t_null_ws_lead_NBSP", "{\u{a0}NULL}", "OK:7bc2a04e554c4c7d"),
+            ("t_null_ws_lead_NEL", "{\u{85}NULL}", "OK:7bc2854e554c4c7d"),
+            ("t_elem_all_ws_SP", "{a, }", "ERR:22P02"),
+            ("t_elem_all_ws_HT", "{a,\u{9}}", "ERR:22P02"),
+            ("t_elem_all_ws_LF", "{a,\u{a}}", "ERR:22P02"),
+            ("t_elem_all_ws_VT", "{a,\u{b}}", "ERR:22P02"),
+            ("t_elem_all_ws_FF", "{a,\u{c}}", "ERR:22P02"),
+            ("t_elem_all_ws_CR", "{a,\u{d}}", "ERR:22P02"),
+            ("t_elem_all_ws_NBSP", "{a,\u{a0}}", "OK:7b612cc2a07d"),
+            ("t_elem_all_ws_NEL", "{a,\u{85}}", "OK:7b612cc2857d"),
+            ("t_dim_lead_SP", " [1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_HT", "\u{9}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_LF", "\u{a}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_VT", "\u{b}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_FF", "\u{c}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_CR", "\u{d}[1:2]={a,b}", "OK:7b612c627d"),
+            ("t_dim_lead_NBSP", "\u{a0}[1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_lead_NEL", "\u{85}[1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_before_eq_SP", "[1:2] ={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_HT", "[1:2]\u{9}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_LF", "[1:2]\u{a}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_VT", "[1:2]\u{b}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_FF", "[1:2]\u{c}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_CR", "[1:2]\u{d}={a,b}", "OK:7b612c627d"),
+            ("t_dim_before_eq_NBSP", "[1:2]\u{a0}={a,b}", "ERR:22P02"),
+            ("t_dim_before_eq_NEL", "[1:2]\u{85}={a,b}", "ERR:22P02"),
+            ("t_dim_after_eq_SP", "[1:2]= {a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_HT", "[1:2]=\u{9}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_LF", "[1:2]=\u{a}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_VT", "[1:2]=\u{b}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_FF", "[1:2]=\u{c}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_CR", "[1:2]=\u{d}{a,b}", "OK:7b612c627d"),
+            ("t_dim_after_eq_NBSP", "[1:2]=\u{a0}{a,b}", "ERR:22P02"),
+            ("t_dim_after_eq_NEL", "[1:2]=\u{85}{a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_SP", "[1 :2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_HT", "[1\u{9}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_LF", "[1\u{a}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_VT", "[1\u{b}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_FF", "[1\u{c}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_CR", "[1\u{d}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_NBSP", "[1\u{a0}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_in_colon_NEL", "[1\u{85}:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_SP", "[ 1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_HT", "[\u{9}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_LF", "[\u{a}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_VT", "[\u{b}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_FF", "[\u{c}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_CR", "[\u{d}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_NBSP", "[\u{a0}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_after_lbrk_NEL", "[\u{85}1:2]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_SP", "[1:2 ]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_HT", "[1:2\u{9}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_LF", "[1:2\u{a}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_VT", "[1:2\u{b}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_FF", "[1:2\u{c}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_CR", "[1:2\u{d}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_NBSP", "[1:2\u{a0}]={a,b}", "ERR:22P02"),
+            ("t_dim_before_rbrk_NEL", "[1:2\u{85}]={a,b}", "ERR:22P02"),
+            ("t_dim_between_SP", "[1:1] [1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_HT", "[1:1]\u{9}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_LF", "[1:1]\u{a}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_VT", "[1:1]\u{b}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_FF", "[1:1]\u{c}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_CR", "[1:1]\u{d}[1:2]={{a,b}}", "OK:7b7b612c627d7d"),
+            ("t_dim_between_NBSP", "[1:1]\u{a0}[1:2]={{a,b}}", "ERR:22P02"),
+            ("t_dim_between_NEL", "[1:1]\u{85}[1:2]={{a,b}}", "ERR:22P02"),
+            ("t_dim_both_ends_SP", "[1:2]= {a,b} ", "OK:7b612c627d"),
+            ("t_dim_both_ends_HT", "[1:2]=\u{9}{a,b}\u{9}", "OK:7b612c627d"),
+            ("t_dim_both_ends_LF", "[1:2]=\u{a}{a,b}\u{a}", "OK:7b612c627d"),
+            ("t_dim_both_ends_VT", "[1:2]=\u{b}{a,b}\u{b}", "OK:7b612c627d"),
+            ("t_dim_both_ends_FF", "[1:2]=\u{c}{a,b}\u{c}", "OK:7b612c627d"),
+            ("t_dim_both_ends_CR", "[1:2]=\u{d}{a,b}\u{d}", "OK:7b612c627d"),
+            ("t_dim_both_ends_NBSP", "[1:2]=\u{a0}{a,b}\u{a0}", "ERR:22P02"),
+            ("t_dim_both_ends_NEL", "[1:2]=\u{85}{a,b}\u{85}", "ERR:22P02"),
+        ];
+        let mut bad = Vec::new();
+        for (id, lit, want) in cases {
+            let got = run_in(mcx, lit, false);
+            if got != *want {
+                bad.push(format!("{id}: want {want}, got {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} cell(s) diverge from PostgreSQL 18.4:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn array_in_int4_whitespace_matrix_matches_c() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            ("i_lead_SP", " {1}", "OK:7b317d"),
+            ("i_lead_HT", "\u{9}{1}", "OK:7b317d"),
+            ("i_lead_LF", "\u{a}{1}", "OK:7b317d"),
+            ("i_lead_VT", "\u{b}{1}", "OK:7b317d"),
+            ("i_lead_FF", "\u{c}{1}", "OK:7b317d"),
+            ("i_lead_CR", "\u{d}{1}", "OK:7b317d"),
+            ("i_lead_NBSP", "\u{a0}{1}", "ERR:22P02"),
+            ("i_lead_NEL", "\u{85}{1}", "ERR:22P02"),
+            ("i_trail_SP", "{1} ", "OK:7b317d"),
+            ("i_trail_HT", "{1}\u{9}", "OK:7b317d"),
+            ("i_trail_LF", "{1}\u{a}", "OK:7b317d"),
+            ("i_trail_VT", "{1}\u{b}", "OK:7b317d"),
+            ("i_trail_FF", "{1}\u{c}", "OK:7b317d"),
+            ("i_trail_CR", "{1}\u{d}", "OK:7b317d"),
+            ("i_trail_NBSP", "{1}\u{a0}", "ERR:22P02"),
+            ("i_trail_NEL", "{1}\u{85}", "ERR:22P02"),
+            ("i_before_rbrace_SP", "{1 }", "OK:7b317d"),
+            ("i_before_rbrace_HT", "{1\u{9}}", "OK:7b317d"),
+            ("i_before_rbrace_LF", "{1\u{a}}", "OK:7b317d"),
+            ("i_before_rbrace_VT", "{1\u{b}}", "OK:7b317d"),
+            ("i_before_rbrace_FF", "{1\u{c}}", "OK:7b317d"),
+            ("i_before_rbrace_CR", "{1\u{d}}", "OK:7b317d"),
+            ("i_before_rbrace_NBSP", "{1\u{a0}}", "ERR:22P02"),
+            ("i_before_rbrace_NEL", "{1\u{85}}", "ERR:22P02"),
+            ("i_around_delim_SP", "{1 , 2}", "OK:7b312c327d"),
+            ("i_around_delim_HT", "{1\u{9},\u{9}2}", "OK:7b312c327d"),
+            ("i_around_delim_LF", "{1\u{a},\u{a}2}", "OK:7b312c327d"),
+            ("i_around_delim_VT", "{1\u{b},\u{b}2}", "OK:7b312c327d"),
+            ("i_around_delim_FF", "{1\u{c},\u{c}2}", "OK:7b312c327d"),
+            ("i_around_delim_CR", "{1\u{d},\u{d}2}", "OK:7b312c327d"),
+            ("i_around_delim_NBSP", "{1\u{a0},\u{a0}2}", "ERR:22P02"),
+            ("i_around_delim_NEL", "{1\u{85},\u{85}2}", "ERR:22P02"),
+            ("i_in_quotes_SP", "{\"1 \"}", "OK:7b317d"),
+            ("i_in_quotes_HT", "{\"1\u{9}\"}", "OK:7b317d"),
+            ("i_in_quotes_LF", "{\"1\u{a}\"}", "OK:7b317d"),
+            ("i_in_quotes_VT", "{\"1\u{b}\"}", "OK:7b317d"),
+            ("i_in_quotes_FF", "{\"1\u{c}\"}", "OK:7b317d"),
+            ("i_in_quotes_CR", "{\"1\u{d}\"}", "OK:7b317d"),
+            ("i_in_quotes_NBSP", "{\"1\u{a0}\"}", "ERR:22P02"),
+            ("i_in_quotes_NEL", "{\"1\u{85}\"}", "ERR:22P02"),
+            ("i_quoted_lead_SP", "{\" 1\"}", "OK:7b317d"),
+            ("i_quoted_lead_HT", "{\"\u{9}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_LF", "{\"\u{a}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_VT", "{\"\u{b}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_FF", "{\"\u{c}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_CR", "{\"\u{d}1\"}", "OK:7b317d"),
+            ("i_quoted_lead_NBSP", "{\"\u{a0}1\"}", "ERR:22P02"),
+            ("i_quoted_lead_NEL", "{\"\u{85}1\"}", "ERR:22P02"),
+        ];
+        let mut bad = Vec::new();
+        for (id, lit, want) in cases {
+            let got = run_in(mcx, lit, true);
+            if got != *want {
+                bad.push(format!("{id}: want {want}, got {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} cell(s) diverge from PostgreSQL 18.4:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn array_out_quotes_every_c_whitespace_and_round_trips() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            ("o_elem_SP", " ", "OUT:7b2220227d RT:EQ"),
+            ("o_mid_SP", "a b", "OUT:7b22612062227d RT:EQ"),
+            ("o_lead_SP", " a", "OUT:7b222061227d RT:EQ"),
+            ("o_trail_SP", "a ", "OUT:7b226120227d RT:EQ"),
+            ("o_elem_HT", "\u{9}", "OUT:7b2209227d RT:EQ"),
+            ("o_mid_HT", "a\u{9}b", "OUT:7b22610962227d RT:EQ"),
+            ("o_lead_HT", "\u{9}a", "OUT:7b220961227d RT:EQ"),
+            ("o_trail_HT", "a\u{9}", "OUT:7b226109227d RT:EQ"),
+            ("o_elem_LF", "\u{a}", "OUT:7b220a227d RT:EQ"),
+            ("o_mid_LF", "a\u{a}b", "OUT:7b22610a62227d RT:EQ"),
+            ("o_lead_LF", "\u{a}a", "OUT:7b220a61227d RT:EQ"),
+            ("o_trail_LF", "a\u{a}", "OUT:7b22610a227d RT:EQ"),
+            ("o_elem_VT", "\u{b}", "OUT:7b220b227d RT:EQ"),
+            ("o_mid_VT", "a\u{b}b", "OUT:7b22610b62227d RT:EQ"),
+            ("o_lead_VT", "\u{b}a", "OUT:7b220b61227d RT:EQ"),
+            ("o_trail_VT", "a\u{b}", "OUT:7b22610b227d RT:EQ"),
+            ("o_elem_FF", "\u{c}", "OUT:7b220c227d RT:EQ"),
+            ("o_mid_FF", "a\u{c}b", "OUT:7b22610c62227d RT:EQ"),
+            ("o_lead_FF", "\u{c}a", "OUT:7b220c61227d RT:EQ"),
+            ("o_trail_FF", "a\u{c}", "OUT:7b22610c227d RT:EQ"),
+            ("o_elem_CR", "\u{d}", "OUT:7b220d227d RT:EQ"),
+            ("o_mid_CR", "a\u{d}b", "OUT:7b22610d62227d RT:EQ"),
+            ("o_lead_CR", "\u{d}a", "OUT:7b220d61227d RT:EQ"),
+            ("o_trail_CR", "a\u{d}", "OUT:7b22610d227d RT:EQ"),
+            ("o_elem_NBSP", "\u{a0}", "OUT:7bc2a07d RT:EQ"),
+            ("o_mid_NBSP", "a\u{a0}b", "OUT:7b61c2a0627d RT:EQ"),
+            ("o_lead_NBSP", "\u{a0}a", "OUT:7bc2a0617d RT:EQ"),
+            ("o_trail_NBSP", "a\u{a0}", "OUT:7b61c2a07d RT:EQ"),
+            ("o_elem_NEL", "\u{85}", "OUT:7bc2857d RT:EQ"),
+            ("o_mid_NEL", "a\u{85}b", "OUT:7b61c285627d RT:EQ"),
+            ("o_lead_NEL", "\u{85}a", "OUT:7bc285617d RT:EQ"),
+            ("o_trail_NEL", "a\u{85}", "OUT:7b61c2857d RT:EQ"),
+        ];
+        let mut bad = Vec::new();
+        for (id, lit, want) in cases {
+            let got = run_out(mcx, lit);
+            if got != *want {
+                bad.push(format!("{id}: want {want}, got {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} cell(s) diverge from PostgreSQL 18.4:\n{}", bad.len(), bad.join("\n"));
+    }
+
+}
+
+// Malformed array images whose header ndim field is outside 0..=MAXDIM: a
+// corrupt page or a crafted binary-format value, unreachable from any array
+// pgrust can construct (ArrayCheckBounds caps ndim at MAXDIM). Every one of
+// these used to PANIC inside read_dims_lbounds, which looped `0..ndim` before
+// the wrappers' sanity check ever ran; C returns SQL NULL (or, for
+// array_cardinality, a value / an error — it has no sanity check at all).
+//
+// Expected values are the EXECUTED output of the vendored PG 18 bodies
+// (utils/adt/arrayfuncs.c + arrayutils.c @ 62d6c7d3df, run as a standalone
+// oracle over byte-identical images):
+//
+//   ndim         ndims  lower/upper/length  dims   cardinality
+//   -1           NULL   NULL                NULL   0
+//   INT_MIN      NULL   NULL                NULL   0
+//    0           NULL   NULL                NULL   0
+//    1              1   1 / 2 / 2           [1:2]  2
+//    6              6   1 / 2 / 2           [1:2]… 6
+//    7           NULL   NULL                NULL   6 (product of the 7 dim
+//    1000        NULL   NULL                NULL   words C happens to read
+//                                                  past the dims area, or
+//                                                  the array-size error —
+//                                                  undefined, see below)
+mod corruption_plane {
+    use super::*;
+    use crate::foundation::{read_dims, read_dims_lbounds, MAXDIM};
+
+    // Flat 4B-header image, PACKED on-disk layout: dims[0..n] right after the
+    // 16-byte header, lbounds[0..n] right after the dims (ARR_LBOUND is
+    // base + 16 + 4*ndim — ndim-dependent). `ndim` is written to the header
+    // verbatim; `n` is how many dim/lbound pairs are actually materialized,
+    // so a corrupt header can claim more dimensions than the body carries.
+    fn mk_image<'m>(mcx: Mcx<'m>, ndim: i32, dims: &[i32], lbs: &[i32]) -> PgVec<'m, u8> {
+        let n = dims.len();
+        assert_eq!(n, lbs.len());
+        let total = 16 + 8 * n;
+        let mut img = vec_with_capacity_in(mcx, total).unwrap();
+        vec_append_bytes(&mut img, &::datum::varlena::set_varsize_4b(total)).unwrap();
+        vec_append_bytes(&mut img, &ndim.to_ne_bytes()).unwrap();
+        vec_append_bytes(&mut img, &0i32.to_ne_bytes()).unwrap(); // dataoffset: no nulls
+        vec_append_bytes(&mut img, &INT4OID.to_ne_bytes()).unwrap();
+        for d in dims {
+            vec_append_bytes(&mut img, &d.to_ne_bytes()).unwrap();
+        }
+        for l in lbs {
+            vec_append_bytes(&mut img, &l.to_ne_bytes()).unwrap();
+        }
+        assert_eq!(img.len(), total);
+        img
+    }
+
+    // Every wrapper's verdict for one image: (ndims, lower(1), upper(1),
+    // length(1), dims, cardinality); None = SQL NULL, Err = ereport.
+    struct Verdicts {
+        ndims: Option<i32>,
+        lower1: Option<i32>,
+        upper1: Option<i32>,
+        length1: Option<i32>,
+        dims: Option<String>,
+        cardinality: Result<i32, String>,
+    }
+
+    fn call1(f: ::types_fmgr::PGFunction, mcx: Mcx<'_>, img: &[u8]) -> (PgResult<Datum>, bool) {
+        let mut fcinfo = LocalFcinfo::<2>::new(0);
+        // SAFETY: mcx outlives the call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        fcinfo.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_i32(1)); // reqdim = 1 for the 2-arg members
+        let r = f(None, &mut fcinfo);
+        (r, fcinfo.isnull)
+    }
+
+    fn verdicts(mcx: Mcx<'_>, img: &[u8]) -> Verdicts {
+        let int_of = |f: ::types_fmgr::PGFunction| -> Option<i32> {
+            let (r, isnull) = call1(f, mcx, img);
+            let d = r.expect("header readers never ereport on this plane");
+            if isnull {
+                None
+            } else {
+                Some(d.as_i32())
+            }
+        };
+        let dims = {
+            let (r, isnull) = call1(crate::ops::fc_array_dims, mcx, img);
+            let d = r.unwrap();
+            if isnull {
+                None
+            } else {
+                Some(as_str_lossy(varlena_payload(d)))
+            }
+        };
+        let cardinality = match call1(crate::ops::fc_array_cardinality, mcx, img) {
+            (Ok(d), false) => Ok(d.as_i32()),
+            (Ok(_), true) => panic!("C array_cardinality never returns NULL"),
+            (Err(e), _) => Err(e.message().to_string()),
+        };
+        Verdicts {
+            ndims: int_of(crate::ops::fc_array_ndims),
+            lower1: int_of(crate::ops::fc_array_lower),
+            upper1: int_of(crate::ops::fc_array_upper),
+            length1: int_of(crate::builtins::fc_array_length),
+            dims,
+            cardinality,
+        }
+    }
+
+    fn as_str_lossy(v: &[u8]) -> String {
+        String::from_utf8_lossy(v).into_owned()
+    }
+
+    fn setup() -> MemoryContext {
+        detoast_construct::install_test_detoast();
+        MemoryContext::new_bump("corruption-plane")
+    }
+
+    // read_dims_lbounds is the first thing every dims-reading wrapper does
+    // with the image; ndim=7 indexed dims[6] on a [i32; 6] (panic), ndim<0
+    // made `0..ndim as usize` a ~2^64 range (panic on the first arr_dim
+    // slice read). It must now come back clean, ndim RAW and dims zeroed.
+    #[test]
+    fn read_dims_lbounds_survives_out_of_range_ndim() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [-1, i32::MIN, 7, 1000, i32::MAX] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            let (got, dims, lbs) = read_dims_lbounds(&img);
+            assert_eq!(got, ndim, "ndim must come back RAW, never clamped");
+            assert_eq!(dims, [0; MAXDIM], "out-of-range ndim fills nothing");
+            assert_eq!(lbs, [0; MAXDIM]);
+        }
+    }
+
+    // read_dims (the dims-only sibling the unnest/selectivity/hstore sites
+    // used to open-code) carries the same contract.
+    #[test]
+    fn read_dims_survives_out_of_range_ndim() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [-1, i32::MIN, 7, 1000, i32::MAX] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            assert_eq!(read_dims(&img), (ndim, [0; MAXDIM]));
+        }
+        for n in 0..=MAXDIM {
+            let dims: std::vec::Vec<i32> = (0..n as i32).map(|i| i + 2).collect();
+            let img = mk_image(mcx, n as i32, &dims, &vec![1; n]);
+            let (got_n, got_dims) = read_dims(&img);
+            assert_eq!(got_n, n as i32);
+            assert_eq!(&got_dims[..n], &dims[..], "ndim={n}");
+        }
+    }
+
+    // The valid plane, including both boundaries (0 and MAXDIM), must be
+    // untouched by the reordering.
+    #[test]
+    fn read_dims_lbounds_valid_plane_unchanged() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        // ndim = 0: nothing to fill, and that IS a valid header field value.
+        let img = mk_image(mcx, 0, &[], &[]);
+        assert_eq!(read_dims_lbounds(&img), (0, [0; MAXDIM], [0; MAXDIM]));
+        // 1..=MAXDIM: every dim/lbound pair read, MAXDIM included.
+        for n in 1..=MAXDIM {
+            let dims: std::vec::Vec<i32> = (0..n as i32).map(|i| i + 2).collect();
+            let lbs: std::vec::Vec<i32> = (0..n as i32).map(|i| i - 3).collect();
+            let img = mk_image(mcx, n as i32, &dims, &lbs);
+            let (got_n, got_dims, got_lbs) = read_dims_lbounds(&img);
+            assert_eq!(got_n, n as i32);
+            assert_eq!(&got_dims[..n], &dims[..], "ndim={n}");
+            assert_eq!(&got_lbs[..n], &lbs[..], "ndim={n}");
+            assert_eq!(&got_dims[n..], &[0; MAXDIM][n..], "tail must stay zero");
+        }
+    }
+
+    // C, executed: ndims/lower/upper/length/dims = NULL, cardinality = 0.
+    #[test]
+    fn negative_ndim_matches_c() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [-1, i32::MIN] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            let v = verdicts(mcx, &img);
+            assert_eq!(v.ndims, None, "array_ndims ndim={ndim}");
+            assert_eq!(v.lower1, None, "array_lower ndim={ndim}");
+            assert_eq!(v.upper1, None, "array_upper ndim={ndim}");
+            assert_eq!(v.length1, None, "array_length ndim={ndim}");
+            assert_eq!(v.dims, None, "array_dims ndim={ndim}");
+            // ArrayGetNItems' own `ndim <= 0 -> 0` arm: a VALUE, not a NULL.
+            assert_eq!(v.cardinality, Ok(0), "array_cardinality ndim={ndim}");
+        }
+    }
+
+    // C, executed: same NULLs. cardinality is the undefined cell — C reads
+    // dim words past the dims area (it returned 6 for a 7-dim body and the
+    // array-size error for ndim=1000, both byte-dependent), so pgrust raises
+    // the dimension-count error instead of inventing a number. What matters:
+    // an Err, not a panic.
+    #[test]
+    fn over_maxdim_ndim_matches_c() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+        for ndim in [7, 1000, i32::MAX] {
+            let img = mk_image(mcx, ndim, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+            let v = verdicts(mcx, &img);
+            assert_eq!(v.ndims, None, "array_ndims ndim={ndim}");
+            assert_eq!(v.lower1, None, "array_lower ndim={ndim}");
+            assert_eq!(v.upper1, None, "array_upper ndim={ndim}");
+            assert_eq!(v.length1, None, "array_length ndim={ndim}");
+            assert_eq!(v.dims, None, "array_dims ndim={ndim}");
+            assert_eq!(
+                v.cardinality,
+                Err(alloc::format!(
+                    "number of array dimensions ({ndim}) exceeds the maximum allowed ({MAXDIM})"
+                )),
+                "array_cardinality ndim={ndim}"
+            );
+        }
+    }
+
+    // The boundary values C accepts must keep working — the fix must not
+    // over-tighten. ndim=0 is a VALID header field (C still nulls the
+    // wrappers via `<= 0`, and cardinality returns 0); ndim=MAXDIM is the
+    // last accepted dimension count and must return real values.
+    #[test]
+    fn boundary_ndim_0_and_maxdim_match_c() {
+        let ctx = setup();
+        let mcx = ctx.mcx();
+
+        // ndim = 0
+        let img = mk_image(mcx, 0, &[], &[]);
+        let v = verdicts(mcx, &img);
+        assert_eq!(v.ndims, None);
+        assert_eq!(v.lower1, None);
+        assert_eq!(v.upper1, None);
+        assert_eq!(v.length1, None);
+        assert_eq!(v.dims, None);
+        assert_eq!(v.cardinality, Ok(0));
+
+        // ndim = 1 (the ordinary case, as a control)
+        let img = mk_image(mcx, 1, &[2], &[1]);
+        let v = verdicts(mcx, &img);
+        assert_eq!(v.ndims, Some(1));
+        assert_eq!(v.lower1, Some(1));
+        assert_eq!(v.upper1, Some(2));
+        assert_eq!(v.length1, Some(2));
+        assert_eq!(v.dims.as_deref(), Some("[1:2]"));
+        assert_eq!(v.cardinality, Ok(2));
+
+        // ndim = MAXDIM
+        let img = mk_image(mcx, 6, &[2, 3, 1, 1, 1, 1], &[1; 6]);
+        let v = verdicts(mcx, &img);
+        assert_eq!(v.ndims, Some(6));
+        assert_eq!(v.lower1, Some(1));
+        assert_eq!(v.upper1, Some(2));
+        assert_eq!(v.length1, Some(2));
+        assert_eq!(v.dims.as_deref(), Some("[1:2][1:3][1:1][1:1][1:1][1:1]"));
+        assert_eq!(v.cardinality, Ok(6));
+    }
+
+    // Every OTHER read_dims_lbounds caller that feeds the raw ndim to
+    // array_get_n_items had the same panic (dims[i] on a 6-long slice); the
+    // central guard turns all of them into the same catchable error.
+    #[test]
+    fn array_get_n_items_rejects_ndim_wider_than_dims() {
+        assert_eq!(::arrayutils::array_get_n_items(0, &[]).unwrap(), 0);
+        assert_eq!(::arrayutils::array_get_n_items(-5, &[]).unwrap(), 0);
+        assert_eq!(::arrayutils::array_get_n_items(6, &[1; 6]).unwrap(), 1);
+        let e = ::arrayutils::array_get_n_items(7, &[1i32; 6]).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "number of array dimensions (7) exceeds the maximum allowed (6)"
+        );
+        // A soft-error context gets the same verdict softly (C's ereturn).
+        let mut soft = ::types_error::SoftErrorContext::new(false);
+        assert_eq!(
+            ::arrayutils::array_get_n_items_safe(7, &[1i32; 6], Some(&mut soft)).unwrap(),
+            -1
+        );
+        assert!(soft.error_occurred());
+    }
+}

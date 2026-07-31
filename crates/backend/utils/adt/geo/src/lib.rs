@@ -16,6 +16,8 @@ pub mod poly;
 pub mod proximity;
 #[cfg(test)]
 mod tests_full;
+#[cfg(test)]
+mod ws_tests;
 
 use ::adt_float::{float8_max, float8_mi, float8_min, float8_mul};
 use ::types_core::geo::{Point, BOX, PATH_HEADER_SIZE, POLYGON_HEADER_SIZE};

@@ -1063,3 +1063,175 @@ mod iterate_tests {
         );
     }
 }
+
+
+/// C-locale `isspace()` is {HT, LF, VT, FF, CR, SP}; Rust's `trim_ascii` omits
+/// VT (0x0b).  `jsonb_extract_path` resolves array subscripts with `strtoint`,
+/// i.e. `strtol`, so a VT-prefixed subscript is a valid index in C.  Every
+/// expectation below is the executed output of the real C `strtoint` plus its
+/// `endptr == str || *endptr != 0 || errno != 0` reject, cross-checked against
+/// PostgreSQL 18.4.
+#[test]
+fn path_subscript_matches_c_strtoint() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let img = jsonb_image(mcx, br#"[10,20,30]"#);
+    let payload = &img[4..];
+
+    let cases: &[(&[u8], Option<&str>)] = &[
+        // plain, and the ASCII whitespace that already worked
+        (b"1", Some("20")),
+        (b" 1", Some("20")),
+        (b"\t1", Some("20")),
+        (b"\n1", Some("20")),
+        (b"\r1", Some("20")),
+        (b"\x0c1", Some("20")), // FF is in Rust's trim set already
+        // the divergence: VT is C-locale space, but not Rust ASCII whitespace
+        (b"\x0b1", Some("20")),
+        (b"\x0b\x0b2", Some("30")),
+        (b" \t\n\x0b\x0c\r1", Some("20")), // the whole C isspace set
+        // signs, with and without VT
+        (b"+1", Some("20")),
+        (b"-1", Some("30")),
+        (b"\x0b-1", Some("30")),
+        (b"\x0b+2", Some("30")),
+        (b"-3", Some("10")),
+        (b"-4", None), // -lindex > nelements
+        // C rejects whitespace or a second sign after the sign
+        (b"+ 1", None),
+        (b"+\x0b1", None),
+        (b"++1", None),
+        (b"- 1", None),
+        // leading zeros are decimal; base 10 has no prefixes
+        (b"001", Some("20")),
+        (b"-001", Some("30")),
+        (b"010", None), // decimal 10, out of range -- not octal 8
+        (b"0x1", None),
+        // trailing junk, trailing whitespace included, is rejected
+        (b"1 ", None),
+        (b"1\x0b", None),
+        (b"1\t", None),
+        (b"1a", None),
+        (b"1.5", None),
+        (b"1_000", None),
+        // nothing converted at all
+        (b"", None),
+        (b" ", None),
+        (b"\x0b", None),
+        (b"abc", None),
+        (b"+", None),
+        // non-ASCII space is NOT C-locale space (U+00A0)
+        (b"\xc2\xa01", None),
+        // invalid UTF-8 after the digits
+        (b"1\xff", None),
+        // -0 is zero, not a negative subscript
+        (b"-0", Some("10")),
+        (b"\x0b-0", Some("10")),
+        // out of array range, and strtoint ERANGE / int narrowing
+        (b"2147483647", None),
+        (b"2147483648", None),
+        (b"-2147483648", None),
+        (b"-2147483649", None),
+        (b"99999999999999999999999", None),
+        (b"-99999999999999999999999", None),
+    ];
+
+    for (subscr, want) in cases {
+        let path: Vec<&[u8]> = vec![subscr];
+        let got = match getfield::get_element(mcx, payload, &path, false).unwrap() {
+            PathResult::Null => None,
+            PathResult::Jsonb(v) => {
+                Some(String::from_utf8_lossy(&image_out_text(mcx, &v)).into_owned())
+            }
+            PathResult::Text(t) => Some(String::from_utf8_lossy(t.data()).into_owned()),
+            PathResult::Input => Some("<input>".to_string()),
+        };
+        assert_eq!(got.as_deref(), *want, "subscript {subscr:?} on [10,20,30]");
+    }
+}
+
+/// The strtoint path is only reached for arrays: object subscripts stay literal
+/// key lookups, and a genuinely non-numeric ARRAY subscript stays SQL NULL
+/// rather than falling back to a key lookup.
+#[test]
+fn object_subscripts_never_go_through_strtoint() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let img = jsonb_image(mcx, br#"{"1": "one", "\u000b1": "vt-one", "a": [7,8]}"#);
+    let payload = &img[4..];
+    let probe = |path: Vec<&[u8]>| -> Option<String> {
+        match getfield::get_element(mcx, payload, &path, false).unwrap() {
+            PathResult::Null => None,
+            PathResult::Jsonb(v) => {
+                Some(String::from_utf8_lossy(&image_out_text(mcx, &v)).into_owned())
+            }
+            PathResult::Text(t) => Some(String::from_utf8_lossy(t.data()).into_owned()),
+            PathResult::Input => Some("<input>".to_string()),
+        }
+    };
+    // A numeric-looking key on an object is a KEY, not an index.
+    assert_eq!(probe(vec![b"1"]).as_deref(), Some("\"one\""));
+    // A VT-prefixed key on an object is a literal key, untouched by the fix.
+    assert_eq!(probe(vec![b"\x0b1"]).as_deref(), Some("\"vt-one\""));
+    // Descending into an array below an object still uses strtoint, VT and all.
+    assert_eq!(probe(vec![b"a", b"1"]).as_deref(), Some("8"));
+    assert_eq!(probe(vec![b"a", b"\x0b1"]).as_deref(), Some("8"));
+    // Non-numeric subscript on an ARRAY: C returns NULL, no key fallback.
+    assert_eq!(probe(vec![b"a", b"nope"]), None);
+}
+
+
+/// setPathArray and push_path resolve their path element with the same
+/// `strtoint`, so a VT-prefixed subscript is a valid index for
+/// jsonb_set/jsonb_insert/jsonb_delete_path too, and a VT-prefixed
+/// non-integer level still creates an OBJECT under FILL_GAPS.  Expectations
+/// are the executed output of PostgreSQL 18.4.
+#[test]
+fn set_path_subscript_matches_c_strtoint() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let doc = jsonb_image(mcx, br#"[10,20,30]"#);
+    let doc: &[u8] = mcx::slice_in(mcx, &doc[4..]).unwrap().leak();
+    let newval = jsonb_image(mcx, br#"99"#);
+    let newval: &[u8] = mcx::slice_in(mcx, &newval[4..]).unwrap().leak();
+    let newval = JsonbItem::Binary(newval);
+
+    let run = |subscr: &[u8], op: u32| -> Result<String, String> {
+        let path: Vec<Option<&[u8]>> = vec![Some(mcx::slice_in(mcx, subscr).unwrap().leak())];
+        let args = crate::mutate::SetPathArgs {
+            path: &path,
+            newval: Some(newval),
+            op_type: op,
+        };
+        match crate::mutate::set_path(mcx, doc, &args) {
+            Ok(v) => Ok(String::from_utf8_lossy(&image_out_text(mcx, &v)).into_owned()),
+            Err(e) => Err(e.message().to_string()),
+        }
+    };
+
+    // jsonb_set: JB_PATH_CREATE.  PG 18.4: [10, 99, 30] for both ' 1' and VT+'1'.
+    let set = crate::mutate::JB_PATH_CREATE;
+    assert_eq!(run(b" 1", set).unwrap(), "[10, 99, 30]");
+    assert_eq!(run(b"\x0b1", set).unwrap(), "[10, 99, 30]");
+    assert_eq!(run(b"1", set).unwrap(), "[10, 99, 30]");
+    // negative, VT-prefixed: PG 18.4 gives [10, 20, 99]
+    assert_eq!(run(b"\x0b-1", set).unwrap(), "[10, 20, 99]");
+    // jsonb_insert before: PG 18.4 gives [10, 99, 20, 30]
+    let ins = crate::mutate::JB_PATH_INSERT_BEFORE;
+    assert_eq!(run(b"\x0b1", ins).unwrap(), "[10, 99, 20, 30]");
+    // jsonb_delete_path: PG 18.4 gives [10, 30]
+    let del = crate::mutate::JB_PATH_DELETE;
+    assert_eq!(run(b"\x0b1", del).unwrap(), "[10, 30]");
+
+    // Still errors where C errors, with C's message text.
+    for bad in [&b"1 "[..], b"abc", b"+\x0b1", b"\x0b", b"", b"1\x0b"] {
+        let e = run(bad, set).expect_err("C raises 22P02 here");
+        assert!(
+            e.starts_with("path element at position 1 is not an integer:"),
+            "subscript {bad:?} gave {e:?}"
+        );
+    }
+}

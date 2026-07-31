@@ -1,0 +1,21 @@
+[package]
+name = "proof_spgist_geo"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]          # escape the pgrust workspace
+
+[dependencies]
+spgist_quadtree = { path = "../../crates/backend/access/spgist/spgist_quadtree" }
+spgist_kdtree = { path = "../../crates/backend/access/spgist/spgist_kdtree" }
+spgist_box = { path = "../../crates/backend/access/spgist/spgist_box" }
+spgist_text = { path = "../../crates/backend/access/spgist/spgist_text" }
+adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+types_spgist = { path = "../../crates/_support/types/types_spgist" }
+types_scan = { path = "../../crates/_support/types/types_scan" }
+types_fmgr = { path = "../../crates/_support/types/fmgr" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+datum = { path = "../../crates/_support/types/datum" }
+mcx = { path = "../../crates/_support/mcx" }
+proof_support = { path = "../support", features = ["mcx-stubs"] }

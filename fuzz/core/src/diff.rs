@@ -18,7 +18,8 @@
 use std::ffi::{c_char, CString};
 
 use types_error::{
-    PgError, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    PgError, ERRCODE_INVALID_ARGUMENT_FOR_LOG, ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 
 extern "C" {
@@ -28,15 +29,22 @@ extern "C" {
     fn pg_diff_float4out(num: f32, buf32: *mut c_char) -> i32;
     fn pg_diff_point_out(x: f64, y: f64, buf: *mut c_char, buflen: i32) -> i32;
     fn pg_diff_on_ppath(px: f64, py: f64, closed: i32, npts: i32, xys: *const f64) -> i32;
-    static mut pg_diff_errcode: i32;
+    fn pg_diff_float_math(fn_id: i32, a: f64, b: f64, out: *mut f64) -> i32;
+    // Accessor because the C-side errcode is _Thread_local (parallel test
+    // threads raced on the old shared global) and stable Rust cannot bind
+    // a C thread-local as an extern static.
+    fn pg_diff_errcode_get() -> i32;
 }
 
-/// Oracle error classes (see the errcode shim in csrc/pg_float_io.c).
+/// Oracle error classes (see the errcode shims in csrc/pg_float_io.c and
+/// csrc/pg_float_math.c).
 const C_ERR_INVALID_TEXT: i32 = 1; /* 22P02 */
 const C_ERR_OUT_OF_RANGE: i32 = 2; /* 22003 */
+const C_ERR_INVALID_LOG_ARG: i32 = 3; /* 2201E */
+const C_ERR_INVALID_POWER_ARG: i32 = 4; /* 2201F */
 
 fn c_errcode() -> i32 {
-    unsafe { pg_diff_errcode }
+    unsafe { pg_diff_errcode_get() }
 }
 
 fn rust_err_class(e: &PgError) -> i32 {
@@ -44,6 +52,10 @@ fn rust_err_class(e: &PgError) -> i32 {
         C_ERR_INVALID_TEXT
     } else if e.sqlstate == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE {
         C_ERR_OUT_OF_RANGE
+    } else if e.sqlstate == ERRCODE_INVALID_ARGUMENT_FOR_LOG {
+        C_ERR_INVALID_LOG_ARG
+    } else if e.sqlstate == ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION {
+        C_ERR_INVALID_POWER_ARG
     } else {
         99
     }
@@ -240,30 +252,6 @@ pub fn geo_diff(data: &[u8]) {
         let cres = unsafe { pg_diff_on_ppath(px, py, closed, npts as i32, xys.as_ptr()) };
         let cerr = c_errcode();
 
-        // KNOWN DIVERGENCE CANDIDATE (2026-07-30, this lane): open-path
-        // on_ppath sums the two running distances with a plain `a + b` in
-        // shipped Rust where C uses float8_pl — when a+b overflows to inf,
-        // C (and real PostgreSQL 18, confirmed via docker) raises 22003
-        // while Rust returns false. Witness: tests::on_ppath_overflow_
-        // divergence_witness. Carved here (open-path C-err-2-vs-Rust-Ok
-        // only) so fuzzing can keep hunting OTHER divergences; remove the
-        // carve when the shipped code is fixed.
-        if closed == 0 && cres == -1 && cerr == C_ERR_OUT_OF_RANGE {
-            if let Ok(_) = adt_geo::proximity::on_ppath(
-                &types_core::geo::Point { x: px, y: py },
-                &adt_geo::PathRef::from_payload(&{
-                    let mut p = Vec::new();
-                    p.extend_from_slice(&(npts as i32).to_ne_bytes());
-                    p.extend_from_slice(&closed.to_ne_bytes());
-                    p.extend_from_slice(&[0u8; 4]);
-                    p.extend_from_slice(&path_bytes[..npts * 16]);
-                    p
-                }),
-            ) {
-                return;
-            }
-        }
-
         // Rust side: build the PATH varlena payload PathRef expects.
         let mut payload = Vec::with_capacity(PATH_HEADER_PAYLOAD + npts * 16);
         payload.extend_from_slice(&(npts as i32).to_ne_bytes());
@@ -293,6 +281,133 @@ pub fn geo_diff(data: &[u8]) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Targets: float_math_diff / float_math2_diff — the libm-backed float8 math
+// family (proofs-ledger blocked(libm)/blocked(seam:libm-oracle) rows).
+// Unlike a Kani seam, both sides here call the REAL platform libm, so the
+// actual numerics are exercised; the comparison is three-way and exact:
+// result bits, error-vs-no-error, errcode class (22003 overflow/underflow +
+// domain, 2201E log args, 2201F power args).
+// ---------------------------------------------------------------------------
+//
+// Function-id table shared with csrc/pg_float_math.c pg_diff_fmath_table.
+// ORDER IS LOAD-BEARING: 0..=27 unary (alphabetical), 28..=30 two-argument.
+
+type Math1 = fn(f64) -> types_error::PgResult<f64>;
+type Math2 = fn(f64, f64) -> types_error::PgResult<f64>;
+
+fn dsinh_ok(x: f64) -> types_error::PgResult<f64> {
+    Ok(adt_float::dsinh(x)) /* infallible in both C and Rust */
+}
+fn dasinh_ok(x: f64) -> types_error::PgResult<f64> {
+    Ok(adt_float::dasinh(x)) /* infallible in both C and Rust */
+}
+
+pub const FLOAT_MATH1: &[(&str, Math1)] = &[
+    ("dacos", adt_float::dacos),     /* 0 */
+    ("dacosd", adt_float::dacosd),   /* 1 */
+    ("dacosh", adt_float::dacosh),   /* 2 */
+    ("dasin", adt_float::dasin),     /* 3 */
+    ("dasind", adt_float::dasind),   /* 4 */
+    ("dasinh", dasinh_ok),           /* 5 */
+    ("datan", adt_float::datan),     /* 6 */
+    ("datand", adt_float::datand),   /* 7 */
+    ("datanh", adt_float::datanh),   /* 8 */
+    ("dcbrt", adt_float::dcbrt),     /* 9 */
+    ("dcos", adt_float::dcos),       /* 10 */
+    ("dcosd", adt_float::dcosd),     /* 11 */
+    ("dcosh", adt_float::dcosh),     /* 12 */
+    ("dcot", adt_float::dcot),       /* 13 */
+    ("dcotd", adt_float::dcotd),     /* 14 */
+    ("derf", adt_float::derf),       /* 15 */
+    ("derfc", adt_float::derfc),     /* 16 */
+    ("dexp", adt_float::dexp),       /* 17 */
+    ("dgamma", adt_float::dgamma),   /* 18 */
+    ("dlgamma", adt_float::dlgamma), /* 19 */
+    ("dlog1", adt_float::dlog1),     /* 20 */
+    ("dlog10", adt_float::dlog10),   /* 21 */
+    ("dsin", adt_float::dsin),       /* 22 */
+    ("dsind", adt_float::dsind),     /* 23 */
+    ("dsinh", dsinh_ok),             /* 24 */
+    ("dtan", adt_float::dtan),       /* 25 */
+    ("dtand", adt_float::dtand),     /* 26 */
+    ("dtanh", adt_float::dtanh),     /* 27 */
+];
+
+pub const FLOAT_MATH2: &[(&str, Math2)] = &[
+    ("datan2", adt_float::datan2),   /* C id 28 */
+    ("datan2d", adt_float::datan2d), /* C id 29 */
+    ("dpow", adt_float::dpow),       /* C id 30 */
+];
+
+/// Core comparator: run C oracle id `fn_id` and the paired Rust fn on the
+/// same argument(s); panic (= libFuzzer divergence artifact) on any
+/// value-bits / error-presence / errcode-class mismatch. NaN payload bits
+/// are not compared when both sides yield NaN (both take payloads straight
+/// from the same platform libm; canonical-vs-passthrough is pinned by the
+/// smoke grid instead) — everything else is bit-exact.
+fn float_math_compare(name: &str, fn_id: i32, a: f64, b: f64, rres: types_error::PgResult<f64>) {
+    let mut cval = 0.0f64;
+    let cerr = unsafe { pg_diff_float_math(fn_id, a, b, &mut cval) };
+    assert!(cerr >= 0, "bad fn_id {fn_id}");
+    match rres {
+        Ok(r) => {
+            let same = cerr == 0 && (r.to_bits() == cval.to_bits() || (r.is_nan() && cval.is_nan()));
+            assert!(
+                same,
+                "{name} DIVERGENCE a={a:e}[{:016x}] b={b:e}[{:016x}]: \
+                 C=(err {cerr}, {:016x} {cval:e}) Rust=Ok({:016x} {r:e})",
+                a.to_bits(),
+                b.to_bits(),
+                cval.to_bits(),
+                r.to_bits()
+            );
+        }
+        Err(e) => {
+            let rerr = rust_err_class(&e);
+            assert!(
+                cerr == rerr,
+                "{name} DIVERGENCE a={a:e}[{:016x}] b={b:e}[{:016x}]: \
+                 C=(err {cerr}, val {cval:e}) Rust=Err({rerr} {})",
+                a.to_bits(),
+                b.to_bits(),
+                e.message
+            );
+        }
+    }
+}
+
+// Input layout: [selector][8 bytes le f64]. selector % 28 picks the unary
+// function. Extra bytes ignored so libFuzzer can grow/shrink freely.
+pub fn float_math_diff(data: &[u8]) {
+    let Some((&sel, rest)) = data.split_first() else {
+        return;
+    };
+    if rest.len() < 8 {
+        return;
+    }
+    let x = f64::from_le_bytes(rest[..8].try_into().unwrap());
+    let id = (sel as usize) % FLOAT_MATH1.len();
+    let (name, f) = FLOAT_MATH1[id];
+    float_math_compare(name, id as i32, x, 0.0, f(x));
+}
+
+// Input layout: [selector][16 bytes le f64 pair]. selector % 3 picks the
+// two-argument function (C ids 28..=30).
+pub fn float_math2_diff(data: &[u8]) {
+    let Some((&sel, rest)) = data.split_first() else {
+        return;
+    };
+    if rest.len() < 16 {
+        return;
+    }
+    let a = f64::from_le_bytes(rest[..8].try_into().unwrap());
+    let b = f64::from_le_bytes(rest[8..16].try_into().unwrap());
+    let id = (sel as usize) % FLOAT_MATH2.len();
+    let (name, f) = FLOAT_MATH2[id];
+    float_math_compare(name, (FLOAT_MATH1.len() + id) as i32, a, b, f(a, b));
 }
 
 // ---------------------------------------------------------------------------
@@ -398,9 +513,9 @@ mod tests {
     /// FPeq(float8_pl(a, b), ...) => real PostgreSQL 18 raises 22003
     /// ("value out of range: overflow"); shipped Rust computes the plain
     /// unchecked `a + b` (inf) and returns Ok(false).
-    /// This test pins the CURRENT divergent Rust behavior; when the fix
-    /// lands (float8_pl-equivalent checked add in proximity::on_ppath),
-    /// flip the assertion to Err(22003) and drop the geo_diff carve.
+    /// FIXED (fix/on-ppath-float8-pl): proximity::on_ppath now uses the
+    /// checked float8_pl, so Rust raises 22003 exactly like C/PG18; the
+    /// geo_diff carve for this divergence has been removed.
     #[test]
     fn on_ppath_overflow_divergence_witness() {
         let pt = types_core::geo::Point { x: 0.0, y: 1e308 };
@@ -413,8 +528,10 @@ mod tests {
             payload.extend_from_slice(&y.to_le_bytes());
         }
         let path = adt_geo::PathRef::from_payload(&payload);
-        // Current shipped behavior (divergent from C/PG18):
-        assert_eq!(adt_geo::proximity::on_ppath(&pt, &path).unwrap(), false);
+        // Fixed behavior: 22003 overflow error, matching C/PG18.
+        let err = adt_geo::proximity::on_ppath(&pt, &path).unwrap_err();
+        assert_eq!(rust_err_class(&err), C_ERR_OUT_OF_RANGE);
+        assert_eq!(err.message, "value out of range: overflow");
         // C oracle behavior (matches real PG18): 22003 error.
         let mut xys = [0.0f64, 0.0, 1.0, 0.0];
         let cres = unsafe { pg_diff_on_ppath(0.0, 1e308, 0, 2, xys.as_mut_ptr()) };
@@ -459,6 +576,136 @@ mod tests {
                     d.extend_from_slice(&y.to_le_bytes());
                 }
                 geo_diff(&d);
+            }
+        }
+    }
+
+    /// Deliberate seed grid for the float-math differentials: domain
+    /// boundaries (acos/asin/atanh at ±1, log at 0/negatives, acosh at 1,
+    /// tan near π/2), exp/gamma overflow-underflow edges, denormals, ±0,
+    /// ±Inf, NaN (canonical + payload), and the degree-variant wrap points
+    /// (30/45/60/90/180/270/360 and neighbors) where PostgreSQL has
+    /// exact-value special cases. gen_seeds.sh writes the same grid as the
+    /// libFuzzer starter corpus.
+    pub const FLOAT_MATH_VAL_CORPUS: &[f64] = &[
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        -0.5,
+        0.9999999999999999,
+        -0.9999999999999999,
+        1.0000000000000002,
+        -1.0000000000000002,
+        1.5,
+        -1.5,
+        2.0,
+        -2.0,
+        -3.0, /* tgamma/lgamma pole */
+        -2.5,
+        0.1,
+        30.0,
+        45.0,
+        60.0,
+        90.0,
+        180.0,
+        270.0,
+        360.0,
+        -30.0,
+        -45.0,
+        -90.0,
+        -180.0,
+        -270.0,
+        -360.0,
+        720.5,
+        -719.5,
+        29.999999999999996,
+        90.00000000000001,
+        179.99999999999997,
+        1.5707963267948966,  /* nearest f64 to π/2 */
+        1.5707963267948968,
+        3.141592653589793,   /* π */
+        6.283185307179586,   /* 2π */
+        0.7853981633974483,  /* π/4 */
+        709.782712893384,    /* exp overflow edge */
+        709.7827128933841,
+        -745.1332191019412,  /* exp underflow edge */
+        -745.1332191019413,
+        710.0,
+        -746.0,
+        171.62437695630272,  /* tgamma overflow edge */
+        171.62437695630274,
+        172.0,
+        -171.5,
+        -2.7476826467e-324,  /* rounds to a denormal */
+        5e-324,
+        -5e-324,
+        2.2250738585072014e-308,
+        -2.2250738585072014e-308,
+        1e-308,
+        1e308,
+        -1e308,
+        1.7976931348623157e308,
+        -1.7976931348623157e308,
+        9.007199254740992e15, /* 2^53 */
+        1e22,
+        -1e22,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+
+    /// DIVERGENCE-CANDIDATE WITNESS (found by float_math_diff fuzzing,
+    /// minimized artifact crash-c603..: dasind of f64 bits
+    /// bfe000000000003f ≈ -0.500000000000007).
+    /// ADJUDICATION: compiler/platform artifact, not a pgrust wrapper
+    /// defect. Three observed result-bit values for the same input:
+    ///   - shipped Rust (never FP-contracts):          c03e000000000082
+    ///   - C oracle, clang -ffp-contract=on (arm64):   c03e000000000081
+    ///     (asind_q1's `90.0 - (acos_x/acos_0_5)*60.0` fused to fmsub)
+    ///   - real PostgreSQL 18.4 aarch64 glibc docker:  c03e000000000085
+    ///     (glibc acos itself differs from macOS libm by ulps here)
+    /// With -ffp-contract=off the C oracle is bit-identical to Rust on
+    /// this host, so build.rs pins that flag: the fuzz claim is "same
+    /// wrapper logic over the same libm". Residual production note: on
+    /// FMA targets where the C compiler contracts (aarch64 gcc default),
+    /// C PostgreSQL's degree-trig can sit 1 ulp from pgrust even with a
+    /// matched libm; baseline x86-64 PG builds cannot contract and match.
+    #[test]
+    fn dasind_fp_contraction_witness() {
+        let x = f64::from_bits(0xbfe000000000003f);
+        let r = adt_float::dasind(x).unwrap();
+        assert_eq!(r.to_bits(), 0xc03e000000000082, "pinned uncontracted result");
+        // The (now -ffp-contract=off) oracle agrees bit-exactly.
+        let mut cval = 0.0f64;
+        let cerr = unsafe { pg_diff_float_math(4, x, 0.0, &mut cval) };
+        assert_eq!((cerr, cval.to_bits()), (0, 0xc03e000000000082));
+    }
+
+    #[test]
+    fn float_math_corpus() {
+        let payload_nan = f64::from_bits(0xfff800000000dead);
+        let mut vals = FLOAT_MATH_VAL_CORPUS.to_vec();
+        vals.push(payload_nan);
+        // Unary family: full value grid for every function id.
+        for id in 0..FLOAT_MATH1.len() {
+            for &x in &vals {
+                let mut d = vec![id as u8];
+                d.extend_from_slice(&x.to_le_bytes());
+                float_math_diff(&d);
+            }
+        }
+        // Two-arg family: full value-pair grid (covers the POSIX pow corner
+        // lattice: NaN^0, 1^NaN, 0^neg, neg^nonint, ±Inf arms, ±1^±Inf).
+        for id in 0..FLOAT_MATH2.len() {
+            for &a in &vals {
+                for &b in &vals {
+                    let mut d = vec![id as u8];
+                    d.extend_from_slice(&a.to_le_bytes());
+                    d.extend_from_slice(&b.to_le_bytes());
+                    float_math2_diff(&d);
+                }
             }
         }
     }

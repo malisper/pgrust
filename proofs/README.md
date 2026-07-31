@@ -164,12 +164,45 @@ cd proofs
 ./run-suite.sh all            # everything incl. calibration and unmeasured
 ```
 
+## Validating the manifest
+
+Two checkers guard `SUITE.tsv`. Run the cheap one on every edit:
+
+```sh
+cd proofs
+./lint-suite-rows.py          # offline row-shape lint: <1s, no cargo/solver
+./check-suite-names.py        # harness names vs `cargo kani list` (compiles
+                              # every family; --cache DIR to reuse listings)
+```
+
+`lint-suite-rows.py` is the authoring-time gate: column count, required
+columns non-empty, `expected`/`tier` vocabulary, numeric `time_s`,
+unexpanded `<...>` placeholders, prose or shell metacharacters in the flags
+column, `--c-lib` paths that exist, and harness fields holding packed data
+instead of a name. Every one of those classes has shipped into the manifest
+and been discovered only on a CI cluster solve run, where a malformed row looks
+exactly like a divergence (see `FLEET-SOLVING.md`).
+
+`check-suite-names.py` validates names against ground truth and prints a
+**census**: rows considered = checked + skipped + errored, asserted. If a
+family's listing fails it is retried, and if it still fails its rows are
+counted as UNVERIFIED under an INCOMPLETE CENSUS banner — a shrinking
+denominator is never allowed to look like a green.
+
 Harnesses run **strictly serially** (one kani/cbmc solve at a time —
 mandatory memory protocol), each under `timeout` plus a 6 GiB RSS
 watchdog polling the solver process tree every 15s. Scoreboard goes to
 stdout, machine-readable rows to `suite-results.tsv`. Exit is nonzero if
 any green-expected harness fails/times out, or if any must-fail control
 verifies SUCCESSFUL (a vacuous gate — the worst outcome).
+
+`run-suite.sh` also **hard-errors** (`BAD-MANIFEST-TIER`, nonzero exit) on a
+`tier` value outside the vocabulary above, instead of dropping the row. An
+unrecognized tier is matched by no arm of `row_selected()`, so the row runs
+in *no* tier: that is how eight must-fail negative controls (authored as
+`tier=control`) sat silently disabled while every gate reported green. The
+must-fail controls belong to `defect-witness`, the tier that rides along
+with every gate — never to a tier of their own.
 
 ## Licensing
 

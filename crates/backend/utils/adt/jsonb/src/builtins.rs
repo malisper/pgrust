@@ -700,7 +700,8 @@ fn item_kind(item: &JsonbItem<'_>) -> &'static str {
 
 // C: JsonbExtractScalar + the cast family's shared null screening.
 // Ok(None) = jsonb null → SQL NULL result.
-fn cast_scalar<'a>(payload: &'a [u8], sqltype: &'static str) -> PgResult<Option<JsonbItem<'a>>> {
+// pub for proofs (jsonb-probe cast rows; visibility-only edit).
+pub fn cast_scalar<'a>(payload: &'a [u8], sqltype: &'static str) -> PgResult<Option<JsonbItem<'a>>> {
     let Some(v) = crate::io::extract_scalar(payload) else {
         let kind = if crate::container::container_is_array(payload) {
             "array"
@@ -731,7 +732,8 @@ pub fn fc_jsonb_bool(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     }
 }
 
-fn cast_numeric_image<'a>(payload: &'a [u8], sqltype: &'static str) -> PgResult<Option<&'a [u8]>> {
+// pub for proofs (jsonb-probe cast rows; visibility-only edit).
+pub fn cast_numeric_image<'a>(payload: &'a [u8], sqltype: &'static str) -> PgResult<Option<&'a [u8]>> {
     match cast_scalar(payload, sqltype)? {
         None => Ok(None),
         Some(JsonbItem::Numeric(img)) => Ok(Some(img)),

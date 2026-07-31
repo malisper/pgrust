@@ -40,6 +40,8 @@ xact = { path = "../xact" }
 adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
 adt_pg_lsn = { path = "../../../utils/adt/pg_lsn" }
 slot = { path = "../../../replication/slot" }
+pg_string = { path = "../../../../common/string" }
+types_guc = { path = "../../../../_support/types/types_guc" }
 xlogarchive = { path = "../xlogarchive" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }

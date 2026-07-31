@@ -53,13 +53,12 @@
 //!     results; union is split per-n (2/3) — symbolic entry counts make
 //!     builder addresses symbolic (jsonb law).
 //!
-//! SCREENED DIVERGENCE PLANE (adjudication at solve time, do NOT record
-//! green over it): C gist_box_same compares with NaN-AWARE float8_eq
-//! (NaN == NaN -> true); shipped fc_gist_box_same uses raw f64 `==`
-//! (crates/backend/access/gist/gistproc/src/lib.rs:238-247).  A NaN
-//! coordinate shared by both keys is C-equal but Rust-unequal.
-//! probe_gist_box_same_nan_plane is the concrete expected-FAIL witness;
-//! eq_gist_box_same is fenced non-NaN and claims only that plane.
+//! HISTORICAL DIVERGENCE PLANES (both FIXED at fa583f02f2, 2026-07-30
+//! solve lane): gist_box_same raw f64 `==` -> NaN-aware float8_eq, and
+//! adjust_box raw </> -> NaN-aware float8_lt/gt (upstream #14238 class).
+//! probe_gist_box_same_nan_plane and eq_gist_box_union_n2/n3 now VERIFY
+//! against the fixed shipped code and stand as regression witnesses;
+//! eq_gist_box_same_full covers the whole plane, NaN included.
 //!
 //! Fallible harnesses stub types_error::PgError::error (field-identical
 //! minus Location/message text — value-space only) and std::fmt::format
@@ -459,6 +458,86 @@ mod proofs {
         }
     }
 
+    // Per-strategy literal split of the 2578 lattice (2026-07-30 solve
+    // lane): the full-symbolic-strategy harnesses above wall BOTH solvers
+    // at 450s under load 15-29 (12 fuzzy epsilon comparators muxed by a
+    // symbolic selector).  Literal strategy cells fold the switch
+    // (assume-never-folds law).  Partition is total by construction:
+    // cells s1..s12 x {leaf, internal} + the symbolic bad-strategy error
+    // harness below cover every u16 strategy; the full-symbolic rows stay
+    // as the CI-tier union claims.
+    macro_rules! box_consistent_cell {
+        ($($h:ident: $strat:literal, $leaf:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let mut recheck = true;
+                let r = rust_box_consistent(Some(&k), Some(&q), $strat, $leaf, &mut recheck);
+                let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+                let cerr = unsafe {
+                    pg_gist_box_consistent(
+                        0, k.high.x, k.high.y, k.low.x, k.low.y,
+                        0, q.high.x, q.high.y, q.low.x, q.low.y,
+                        $strat, $leaf as c_int, &mut crech, &mut cres,
+                    )
+                };
+                assert!(recheck as c_int == crech);
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    box_consistent_cell! {
+        eq_gbc_leaf_s1: 1u16, true;   eq_gbc_int_s1: 1u16, false;
+        eq_gbc_leaf_s2: 2u16, true;   eq_gbc_int_s2: 2u16, false;
+        eq_gbc_leaf_s3: 3u16, true;   eq_gbc_int_s3: 3u16, false;
+        eq_gbc_leaf_s4: 4u16, true;   eq_gbc_int_s4: 4u16, false;
+        eq_gbc_leaf_s5: 5u16, true;   eq_gbc_int_s5: 5u16, false;
+        eq_gbc_leaf_s6: 6u16, true;   eq_gbc_int_s6: 6u16, false;
+        eq_gbc_leaf_s7: 7u16, true;   eq_gbc_int_s7: 7u16, false;
+        eq_gbc_leaf_s8: 8u16, true;   eq_gbc_int_s8: 8u16, false;
+        eq_gbc_leaf_s9: 9u16, true;   eq_gbc_int_s9: 9u16, false;
+        eq_gbc_leaf_s10: 10u16, true; eq_gbc_int_s10: 10u16, false;
+        eq_gbc_leaf_s11: 11u16, true; eq_gbc_int_s11: 11u16, false;
+        eq_gbc_leaf_s12: 12u16, true; eq_gbc_int_s12: 12u16, false;
+    }
+
+    /// 2578 error arm: symbolic strategy OUTSIDE 1..=12, symbolic leaf —
+    /// both sides take the unrecognized-strategy path (verdict parity).
+    #[kani::proof]
+    #[kani::unwind(34)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_box_consistent_badstrategy() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let strategy: u16 = kani::any();
+        kani::assume(strategy < 1 || strategy > 12);
+        let leaf: bool = kani::any();
+        let mut recheck = true;
+        let r = rust_box_consistent(Some(&k), Some(&q), strategy, leaf, &mut recheck);
+        let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+        let cerr = unsafe {
+            pg_gist_box_consistent(
+                0, k.high.x, k.high.y, k.low.x, k.low.y,
+                0, q.high.x, q.high.y, q.low.x, q.low.y,
+                strategy, leaf as c_int, &mut crech, &mut cres,
+            )
+        };
+        assert!(recheck as c_int == crech);
+        assert!(cerr != 0 && cerr != 99);
+        assert!(r.is_err());
+        if let Err(e) = r {
+            core::mem::forget(e);
+        }
+    }
+
     // =================================================================
     // gist_box_same (oid 2584)
     // =================================================================
@@ -484,20 +563,15 @@ mod proofs {
         (result, d.as_usize() == rptr.as_usize())
     }
 
-    /// Non-NaN plane: exact-equality lattice, result out-param + returned
-    /// pointer datum parity.  (The NaN plane is a screened divergence — see
-    /// module doc and the probe below.)
+    /// FULL plane (NaN included): exact-equality lattice, result out-param +
+    /// returned pointer datum parity.  The historical NaN divergence (raw
+    /// f64 `==` vs C NaN-aware float8_eq) was FIXED at fa583f02f2; the fence
+    /// this harness used to carry is retired and the plane is unrestricted.
     #[kani::proof]
-    #[kani::unwind(12)]
-    fn eq_gist_box_same_nonnan() {
+    #[kani::unwind(34)] // image compares need unwind > BOX image bytes + 1 (repair law)
+    fn eq_gist_box_same_full() {
         let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
         let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
-        kani::assume(
-            !k.high.x.is_nan() && !k.high.y.is_nan() && !k.low.x.is_nan() && !k.low.y.is_nan(),
-        );
-        kani::assume(
-            !q.high.x.is_nan() && !q.high.y.is_nan() && !q.low.x.is_nan() && !q.low.y.is_nan(),
-        );
         let (r, ret_is_arg2) = rust_box_same(Some(&k), Some(&q));
         let mut cres: c_int = 0;
         let cerr = unsafe {
@@ -534,10 +608,11 @@ mod proofs {
         assert!(r as c_int == cres);
     }
 
-    /// DIVERGENCE WITNESS (EXPECTED FAIL, default solver): concrete NaN
-    /// coordinate in both keys — C float8_eq says equal (NaN == NaN), the
-    /// shipped raw f64 `==` says unequal.  Decodable single-path
-    /// counterexample; adjudication owed before any fix.
+    /// REGRESSION WITNESS (now GREEN): concrete NaN coordinate in both keys.
+    /// Was the expected-FAIL divergence witness for the raw-== NaN bug; fix
+    /// fa583f02f2 (NaN-aware float8_eq, upstream #14238 class) landed and
+    /// this now VERIFIES (measured 2026-07-30, 5.4s).  Keep it: it pins the
+    /// NaN plane concretely and fails again on any regression.
     #[kani::proof]
     #[kani::unwind(34)]
     fn probe_gist_box_same_nan_plane() {
@@ -553,7 +628,7 @@ mod proofs {
             )
         };
         assert!(cerr == 0);
-        assert!(r as c_int == cres); // must fail: C true, Rust false
+        assert!(r as c_int == cres); // green since fa583f02f2 (both true)
     }
 
     // =================================================================
@@ -581,7 +656,7 @@ mod proofs {
     /// Full-symbolic probe: symbolic×symbolic 53-bit multiply in size_box —
     /// expected WALL per the float-arith cost law; run to record honestly.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(34)] // image-compare repair law
     #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
     #[kani::stub(std::fmt::format, stubs::stub_format)]
     fn probe_gist_box_penalty_full() {
@@ -650,7 +725,7 @@ mod proofs {
     /// measured superlinear symex growth): universally quantified over all
     /// 100 (orig, new) cells; multiply operands are 10-valued.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(34)] // image-compare repair law
     #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
     #[kani::stub(std::fmt::format, stubs::stub_format)]
     fn grid_gist_box_penalty() {
@@ -887,6 +962,90 @@ mod proofs {
         }
     }
 
+    // Per-strategy literal split of group 0 (2026-07-30): the full-sym
+    // group0 harness above walls both solvers at 450s under load (same
+    // symbolic-selector wall class as 2578).  In-group live strategies:
+    // 1 RTLeft, 5 RTRight, 6 RTSame (leaf/internal split), 10 RTBelow,
+    // 11 RTAbove, plus the 29/30 RTOld remaps; everything else in <20 is
+    // the error arm (own harness below).  page_is_leaf stays symbolic in
+    // every cell.
+    macro_rules! point_consistent_g0_cell {
+        ($($h:ident: $strat:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let q = pt(any_f64(), any_f64());
+                let leaf: bool = kani::any();
+                let qimg = q.to_datum_bytes();
+                let mut recheck = true;
+                let r = rust_point_consistent(&k, dp(qimg.as_ptr()), $strat, leaf, &mut recheck);
+                let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+                let cerr = unsafe {
+                    pg_gist_point_consistent(
+                        $strat, leaf as c_int,
+                        k.high.x, k.high.y, k.low.x, k.low.y,
+                        q.x, q.y,
+                        0.0, 0.0, 0.0, 0.0,
+                        &mut crech, &mut cres,
+                    )
+                };
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(recheck as c_int == crech);
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    point_consistent_g0_cell! {
+        eq_gp0_s1: 1u16;   // RTLeft
+        eq_gp0_s5: 5u16;   // RTRight
+        eq_gp0_s6: 6u16;   // RTSame (leaf/internal both, leaf symbolic)
+        eq_gp0_s10: 10u16; // RTBelow
+        eq_gp0_s11: 11u16; // RTAbove
+        eq_gp0_s29: 29u16; // RTOldBelow -> remapped to 10 on both sides
+        eq_gp0_s30: 30u16; // RTOldAbove -> remapped to 11 on both sides
+    }
+
+    /// Group 0 in-group error arm: symbolic strategy < 20 outside the live
+    /// set {1,5,6,10,11} — unrecognized-strategy verdict parity (no
+    /// comparator circuit on this path).
+    #[kani::proof]
+    #[kani::unwind(34)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_point_consistent_group0_badstrategy() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let q = pt(any_f64(), any_f64());
+        let strategy: u16 = kani::any();
+        kani::assume(strategy < 20);
+        kani::assume(
+            strategy != 1 && strategy != 5 && strategy != 6 && strategy != 10 && strategy != 11,
+        );
+        let leaf: bool = kani::any();
+        let qimg = q.to_datum_bytes();
+        let mut recheck = true;
+        let r = rust_point_consistent(&k, dp(qimg.as_ptr()), strategy, leaf, &mut recheck);
+        let (mut crech, mut cres): (c_int, c_int) = (1, 0);
+        let cerr = unsafe {
+            pg_gist_point_consistent(
+                strategy, leaf as c_int,
+                k.high.x, k.high.y, k.low.x, k.low.y,
+                q.x, q.y,
+                0.0, 0.0, 0.0, 0.0,
+                &mut crech, &mut cres,
+            )
+        };
+        assert!(cerr != 0 && cerr != 99);
+        assert!(r.is_err());
+        if let Err(e) = r {
+            core::mem::forget(e);
+        }
+    }
+
     /// Group 1 (point <@ box, on_pb): the deliberately NON-FUZZY overlap
     /// test; query is a box datum.
     #[kani::proof]
@@ -898,6 +1057,11 @@ mod proofs {
         let q = bx(any_f64(), any_f64(), any_f64(), any_f64());
         let strategy: u16 = kani::any();
         kani::assume((20..40).contains(&strategy));
+        // 29/30 are RTOldBelow/RTOldAbove: both sides REMAP them into group 0
+        // before the group split, where this harness wires different query
+        // points to C (literal 0,0) vs Rust (the box image) — they belong to
+        // the group0 harness (which includes them) and are fenced here.
+        kani::assume(strategy != 29 && strategy != 30);
         let leaf: bool = kani::any();
         let qimg = q.to_datum_bytes();
         let mut recheck = true;
@@ -1176,6 +1340,67 @@ mod proofs {
         if let Some(d) = adjudicate(r, cerr) {
             assert!(d.to_bits() == cdist.to_bits());
         }
+    }
+
+    // Per-arm split of the bbox-distance strips (2026-07-30 solve lane):
+    // the combined disjunctive-assume strips harnesses wall BOTH solvers at
+    // 450s under load (the point_distance per-arm siblings prove at
+    // 98-345s) — case-split law: one fenced harness per compute_distance
+    // arm.  The combined harnesses above stay for the CI cluster tier.
+    macro_rules! bbox_distance_arm {
+        ($($h:ident: $idx:ident, $oid:literal, $name:literal, $rech:literal, $arm:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let q = pt(any_f64(), any_f64());
+                let inx = q.x <= k.high.x && q.x >= k.low.x;
+                let iny = q.y <= k.high.y && q.y >= k.low.y;
+                match $arm {
+                    0 => kani::assume(inx && iny),   // in-box arm -> 0.0
+                    1 => kani::assume(inx && !iny),  // y-strip float8_mi arms
+                    _ => kani::assume(!inx && iny),  // x-strip float8_mi arms
+                }
+                let mut recheck = false;
+                let r = rust_bbox_distance($idx, $oid, $name, &k, &q, 15, &mut recheck);
+                let (mut crech, mut cdist): (c_int, f64) = (0, 0.0);
+                let cerr = unsafe {
+                    match $oid {
+                        3998u32 => pg_gist_box_distance(
+                            15, k.high.x, k.high.y, k.low.x, k.low.y, q.x, q.y, &mut cdist,
+                        ),
+                        3280u32 => pg_gist_circle_distance(
+                            15, k.high.x, k.high.y, k.low.x, k.low.y, q.x, q.y,
+                            &mut crech, &mut cdist,
+                        ),
+                        _ => pg_gist_poly_distance(
+                            15, k.high.x, k.high.y, k.low.x, k.low.y, q.x, q.y,
+                            &mut crech, &mut cdist,
+                        ),
+                    }
+                };
+                if let Some(d) = adjudicate(r, cerr) {
+                    if $rech {
+                        assert!(recheck as c_int == crech); // lossy claim
+                    }
+                    assert!(d.to_bits() == cdist.to_bits());
+                }
+            }
+        )*};
+    }
+
+    bbox_distance_arm! {
+        eq_gist_box_distance_inbox:  IDX_BOX_DISTANCE, 3998u32, "gist_box_distance", false, 0;
+        eq_gist_box_distance_ystrip: IDX_BOX_DISTANCE, 3998u32, "gist_box_distance", false, 1;
+        eq_gist_box_distance_xstrip: IDX_BOX_DISTANCE, 3998u32, "gist_box_distance", false, 2;
+        eq_gist_circle_distance_inbox:  IDX_CIRCLE_DISTANCE, 3280u32, "gist_circle_distance", true, 0;
+        eq_gist_circle_distance_ystrip: IDX_CIRCLE_DISTANCE, 3280u32, "gist_circle_distance", true, 1;
+        eq_gist_circle_distance_xstrip: IDX_CIRCLE_DISTANCE, 3280u32, "gist_circle_distance", true, 2;
+        eq_gist_poly_distance_inbox:  IDX_POLY_DISTANCE, 3288u32, "gist_poly_distance", true, 0;
+        eq_gist_poly_distance_ystrip: IDX_POLY_DISTANCE, 3288u32, "gist_poly_distance", true, 1;
+        eq_gist_poly_distance_xstrip: IDX_POLY_DISTANCE, 3288u32, "gist_poly_distance", true, 2;
     }
 
     /// gist_box_distance, vertex arm on the concrete grid.
@@ -1461,6 +1686,208 @@ mod proofs {
         let f = fcn(IDX_CIRCLE_COMPRESS, 2592, "gist_circle_compress");
         let d = expect_ok(call(f, [eptr], false), 0);
         assert!(d.as_usize() == eptr.as_usize());
+    }
+
+    // Per-strategy literal split for the poly/circle consistent lattices
+    // (2591/2585): the full-symbolic-strategy harnesses above wall both
+    // solvers locally (same class as 2578).  Cells pin strategy to a
+    // literal, non-null keys; the null lattice keeps its own symbolic
+    // harnesses via the full rows (CI cluster tier).  Partition: s1..s12 cells
+    // + the shared bad-strategy arms of the full harnesses.
+    macro_rules! circle_consistent_cell {
+        ($($h:ident: $strat:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(34)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let c = CIRCLE { center: pt(any_f64(), any_f64()), radius: any_f64() };
+                let kimg = k.to_datum_bytes();
+                let qimg = c.to_datum_bytes();
+                let e = entry(dp(kimg.as_ptr()), 0, false, kani::any());
+                let f = fcn(IDX_CIRCLE_CONSISTENT, 2591, "gist_circle_consistent");
+                let mut recheck = false;
+                let r = call(
+                    f,
+                    [
+                        dp(&e as *const GISTENTRY),
+                        dp(qimg.as_ptr()),
+                        Datum::from_u16($strat),
+                        Datum::from_u16(0),
+                        dpm(&mut recheck as *mut bool),
+                    ],
+                    false,
+                )
+                .map(Datum::as_bool);
+                let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+                let cerr = unsafe {
+                    pg_gist_circle_consistent(
+                        0, k.high.x, k.high.y, k.low.x, k.low.y,
+                        0, c.center.x, c.center.y, c.radius,
+                        $strat, &mut crech, &mut cres,
+                    )
+                };
+                assert!(recheck as c_int == crech);
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    circle_consistent_cell! {
+        eq_gcc_s1: 1u16;  eq_gcc_s2: 2u16;  eq_gcc_s3: 3u16;  eq_gcc_s4: 4u16;
+        eq_gcc_s5: 5u16;  eq_gcc_s6: 6u16;  eq_gcc_s7: 7u16;  eq_gcc_s8: 8u16;
+        eq_gcc_s9: 9u16;  eq_gcc_s10: 10u16; eq_gcc_s11: 11u16; eq_gcc_s12: 12u16;
+    }
+
+    macro_rules! poly_consistent_cell {
+        ($($h:ident: $strat:literal;)*) => {$(
+            #[kani::proof]
+            #[kani::unwind(72)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+            #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $h() {
+                let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let bb = bx(any_f64(), any_f64(), any_f64(), any_f64());
+                let p0 = pt(any_f64(), any_f64());
+                let kimg = k.to_datum_bytes();
+                let qimg = poly_image(&bb, &p0);
+                let e = entry(dp(kimg.as_ptr()), 0, false, kani::any());
+                let f = fcn(IDX_POLY_CONSISTENT, 2585, "gist_poly_consistent");
+                let mut recheck = false;
+                let r = call(
+                    f,
+                    [
+                        dp(&e as *const GISTENTRY),
+                        dp(qimg.as_ptr()),
+                        Datum::from_u16($strat),
+                        Datum::from_u16(0),
+                        dpm(&mut recheck as *mut bool),
+                    ],
+                    true, // poly_at evaluates fcinfo.result_mcx()
+                )
+                .map(Datum::as_bool);
+                let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+                let cerr = unsafe {
+                    pg_gist_poly_consistent(
+                        0, k.high.x, k.high.y, k.low.x, k.low.y,
+                        0, bb.high.x, bb.high.y, bb.low.x, bb.low.y,
+                        $strat, &mut crech, &mut cres,
+                    )
+                };
+                assert!(recheck as c_int == crech);
+                if let Some(v) = adjudicate(r, cerr) {
+                    assert!(v as c_int == cres);
+                }
+            }
+        )*};
+    }
+
+    poly_consistent_cell! {
+        eq_gpc_s1: 1u16;  eq_gpc_s2: 2u16;  eq_gpc_s3: 3u16;  eq_gpc_s4: 4u16;
+        eq_gpc_s5: 5u16;  eq_gpc_s6: 6u16;  eq_gpc_s7: 7u16;  eq_gpc_s8: 8u16;
+        eq_gpc_s9: 9u16;  eq_gpc_s10: 10u16; eq_gpc_s11: 11u16; eq_gpc_s12: 12u16;
+    }
+
+    /// 2585 null lattice: key and/or query null -> false before any
+    /// comparator; strategy fully symbolic (never dispatched to a fuzzy
+    /// compare on the null path); recheck stays the C value.
+    #[kani::proof]
+    #[kani::unwind(72)]
+    #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+    #[kani::stub(std::env::var, stubs::stub_env_var_zero)]
+    #[kani::stub(std::sync::OnceLock::get_or_init, stubs::stub_once_lock_get_or_init)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_poly_consistent_nulls() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let bb = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let p0 = pt(any_f64(), any_f64());
+        let strategy: u16 = kani::any();
+        let (knull, qnull): (bool, bool) = (kani::any(), kani::any());
+        kani::assume(knull || qnull);
+        let kimg = k.to_datum_bytes();
+        let qimg = poly_image(&bb, &p0);
+        let e = entry(
+            if knull { Datum::from_usize(0) } else { dp(kimg.as_ptr()) },
+            0, false, kani::any(),
+        );
+        let f = fcn(IDX_POLY_CONSISTENT, 2585, "gist_poly_consistent");
+        let mut recheck = false;
+        let r = call(
+            f,
+            [
+                dp(&e as *const GISTENTRY),
+                if qnull { Datum::from_usize(0) } else { dp(qimg.as_ptr()) },
+                Datum::from_u16(strategy),
+                Datum::from_u16(0),
+                dpm(&mut recheck as *mut bool),
+            ],
+            true,
+        )
+        .map(Datum::as_bool);
+        let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+        let cerr = unsafe {
+            pg_gist_poly_consistent(
+                knull as c_int, k.high.x, k.high.y, k.low.x, k.low.y,
+                qnull as c_int, bb.high.x, bb.high.y, bb.low.x, bb.low.y,
+                strategy, &mut crech, &mut cres,
+            )
+        };
+        assert!(recheck as c_int == crech);
+        if let Some(v) = adjudicate(r, cerr) {
+            assert!(v as c_int == cres);
+        }
+    }
+
+    /// 2591 null lattice: same shape, circle query.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    fn eq_gist_circle_consistent_nulls() {
+        let k = bx(any_f64(), any_f64(), any_f64(), any_f64());
+        let c = CIRCLE { center: pt(any_f64(), any_f64()), radius: any_f64() };
+        let strategy: u16 = kani::any();
+        let (knull, qnull): (bool, bool) = (kani::any(), kani::any());
+        kani::assume(knull || qnull);
+        let kimg = k.to_datum_bytes();
+        let qimg = c.to_datum_bytes();
+        let e = entry(
+            if knull { Datum::from_usize(0) } else { dp(kimg.as_ptr()) },
+            0, false, kani::any(),
+        );
+        let f = fcn(IDX_CIRCLE_CONSISTENT, 2591, "gist_circle_consistent");
+        let mut recheck = false;
+        let r = call(
+            f,
+            [
+                dp(&e as *const GISTENTRY),
+                if qnull { Datum::from_usize(0) } else { dp(qimg.as_ptr()) },
+                Datum::from_u16(strategy),
+                Datum::from_u16(0),
+                dpm(&mut recheck as *mut bool),
+            ],
+            false,
+        )
+        .map(Datum::as_bool);
+        let (mut crech, mut cres): (c_int, c_int) = (0, 0);
+        let cerr = unsafe {
+            pg_gist_circle_consistent(
+                knull as c_int, k.high.x, k.high.y, k.low.x, k.low.y,
+                qnull as c_int, c.center.x, c.center.y, c.radius,
+                strategy, &mut crech, &mut cres,
+            )
+        };
+        assert!(recheck as c_int == crech);
+        if let Some(v) = adjudicate(r, cerr) {
+            assert!(v as c_int == cres);
+        }
     }
 
     // =================================================================

@@ -70,4 +70,36 @@ open("corpus/geo_diff/path_open", "wb").write(b"\x01\x00" + tri)
 open("corpus/geo_diff/path_closed", "wb").write(b"\x01\x01" + tri)
 PY
 
+# --- float math differentials (libm family) ---------------------------------
+mkdir -p corpus/float_math_diff corpus/float_math2_diff
+python3 - <<'PY'
+import struct
+
+# Deliberate boundary values — keep in sync with diff.rs FLOAT_MATH_VAL_CORPUS
+# (domain edges, exp/gamma overflow-underflow edges, denormals, degree wrap
+# points, near-pi/2, +-0/+-Inf/NaN).
+vals = [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 0.9999999999999999, 1.0000000000000002,
+        1.5, -1.5, -2.0, -3.0, 0.1, 30.0, 45.0, 60.0, 90.0, 180.0, 270.0, 360.0,
+        -90.0, -360.0, 720.5, 90.00000000000001, 1.5707963267948966,
+        3.141592653589793, 709.782712893384, -745.1332191019413, 710.0,
+        171.62437695630272, -171.5, 5e-324, -5e-324, 2.2250738585072014e-308,
+        1e308, -1e308, 1e22, float("inf"), float("-inf"), float("nan")]
+# unary: [id][8 bytes]; every function id gets a spread of boundary values
+for fid in range(28):
+    for i, v in enumerate(vals):
+        open(f"corpus/float_math_diff/f{fid:02d}_{i:02d}", "wb").write(
+            bytes([fid]) + struct.pack("<d", v))
+# two-arg: [id][16 bytes]; POSIX pow lattice + atan2 quadrant/inf corners
+pairs = [(0.0, -1.0), (-0.0, -3.0), (0.0, 0.0), (1.0, float("nan")),
+         (float("nan"), 0.0), (float("nan"), float("nan")), (-1.0, 0.5),
+         (-2.0, 3.0), (-2.0, 2.0), (-1.0, float("inf")), (0.5, float("-inf")),
+         (2.0, float("inf")), (float("-inf"), 3.0), (float("-inf"), -3.0),
+         (float("-inf"), 2.0), (float("inf"), -1.0), (2.0, 1e18), (2.0, 9.9e15),
+         (10.0, 309.0), (10.0, -324.0), (-0.0, float("inf")), (1e308, 2.0)]
+for fid in range(3):
+    for i, (a, b) in enumerate(pairs):
+        open(f"corpus/float_math2_diff/g{fid}_{i:02d}", "wb").write(
+            bytes([fid]) + struct.pack("<dd", a, b))
+PY
+
 echo "seed corpus written under $(pwd)/corpus/"

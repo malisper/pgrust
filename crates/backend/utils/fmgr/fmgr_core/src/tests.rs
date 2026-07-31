@@ -549,3 +549,29 @@ fn thin_twin_matches_wrapper() {
     let e2 = unsafe { thin(core::ptr::NonNull::from(&mut fcinfo).cast()) }.unwrap_err();
     assert_eq!(e1.sqlstate(), e2.sqlstate());
 }
+
+#[test]
+fn not_ported_name_predicate() {
+    // A ported builtin resolves to its real entry point: predicate is None.
+    let f = fmgr_info(177).unwrap(); // int4pl
+    assert_eq!(fmgr_info_not_ported_name(&f), None);
+
+    // Any canonical row still on the stub must be reported by name. Scan for
+    // one instead of hard-coding an oid so this test survives future ports;
+    // if the whole catalog is ever ported the loop body simply never runs.
+    for b in FMGR_BUILTINS.iter() {
+        let live = fmgr_isbuiltin(b.foid)
+            .is_some_and(|x| x.func as usize != builtin_not_ported as usize);
+        if live {
+            continue;
+        }
+        let mut f = fmgr_info(b.foid).unwrap();
+        assert_eq!(fmgr_info_not_ported_name(&f), Some(b.name), "oid {}", b.foid);
+        // The predicate matches call-time behavior: invoking the carrier
+        // raises the clean feature-not-supported error.
+        let mut fci = LocalFcinfo::<0>::new(InvalidOid);
+        let err = f.invoke(&mut fci).unwrap_err();
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        break;
+    }
+}

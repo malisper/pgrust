@@ -29,6 +29,19 @@ fn array_size_exceeded() -> PgError {
     .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
 }
 
+// Same text/sqlstate C raises for an over-MAXDIM ndim on the wire
+// (arrayfuncs.c array_recv / ArrayCheckBounds).
+#[cold]
+#[inline(never)]
+fn ndims_exceeded(ndim: i32, max: usize) -> PgError {
+    PgError::error(alloc::format!(
+        "number of array dimensions ({}) exceeds the maximum allowed ({})",
+        ndim,
+        max
+    ))
+    .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+}
+
 pub fn array_get_offset(n: i32, dim: &[i32], lb: &[i32], indx: &[i32]) -> i32 {
     let mut scale: i32 = 1;
     let mut offset: i32 = 0;
@@ -55,6 +68,22 @@ pub fn array_get_n_items_safe(
 ) -> PgResult<i32> {
     if ndim <= 0 {
         return Ok(0);
+    }
+    // C's ArrayGetNItems takes a bare `const int *dims` and reads `ndim` of
+    // them, so a corrupt header claiming ndim > MAXDIM makes it read past the
+    // dims area and past the datum (undefined; observed C returns a garbage
+    // product or raises the array-size error, depending on adjacent bytes).
+    // Rust knows the buffer length, so say so instead: a claimed ndim wider
+    // than the dims the caller actually holds is a corrupt image, and a
+    // caught error beats the slice-index panic this used to be. Unreachable
+    // for any constructible array -- ArrayCheckBounds caps ndim at MAXDIM.
+    // Bonus: it is what lets LLVM drop the per-iteration dims[i] bounds check.
+    if ndim as usize > dims.len() {
+        return ereturn(
+            escontext.take(),
+            -1,
+            ndims_exceeded(ndim, dims.len()),
+        );
     }
     let mut ret: i32 = 1;
     for i in 0..ndim as usize {

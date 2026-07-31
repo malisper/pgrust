@@ -11,6 +11,8 @@ pub mod insert;
 pub mod scan;
 pub mod split;
 pub mod state;
+#[cfg(test)]
+mod state_tests;
 pub mod util;
 pub mod vacuum;
 pub mod wal;

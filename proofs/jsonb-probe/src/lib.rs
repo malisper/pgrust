@@ -108,7 +108,7 @@
 mod proofs {
     use adt_jsonb::container::{
         self, JsonbItem, JB_FARRAY, JB_FOBJECT, JB_FSCALAR, JENTRY_HAS_OFF, JENTRY_ISBOOL_FALSE,
-        JENTRY_ISBOOL_TRUE, JENTRY_ISCONTAINER, JENTRY_ISNULL, JENTRY_ISSTRING,
+        JENTRY_ISBOOL_TRUE, JENTRY_ISCONTAINER, JENTRY_ISNULL, JENTRY_ISNUMERIC, JENTRY_ISSTRING,
     };
     use proof_support::mcx_stubs;
     use std::os::raw::{c_char, c_int};
@@ -1290,5 +1290,1052 @@ mod proofs {
         };
         let r = container::get_key_value(&img.0[..], &probe.bytes[..probe.len]);
         assert!((c_found != 0) == r.is_some());
+    }
+
+    // ======================================================================
+    // WAVE 2 (2026-07-30): gin_compare_jsonb (3480) + the scalar-cast rows
+    // 3449 jsonb_numeric / 3450-3452 jsonb_int2/4/8 / 2580+3453
+    // jsonb_float8/float4.  C side: c/pg_gin_cmp.c and c/pg_jsonb_casts.c
+    // (run with `--c-lib c/pg_jsonb_casts.c --c-lib c/pg_gin_cmp.c` added;
+    // the casts TU links against pg_jsonb.c's pg_JsonbExtractScalar).
+    //
+    // Cast-rig fence: raw-scalar jsonb images whose sole element is a
+    // NUMERIC leaf built by build_raw_numeric (4-byte varlena header +
+    // short/long packed numeric header + digits < NBASE, the writer
+    // invariant), or the existing null/bool/string/array/object builders
+    // for the error-class cells.  Result materialization (byref_result /
+    // Datum packing) is out of scope; claims are value-space + error-CLASS
+    // (sqlstate) parity, message text out of proof (stub_pg_error_error /
+    // stub_format).  DigitBuf: inline-capacity allocator model (heap arm
+    // panics if reached — nd fences keep it unreachable), pool return
+    // forgotten (numeric-probe N4 recipe).
+    // ======================================================================
+
+    use proof_support::stubs;
+
+    extern "C" {
+        fn pg_gin_compare_jsonb(a: *const u8, la: c_int, b: *const u8, lb: c_int) -> c_int;
+        fn pgp_casts_reset() -> c_int;
+        fn pgp_casts_take_abort() -> c_int;
+        fn pgp_jsonb_numeric(
+            c: *const u8,
+            errclass: *mut c_int,
+            errtype: *mut c_int,
+            vdata: *mut *const u8,
+            vlen: *mut c_int,
+        ) -> c_int;
+        fn pgp_jsonb_int8(
+            c: *const u8,
+            errclass: *mut c_int,
+            errtype: *mut c_int,
+            out: *mut i64,
+        ) -> c_int;
+        fn pgp_jsonb_int4(
+            c: *const u8,
+            errclass: *mut c_int,
+            errtype: *mut c_int,
+            out: *mut i32,
+        ) -> c_int;
+        fn pgp_jsonb_int2(
+            c: *const u8,
+            errclass: *mut c_int,
+            errtype: *mut c_int,
+            out: *mut i16,
+        ) -> c_int;
+        fn pgp_jsonb_float8_special(
+            c: *const u8,
+            errclass: *mut c_int,
+            errtype: *mut c_int,
+            bits: *mut u64,
+        ) -> c_int;
+        fn pgp_jsonb_float4_special(
+            c: *const u8,
+            errclass: *mut c_int,
+            errtype: *mut c_int,
+            bits: *mut u32,
+        ) -> c_int;
+    }
+
+    // ---- 3480 gin_compare_jsonb ----
+    //
+    // Core-level (ptr,len) pairs per the varlena-comparator pattern (fmgr
+    // text unwrap stays in the tested tier, bytea-cmp precedent).  EXACT
+    // int32 value asserted: CBMC's memcmp model returns the first
+    // mismatching byte difference — the glibc convention the shipped
+    // varstrfastcmp_c mirrors (text-cmp eq_bttextcmp precedent).
+
+    const GINCAP: usize = 8;
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn eq_gin_compare_jsonb() {
+        let a: [u8; GINCAP] = kani::any();
+        let b: [u8; GINCAP] = kani::any();
+        let la: usize = kani::any();
+        let lb: usize = kani::any();
+        kani::assume(la <= GINCAP);
+        kani::assume(lb <= GINCAP);
+        let c = unsafe {
+            pg_gin_compare_jsonb(a.as_ptr(), la as c_int, b.as_ptr(), lb as c_int)
+        };
+        let r = adt_jsonb::gin::gin_compare_jsonb(&a[..la], &b[..lb]);
+        kani::cover!(r < 0);
+        kani::cover!(r == 0);
+        kani::cover!(r > 0);
+        kani::cover!(r != 0 && la == lb); // memcmp mismatch arm
+        kani::cover!(r != 0 && la != lb); // length tiebreak arm
+        assert!(c == r);
+    }
+
+    // ---- cast rig ----
+
+    /// numeric-leaf image cap (max cell: w4n5 short = 8 + 6 + 10 = 24).
+    const CASTCAP: usize = 32;
+
+    const NBASE: i16 = 10000;
+    const NUMERIC_POS: u16 = 0x0000;
+    const NUMERIC_NEG: u16 = 0x4000;
+    const NUMERIC_SHORT: u16 = 0x8000;
+    const NUMERIC_SHORT_SIGN_MASK: u16 = 0x2000;
+    const NUMERIC_SHORT_DSCALE_SHIFT: u16 = 7;
+    const NUMERIC_SHORT_DSCALE_MAX: u16 = 0x1F80 >> 7;
+    const NUMERIC_SHORT_WEIGHT_SIGN_MASK: u16 = 0x0040;
+    const NUMERIC_SHORT_WEIGHT_MASK: u16 = 0x003F;
+    const NUM_NAN: u16 = 0xC000;
+    const NUM_PINF: u16 = 0xD000;
+    const NUM_NINF: u16 = 0xF000;
+
+    const NDMAX: usize = 5;
+
+    fn put_u16<const C: usize>(buf: &mut Img<C>, off: usize, v: u16) {
+        buf.0[off..off + 2].copy_from_slice(&v.to_ne_bytes());
+    }
+
+    /// Trusted builder: raw-scalar jsonb image whose sole element is a
+    /// numeric leaf. `hdr_words`: 1 (short form) or 2 (long form: sign|dscale
+    /// then weight). Digits are the caller's (fenced 0..NBASE there).
+    /// Element data offset is 0 (base = 8), so INTALIGN padding is zero and
+    /// the JEntry length equals the numeric image size — the writer layout
+    /// for a raw-scalar numeric root.
+    fn build_raw_numeric<const C: usize>(
+        w0: u16,
+        w1: i16,
+        long_form: bool,
+        digits: &[i16; NDMAX],
+        nd: usize,
+    ) -> Img<C> {
+        let numlen = 4 + 2 + if long_form { 2 } else { 0 } + 2 * nd;
+        let mut buf = Img::<C>([0u8; C]);
+        put_u32(&mut buf, 0, 1u32 | JB_FARRAY | JB_FSCALAR);
+        put_u32(
+            &mut buf,
+            4,
+            jentry(JENTRY_ISNUMERIC, numlen, numlen as u32),
+        );
+        // 4-byte varlena header (varattrib_4b LE word, len<<2)
+        put_u32(&mut buf, 8, (numlen as u32) << 2);
+        put_u16(&mut buf, 12, w0);
+        let mut pos = 14;
+        if long_form {
+            put_u16(&mut buf, 14, w1 as u16);
+            pos = 16;
+        }
+        for i in 0..NDMAX {
+            if i < nd {
+                put_u16(&mut buf, pos + 2 * i, digits[i] as u16);
+            }
+        }
+        buf
+    }
+
+    /// Symbolic short-form numeric cell at LITERAL weight/nd: sign and
+    /// dscale symbolic, digits symbolic fenced to the on-disk invariant
+    /// 0 <= d < NBASE.
+    fn any_short_numeric(weight: i32, nd: usize) -> Img<CASTCAP> {
+        set_hoff_pin(1); // length-form JEntry cells (offset-form reader lane
+                         // covered by the lookup family + window_n1_of)
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
+        let mut digits = [0i16; NDMAX];
+        for d in digits.iter_mut().take(nd) {
+            let v: i16 = kani::any();
+            kani::assume(v >= 0 && v < NBASE);
+            *d = v;
+        }
+        let wbits = ((weight as u16) & NUMERIC_SHORT_WEIGHT_MASK)
+            | if weight < 0 { NUMERIC_SHORT_WEIGHT_SIGN_MASK } else { 0 };
+        let hdr = NUMERIC_SHORT
+            | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
+            | (dscale << NUMERIC_SHORT_DSCALE_SHIFT)
+            | wbits;
+        let img = build_raw_numeric(hdr, 0, false, &digits, nd);
+        set_hoff_pin(0);
+        img
+    }
+
+    /// Long-form cell (verbatim long header: sign|dscale word + weight word).
+    fn any_long_numeric(weight: i16, nd: usize) -> Img<CASTCAP> {
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= 0x3FFF && dscale <= 100);
+        let mut digits = [0i16; NDMAX];
+        for d in digits.iter_mut().take(nd) {
+            let v: i16 = kani::any();
+            kani::assume(v >= 0 && v < NBASE);
+            *d = v;
+        }
+        let hdr = if neg { NUMERIC_NEG } else { NUMERIC_POS } | dscale;
+        set_hoff_pin(1);
+        let img = build_raw_numeric(hdr, weight, true, &digits, nd);
+        set_hoff_pin(0);
+        img
+    }
+
+    /// Special (NaN/+Inf/-Inf) numeric cell at a LITERAL header (a symbolic
+    /// selector keeps the finite numeric_out+float8in arm structurally in
+    /// the formula — assume never folds; the literal prunes it.  The three
+    /// per-header cells partition the special lattice by construction).
+    fn special_numeric(hdr: u16) -> Img<CASTCAP> {
+        set_hoff_pin(1); // literal JEntry (symbolic HAS_OFF keeps the numeric
+                         // window symbolic and the finite arm live)
+        let img = build_raw_numeric(hdr, 0, false, &[0i16; NDMAX], 0);
+        set_hoff_pin(0);
+        img
+    }
+
+    /// Rust-side value-space cast composition (the jsonb_numeric_cast macro
+    /// body minus fcinfo/mcx result packing, which stays in the tested
+    /// tier): shipped cast_numeric_image + the shipped numeric conversion.
+    enum CastR<T> {
+        Null,
+        Val(T),
+        Err(types_error::SqlState),
+    }
+
+    fn take_err<T>(e: Box<types_error::PgError>) -> CastR<T> {
+        let s = e.sqlstate;
+        core::mem::forget(e); // avoid Box<PgError> drop glue (varbit lesson)
+        CastR::Err(s)
+    }
+
+    fn rust_cast<T>(
+        payload: &[u8],
+        sqltype: &'static str,
+        conv: impl Fn(adt_numeric::Num<'_>) -> types_error::PgResult<T>,
+    ) -> CastR<T> {
+        match adt_jsonb::builtins::cast_numeric_image(payload, sqltype) {
+            Ok(None) => CastR::Null,
+            Ok(Some(img)) => match conv(adt_numeric::Num::from_payload(&img[4..])) {
+                Ok(v) => CastR::Val(v),
+                Err(e) => take_err(e),
+            },
+            Err(e) => take_err(e),
+        }
+    }
+
+    /// sqlstate expected for each C error class (SHIM C2 mapping).
+    fn class_sqlstate(errclass: c_int) -> types_error::SqlState {
+        match errclass {
+            1 => types_error::ERRCODE_INVALID_PARAMETER_VALUE,
+            2 => types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            _ => types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+        }
+    }
+
+    fn casts_reset() {
+        unsafe {
+            pgp_reset();
+            pgp_casts_reset();
+        }
+    }
+
+    fn assert_no_abort_casts() {
+        assert!(unsafe { pgp_take_abort() } == 0);
+        assert!(unsafe { pgp_casts_take_abort() } == 0);
+    }
+
+    macro_rules! int_cast_check {
+        ($check:ident, $pgp:ident, $sqltype:literal, $conv:path, $cty:ty) => {
+            fn $check(img: &Img<CASTCAP>, want_overflow_covers: bool) {
+                let (mut ec, mut et): (c_int, c_int) = (0, 0);
+                let mut out: $cty = 0;
+                let c = unsafe { $pgp(img.0.as_ptr(), &mut ec, &mut et, &mut out) };
+                let r = rust_cast(&img.0[..], $sqltype, |n| $conv(n));
+                assert_no_abort_casts();
+                if want_overflow_covers {
+                    kani::cover!(matches!(r, CastR::Val(_)));
+                    kani::cover!(matches!(r, CastR::Err(_)));
+                }
+                match r {
+                    CastR::Null => assert!(c == 0),
+                    CastR::Val(v) => {
+                        assert!(c == 1);
+                        assert!(out == v);
+                    }
+                    CastR::Err(s) => {
+                        assert!(c == 2);
+                        assert!(s == class_sqlstate(ec));
+                    }
+                }
+            }
+        };
+    }
+
+    int_cast_check!(check_jsonb_int8, pgp_jsonb_int8, "bigint", adt_numeric::numeric_int8, i64);
+    int_cast_check!(check_jsonb_int4, pgp_jsonb_int4, "integer", adt_numeric::numeric_int4, i32);
+    int_cast_check!(
+        check_jsonb_int2,
+        pgp_jsonb_int2,
+        "smallint",
+        adt_numeric::numeric_int2,
+        i16
+    );
+
+    /// Kani stub for `adt_numeric::var::digit_buf_heap_realloc` (N4 recipe):
+    /// the plane fences ndigits within INLINE_DIGITS, so reaching the heap
+    /// arm is a harness defect — panic loudly, never a silent fence.
+    fn stub_digit_buf_heap_realloc(_heap: &mut Vec<i16>, _n: usize) {
+        panic!("DigitBuf heap arm reached under the inline nd fence");
+    }
+
+    /// Kani stub for `adt_numeric::var::digit_buf_put`: drop-time pool
+    /// return out of proof.
+    fn stub_digit_buf_put(v: Vec<i16>) {
+        core::mem::forget(v);
+    }
+
+    /// Cast-cell harness generator: per-(weight, nd) LITERAL cells (the
+    /// case-split law: assumes never fold; each cell pins its plane and the
+    /// family partitions the short-form weight/nd grid — per_n coverage
+    /// argument).  All cast stubs: message machinery (stub_pg_error_error /
+    /// stub_format — sqlstate stays shipped and IS asserted) + the DigitBuf
+    /// inline-capacity model.
+    macro_rules! cast_case {
+        ($($name:ident[$unwind:literal]: $check:ident($($arg:expr),*);)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($unwind)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+            #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+            fn $name() { $check($($arg),*); }
+        )*};
+    }
+
+    // int cells: literal (weight, nd) planes.  w0n0 = zero; wm1n1 = pure
+    // fraction (rounding to 0/±1); w0n2/w1n2 = fractional-digit rounding
+    // lanes; w4n5/w4n1 = the "treat stripped digits as real" lane at big
+    // weights (int2/int4 range-error arms live from w1n2 up; int8's
+    // overflow arm needs w4+ which its own cells carry).
+    fn cell_int8(weight: i32, nd: usize, covers: bool) {
+        casts_reset();
+        let img = any_short_numeric(weight, nd);
+        check_jsonb_int8(&img, covers);
+    }
+    fn cell_int4(weight: i32, nd: usize, covers: bool) {
+        casts_reset();
+        let img = any_short_numeric(weight, nd);
+        check_jsonb_int4(&img, covers);
+    }
+    fn cell_int2(weight: i32, nd: usize, covers: bool) {
+        casts_reset();
+        let img = any_short_numeric(weight, nd);
+        check_jsonb_int2(&img, covers);
+    }
+    fn cell_int8_long(weight: i16, nd: usize) {
+        casts_reset();
+        let img = any_long_numeric(weight, nd);
+        check_jsonb_int8(&img, false);
+    }
+
+    cast_case! {
+        eq_jsonb_int8_w0n0[6]: cell_int8(0, 0, false);
+        eq_jsonb_int8_w0n1[12]: cell_int8(0, 1, false);
+        eq_jsonb_int8_w0n2[12]: cell_int8(0, 2, false);
+        eq_jsonb_int8_wm1n1[12]: cell_int8(-1, 1, false);
+        eq_jsonb_int8_w1n2[12]: cell_int8(1, 2, false);
+        eq_jsonb_int8_w4n5[14]: cell_int8(4, 5, true);
+        eq_jsonb_int8_w5n1[14]: cell_int8(5, 1, true);
+        eq_jsonb_int8_long_w0n1[12]: cell_int8_long(0, 1);
+        eq_jsonb_int4_w0n1[12]: cell_int4(0, 1, false);
+        eq_jsonb_int4_w0n2[12]: cell_int4(0, 2, false);
+        eq_jsonb_int4_wm1n1[12]: cell_int4(-1, 1, false);
+        eq_jsonb_int4_w2n3[13]: cell_int4(2, 3, true);
+        eq_jsonb_int2_w0n1[12]: cell_int2(0, 1, false);
+        eq_jsonb_int2_wm1n1[12]: cell_int2(-1, 1, false);
+        eq_jsonb_int2_w1n2[12]: cell_int2(1, 2, true);
+    }
+
+    // ---- special-value lattice (int class-2 errors; float NaN/±Inf) ----
+
+    fn cell_int8_special(hdr: u16) {
+        casts_reset();
+        let img = special_numeric(hdr);
+        check_jsonb_int8(&img, false);
+    }
+    fn cell_int4_special(hdr: u16) {
+        casts_reset();
+        let img = special_numeric(hdr);
+        check_jsonb_int4(&img, false);
+    }
+    fn cell_int2_special(hdr: u16) {
+        casts_reset();
+        let img = special_numeric(hdr);
+        check_jsonb_int2(&img, false);
+    }
+
+    /// 2580/3453 fenced plane: the specials lattice (NaN/+Inf/-Inf) with
+    /// bit-exact results, plus the shared null/error classes in the kinds
+    /// cells below.  The finite arm (numeric_out + strtod cascade) is out
+    /// of fence on both sides (C sets the abort sentinel; the ledger row
+    /// records the wall).
+    fn cell_float8_special(hdr: u16) {
+        casts_reset();
+        let img = special_numeric(hdr);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut bits: u64 = 0;
+        let c = unsafe { pgp_jsonb_float8_special(img.0.as_ptr(), &mut ec, &mut et, &mut bits) };
+        let r = rust_cast(&img.0[..], "double precision", adt_numeric::numeric_float8);
+        assert_no_abort_casts();
+        match r {
+            CastR::Val(v) => {
+                assert!(c == 1);
+                assert!(v.to_bits() == bits);
+            }
+            _ => panic!("special lattice cell left the value arm"),
+        }
+    }
+
+    fn cell_float4_special(hdr: u16) {
+        casts_reset();
+        let img = special_numeric(hdr);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut bits: u32 = 0;
+        let c = unsafe { pgp_jsonb_float4_special(img.0.as_ptr(), &mut ec, &mut et, &mut bits) };
+        let r = rust_cast(&img.0[..], "real", adt_numeric::numeric_float4);
+        assert_no_abort_casts();
+        match r {
+            CastR::Val(v) => {
+                assert!(c == 1);
+                assert!(v.to_bits() == bits);
+            }
+            _ => panic!("special lattice cell left the value arm"),
+        }
+    }
+
+    cast_case! {
+        eq_jsonb_int8_special_nan[6]: cell_int8_special(NUM_NAN);
+        eq_jsonb_int8_special_pinf[6]: cell_int8_special(NUM_PINF);
+        eq_jsonb_int8_special_ninf[6]: cell_int8_special(NUM_NINF);
+        eq_jsonb_int4_special_nan[6]: cell_int4_special(NUM_NAN);
+        eq_jsonb_int2_special_nan[6]: cell_int2_special(NUM_NAN);
+        eq_jsonb_float8_special_nan[6]: cell_float8_special(NUM_NAN);
+        eq_jsonb_float8_special_pinf[6]: cell_float8_special(NUM_PINF);
+        eq_jsonb_float8_special_ninf[6]: cell_float8_special(NUM_NINF);
+        eq_jsonb_float4_special_nan[6]: cell_float4_special(NUM_NAN);
+        eq_jsonb_float4_special_pinf[6]: cell_float4_special(NUM_PINF);
+        eq_jsonb_float4_special_ninf[6]: cell_float4_special(NUM_NINF);
+    }
+
+    // ---- 3449 jsonb_numeric: image-window identity + shared error class --
+
+    /// Window identity: same input buffer, so slice identity is pointer +
+    /// length equality (materialization/copy out of scope, SHIM C3).
+    fn cell_numeric_window(nd: usize, hoff: u8) {
+        casts_reset();
+        set_hoff_pin(hoff);
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
+        let mut digits = [0i16; NDMAX];
+        for d in digits.iter_mut().take(nd) {
+            let v: i16 = kani::any();
+            kani::assume(v >= 0 && v < NBASE);
+            *d = v;
+        }
+        let hdr = NUMERIC_SHORT | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
+            | (dscale << NUMERIC_SHORT_DSCALE_SHIFT);
+        let img: Img<CASTCAP> = build_raw_numeric(hdr, 0, false, &digits, nd);
+        set_hoff_pin(0);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut vlen: c_int = -1;
+        let mut vdata: *const u8 = core::ptr::null();
+        let c = unsafe {
+            pgp_jsonb_numeric(img.0.as_ptr(), &mut ec, &mut et, &mut vdata, &mut vlen)
+        };
+        // shipped cast_numeric_image directly: the claim is the image
+        // window (ptr + len) itself — same input buffer on both sides.
+        let r = adt_jsonb::builtins::cast_numeric_image(&img.0[..], "numeric");
+        assert_no_abort_casts();
+        match r {
+            Ok(Some(s)) => {
+                assert!(c == 1);
+                assert!(vdata == s.as_ptr());
+                assert!(vlen == s.len() as c_int);
+            }
+            Ok(None) => panic!("numeric window cell left the value arm"),
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("numeric window cell errored");
+            }
+        }
+    }
+
+    /// Shared error/null classes for ALL cast rows: raw-scalar root over the
+    /// full null/bool/string kind space through the jsonb_numeric flow (the
+    /// same shipped cast_numeric_image + verbatim C flow every cast row
+    /// shares; per-row sqltype only changes message text, which is out of
+    /// proof).  null -> SQL NULL both sides; bool/string -> class-1 error
+    /// with C's jbvType matching the builder kind.
+    fn cell_cast_scalar_kinds() {
+        casts_reset();
+        let elems: [Scalar; MAXN] = [any_scalar(true), any_scalar(true), any_scalar(true)];
+        let img: Img<CASTCAP> = build_array(&elems, 1, true);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut vlen: c_int = -1;
+        let mut vdata: *const u8 = core::ptr::null();
+        let c = unsafe {
+            pgp_jsonb_numeric(img.0.as_ptr(), &mut ec, &mut et, &mut vdata, &mut vlen)
+        };
+        let r = rust_cast(&img.0[..], "numeric", |_| Ok(()));
+        assert_no_abort_casts();
+        kani::cover!(matches!(r, CastR::Null));
+        kani::cover!(matches!(r, CastR::Err(_)));
+        match r {
+            CastR::Null => {
+                assert!(c == 0);
+                assert!(elems[0].kind == 0);
+            }
+            CastR::Err(s) => {
+                assert!(c == 2);
+                assert!(s == class_sqlstate(ec));
+                // C jbvType parity with the builder kind (string=1, bool=3)
+                assert!(et == if elems[0].kind == 3 { 1 } else { 3 });
+            }
+            CastR::Val(_) => panic!("no numeric leaf in this cell"),
+        }
+    }
+
+    /// Not-a-scalar error class: array root (n symbolic would wall the
+    /// builder; n literal per the per_n law — n=2 exercises the false-arm
+    /// type report jbvArray).
+    fn cell_cast_err_array(n: usize) {
+        casts_reset();
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CASTCAP> = build_array(&elems, n, false);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut vlen: c_int = -1;
+        let mut vdata: *const u8 = core::ptr::null();
+        let c = unsafe {
+            pgp_jsonb_numeric(img.0.as_ptr(), &mut ec, &mut et, &mut vdata, &mut vlen)
+        };
+        let r = rust_cast(&img.0[..], "numeric", |_| Ok(()));
+        assert_no_abort_casts();
+        match r {
+            CastR::Err(s) => {
+                assert!(c == 2);
+                assert!(s == class_sqlstate(ec));
+                assert!(et == 0x10); // jbvArray
+            }
+            _ => panic!("array root must be a cast error"),
+        }
+    }
+
+    fn cell_cast_err_object(n: usize) {
+        casts_reset();
+        let keys: [Key; MAXN] = [any_key_len(1), any_key_len(2), any_key_len(2)];
+        let vals: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CASTCAP> = build_object(&keys, &vals, n);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut vlen: c_int = -1;
+        let mut vdata: *const u8 = core::ptr::null();
+        let c = unsafe {
+            pgp_jsonb_numeric(img.0.as_ptr(), &mut ec, &mut et, &mut vdata, &mut vlen)
+        };
+        let r = rust_cast(&img.0[..], "numeric", |_| Ok(()));
+        assert_no_abort_casts();
+        match r {
+            CastR::Err(s) => {
+                assert!(c == 2);
+                assert!(s == class_sqlstate(ec));
+                assert!(et == 0x11); // jbvObject
+            }
+            _ => panic!("object root must be a cast error"),
+        }
+    }
+
+    /// int-row representative of the shared error flow (macro-identical
+    /// composition across int2/4/float rows; sqltype only feeds message
+    /// text).
+    fn cell_int8_scalar_kinds() {
+        casts_reset();
+        let elems: [Scalar; MAXN] = [any_scalar(true), any_scalar(true), any_scalar(true)];
+        let img: Img<CASTCAP> = build_array(&elems, 1, true);
+        check_jsonb_int8(&img, false);
+    }
+
+    cast_case! {
+        eq_jsonb_numeric_window_n0[6]: cell_numeric_window(0, 1);
+        eq_jsonb_numeric_window_n1[7]: cell_numeric_window(1, 1);
+        eq_jsonb_numeric_window_n1_of[7]: cell_numeric_window(1, 2);
+        eq_jsonb_numeric_window_n2[8]: cell_numeric_window(2, 1);
+        eq_jsonb_cast_scalar_kinds[7]: cell_cast_scalar_kinds();
+        eq_jsonb_cast_err_array_n2[7]: cell_cast_err_array(2);
+        eq_jsonb_cast_err_object_n1[7]: cell_cast_err_object(1);
+        eq_jsonb_int8_scalar_kinds[7]: cell_int8_scalar_kinds();
+    }
+
+    // ---- 3217 jsonb_extract_path (#>): path-resolution verdict ----
+    //
+    // Rust target: shipped getfield::resolve_path (the jsonb_get_element
+    // walk factored out; materialization + the fc-level null-element
+    // pre-screen of get_jsonb_path_all stay in the tested tier).  C:
+    // c/pg_jsonb_path.c pgp_get_element (verbatim walk; strtol -> total
+    // C-locale model, SHIM P3).  Path-element fence: no NUL bytes (SQL text
+    // cannot contain them; the shipped parse stops at the first NUL exactly
+    // as TextDatumGetCString does, and the C model is handed a NUL-free
+    // buffer).  0x0B is IN the symbolic alphabet: the walk now parses
+    // subscripts with pg_string::strtoint10_strict, so the VT case that once
+    // diverged is covered by these EQ cells and pinned by the standing
+    // witness witness_path_vt_subscript below.
+
+    extern "C" {
+        fn pgp_path_take_abort() -> c_int;
+        fn pgp_get_element(
+            c: *const u8,
+            paths: *const *const u8,
+            plens: *const c_int,
+            npath: c_int,
+            vtype: *mut c_int,
+            vdata: *mut *const u8,
+            vlen: *mut c_int,
+            vbool: *mut c_int,
+        ) -> c_int;
+    }
+
+    fn run_get_element(img: &[u8], path: &[&[u8]]) -> (c_int, c_int, *const u8, c_int, c_int) {
+        let mut ptrs = [core::ptr::null::<u8>(); 2];
+        let mut lens = [0 as c_int; 2];
+        for (i, p) in path.iter().enumerate() {
+            ptrs[i] = p.as_ptr();
+            lens[i] = p.len() as c_int;
+        }
+        let (mut vtype, mut vlen, mut vbool): (c_int, c_int, c_int) = (0, 0, 0);
+        let mut vdata: *const u8 = core::ptr::null();
+        let c = unsafe {
+            pgp_get_element(
+                img.as_ptr(),
+                ptrs.as_ptr(),
+                lens.as_ptr(),
+                path.len() as c_int,
+                &mut vtype,
+                &mut vdata,
+                &mut vlen,
+                &mut vbool,
+            )
+        };
+        assert!(unsafe { pgp_path_take_abort() } == 0);
+        (c, vtype, vdata, vlen, vbool)
+    }
+
+    fn check_get_element(img: &[u8], path: &[&[u8]]) {
+        let (c, vtype, vdata, vlen, vbool) = run_get_element(img, path);
+        match adt_jsonb::getfield::resolve_path(img, path) {
+            adt_jsonb::getfield::PathVerdict::Null => assert!(c == 0),
+            adt_jsonb::getfield::PathVerdict::Input => assert!(c == 2),
+            adt_jsonb::getfield::PathVerdict::Item(it) => {
+                assert!(c == 1);
+                assert_item_matches(1, vtype, vdata, vlen, vbool, Some(it));
+            }
+        }
+    }
+
+    /// Symbolic path-element text, fenced: no NUL (SQL text cannot carry
+    /// one).  Every other byte, VT (0x0B) included, is in the alphabet.
+    fn any_path_elem(bytes: &mut [u8; 8], cap: usize) -> usize {
+        let len: usize = kani::any();
+        kani::assume(len <= cap);
+        for b in bytes.iter_mut().take(cap) {
+            let v: u8 = kani::any();
+            kani::assume(v != 0);
+            *b = v;
+        }
+        len
+    }
+
+    fn cell_path_obj_n2_len1() {
+        unsafe { pgp_reset() };
+        let keys: [Key; MAXN] = [any_key_len(1), any_key_len(2), any_key_len(2)];
+        let vals: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_object(&keys, &vals, 2);
+        let probe = any_key();
+        check_get_element(&img.0[..], &[&probe.bytes[..probe.len]]);
+    }
+
+    /// Per-length case split (assumes never fold; literal len prunes the
+    /// parse circuit).  hoff_pin: 0 symbolic, 1/2 pinned length/offset form.
+    fn cell_path_arr_sub_len(sl: usize, hoff_pin: u8) {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        set_hoff_pin(hoff_pin);
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        set_hoff_pin(0);
+        let mut sub = [0u8; 8];
+        for b in sub.iter_mut().take(sl) {
+            let v: u8 = kani::any();
+            kani::assume(v != 0);
+            *b = v;
+        }
+        check_get_element(&img.0[..], &[&sub[..sl]]);
+    }
+
+    /// Subscript-parse regime witnesses for the array cell (hoisted).
+    fn cover_path_arr_subscr() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        let mut sub = [0u8; 8];
+        let sl = any_path_elem(&mut sub, 4);
+        let (c, _, _, _, _) = run_get_element(&img.0[..], &[&sub[..sl]]);
+        kani::cover!(c == 1 && sub[0] == b'-'); // negative subscript hit
+        kani::cover!(c == 1 && sub[0] == b' '); // leading-whitespace parse
+        kani::cover!(c == 1 && sub[0] == 0x0b); // VT is C-locale whitespace
+        kani::cover!(c == 1 && sub[0] == b'+'); // explicit plus sign
+        kani::cover!(c == 0 && sl == 2 && sub[0] == b'1'); // trailing junk null
+        kani::cover!(c == 0 && sl == 0); // empty string null
+    }
+
+    /// i32-overflow subscript lane (11 symbolic digits > INT_MAX: C strtoint
+    /// flags ERANGE, Rust flags the i32 range check — both null).
+    fn cell_path_arr_bigsub() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        let mut sub = [0u8; 12];
+        let first: u8 = kani::any();
+        kani::assume(first >= b'1' && first <= b'9');
+        sub[0] = first;
+        for b in sub.iter_mut().skip(1) {
+            let v: u8 = kani::any();
+            kani::assume(v.is_ascii_digit());
+            *b = v;
+        }
+        let (c, _, _, _, _) = run_get_element(&img.0[..], &[&sub[..]]);
+        assert!(c == 0);
+        match adt_jsonb::getfield::resolve_path(&img.0[..], &[&sub[..]]) {
+            adt_jsonb::getfield::PathVerdict::Null => {}
+            _ => panic!("11-digit subscript must be null on both sides"),
+        }
+    }
+
+    fn cell_path_scalar_root_len1() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(true), any_scalar(true), any_scalar(true)];
+        let img: Img<CMPCAP> = build_array(&elems, 1, true);
+        let mut sub = [0u8; 8];
+        let sl = any_path_elem(&mut sub, 2);
+        check_get_element(&img.0[..], &[&sub[..sl]]);
+    }
+
+    fn cell_path_empty_arr() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(false), any_scalar(false), any_scalar(false)];
+        let img: Img<CMPCAP> = build_array(&elems, 1, false);
+        check_get_element(&img.0[..], &[]);
+    }
+
+    fn cell_path_empty_scalar() {
+        unsafe { pgp_reset() };
+        let elems: [Scalar; MAXN] = [any_scalar(true), any_scalar(true), any_scalar(true)];
+        let img: Img<CMPCAP> = build_array(&elems, 1, true);
+        check_get_element(&img.0[..], &[]);
+    }
+
+    /// Depth-2 walk: outer array [ <child array>, bool ], path len 2 —
+    /// first subscript must resolve the container element, second recurses.
+    fn cell_path_nested_len2() {
+        unsafe { pgp_reset() };
+        let img: Img<CMPCAP> = build_array_nested(2, 2, false);
+        let mut s1 = [0u8; 8];
+        let l1 = any_path_elem(&mut s1, 2);
+        let mut s2 = [0u8; 8];
+        let l2 = any_path_elem(&mut s2, 2);
+        check_get_element(&img.0[..], &[&s1[..l1], &s2[..l2]]);
+    }
+
+    per_n! {
+        eq_path_obj_n2_len1[6]: cell_path_obj_n2_len1();
+        eq_path_arr_sub_len1_lf[8]: cell_path_arr_sub_len(1, 1);
+        eq_path_arr_sub_len1_of[8]: cell_path_arr_sub_len(1, 2);
+        eq_path_arr_sub_len2_lf[8]: cell_path_arr_sub_len(2, 1);
+        eq_path_arr_sub_len2_of[8]: cell_path_arr_sub_len(2, 2);
+        eq_path_arr_sub_len3_lf[8]: cell_path_arr_sub_len(3, 1);
+        eq_path_arr_sub_len0[8]: cell_path_arr_sub_len(0, 1);
+        cover_path_arr_subscr_regimes[8]: cover_path_arr_subscr();
+        eq_path_arr_bigsub[14]: cell_path_arr_bigsub();
+        eq_path_scalar_root_len1[6]: cell_path_scalar_root_len1();
+        eq_path_empty_arr[6]: cell_path_empty_arr();
+        eq_path_empty_scalar[7]: cell_path_empty_scalar();
+        eq_path_nested_len2[16]: cell_path_nested_len2();
+    }
+
+    // ---- 3272/3274 jsonb_build_array_noargs / jsonb_build_object_noargs --
+    //
+    // Constant empty-container images through the SHIPPED build pipeline
+    // (JsonbPush + convert_to_jsonb) vs the verbatim C writer subset
+    // (c/pg_jsonb_build.c).  Full varlena image byte-compared.  Rust
+    // allocation via token ctx + mcx stubs (allocation strategy out of
+    // scope); fcinfo/variadic-extraction stays in the tested tier.
+
+    extern "C" {
+        fn pgp_build_take_abort() -> c_int;
+        fn pgp_build_array_noargs(out: *mut u8, outcap: c_int) -> c_int;
+        fn pgp_build_object_noargs(out: *mut u8, outcap: c_int) -> c_int;
+    }
+
+    fn check_build_noargs(object: bool) {
+        let mut out = [0u8; 16];
+        let clen = unsafe {
+            if object {
+                pgp_build_object_noargs(out.as_mut_ptr(), 16)
+            } else {
+                pgp_build_array_noargs(out.as_mut_ptr(), 16)
+            }
+        };
+        assert!(unsafe { pgp_build_take_abort() } == 0);
+        let ctx: &'static mcx::MemoryContext = token_ctx();
+        let r = if object {
+            adt_jsonb::tojsonb::jsonb_build_object_worker(ctx.mcx(), &[], &[], &[], false, false)
+        } else {
+            adt_jsonb::tojsonb::jsonb_build_array_worker(ctx.mcx(), &[], &[], &[], false)
+        };
+        let v = match r {
+            Ok(v) => v,
+            Err(e) => {
+                core::mem::forget(e);
+                panic!("noargs builder errored");
+            }
+        };
+        assert!(clen >= 0);
+        assert!(clen as usize == v.len());
+        let vs: &[u8] = &v;
+        for i in 0..16 {
+            if i < vs.len() {
+                assert!(out[i] == vs[i]);
+            }
+        }
+        core::mem::forget(v);
+    }
+
+    macro_rules! build_case {
+        ($($name:ident[$unwind:literal]: $check:ident($($arg:expr),*);)*) => {$(
+            #[kani::proof]
+            #[kani::unwind($unwind)]
+            #[kani::stub(mcx::Mcx::allocate, mcx_stubs::stub_mcx_allocate)]
+            #[kani::stub(mcx::Mcx::deallocate, mcx_stubs::stub_mcx_deallocate)]
+            #[kani::stub(mcx::vec_with_capacity_in, mcx_stubs::stub_vec_with_capacity_in)]
+            #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+            #[kani::stub(std::fmt::format, stubs::stub_format)]
+            fn $name() { $check($($arg),*); }
+        )*};
+    }
+
+    build_case! {
+        eq_build_array_noargs[8]: check_build_noargs(false);
+        eq_build_object_noargs[8]: check_build_noargs(true);
+    }
+
+    /// STANDING REGRESSION WITNESS (must PASS — it asserts the two sides
+    /// AGREE): subscript text "\x0b1" over a 2-element array.  C-locale
+    /// strtol skips '\v' as whitespace and resolves index 1; the shipped
+    /// walk must resolve the SAME element.
+    ///
+    /// History: this harness originally asserted the DIVERGENCE — the walk
+    /// parsed subscripts with `trim_ascii_start()`, whose whitespace set
+    /// omits VT (0x0B), so a VT-prefixed subscript that C accepts returned
+    /// SQL NULL.  Ground-truthed against PostgreSQL 18.4 (glibc) and FIXED
+    /// by routing the parse through `pg_string::strtoint10_strict`, an exact
+    /// model of C's strtoint.  Flipped to assert equivalence and kept as a
+    /// permanent witness: reintroducing ANY Rust-whitespace-set
+    /// approximation at the subscript parse drives the PathVerdict::Null arm
+    /// below against a C side that found the element, and this harness FAILS.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn witness_path_vt_subscript() {
+        unsafe { pgp_reset() };
+        // fully concrete instance (a witness needs ONE case): false,false
+        // elements, length-form JEntrys.
+        let e = Scalar { kind: 1, sbytes: [0u8; VL], slen: 0 };
+        let elems: [Scalar; MAXN] = [e, e, e];
+        set_hoff_pin(1);
+        let img: Img<CMPCAP> = build_array(&elems, 2, false);
+        set_hoff_pin(0);
+        let sub: [u8; 2] = [0x0b, b'1'];
+        let (c, vtype, vdata, vlen, vbool) = run_get_element(&img.0[..], &[&sub[..]]);
+        // The C side must FIND the element.  Anti-vacuity: if the C model
+        // ever stopped resolving VT subscripts the equivalence claim below
+        // would be satisfiable by both sides returning NULL, which is
+        // exactly the bug this witness exists to catch.
+        assert!(c == 1); // C: '\v' skipped, index 1 found
+        match adt_jsonb::getfield::resolve_path(&img.0[..], &[&sub[..]]) {
+            adt_jsonb::getfield::PathVerdict::Item(it) => {
+                assert_item_matches(1, vtype, vdata, vlen, vbool, Some(it));
+            }
+            adt_jsonb::getfield::PathVerdict::Null => {
+                panic!("VT-prefixed subscript regressed to SQL NULL; C resolves it")
+            }
+            adt_jsonb::getfield::PathVerdict::Input => {
+                panic!("non-empty path cannot yield the input datum")
+            }
+        }
+    }
+
+    /// Concrete diagnostic probe (w0n1 counterexample instance: short-form
+    /// negative, dscale 0, digit 1 => value -1).  Separates the sides.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn probe_int8_concrete_neg1() {
+        casts_reset();
+        set_hoff_pin(1);
+        let digits = [8192i16, 0, 0, 0, 0];
+        // hdr = SHORT | NEG-sign | dscale=63<<7 (the second counterexample)
+        let img: Img<CASTCAP> = build_raw_numeric(0xBF80, 0, false, &digits, 1);
+        set_hoff_pin(0);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut out: i64 = 0;
+        let c = unsafe { pgp_jsonb_int8(img.0.as_ptr(), &mut ec, &mut et, &mut out) };
+        assert_no_abort_casts();
+        assert!(c == 1);
+        assert!(out == -8192); // C side
+        let r = rust_cast(&img.0[..], "bigint", adt_numeric::numeric_int8);
+        match r {
+            CastR::Val(v) => assert!(v == -8192), // Rust side
+            _ => panic!("rust side left value arm"),
+        }
+    }
+
+    /// Symbolic diagnostic for the w0n1 fabrication: both sides asserted
+    /// against the analytic spec (value = ±digits[0] at weight 0, nd 1).
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn probe_int8_w0n1_spec() {
+        casts_reset();
+        set_hoff_pin(1);
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
+        let d0: i16 = kani::any();
+        kani::assume(d0 >= 0 && d0 < NBASE);
+        let digits = [d0, 0, 0, 0, 0];
+        let hdr = NUMERIC_SHORT
+            | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
+            | (dscale << NUMERIC_SHORT_DSCALE_SHIFT);
+        let img: Img<CASTCAP> = build_raw_numeric(hdr, 0, false, &digits, 1);
+        set_hoff_pin(0);
+        let expected: i64 = if neg { -(d0 as i64) } else { d0 as i64 };
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut out: i64 = 0;
+        let c = unsafe { pgp_jsonb_int8(img.0.as_ptr(), &mut ec, &mut et, &mut out) };
+        assert_no_abort_casts();
+        assert!(c == 1);
+        assert!(out == expected); // C vs spec
+        let r = rust_cast(&img.0[..], "bigint", adt_numeric::numeric_int8);
+        match r {
+            CastR::Val(v) => assert!(v == expected), // Rust vs spec
+            _ => panic!("rust side left value arm"),
+        }
+    }
+
+    extern "C" {
+        fn pgp_probe_numeric_decode(
+            c: *const u8,
+            sign: *mut c_int,
+            weight: *mut c_int,
+            dsc: *mut c_int,
+            nd: *mut c_int,
+            d0: *mut c_int,
+        ) -> c_int;
+    }
+
+    /// C-side decode diagnostic: the C view of the symbolic embedded
+    /// numeric must equal the builder's fields.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn probe_int8_w0n1_cdecode() {
+        casts_reset();
+        set_hoff_pin(1);
+        let neg: bool = kani::any();
+        let dscale: u16 = kani::any();
+        kani::assume(dscale <= NUMERIC_SHORT_DSCALE_MAX);
+        let d0: i16 = kani::any();
+        kani::assume(d0 >= 0 && d0 < NBASE);
+        let digits = [d0, 0, 0, 0, 0];
+        let hdr = NUMERIC_SHORT
+            | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 }
+            | (dscale << NUMERIC_SHORT_DSCALE_SHIFT);
+        let img: Img<CASTCAP> = build_raw_numeric(hdr, 0, false, &digits, 1);
+        set_hoff_pin(0);
+        let (mut sign, mut weight, mut dsc, mut nd, mut cd0): (c_int, c_int, c_int, c_int, c_int) =
+            (0, 0, 0, 0, 0);
+        let ok = unsafe {
+            pgp_probe_numeric_decode(
+                img.0.as_ptr(),
+                &mut sign,
+                &mut weight,
+                &mut dsc,
+                &mut nd,
+                &mut cd0,
+            )
+        };
+        assert!(ok == 1);
+        assert!(sign == if neg { 0x4000 } else { 0 });
+        assert!(weight == 0);
+        assert!(dsc == dscale as c_int);
+        assert!(nd == 1);
+        assert!(cd0 == d0 as c_int);
+    }
+
+    /// Negative control (DEFAULT solver, MUST FAIL): C reads a
+    /// weight-skewed image (weight+1 in the header the C side sees) on a
+    /// plane where the value parity is otherwise provable — the int8 cell
+    /// must find a counterexample.  Proves the cast rig is non-vacuous.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::stub(types_error::PgError::error, stubs::stub_pg_error_error)]
+    #[kani::stub(std::fmt::format, stubs::stub_format)]
+    #[kani::stub(adt_numeric::var::digit_buf_heap_realloc, stub_digit_buf_heap_realloc)]
+    #[kani::stub(adt_numeric::var::digit_buf_put, stub_digit_buf_put)]
+    fn control_cast_weight_skew() {
+        casts_reset();
+        // Rust reads weight 0, C reads weight 1 (skewed header bit assembly)
+        let neg: bool = kani::any();
+        let mut digits = [0i16; NDMAX];
+        let v: i16 = kani::any();
+        kani::assume(v >= 1 && v < NBASE);
+        digits[0] = v;
+        let hdr_r = NUMERIC_SHORT | if neg { NUMERIC_SHORT_SIGN_MASK } else { 0 };
+        let hdr_c = hdr_r | 1; // weight bits skewed: C sees weight 1
+        let img_r = build_raw_numeric::<CASTCAP>(hdr_r, 0, false, &digits, 1);
+        let img_c = build_raw_numeric::<CASTCAP>(hdr_c, 0, false, &digits, 1);
+        let (mut ec, mut et): (c_int, c_int) = (0, 0);
+        let mut out: i64 = 0;
+        let c = unsafe { pgp_jsonb_int8(img_c.0.as_ptr(), &mut ec, &mut et, &mut out) };
+        let r = rust_cast(&img_r.0[..], "bigint", adt_numeric::numeric_int8);
+        match r {
+            CastR::Val(v) => {
+                assert!(c == 1);
+                assert!(out == v);
+            }
+            _ => panic!("plane stays in the value arm"),
+        }
     }
 }

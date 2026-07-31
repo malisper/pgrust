@@ -7,6 +7,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // pgrust-only (no C analogue): Some(builtin name) iff `flinfo` resolved
+    // to fmgr's not-ported stub, i.e. invoking it can only raise the
+    // feature-not-supported error. Lets eager resolvers (index-AM support
+    // procs) fail at resolution time instead of mid-operation. Installed by
+    // fmgr_core::init_seams; consumers must gate on is_installed() — test
+    // mocks that install only fmgr_info leave this one empty.
+    pub fn fmgr_info_not_ported_name(flinfo: &FmgrInfo) -> Option<&'static str>
+);
+
+seam_core::seam!(
     pub fn get_fn_expr_variadic(flinfo: &FmgrInfo) -> bool
 );
 

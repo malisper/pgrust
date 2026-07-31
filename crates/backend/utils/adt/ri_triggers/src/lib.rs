@@ -2,11 +2,9 @@
 // ri_restrict (noaction/restrict del/upd), RI_FKey_cascade_del/upd, ri_set
 // (setnull/setdefault del/upd), ri_Check_Pk_Match, RI_Initial_Check, the
 // constraint-info and prepared-plan caches, and the upd_check_required skip
-// tests. LOUD: PERIOD, cross-type comparison casts, cross-collation
-// initial-check quals. Divergences: constraint-info cache has no syscache invalidation
-// callback (constraint rows are immutable in the ported DDL surface; DROP
-// removes the triggers that key into it) and the violation DETAIL permission
-// check is the superuser fast path.
+// tests, plus InvalidateConstraintCacheCallBack. LOUD: PERIOD, cross-type
+// comparison casts, cross-collation initial-check quals. Divergence: the
+// violation DETAIL permission check is the superuser fast path.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use core::cell::RefCell;
@@ -67,6 +65,11 @@ const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 struct RiConstraintInfo {
     constraint_id: Oid,
     constraint_root_id: Oid,
+    // CONSTROID syscache hash values of constraint_id / constraint_root_id:
+    // what InvalidateConstraintCacheCallBack matches a pg_constraint inval
+    // message against.
+    oidHashValue: u32,
+    rootHashValue: u32,
     conname: NameData,
     pk_relid: Oid,
     fk_relid: Oid,
@@ -93,6 +96,9 @@ fn cache_mcx() -> &'static MemoryContext {
             ::mcx::register_session_cleanup(Box::new(|| {
                 RI_CONSTRAINT_CACHE.with(|c| drop(c.borrow_mut().take()));
                 RI_QUERY_CACHE.with(|c| drop(c.borrow_mut().take()));
+                // The syscache callback list is session-scoped too, so the
+                // next session on this thread must re-register.
+                RI_HASHTABLES_BUILT.with(|f| f.set(false));
             }));
             cx
         };
@@ -105,6 +111,70 @@ thread_local! {
         const { RefCell::new(None) };
     static RI_QUERY_CACHE: RefCell<Option<PgHashMap<'static, (Oid, i32), spi::SpiPlanPtr>>> =
         const { RefCell::new(None) };
+    static RI_HASHTABLES_BUILT: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+// ri_InitHashTables (ri_triggers.c): create the private hash tables and arrange
+// to flush the constraint cache on pg_constraint changes. The maps themselves
+// are created lazily at their insertion sites here, so what is left of C's
+// ri_InitHashTables is the one-shot callback registration -- hooked at
+// ri_LoadConstraintInfo, which every RI entry point reaches before it can touch
+// the query or compare caches.
+fn ri_InitHashTables() -> PgResult<()> {
+    if RI_HASHTABLES_BUILT.with(|f| f.get()) {
+        return Ok(());
+    }
+    // Touch the cache context first so its session cleanup is registered
+    // before (i.e. runs after) anything the callback path installs.
+    let _ = cache_mcx();
+    inval::invalidate::CacheRegisterSyscacheCallback(
+        cache_syscache::CONSTROID,
+        InvalidateConstraintCacheCallBack,
+        Datum::null(),
+    )?;
+    RI_HASHTABLES_BUILT.with(|f| f.set(true));
+    Ok(())
+}
+
+// InvalidateConstraintCacheCallBack (ri_triggers.c). pg_constraint sees enough
+// update traffic that a blanket flush isn't worth it: drop only the entries
+// whose own -- or whose ROOT constraint's -- CONSTROID hash value matches the
+// message (a root invalidation has to take its inherited children with it), or
+// every entry on a reset message (hashvalue == 0). Above 1000 live entries C
+// stops being clever and pretends it got a reset, which is what keeps a session
+// that touches many foreign keys and also runs many ALTER TABLEs (pg_dump
+// restore) off an O(N^2) curve.
+//
+// C marks matched entries invalid in place rather than removing them, because a
+// caller may hold a pointer into the hash table while a cache flush arrives.
+// This port hands out clones of RiConstraintInfo, so no such pointer exists and
+// the entry itself can go. C's "list of valid entries" is therefore exactly this
+// map -- invalid entries are unlinked from that list -- so the 1000 bound reads
+// the map's length.
+fn InvalidateConstraintCacheCallBack(_arg: Datum, _cacheid: i32, hashvalue: u32) {
+    RI_CONSTRAINT_CACHE.with(|c| {
+        let mut b = c.borrow_mut();
+        let Some(m) = b.as_mut() else { return };
+        if hashvalue == 0 || m.len() > 1000 {
+            m.clear();
+            return;
+        }
+        m.retain(|_, riinfo| {
+            riinfo.oidHashValue != hashvalue && riinfo.rootHashValue != hashvalue
+        });
+    });
+}
+
+// GetSysCacheHashValue1(CONSTROID, oid).
+fn ri_constraint_hash_value(constraint_oid: Oid) -> PgResult<u32> {
+    use cache_syscache::SysCacheKey;
+    cache_syscache::GetSysCacheHashValue(
+        cache_syscache::CONSTROID,
+        SysCacheKey::Value(Datum::from_oid(constraint_oid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
 }
 
 #[cold]
@@ -1104,6 +1174,7 @@ fn ri_FetchConstraintInfo<'mcx>(
 }
 
 fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
+    ri_InitHashTables()?;
     if let Some(hit) = RI_CONSTRAINT_CACHE.with(|c| {
         c.borrow().as_ref().and_then(|m| m.get(&constraint_oid).cloned())
     }) {
@@ -1139,13 +1210,16 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
     );
 
     let conparentid = req(Anum_conparentid)?.as_oid();
+    let constraint_root_id = if conparentid != InvalidOid {
+        get_ri_constraint_root(conparentid)?
+    } else {
+        constraint_oid
+    };
     let mut info = RiConstraintInfo {
         constraint_id: constraint_oid,
-        constraint_root_id: if conparentid != InvalidOid {
-            get_ri_constraint_root(conparentid)?
-        } else {
-            constraint_oid
-        },
+        constraint_root_id,
+        oidHashValue: ri_constraint_hash_value(constraint_oid)?,
+        rootHashValue: ri_constraint_hash_value(constraint_root_id)?,
         // SAFETY: conname is a by-ref NAME column of the held syscache tuple.
         conname: unsafe { *(req(Anum_conname)?.as_usize() as *const NameData) },
         pk_relid: req(Anum_confrelid)?.as_oid(),
@@ -1927,3 +2001,6 @@ fn tuple_satisfies_self(rel: &Relation<'_>, tup: &HeapTupleData<'_>) -> PgResult
     }
     Ok(found)
 }
+
+#[cfg(test)]
+mod tests;
