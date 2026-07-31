@@ -60,6 +60,7 @@ fn pad_spaces(v: &mut PgVec<'_, u8>, n: usize) -> PgResult<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct BpClip {
     pub copy: usize,
     pub total: usize,
@@ -96,10 +97,14 @@ pub fn bpchar_clip(
             total: mbmaxlen,
         }))
     } else {
-        Ok(Some(BpClip {
-            copy: len,
-            total: len + (maxchars - charlen),
-        }))
+        // C (varchar.c bpchar_input): all size arithmetic is size_t, then
+        // `palloc(maxlen + VARHDRSZ)` whose MaxAllocSize guard raises a
+        // catchable XX000 "invalid memory alloc request size N" for huge
+        // typmods (e.g. atttypmod = INT32_MAX requests ~2^31 bytes of blank
+        // padding). Raise the C-exact error before any allocation.
+        let total = len + (maxchars - charlen);
+        mcx::check_alloc_size(total + VARHDRSZ)?;
+        Ok(Some(BpClip { copy: len, total }))
     }
 }
 

@@ -373,3 +373,65 @@ fn bpchar_tie_law_fails_without_typmod() {
     assert!(bpchareq(a.data(), b.data(), C).unwrap(), "bpchareq strips trailing blanks");
     assert_ne!(a.data(), b.data(), "but the unpadded images differ — no tie law");
 }
+
+/// Task #53: bpcharin at extreme typmods. C (18.3 varchar.c bpchar_input)
+/// computes the pad length in size_t and hits palloc's MaxAllocSize guard —
+/// a catchable XX000 "invalid memory alloc request size N" — never a crash.
+/// Ground-truthed on docker postgres:18.3:
+///   bpcharin('abc', 1042, 2147483647)  -> XX000 size 2147483647
+///   bpcharin('é',   1042, 2147483647)  -> XX000 size 2147483648
+///   bpcharin('abc', 1042, 1073741824)  -> XX000 size 1073741824
+///   bpcharin('abc', 1042, -2147483648) -> 'abc' (typmod < VARHDRSZ passthrough)
+#[test]
+fn bpchar_clip_huge_typmod_is_catchable_alloc_error() {
+    // ASCII: request = len + (maxchars - charlen) + VARHDRSZ = typmod.
+    let err = bpchar_clip(b"abc", i32::MAX, None).unwrap_err();
+    assert_eq!(err.message(), "invalid memory alloc request size 2147483647");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+
+    // Empty input: same request (charlen = len = 0).
+    let err = bpchar_clip(b"", i32::MAX, None).unwrap_err();
+    assert_eq!(err.message(), "invalid memory alloc request size 2147483647");
+
+    // Multibyte input under UTF-8 makes len > charlen and the request exceeds
+    // i32 (2147483648) — size_t arithmetic in C, no wrap (18.3 declares
+    // maxlen as size_t; ground-truthed on docker). The unit-test environment
+    // runs single-byte, so charlen == len and the request equals the typmod.
+    let err = bpchar_clip("é".as_bytes(), i32::MAX, None).unwrap_err();
+    assert_eq!(err.message(), "invalid memory alloc request size 2147483647");
+
+    // First failing boundary: request = MaxAllocSize + 1.
+    let err = bpchar_clip(b"abc", 0x4000_0000, None).unwrap_err();
+    assert_eq!(err.message(), "invalid memory alloc request size 1073741824");
+
+    // Last passing boundary: request = MaxAllocSize exactly — the clip
+    // decision succeeds without allocating.
+    let clip = bpchar_clip(b"abc", 0x3FFF_FFFF, None).unwrap().unwrap();
+    assert_eq!(clip.copy, 3);
+    assert_eq!(clip.total, 0x3FFF_FFFF - VARHDRSZ);
+
+    // The guard is a hard error even under a soft-error context (C palloc
+    // failures are never soft).
+    let mut esc = SoftErrorContext::default();
+    let err = bpchar_clip(b"abc", i32::MAX, Some(&mut esc)).unwrap_err();
+    assert_eq!(err.message(), "invalid memory alloc request size 2147483647");
+    assert!(!esc.error_occurred());
+}
+
+#[test]
+fn bpchar_clip_negative_and_min_typmod_passthrough() {
+    for tm in [-1, 0, i32::MIN, (VARHDRSZ as i32) - 1] {
+        let clip = bpchar_clip(b"abc", tm, None).unwrap().unwrap();
+        assert_eq!((clip.copy, clip.total), (3, 3), "typmod {tm} is a passthrough");
+    }
+}
+
+/// varcharin never pads, so extreme typmods clip/pass without huge requests
+/// (C pallocs len + VARHDRSZ with len bounded by the input).
+#[test]
+fn varchar_clip_extreme_typmods_ok() {
+    assert_eq!(varchar_clip(b"abc", i32::MAX, None).unwrap(), Some(3));
+    assert_eq!(varchar_clip(b"abc", i32::MIN, None).unwrap(), Some(3));
+    assert_eq!(varchar_clip(b"abc", -1, None).unwrap(), Some(3));
+}
+

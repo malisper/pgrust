@@ -67,12 +67,16 @@ pub fn is_valid_numeric_typmod(typmod: i32) -> bool {
 
 #[inline]
 pub fn numeric_typmod_precision(typmod: i32) -> i32 {
-    ((typmod - VARHDRSZ as i32) >> 16) & 0xffff
+    // C (numeric.c numeric_typmod_precision): plain int arithmetic under
+    // -fwrapv; callers may apply this to unvalidated typmods (numeric_support
+    // does), so INT32_MIN must wrap, not panic.
+    (typmod.wrapping_sub(VARHDRSZ as i32) >> 16) & 0xffff
 }
 
 #[inline]
 pub fn numeric_typmod_scale(typmod: i32) -> i32 {
-    (((typmod - VARHDRSZ as i32) & 0x7ff) ^ 1024) - 1024
+    // C wraps (see numeric_typmod_precision above).
+    ((typmod.wrapping_sub(VARHDRSZ as i32) & 0x7ff) ^ 1024) - 1024
 }
 
 #[cold]

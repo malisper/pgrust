@@ -348,8 +348,10 @@ pub fn fc_varchar_support(
     let source = fexpr.args.nth(0);
     let old_typmod = nodes_core::expr_typmod(source);
     let new_typmod = c.constvalue.as_i32();
-    let old_max = old_typmod - VARHDRSZ as i32;
-    let new_max = new_typmod - VARHDRSZ as i32;
+    // C (varchar.c varchar_support): int subtraction under -fwrapv; typmods
+    // here are unvalidated expression typmods, so INT32_MIN must wrap.
+    let old_max = old_typmod.wrapping_sub(VARHDRSZ as i32);
+    let new_max = new_typmod.wrapping_sub(VARHDRSZ as i32);
     if new_typmod < 0 || (old_typmod >= 0 && old_max <= new_max) {
         let mcx = req.mcx.expect("varchar_support: request carries an mcx");
         let ret = nodes_core::relabel_to_typmod(mcx, source, new_typmod)?;

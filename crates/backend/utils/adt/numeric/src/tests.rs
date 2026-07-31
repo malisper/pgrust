@@ -1740,3 +1740,21 @@ mod transarray_detoast {
         assert_eq!(read2(d), [4, 100]);
     }
 }
+
+/// Task #53 sibling sweep: the typmod field extractors are applied to
+/// UNVALIDATED typmods (numeric_support reads expression typmods before the
+/// validity check), and C computes them with plain int arithmetic under
+/// -fwrapv. INT32_MIN must wrap exactly as C does — never panic.
+#[test]
+fn numeric_typmod_extractors_wrap_at_extremes() {
+    // C: (INT32_MIN - 4) wraps to 0x7FFFFFFC.
+    assert_eq!(numeric_typmod_precision(i32::MIN), 32767);
+    assert_eq!(numeric_typmod_scale(i32::MIN), -4);
+    assert_eq!(numeric_typmod_precision(i32::MAX), 32767);
+    assert_eq!(numeric_typmod_scale(i32::MAX), -5);
+    assert_eq!(numeric_typmod_precision(-1), 65535);
+    // Round-trip sanity at a normal typmod.
+    let tm = make_numeric_typmod(10, 2);
+    assert_eq!(numeric_typmod_precision(tm), 10);
+    assert_eq!(numeric_typmod_scale(tm), 2);
+}
