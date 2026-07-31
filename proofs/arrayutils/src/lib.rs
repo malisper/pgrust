@@ -227,6 +227,100 @@ mod harnesses {
         assert_eq!(rcurr, ccurr);
     }
 
+    /// Per-n literal case-split cells (TRIAGE remedy attempted before
+    /// declaring the symbolic-n harnesses walled): n pinned to the worst
+    /// literal (6) and the boundary literal (1).
+    macro_rules! n_items_cell {
+        ($name:ident, $n:literal) => {
+            #[kani::proof]
+            #[kani::unwind(8)]
+            fn $name() {
+                let dims = sym_arr();
+                let cv = unsafe { ffi::c_array_get_n_items($n, dims.as_ptr()) };
+                let cerr = unsafe { ffi::c_errcode_read() };
+                match array_get_n_items($n, &dims) {
+                    Ok(v) => {
+                        assert_eq!(v, cv);
+                        assert_eq!(cerr, 0);
+                    }
+                    Err(e) => {
+                        assert_eq!(cv, -1);
+                        assert_eq!(cerr, 1);
+                        assert!(e.sqlstate() == ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+                    }
+                }
+            }
+        };
+    }
+    n_items_cell!(eq_array_get_n_items_n1, 1);
+    n_items_cell!(eq_array_get_n_items_n6, 6);
+
+    macro_rules! check_bounds_cell {
+        ($name:ident, $n:literal) => {
+            #[kani::proof]
+            #[kani::unwind(8)]
+            fn $name() {
+                let dims = sym_arr();
+                let lb = sym_arr();
+                let cv =
+                    unsafe { ffi::c_array_check_bounds($n, dims.as_ptr(), lb.as_ptr()) };
+                let cerr = unsafe { ffi::c_errcode_read() };
+                match array_check_bounds($n, &dims[..$n as usize], &lb[..$n as usize]) {
+                    Ok(()) => {
+                        assert_eq!(cv, 1);
+                        assert_eq!(cerr, 0);
+                    }
+                    Err(e) => {
+                        assert_eq!(cv, 0);
+                        assert_eq!(cerr, 1);
+                        assert!(e.sqlstate() == ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+                    }
+                }
+            }
+        };
+    }
+    check_bounds_cell!(eq_array_check_bounds_n1, 1);
+    check_bounds_cell!(eq_array_check_bounds_n6, 6);
+
+    /// Ok-arm fenced proofs (WALL DIAGNOSIS 2026-07-31: any harness whose
+    /// PgError arm is FEASIBLE drags alloc::format! into CBMC and walls
+    /// even at n=1 literal; with the error arm made infeasible by the
+    /// fence, slicing drops it). Error arms are fuzz-carried (full-range
+    /// i32 planes + MaxArraySize boundary seeds, 10M execs).
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn eq_array_get_n_items_ok_arm() {
+        let ndim: i32 = kani::any();
+        kani::assume(ndim <= MAXDIM as i32); // incl. <=0 arms
+        let dims = sym_arr();
+        for i in 0..MAXDIM {
+            kani::assume(dims[i] >= 0 && dims[i] <= 16); // product <= 2^24 << MaxArraySize
+        }
+        let cv = unsafe { ffi::c_array_get_n_items(ndim, dims.as_ptr()) };
+        let cerr = unsafe { ffi::c_errcode_read() };
+        let v = array_get_n_items(ndim, &dims).unwrap();
+        assert_eq!(v, cv);
+        assert_eq!(cerr, 0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn eq_array_check_bounds_ok_arm() {
+        let n = sym_n();
+        let dims = sym_arr();
+        let lb = sym_arr();
+        for i in 0..MAXDIM {
+            // no i32 overflow in dims + lb: both halves bounded
+            kani::assume(dims[i] >= 0 && dims[i] <= i32::MAX / 2);
+            kani::assume(lb[i] >= i32::MIN / 2 && lb[i] <= i32::MAX / 2 - dims[i]);
+        }
+        let cv = unsafe { ffi::c_array_check_bounds(n, dims.as_ptr(), lb.as_ptr()) };
+        let cerr = unsafe { ffi::c_errcode_read() };
+        assert!(array_check_bounds(n, &dims[..n as usize], &lb[..n as usize]).is_ok());
+        assert_eq!(cv, 1);
+        assert_eq!(cerr, 0);
+    }
+
     /// Must-fail negative control (family non-vacuity), on the INTENDED
     /// assert: a wrong-value claim against the C offset.
     #[kani::proof]
