@@ -1,393 +1,343 @@
-//! arrayutils_diff: differential fuzz driver — shipped Rust `arrayutils` vs vendored
-//! PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df) C
-//! (csrc/pg_arrayutils_io.c). Crate under test: crates/backend/utils/adt/arrayutils.
+//! arrayutils_diff: differential fuzz driver — shipped Rust `arrayutils` vs
+//! vendored PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df) C
+//! (csrc/pg_arrayutils_io.c). Crate under test:
+//! crates/backend/utils/adt/arrayutils.
 //!
-//! GENERATED SKELETON (fuzz/scaffold.py) — every TODO(scaffold) below is
-//! hand-work; see fuzz/README-TODO-arrayutils_diff.md for the ordered checklist.
+//! Comparison planes: value (exact ints / output arrays element-for-element)
+//! + error-verdict + errcode class (1 = ERRCODE_PROGRAM_LIMIT_EXCEEDED, the
+//! only code this file raises; Rust side asserted 54000 on the same arms).
 //!
-//! Comparison planes (float_in_diff conventions): value bytes/bits,
-//! error-verdict, and errcode/sqlstate class. Message text is out of scope.
+//! Input layout: [selector][n][payload]; selector % 7 picks the arm, n % 7
+//! gives the dimension count 0..=6 (MAXDIM). Payload supplies little-endian
+//! i32 fields, zero-extended when short.
+//!   0 array_get_n_items(_safe)  ndim = n (also probes ndim<0 and the
+//!     Rust-only ndim>len arm), dims = FULL-RANGE i32s -> value/verdict/code
+//!   1 array_check_bounds(_safe) dims, lb = FULL-RANGE i32s -> verdict/code
+//!   2 array_get_offset          dim/lb/indx CONSTRAINED (see carves)
+//!   3 mda_get_range             st/endp CONSTRAINED -> span image
+//!   4 mda_get_prod              range CONSTRAINED -> prod image
+//!   5 mda_get_offset_values     prod/span CONSTRAINED -> dist image
+//!   6 mda_next_tuple            span>=1, curr in [0,span) -> ret + curr image
 //!
-//! Input layout: [selector][payload]; selector % 9 picks the arm:
-//!   0 ArrayGetOffset  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   1 ArrayGetNItems  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   2 ArrayGetNItemsSafe  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   3 ArrayCheckBounds  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   4 ArrayCheckBoundsSafe  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   5 mda_get_range  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   6 mda_get_prod  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   7 mda_get_offset_values  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
-//!   8 mda_next_tuple  (oid 0, C: arrayutils.c) — TODO(scaffold): document
-//!     the payload this arm decodes.
+//! DOMAIN CARVES (C caller-contract / UB fences — each fences C signed-
+//! overflow UB, never pgrust behavior; the C comments state the contracts:
+//! "caller has already range-checked", "overflow is impossible"):
+//!   - array_get_offset: dim in [1,16], lb/indx in [-64,63] => offset and
+//!     scale stay far inside i32 (16^6 = 2^24).
+//!   - mda_get_range: st/endp folded to i16 => no i32 overflow in endp-st+1.
+//!   - mda_get_prod: range in [1,16] => products <= 2^24.
+//!   - mda_get_offset_values: prod/span in [1,16] => all terms tiny.
+//!   - mda_next_tuple: span in [1,16], curr folded into [0, span) — C's
+//!     documented precondition (curr is a valid tuple under span); span 0
+//!     would be modulo-by-zero in C (UB) and a panic in Rust.
+//!   array_get_n_items and array_check_bounds run FULL-RANGE: their C bodies
+//!   are overflow-checked by construction (int64 widening / builtin add
+//!   overflow), so every i32 input is well-defined on both sides.
 //!
-//! FC-WRAPPER PLANE: each arm additionally routes its (already core-vs-C
-//! checked) input through the crate's builtins.rs fc_* wrapper via a native
-//! types_fmgr::LocalFcinfo frame and asserts wrapper == core (Datum value /
-//! returned bytes / error verdict + sqlstate). C-parity keeps being carried
-//! by the core comparison; the plane makes the wrapper lines execute every
-//! iteration with an in-harness oracle.
+//! DELIBERATE DEVIATION UNDER TEST (documented in the crate): for
+//! array_get_n_items, ndim > dims.len() makes C read past the caller's
+//! buffer (UB on a corrupt header); Rust raises the ndims error instead.
+//! The driver gives C a MAXDIM-sized buffer always, and separately asserts
+//! the RUST-ONLY error arm (no C call) when claimed ndim > provided len.
 //!
-//! SKIPPED: TODO(scaffold) — record here every excluded row (stateful /
-//! PRNG / clock / locale carve-outs) and WHY, per the fuzzuproof-crate
-//! skill's exception rules.
+//! FC-WRAPPER PLANE: not applicable — the crate has no builtins.rs / fc_*
+//! surface (support routines, not SQL-callable).
+//!
+//! SKIPPED: C ArrayGetIntegerTypmods — array-Datum/catalog machinery
+//! (deconstruct_array, palloc, pg_strtoint32), not ported by this crate;
+//! out of the pure phase-1 scope.
 
-// Scaffold state: helpers below are exercised only once the arms are
-// implemented. Remove this allow together with the last todo!().
 #![allow(dead_code)]
 
-use datum::{Datum, NullableDatum};
-use stringinfo::StringInfo;
-use types_error::PgResult;
-use types_fmgr::{LocalFcinfo, PGFunction};
+use arrayutils::{
+    array_check_bounds, array_check_bounds_safe, array_get_n_items, array_get_n_items_safe,
+    array_get_offset, mda_get_offset_values, mda_get_prod, mda_get_range, mda_next_tuple,
+};
+use types_error::{SoftErrorContext, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
 extern "C" {
     // Shared TLS errcode accessor (defined in csrc/pg_float_io.c).
     fn pg_diff_errcode_get() -> i32;
-    // TODO(scaffold): declare the pg_diff_* oracle entries as you write them
-    // in csrc/pg_arrayutils_io.c (declarations are link-inert until called, so
-    // `cargo check` and `cargo test` stay green while sites are unfilled):
-    // TODO(scaffold): fn pg_diff_ArrayGetOffset(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_ArrayGetNItems(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_ArrayGetNItemsSafe(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_ArrayCheckBounds(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_ArrayCheckBoundsSafe(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_mda_get_range(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_mda_get_prod(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_mda_get_offset_values(...) -> i32;   [oid 0, arrayutils.c]
-    // TODO(scaffold): fn pg_diff_mda_next_tuple(...) -> i32;   [oid 0, arrayutils.c]
+
+    fn pg_diff_array_get_offset(n: i32, dim: *const i32, lb: *const i32, indx: *const i32)
+        -> i32;
+    fn pg_diff_array_get_n_items(ndim: i32, dims: *const i32) -> i32;
+    fn pg_diff_array_check_bounds(ndim: i32, dims: *const i32, lb: *const i32) -> i32;
+    fn pg_diff_mda_get_range(n: i32, span: *mut i32, st: *const i32, endp: *const i32);
+    fn pg_diff_mda_get_prod(n: i32, range: *const i32, prod: *mut i32);
+    fn pg_diff_mda_get_offset_values(
+        n: i32,
+        dist: *mut i32,
+        prod: *const i32,
+        span: *const i32,
+    );
+    fn pg_diff_mda_next_tuple(n: i32, curr: *mut i32, span: *const i32) -> i32;
 }
 
-// ---------------------------------------------------------------------------
-// fc-wrapper plane plumbing (native LocalFcinfo, real mcx — the proofs
-// wrapper-level pattern run without kani; verbatim from uuid_diff.rs).
-// ---------------------------------------------------------------------------
+const MAXDIM: usize = 6;
 
-/// Invoke an fc_* wrapper over non-null args; returns (result, isnull flag).
-fn fc_call<const N: usize>(
-    f: PGFunction,
-    m: mcx::Mcx<'_>,
-    args: [Datum; N],
-) -> (PgResult<Datum>, bool) {
-    let mut fcinfo = LocalFcinfo::<N>::new(0);
-    // SAFETY: the context owning `m` outlives this single call (caller scope).
-    unsafe { fcinfo.set_result_mcx(m) };
-    for (i, a) in args.into_iter().enumerate() {
-        fcinfo.args[i] = NullableDatum::value(a);
+/// Little-endian i32 field reader, zero-extended past payload end.
+fn i32_at(payload: &[u8], idx: usize) -> i32 {
+    let mut b = [0u8; 4];
+    let off = idx * 4;
+    for (i, slot) in b.iter_mut().enumerate() {
+        if let Some(&v) = payload.get(off + i) {
+            *slot = v;
+        }
     }
-    let r = f(None, &mut fcinfo);
-    (r, fcinfo.isnull)
+    i32::from_le_bytes(b)
 }
 
-/// First `n` bytes behind a by-ref result Datum. Caller contract: `d` came
-/// from a wrapper that returned an `n`-byte-or-longer allocation still live
-/// in the arming context (or thread-local out scratch).
-fn datum_bytes<'a>(d: Datum, n: usize) -> &'a [u8] {
-    // SAFETY: caller contract above.
-    unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, n) }
+fn arr(payload: &[u8], base: usize) -> [i32; MAXDIM] {
+    core::array::from_fn(|i| i32_at(payload, base + i))
 }
 
-/// A StringInfo image over `bytes` in `m` (None = alloc failure: skip plane).
-fn make_si<'a>(m: mcx::Mcx<'a>, bytes: &[u8]) -> Option<StringInfo<'a>> {
-    let mut vec = mcx::vec_with_capacity_in::<u8>(m, bytes.len()).ok()?;
-    mcx::vec_append_bytes(&mut vec, bytes).ok()?;
-    StringInfo::from_vec(vec).ok()
+/// Fold to [1, 16] (positive small dims — the C "validated" domain).
+fn small_pos(v: i32) -> i32 {
+    (v & 0xf) + 1
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
+/// Fold to [-64, 63].
+fn small(v: i32) -> i32 {
+    (v & 0x7f) - 64
+}
 
 pub fn arrayutils_diff(data: &[u8]) {
-    let Some((&sel, payload)) = data.split_first() else {
+    let Some((&sel, rest)) = data.split_first() else {
         return;
     };
-    match sel % 9 {
-        0 => ArrayGetOffset_diff(payload),
-        1 => ArrayGetNItems_diff(payload),
-        2 => ArrayGetNItemsSafe_diff(payload),
-        3 => ArrayCheckBounds_diff(payload),
-        4 => ArrayCheckBoundsSafe_diff(payload),
-        5 => mda_get_range_diff(payload),
-        6 => mda_get_prod_diff(payload),
-        7 => mda_get_offset_values_diff(payload),
-        _ => mda_next_tuple_diff(payload),
+    let Some((&nb, payload)) = rest.split_first() else {
+        return;
+    };
+    let n = (nb % 7) as i32; // 0..=6
+    let nu = n as usize;
+
+    match sel % 7 {
+        0 => {
+            // array_get_n_items: full-range dims; ndim also probes <=0.
+            let dims = arr(payload, 0);
+            let ndim = if nb >= 224 { -((nb % 7) as i32) } else { n };
+            let cv = unsafe { pg_diff_array_get_n_items(ndim, dims.as_ptr()) };
+            let cerr = unsafe { pg_diff_errcode_get() };
+            let mut esc = SoftErrorContext::new(true);
+            let rv = array_get_n_items_safe(ndim, &dims, Some(&mut esc)).unwrap();
+            assert_eq!(rv, cv, "array_get_n_items value/sentinel");
+            assert_eq!(esc.error_occurred(), cerr != 0, "array_get_n_items verdict");
+            // hard-error shape agrees with the soft shape
+            match array_get_n_items(ndim, &dims) {
+                Ok(v) => {
+                    assert!(!esc.error_occurred());
+                    assert_eq!(v, cv);
+                }
+                Err(e) => {
+                    assert!(esc.error_occurred());
+                    assert_eq!(cerr, 1, "oracle errcode class");
+                    assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+                }
+            }
+            // RUST-ONLY deviation arm: claimed ndim wider than the slice
+            // (no C call — C would read out of bounds; see module header).
+            if n >= 1 {
+                let short = &dims[..nu - 1];
+                let e = array_get_n_items(n, short).unwrap_err();
+                assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+            }
+        }
+        1 => {
+            // array_check_bounds: full-range dims/lb.
+            let dims = arr(payload, 0);
+            let lb = arr(payload, MAXDIM);
+            let cv = unsafe { pg_diff_array_check_bounds(n, dims.as_ptr(), lb.as_ptr()) };
+            let cerr = unsafe { pg_diff_errcode_get() };
+            let mut esc = SoftErrorContext::new(true);
+            let rv =
+                array_check_bounds_safe(n, &dims[..nu], &lb[..nu], Some(&mut esc)).unwrap();
+            assert_eq!(rv as i32, cv, "array_check_bounds verdict");
+            assert_eq!(esc.error_occurred(), cerr != 0);
+            match array_check_bounds(n, &dims[..nu], &lb[..nu]) {
+                Ok(()) => assert_eq!(cv, 1),
+                Err(e) => {
+                    assert_eq!(cv, 0);
+                    assert_eq!(cerr, 1, "oracle errcode class");
+                    assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+                }
+            }
+        }
+        2 => {
+            // array_get_offset: constrained to the validated domain.
+            let dim: [i32; MAXDIM] = core::array::from_fn(|i| small_pos(i32_at(payload, i)));
+            let lb: [i32; MAXDIM] =
+                core::array::from_fn(|i| small(i32_at(payload, MAXDIM + i)));
+            let indx: [i32; MAXDIM] =
+                core::array::from_fn(|i| small(i32_at(payload, 2 * MAXDIM + i)));
+            let rv = array_get_offset(n, &dim, &lb, &indx);
+            let cv = unsafe {
+                pg_diff_array_get_offset(n, dim.as_ptr(), lb.as_ptr(), indx.as_ptr())
+            };
+            assert_eq!(rv, cv, "array_get_offset value");
+        }
+        3 => {
+            // mda_get_range: i16-folded endpoints.
+            let st: [i32; MAXDIM] =
+                core::array::from_fn(|i| i32_at(payload, i) as i16 as i32);
+            let endp: [i32; MAXDIM] =
+                core::array::from_fn(|i| i32_at(payload, MAXDIM + i) as i16 as i32);
+            let mut rspan = [0i32; MAXDIM];
+            let mut cspan = [0i32; MAXDIM];
+            mda_get_range(n, &mut rspan, &st, &endp);
+            unsafe {
+                pg_diff_mda_get_range(n, cspan.as_mut_ptr(), st.as_ptr(), endp.as_ptr())
+            };
+            assert_eq!(rspan, cspan, "mda_get_range span image");
+        }
+        4 => {
+            // mda_get_prod: small positive ranges; C writes prod[n-1] so n>=1.
+            if n == 0 {
+                return;
+            }
+            let range: [i32; MAXDIM] =
+                core::array::from_fn(|i| small_pos(i32_at(payload, i)));
+            let mut rprod = [0i32; MAXDIM];
+            let mut cprod = [0i32; MAXDIM];
+            mda_get_prod(n, &range, &mut rprod);
+            unsafe { pg_diff_mda_get_prod(n, range.as_ptr(), cprod.as_mut_ptr()) };
+            assert_eq!(rprod, cprod, "mda_get_prod image");
+        }
+        5 => {
+            // mda_get_offset_values: small positive prod/span; n>=1.
+            if n == 0 {
+                return;
+            }
+            let prod: [i32; MAXDIM] =
+                core::array::from_fn(|i| small_pos(i32_at(payload, i)));
+            let span: [i32; MAXDIM] =
+                core::array::from_fn(|i| small_pos(i32_at(payload, MAXDIM + i)));
+            let mut rdist = [0i32; MAXDIM];
+            let mut cdist = [0i32; MAXDIM];
+            mda_get_offset_values(n, &mut rdist, &prod, &span);
+            unsafe {
+                pg_diff_mda_get_offset_values(
+                    n,
+                    cdist.as_mut_ptr(),
+                    prod.as_ptr(),
+                    span.as_ptr(),
+                )
+            };
+            assert_eq!(rdist, cdist, "mda_get_offset_values image");
+        }
+        _ => {
+            // mda_next_tuple: span>=1, curr folded into [0, span). n=0 probes
+            // the n<=0 early-return on both sides.
+            let span: [i32; MAXDIM] =
+                core::array::from_fn(|i| small_pos(i32_at(payload, i)));
+            let mut rcurr: [i32; MAXDIM] =
+                core::array::from_fn(|i| i32_at(payload, MAXDIM + i).rem_euclid(span[i]));
+            let mut ccurr = rcurr;
+            let rv = mda_next_tuple(n, &mut rcurr, &span);
+            let cv =
+                unsafe { pg_diff_mda_next_tuple(n, ccurr.as_mut_ptr(), span.as_ptr()) };
+            assert_eq!(rv, cv, "mda_next_tuple return");
+            assert_eq!(rcurr, ccurr, "mda_next_tuple curr image");
+        }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Arm: ArrayGetOffset (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn ArrayGetOffset_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ArrayGetOffset(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::ArrayGetOffset(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_ArrayGetOffset via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): ArrayGetOffset arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ArrayGetNItems (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn ArrayGetNItems_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ArrayGetNItems(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::ArrayGetNItems(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_ArrayGetNItems via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): ArrayGetNItems arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ArrayGetNItemsSafe (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn ArrayGetNItemsSafe_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ArrayGetNItemsSafe(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::ArrayGetNItemsSafe(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_ArrayGetNItemsSafe via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): ArrayGetNItemsSafe arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ArrayCheckBounds (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn ArrayCheckBounds_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ArrayCheckBounds(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::ArrayCheckBounds(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_ArrayCheckBounds via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): ArrayCheckBounds arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: ArrayCheckBoundsSafe (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn ArrayCheckBoundsSafe_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_ArrayCheckBoundsSafe(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::ArrayCheckBoundsSafe(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_ArrayCheckBoundsSafe via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): ArrayCheckBoundsSafe arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: mda_get_range (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn mda_get_range_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_mda_get_range(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::mda_get_range(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_mda_get_range via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): mda_get_range arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: mda_get_prod (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn mda_get_prod_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_mda_get_prod(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::mda_get_prod(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_mda_get_prod via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): mda_get_prod arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: mda_get_offset_values (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn mda_get_offset_values_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_mda_get_offset_values(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::mda_get_offset_values(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_mda_get_offset_values via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): mda_get_offset_values arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
-// Arm: mda_next_tuple (oid 0; C source: arrayutils.c).
-// ---------------------------------------------------------------------------
-
-fn mda_next_tuple_diff(payload: &[u8]) {
-    let _ = payload;
-    // TODO(scaffold): implement this arm (arrayutils_diff conventions; copy the
-    // shape from uuid_diff.rs / cash_diff.rs in the lane worktrees):
-    //   1. C oracle: uncomment/adjust the extern decl above, fill the
-    //      csrc/pg_arrayutils_io.c paste site, uncomment the build.rs line, then:
-    //        let cst = unsafe { pg_diff_mda_next_tuple(/* payload views + out bufs */) };
-    //        let cerr = unsafe { pg_diff_errcode_get() };
-    //   2. Shipped Rust core: arrayutils::mda_next_tuple(...), then compare ALL planes:
-    //        - value plane:    exact result bytes/bits vs the C out-buffer
-    //        - verdict plane:  Ok/Err agreement with cst
-    //        - sqlstate plane: e.sqlstate vs the oracle errcode class (cerr)
-    //      (message text out of scope; document any ratified platform
-    //      carve-outs in the module header).
-    //   3. fc-wrapper plane: route the same input through
-    //      arrayutils::builtins::fc_mda_next_tuple via fc_call::<N>(..) (helpers above) and
-    //      assert wrapper == core (Datum value / returned bytes / error
-    //      verdict + sqlstate). Soft-error (ErrorSaveNode) shape too, where
-    //      the wrapper takes an escontext.
-    todo!("scaffold(arrayutils_diff): mda_next_tuple arm not implemented");
-}
-
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Replay every checked-in seed (catches shim/link errors before the
-    /// nightly fuzz campaign). TODO(scaffold): un-ignore once the arms are
-    /// implemented and ../corpus/arrayutils_diff/ is seeded (>=30 seeds; corpora
-    /// are COMMITTED — plain `git add`, no -f needed).
+    /// Fixed sweep: every arm executes against the C oracle every test run.
     #[test]
-    #[ignore = "scaffold(arrayutils_diff): arms not implemented yet"]
+    fn arm_sweep() {
+        let payloads: [&[u8]; 4] = [
+            &[],
+            &[0xff; 96],
+            &[0x01; 96],
+            &[0x80, 0x00, 0x00, 0x80, 0x7f, 0xff, 0xff, 0x7f, 0x10, 0x20, 0x30, 0x40],
+        ];
+        for sel in 0u8..7 {
+            for nb in [0u8, 1, 3, 6, 13, 200, 250] {
+                for p in payloads {
+                    let mut data = vec![sel, nb];
+                    data.extend_from_slice(p);
+                    arrayutils_diff(&data);
+                }
+            }
+        }
+    }
+
+    /// Single-field witness pairs (skill obligation): array_get_offset merges
+    /// (dim, lb, indx) per-dimension into one scalar — each element of each
+    /// array must independently steer the offset, small deltas, both orders.
+    #[test]
+    fn single_field_witness_pairs_offset() {
+        let dim = [3i32, 4, 5, 2, 3, 2];
+        let lb = [1i32, 1, 1, 1, 1, 1];
+        let indx = [2i32, 3, 4, 1, 2, 1];
+        let base = array_get_offset(6, &dim, &lb, &indx);
+        for i in 0..6 {
+            for delta in [-1i32, 1] {
+                // indx element: must move the offset
+                let mut ix = indx;
+                ix[i] += delta;
+                let v = array_get_offset(6, &dim, &lb, &ix);
+                assert_ne!(v, base, "indx[{i}] delta {delta} not witnessed");
+                // lb element: exact mirror of indx
+                let mut l = lb;
+                l[i] += delta;
+                let w = array_get_offset(6, &dim, &l, &indx);
+                assert_eq!(w - base, base - v, "lb[{i}] should mirror indx[{i}]");
+            }
+            // dim element steers scale for all lower positions (i > 0)
+            if i > 0 {
+                let mut d = dim;
+                d[i] += 1;
+                assert_ne!(
+                    array_get_offset(6, &d, &lb, &indx),
+                    base,
+                    "dim[{i}] delta not witnessed"
+                );
+            }
+        }
+        // and variants agree with C via the differential arm
+        for i in 0..6usize {
+            let mut payload = Vec::new();
+            for v in dim {
+                payload.extend_from_slice(&(v - 1).to_le_bytes()); // small_pos folds &0xf +1
+            }
+            for v in lb {
+                payload.extend_from_slice(&(v + 64).to_le_bytes()); // small folds &0x7f -64
+            }
+            let mut ix = indx;
+            ix[i] += 1;
+            for v in ix {
+                payload.extend_from_slice(&(v + 64).to_le_bytes());
+            }
+            let mut data = vec![2u8, 6u8];
+            data.extend_from_slice(&payload);
+            arrayutils_diff(&data);
+        }
+    }
+
+    /// The Rust-only corrupt-header arm: claimed ndim > provided dims.
+    #[test]
+    fn ndim_wider_than_slice_errors() {
+        let e = array_get_n_items(3, &[2, 2]).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    }
+
+    /// Replay every checked-in seed. Corpus is COMMITTED.
+    #[test]
     fn seed_corpus_replays_clean() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/arrayutils_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus/arrayutils_diff missing") {
             let p = e.unwrap().path();
-            if p.is_file() {
+            if p.is_file() && p.file_name().is_some_and(|f| f != ".gitkeep") {
                 arrayutils_diff(&std::fs::read(&p).unwrap());
                 n += 1;
             }
         }
         assert!(n >= 30, "expected >=30 seeds, found {n}");
-    }
-
-    /// TODO(scaffold): per-arm smoke tests on stable (ok + error shapes per
-    /// arm, fc-plane smoke driving every wrapper at least once — see
-    /// uuid_diff.rs tests for the expected shape). Start by un-ignoring:
-    #[test]
-    #[ignore = "scaffold(arrayutils_diff): arms not implemented yet"]
-    fn arms_smoke() {
-        // Arm 0 example: selector byte 0, then a payload for ArrayGetOffset.
-        arrayutils_diff(&[0u8]);
     }
 }

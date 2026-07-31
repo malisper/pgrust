@@ -7,15 +7,15 @@ fn main() {
         // COMPILE GATE (hashfn_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_hashfn_io.c is filled
         // with verbatim vendored C (README-TODO-hashfn_diff.md step 1).
-        // .file("csrc/pg_hashfn_io.c")
+        .file("csrc/pg_hashfn_io.c")
         // COMPILE GATE (arrayutils_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_arrayutils_io.c is filled
         // with verbatim vendored C (README-TODO-arrayutils_diff.md step 1).
-        // .file("csrc/pg_arrayutils_io.c")
+        .file("csrc/pg_arrayutils_io.c")
         // COMPILE GATE (pg_prng_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_pg_prng_io.c is filled
         // with verbatim vendored C (README-TODO-pg_prng_diff.md step 1).
-        // .file("csrc/pg_pg_prng_io.c")
+        .file("csrc/pg_pg_prng_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
@@ -40,6 +40,18 @@ fn main() {
         // defaults contract — so the well-defined oracle for "same
         // wrapper logic over the same libm" is the uncontracted build.
         .flag_if_supported("-ffp-contract=off")
+        // SANCOV ON THE C SIDE (NEZHA finding, fuzzuproof-crate skill):
+        // under cargo-fuzz (cfg(fuzzing) set) instrument the vendored
+        // oracle objects too, so corpus retention is UNION coverage —
+        // Rust-side-only feedback discards exactly the inputs likeliest
+        // to diverge. No-op for plain cargo build/test.
+        .flag_if_supported(
+            if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
+                "-fsanitize=fuzzer-no-link"
+            } else {
+                "-fno-strict-aliasing" // harmless repeat when not fuzzing
+            },
+        )
         .compile("pg_difffuzz_oracle");
     println!("cargo:rerun-if-changed=csrc");
 }
