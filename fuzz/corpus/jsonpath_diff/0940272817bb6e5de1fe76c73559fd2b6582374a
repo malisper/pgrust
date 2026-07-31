@@ -1,0 +1,1 @@
+$ ? (@ like_regex "pa;tt@r\\\077#7/\\\\\\n" flan "isim")
