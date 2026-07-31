@@ -1,9 +1,6 @@
-# rowtypes_diff dictionary (scaffolded by fuzz/scaffold.py).
-# TODO(scaffold): add multi-byte tokens the parsers compare against —
-# keywords, unit suffixes, type-name literals, format tokens — harvested
-# mechanically from the vendored regress SQL literals (gen_seeds.sh pattern)
-# plus every past divergence. CmpLog + dictionary is day-one for
-# parser-shaped targets (fuzzuproof-crate skill).
+# rowtypes_diff dictionary: record-literal tokens (quoting/escaping/NULL
+# machine), wire-framing constants, and int4 boundary literals — harvested
+# from src/test/regress/sql/rowtypes.sql literals + the crate's c_cases.rs.
 # arm selectors
 "\x00"
 "\x01"
@@ -15,3 +12,41 @@
 "\x07"
 "\x08"
 "\x09"
+# record literal structure
+"("
+")"
+","
+"(,)"
+"()"
+"\"\""
+"\"a\"\"b\""
+"\\\""
+"\\\\"
+"(a,b)"
+"(Joe,Blow)"
+"(Joe,\"Blow,Jr\")"
+"(Joe,\"von\"\"Blow\")"
+# C-locale whitespace incl. VT/FF (the known divergence class)
+" "
+"\x09"
+"\x0b"
+"\x0c"
+"\x0d"
+"\x0a"
+# int4 boundaries
+"2147483647"
+"-2147483648"
+"2147483648"
+"-2147483649"
+"0"
+"-"
+# wire framing: colcounts, type oids (int4=23, text=25, fake=7777), -1 NULL
+"\x00\x00\x00\x01"
+"\x00\x00\x00\x02"
+"\x00\x00\x00\x03"
+"\x00\x00\x00\x17"
+"\x00\x00\x00\x19"
+"\x00\x00\x1e\x61"
+"\xff\xff\xff\xff"
+"\x00\x00\x00\x00"
+"\x00\x00\x00\x04"
