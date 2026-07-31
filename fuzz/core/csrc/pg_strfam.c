@@ -126,7 +126,10 @@ pg_strfam_snprintf(char *str, size_t count, const char *fmt, ...)
 }
 #define snprintf pg_strfam_snprintf
 
-/* ---- StringInfo shim (plumbing; see header) ---- */
+/* ---- StringInfo shim (plumbing; see header) ----
+ * pg_strfam_pending tracks the one live buffer so the ereport/longjmp exit
+ * can free it (real PG reclaims via memory-context reset; without this the
+ * error arm leaks per-exec and the campaign OOMs — seen at 6.7M execs). */
 typedef struct StringInfoData
 {
 	char	   *data;
@@ -134,6 +137,15 @@ typedef struct StringInfoData
 	int			maxlen;
 } StringInfoData;
 typedef StringInfoData *StringInfo;
+
+static _Thread_local char *pg_strfam_pending;
+
+static void
+pg_strfam_free_pending(void)
+{
+	free(pg_strfam_pending);
+	pg_strfam_pending = NULL;
+}
 
 static void
 initStringInfo(StringInfo str)
@@ -144,6 +156,7 @@ initStringInfo(StringInfo str)
 		abort();
 	str->len = 0;
 	str->data[0] = '\0';
+	pg_strfam_pending = str->data;
 }
 
 static void
@@ -156,6 +169,7 @@ appendBinaryStringInfo(StringInfo str, const char *data, int datalen)
 		str->data = realloc(str->data, str->maxlen);
 		if (!str->data)
 			abort();
+		pg_strfam_pending = str->data;
 	}
 	memcpy(str->data + str->len, data, datalen);
 	str->len += datalen;
@@ -644,8 +658,12 @@ pg_diff_percentrepl(const char *instr, const char *param_name,
 {
 	pg_diff_errcode = 0;
 	if (setjmp(pg_strfam_jmp) != 0)
+	{
+		pg_strfam_free_pending();
 		return pg_diff_errcode;
+	}
 	*out = replace_percent_placeholders(instr, param_name, letters, v0, v1, v2);
+	pg_strfam_pending = NULL;	/* ownership to caller */
 	return 0;
 }
 
@@ -657,8 +675,12 @@ pg_diff_build_restore_command(const char *cmd, const char *xlogpath,
 {
 	pg_diff_errcode = 0;
 	if (setjmp(pg_strfam_jmp) != 0)
+	{
+		pg_strfam_free_pending();
 		return pg_diff_errcode;
+	}
 	*out = BuildRestoreCommand(cmd, xlogpath, xlogfname, restartname);
+	pg_strfam_pending = NULL;	/* ownership to caller */
 	return 0;
 }
 
