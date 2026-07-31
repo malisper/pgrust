@@ -34,7 +34,11 @@
  */
 #include "pg_mbconv.h"
 
+#ifdef PG_MBCONV_TLS			/* native differential builds; see pg_mbconv.h */
+__thread int pg_mbconv_err = 0;
+#else
 int			pg_mbconv_err = 0;
+#endif
 
 /* linear bsearch model (see header comment) */
 void *

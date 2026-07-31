@@ -237,3 +237,11 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+# mbconv_diff: encoding-conversion family differential (p1-lanez).
+[[bin]]
+name = "mbconv_diff"
+path = "fuzz_targets/mbconv_diff.rs"
+test = false
+doc = false
+bench = false

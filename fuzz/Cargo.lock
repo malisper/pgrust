@@ -1616,6 +1616,7 @@ dependencies = [
  "adt_uuid",
  "archive",
  "cc",
+ "conv",
  "crc32c",
  "cryptohashfuncs",
  "datum",

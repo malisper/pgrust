@@ -171,8 +171,18 @@ typedef struct
 
 typedef uint32 (*utf_local_conversion_func) (uint32 code);
 
-/* ---- PROOF ereport rewires (see header comment) ---- */
+/* ---- PROOF ereport rewires (see header comment) ----
+ * PG_MBCONV_TLS (native differential builds only — fuzz/core/build.rs):
+ * the flag becomes thread-local so the exhaustive-diff sweeps can run the
+ * oracle from parallel threads; Kani builds never define it (CBMC is
+ * single-threaded and __thread is unsupported there). Rust reads the flag
+ * through the pg_mbconv_err_get/reset accessors in
+ * fuzz/core/csrc/mbconv_glue.c (extern TLS statics are not stable Rust). */
+#ifdef PG_MBCONV_TLS
+extern __thread int pg_mbconv_err;
+#else
 extern int	pg_mbconv_err;
+#endif
 
 #define report_invalid_encoding(enc, mbstr, len) \
 	do { pg_mbconv_err = 1; return -1; } while (0)
