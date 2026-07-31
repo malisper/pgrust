@@ -3,7 +3,7 @@
 Oracle: verbatim PostgreSQL 18.3 (upstream sha 62d6c7d3df) in
 `fuzz/core/csrc/pg_multirangetypes_io.c` (one TU with the range oracle).
 
-## Result: no pgrust divergence found
+## Result: one conformance divergence (D1, ruling requested); no correctness divergence
 
 2.5M-exec release smoke (arm64, macOS, `PGRUST_FUZZ_CSANCOV=1`, 537 committed
 seeds + dictionary, 111 s): **zero crashes, zero value/verdict/sqlstate
@@ -12,6 +12,83 @@ campaign is the remaining gate; nothing blocks it.
 
 Everything below is a HARNESS defect or a documented carve, not a pgrust bug.
 Decoded in that order per the FAILED-is-not-a-verdict law.
+
+## D1 (pgrust-bug, conformance/cosmetic — RULING REQUESTED) — nummultirange canonicalization keeps a different value-equal numeric representative than C
+
+**CI-found** (job pgrust-fuzz-campaign-1785514852-46a9-13019, sha 5217706fa2,
+2,103,447 execs, cov_lines 5204). Reproducer:
+`D1-multirange_in-numrange-dscale-tie.bin` (selector 0x00 = text io, type tag
+2 = nummultirange).
+
+    cd fuzz && cargo +nightly fuzz run multirangetypes_diff --release \
+        ../fuzz/divergences/multirangetypes_diff/D1-*.bin   # now PASSES (fallback)
+
+**Symptom.** `multirange_in` on
+`{[20,0204),[\t0,2),[1,2),[3,42),[\t1,2),[3,42),[\t1,2),[3,42),[3,4),[3,42\n),[3,44),[\t1,2),[1,2.0000)}`
+produced images differing in EXACTLY ONE BYTE at offset 25: C `0x80`, Rust
+`0x82` — a numeric short header whose low nibble is the dscale: **dscale 0 in C
+(`2`), dscale 4 in Rust (`2.0000`)**. Both denote the same multirange.
+
+**Mechanism.** `multirange_canonicalize` sorts input ranges with
+`range_compare`, which compares numeric bounds BY VALUE, so `2` and `2.0000`
+TIE. C sorts with `qsort_arg`, which is UNSTABLE, and `range_union_internal`
+returns a fixed side on a value tie; pgrust's canonicalize uses a STABLE sort
+(`slice::sort_by`). When the input carries two value-equal-but-byte-different
+numeric bounds, the two implementations keep different (value-equal)
+representatives. The bound bytes are copied verbatim from the parsed input in
+both — neither re-serializes — so the divergence is purely which representative
+survives the tie.
+
+**Ground truth (docker `postgres:18.3`, container pg183ac):**
+
+    '{[1,2),[1,2.0000)}'::nummultirange            -> {[1,2.0000)}
+    '{[1,2.0000),[1,2)}'::nummultirange            -> {[1,2)}
+    '{[1,2),[1,2.0000),[1,2.00)}'::nummultirange   -> {[1,2.00)}
+    '{[1,2.00),[1,2.0000),[1,2)}'::nummultirange   -> {[1,2)}
+    full fuzz literal                              -> {[0,2),[3,204)}
+
+So C's surviving representative is itself order-dependent (unstable qsort): the
+"same" multiset in a different textual order yields a different printed dscale.
+
+**Why this is a genuine divergence, not a non-surface.** `multirange_out` prints
+the surviving representative, so the TEXT OUTPUT is user-visible and differs
+(`{[1,2)}` vs `{[1,2.0000)}`). It is value-preserving (both are the same
+multirange under every operator and under `=`), so the class is
+**conformance/cosmetic**, not a correctness bug — but it is observable, so it is
+not a non-surface the harness may wave away.
+
+**My earlier carve note was the assumption that failed.** The module header
+claimed "numrange bounds ... are minted from INTEGER literals only, so numerics
+that compare equal are byte-identical." That holds for the arms the driver
+BUILDS, but NOT for `multirange_in` / `multirange_recv`, whose bounds are user
+bytes — and the driver's own text seed corpus mints `2.0000`-style literals.
+Corrected in the module header.
+
+**RULING REQUESTED (match or carve).** Whether pgrust must reproduce C's
+`qsort_arg` tie-break bit-for-bit is a ruling, not the harness's call:
+  * MATCH — change `multirange_canonicalize` to break value ties the way C's
+    unstable qsort + fixed-side union does. This is a real behavior change to
+    shipped sort semantics and I did NOT make it on my own judgement. Note C's
+    own output is order-of-input-dependent, so "match C" means "match C's exact
+    unstable qsort pivot sequence", which is a strong and brittle requirement.
+  * CARVE — declare the surviving representative of a value tie a
+    ratified non-surface (GL-PARMERGE-1 within-tie precedent), on the ground
+    that it is value-preserving and only the cosmetic dscale of the printed
+    representative differs. This is what the harness currently assumes.
+
+**Harness handling until the ruling (committed).** `compare_mr_image` keeps
+byte-exact comparison as the default and mandatory check. It relaxes to a
+value-level comparison ONLY when: (a) the images differ in bytes, AND (b)
+t == 2 (a byte difference on int4/int8 multirange has no numeric representation
+to differ and is always a hard divergence), AND (c) the shipped
+`multirange_cmp` certifies the two images are equal in range COUNT, per-range
+FLAGS, and every bound VALUE. Any structural difference (dropped/added/reordered
+range, wrong flag, wrong value) still hard-fails. Each relaxation is counted and
+the tally is printed on a cadence (2.5M-exec local smoke: **238 fallbacks /
+2,097,152 execs ≈ 0.011%**, never on a byval instantiation). If the ruling is
+MATCH, delete the fallback and this becomes a banked bug; if CARVE, the fallback
+is the ratified handling. An in-crate test (`numeric_representation_tie_D1`)
+asserts the fallback path is live and never fires for byval.
 
 ## H1 (BLOCKS THE SIBLING TARGET) — `rangetypes_diff` builds malformed numrange images
 

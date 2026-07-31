@@ -30,6 +30,16 @@
 //! every downstream arm consumes a real make_multirange image rather than a
 //! hand-forged one.
 //!
+//! NUMERIC REPRESENTATION TIE (CI-found; FINDINGS D1). The fence below was
+//! written for the arms whose ranges the driver BUILDS. It does NOT cover the
+//! text/binary io arms, whose bounds come from user literal/wire bytes: those
+//! can carry value-equal-but-byte-different numerics (`2` vs `2.0000`), and
+//! multirange canonicalization then picks different representatives across C's
+//! unstable qsort and pgrust's stable sort. `compare_mr_image` handles that
+//! precisely — byte-exact by default, a gated value-level fallback (t==2 only,
+//! still asserting count+flags+bound-values, counted) when and only when a
+//! representation tie is what differs. See its comment and D1.
+//!
 //! WITHIN-TIE ORDER FENCE (ratified non-surface; GL-PARMERGE-1 precedent).
 //! C canonicalizes with qsort_arg — vendored verbatim, so the algorithm
 //! matches — but the shipped Rust uses a stable sort. For two input ranges
@@ -45,8 +55,12 @@
 //!     adt/numeric lane and to rangetypes_diff's single-range arms, and here it
 //!     is fed to the RANGE operand of the r x mr arm, never into a
 //!     multirange's sort input.)
-//! Ties are therefore between byte-identical ranges, where the surviving
-//! representative is immaterial. Every comparator stays at full strength.
+//! For the arms the driver BUILDS, ties are therefore between byte-identical
+//! ranges and the surviving representative is immaterial. This fence covers
+//! ONLY those arms. It does NOT hold for text/binary io, where the bounds are
+//! user bytes — value-equal-but-byte-different numerics DO occur there, and the
+//! driver's own text seed corpus mints them, which is exactly how the CI cluster
+//! found D1. Those arms use `compare_mr_image`'s gated value-level fallback.
 //!
 //! Comparison planes: value bytes/bits (canonicalized multirange images,
 //! output text, wire bytes, element datum images, bool/i32/u32/u64 results),
@@ -100,6 +114,7 @@
 //! per iteration; the memo is a pure cache with no behavioral surface).
 
 use std::ffi::CString;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use adt_multirangetypes as mrt;
 use adt_multirangetypes::builtins as mb;
@@ -769,6 +784,140 @@ fn compare_image(name: &str, cret: i32, cbytes: &[u8], r: &FcOut, dbg: &str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// numeric-representative tie fallback (FINDINGS D1)
+// ---------------------------------------------------------------------------
+//
+// Byte-exact image comparison is the DEFAULT and stays mandatory. It is
+// relaxed to a value-level structural comparison in EXACTLY ONE situation, and
+// only after the relaxation itself proves the situation holds:
+//
+//   nummultirange canonicalization ties. multirange_canonicalize sorts input
+//   ranges with range_compare, which compares numeric bounds BY VALUE, so `2`
+//   and `2.0000` TIE. C's qsort_arg is UNSTABLE and range_union_internal
+//   returns a fixed side on a value tie; pgrust's canonicalize uses a STABLE
+//   sort. When the input carries two value-equal-but-byte-different numeric
+//   bounds, the two implementations keep different (value-equal) byte
+//   representatives. multirange_in and multirange_recv parse such bounds
+//   straight from user text/wire, so this is reachable there; the
+//   integer-minted arms cannot produce it (value-equal => byte-equal for int).
+//
+// Why the value-level check is not a vacuous pass:
+//   * It fires only for t == 2. A byte difference on int4/int8 multirange has
+//     NO numeric representation to differ and is always a hard divergence.
+//   * When it fires it still asserts, per output range: equal range COUNT,
+//     equal FLAGS, and equal bound VALUE via numeric_cmp (infinite bounds must
+//     match infinite). A dropped/added/reordered range, a wrong flag, or a
+//     wrong value all still hard-fail.
+//   * Soundness of "same value+flags+count but different bytes => tie": inside
+//     multirange_in / multirange_recv / multirange_canonicalize a bound is
+//     NEVER re-serialized — range_union_internal on a tie returns one input
+//     image verbatim (UnionResult::Input1/Input2). So a value-equal
+//     byte-different output bound can only be an INPUT representative selected
+//     by the tie. A dscale corruption (which WOULD be a bug) would have to
+//     originate in range_in/numeric_in, where it also breaks the single-range
+//     case and is caught by rangetypes_diff's byte-exact check.
+//   * Every fire is counted; the count is printed periodically so the CI cluster
+//     can confirm it stays a rare fraction and never fires for t != 2.
+static NUMERIC_TIE_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+pub fn numeric_tie_fallback_count() -> u64 {
+    NUMERIC_TIE_FALLBACKS.load(Ordering::Relaxed)
+}
+
+/// Total driver iterations, for the fallback-rate line below.
+static ITERS: AtomicU64 = AtomicU64::new(0);
+
+/// Print the numeric-tie fallback tally on a power-of-two-ish cadence so the
+/// CI cluster log shows it stays a rare fraction of executions (and, since the
+/// fallback is gated to t==2, never fires for a byval instantiation). Cheap:
+/// one relaxed increment per exec, a stderr line only at the checkpoints.
+fn report_tie_fallbacks() {
+    let n = ITERS.fetch_add(1, Ordering::Relaxed) + 1;
+    if n & (n - 1) == 0 && n >= 1 << 16 {
+        eprintln!(
+            "multirangetypes_diff: numeric-tie fallbacks {} / {} execs",
+            NUMERIC_TIE_FALLBACKS.load(Ordering::Relaxed),
+            n
+        );
+    }
+}
+
+/// Do the two multirange images denote the SAME multirange value — same range
+/// count, and each range's bounds equal in VALUE and in flags (inclusive /
+/// infinite)? Computed with the SHIPPED `multirange_cmp`, i.e. the exact
+/// value-equality the code under test defines: it walks range-by-range and
+/// compares each bound through the element cmp (numeric_cmp with the correct
+/// packed-short detoast, which a raw fc call on the stored bound datum
+/// mishandles). cmp == 0 therefore certifies count + flags + every bound value
+/// all agree; a dropped/added/reordered range, a wrong flag, or a wrong value
+/// makes it non-zero. This is NOT a blanket "ignore bytes": it is only ever
+/// consulted after a byte difference on t == 2, and a non-zero result is a hard
+/// divergence.
+fn multiranges_value_equal(t: usize, a: &[u8], b: &[u8], mcx: mcx::Mcx<'_>) -> bool {
+    if mrt::multirange_count(a) != mrt::multirange_count(b) {
+        return false;
+    }
+    let mut fl = ops_flinfo(t);
+    let o = fc_call(
+        mb::fc_multirange_cmp,
+        Some(&mut fl),
+        mcx,
+        [
+            Some(Datum::from_usize(a.as_ptr() as usize)),
+            Some(Datum::from_usize(b.as_ptr() as usize)),
+        ],
+    );
+    matches!(o.result, Ok(d) if d.as_i32() == 0)
+}
+
+/// Compare a multirange-image result. Byte-exact by default; on a byte
+/// difference, the numeric-representation-tie fallback above (precise, gated to
+/// t == 2, counted). Use this — not compare_image — for every arm whose result
+/// is a canonicalized MULTIRANGE image.
+fn compare_mr_image(
+    name: &str,
+    t: usize,
+    cret: i32,
+    cbytes: &[u8],
+    r: &FcOut,
+    mcx: mcx::Mcx<'_>,
+    dbg: &str,
+) {
+    assert!(cret >= 0, "{name}: oracle buffer overflow (harness bug) {dbg}");
+    match &r.result {
+        Ok(d) => {
+            assert!(cret == 0, "{name} DIVERGENCE {dbg}: C err {cret} vs Rust Ok");
+            assert!(!r.isnull, "{name} DIVERGENCE {dbg}: Rust returned SQL NULL");
+            let rbytes = datum_varlena_bytes(*d);
+            if rbytes == cbytes {
+                return; // byte-exact: the default and overwhelmingly common path
+            }
+            assert!(
+                t == 2,
+                "{name} DIVERGENCE {dbg}: byte difference on a byval instantiation \
+                 (no numeric representation to differ) C={cbytes:02x?} Rust={rbytes:02x?}"
+            );
+            assert!(
+                multiranges_value_equal(t, cbytes, rbytes, mcx),
+                "{name} DIVERGENCE {dbg}: multiranges differ by VALUE, not just numeric \
+                 representation C={cbytes:02x?} Rust={rbytes:02x?}"
+            );
+            // Same multirange VALUE, byte-different only in value-equal numeric
+            // bounds: the unstable-qsort vs stable-sort tie (FINDINGS D1).
+            NUMERIC_TIE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(e) => {
+            let rc = err_class(e);
+            assert!(
+                cret == rc,
+                "{name} DIVERGENCE {dbg}: C err {cret} vs Rust err {rc} ({})",
+                e.message
+            );
+        }
+    }
+}
+
 fn compare_scalar(name: &str, cret: i32, cval: i32, r: &FcOut, is_int: bool, dbg: &str) {
     match &r.result {
         Ok(d) => {
@@ -820,7 +969,11 @@ fn agreed_image(t: usize, ranges: &[Vec<u8>], mcx: mcx::Mcx<'_>) -> Option<Vec<u
         [Some(Datum::from_usize(arr.as_ptr() as usize))],
     );
     let dbg = format!("t={t} n={} (canonicalize)", ranges.len());
-    compare_image("multirange_constructor2", cret, &cbuf[..clen as usize], &r, &dbg);
+    // constructor2 inputs here are integer-minted (decode_range), so
+    // value-equality implies byte-equality and the tie fallback never fires;
+    // routed through the tie-aware comparator anyway so no multirange-image
+    // comparison in the driver is silently weaker than another.
+    compare_mr_image("multirange_constructor2", t, cret, &cbuf[..clen as usize], &r, mcx, &dbg);
     r.result.ok().map(|d| datum_varlena_bytes(d).to_vec())
 }
 
@@ -853,6 +1006,7 @@ fn install_seams() {
 
 pub fn multirangetypes_diff(data: &[u8]) {
     install_seams();
+    report_tie_fallbacks();
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
@@ -904,7 +1058,10 @@ fn arm_text_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
                 Some(Datum::from_i32(-1)),
             ],
         );
-        compare_image("multirange_in", cret, &cbuf[..clen as usize], &r, &dbg);
+        // TIE-REACHABLE arm: the literal carries user-chosen numeric bounds
+        // (e.g. `2` and `2.0000`), so nummultirange canonicalization can select
+        // different value-equal representatives (FINDINGS D1).
+        compare_mr_image("multirange_in", t, cret, &cbuf[..clen as usize], &r, mcx, &dbg);
         r.result.ok().map(|d| datum_varlena_bytes(d).to_vec())
     });
     let Some(img) = img else { return };
@@ -1000,7 +1157,8 @@ fn arm_binary_io(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         ],
     );
     let dbg = format!("t={t} wire={payload:02x?}");
-    compare_image("multirange_recv", cret, &cbuf[..clen as usize], &r, &dbg);
+    // TIE-REACHABLE arm: wire numeric bounds are user-chosen, same as text io.
+    compare_mr_image("multirange_recv", t, cret, &cbuf[..clen as usize], &r, mcx, &dbg);
 
     let Ok(d) = &r.result else { return };
     let img = datum_varlena_bytes(*d).to_vec();
@@ -1056,11 +1214,14 @@ fn arm_ctors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
             };
             let mut fl = ops_flinfo(t);
             let r = fc_call::<0>(mb::fc_multirange_constructor0, Some(&mut fl), mcx, []);
-            compare_image(
+            // empty multirange (count 0): no bounds, tie fallback cannot fire.
+            compare_mr_image(
                 "multirange_constructor0",
+                t,
                 cret,
                 &cbuf[..clen as usize],
                 &r,
+                mcx,
                 &format!("t={t}"),
             );
         }
@@ -1105,11 +1266,14 @@ fn arm_ctors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
                     "multirange_constructor1 DIVERGENCE {dbg}: Rust ok on NULL member"
                 );
             } else {
-                compare_image(
+                // single range from decode_range (integer-minted): no tie.
+                compare_mr_image(
                     "multirange_constructor1",
+                    t,
                     cret,
                     &cbuf[..clen as usize],
                     &r,
+                    mcx,
                     &dbg,
                 );
             }
@@ -1147,11 +1311,13 @@ fn arm_ctors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
                 mcx,
                 [Some(Datum::from_usize(arr.as_ptr() as usize))],
             );
-            compare_image(
+            compare_mr_image(
                 "multirange_constructor2_err",
+                t,
                 cret,
                 &cbuf[..clen as usize],
                 &r,
+                mcx,
                 &format!("t={t} multidim={multidim} wrong_elem={wrong_elem}"),
             );
         }
@@ -1390,7 +1556,10 @@ fn arm_setops(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
                 Some(Datum::from_usize(img2.as_ptr() as usize)),
             ],
         );
-        compare_image(name, cret, &cbuf[..clen as usize], &r, &format!("t={t}"));
+        // set-op operands are integer-minted (agreed_from_payload -> decode_range),
+        // so no value-equal-but-byte-different bound can arise and the tie
+        // fallback never fires; routed through it for uniform strength.
+        compare_mr_image(name, t, cret, &cbuf[..clen as usize], &r, mcx, &format!("t={t}"));
     }
 }
 
@@ -1399,6 +1568,12 @@ fn arm_hash(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let Some(img) = agreed_from_payload(t, &mut rd, mcx) else { return };
     let seed = rd.i64() as u64;
     let (mut ch, mut che) = (0u32, 0u64);
+    // AUDIT (value-vs-byte tie): hashing is over BYTES, so two value-equal
+    // byte-different multiranges WOULD hash differently — but both sides hash
+    // the SAME `img` (agreed_image over integer-minted ranges is byte-identical
+    // C==Rust), so the input can carry no representation tie and the hashes
+    // must match exactly. If a hash arm ever consumed a text/recv image (which
+    // CAN tie), it would need the value-level path, not a byte hash compare.
     let cret = unsafe { pg_diff_mr_hash(img.as_ptr(), &mut ch, seed, &mut che) };
     let dbg = format!("t={t} seed={seed:#x}");
     let mut fl = ops_flinfo(t);
@@ -1453,6 +1628,12 @@ fn arm_merge(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         mcx,
         [Some(Datum::from_usize(img.as_ptr() as usize))],
     );
+    // AUDIT (value-vs-byte tie): output is a single RANGE, not a multirange,
+    // and range_merge does not canonicalize a tied multiset — it spans
+    // lower-of-first..upper-of-last of an already-canonical input whose bounds
+    // are integer-minted here. No value-equal-but-byte-different bound can
+    // reach it, so byte-exact is correct and cannot mask a tie. (A dscale tie
+    // on the RANGE surface, if it ever mattered, is rangetypes_diff's to own.)
     compare_image(
         "range_merge_from_multirange",
         cret,
@@ -1563,6 +1744,52 @@ mod tests {
                 run(&v);
             }
         }
+    }
+
+
+    /// D1: the numrange canonicalization tie. Value-equal-but-byte-different
+    /// bounds in a nummultirange literal (`2` vs `2.0000`, dscale 0 vs 4) make
+    /// C (unstable qsort) and pgrust (stable sort) keep different value-equal
+    /// representatives. The comparator must NOT flag this, MUST take the gated
+    /// value-level fallback, and the fallback counter must advance — proving
+    /// the path is live and not silently short-circuited. The same shapes on
+    /// int4/int8 multirange must NOT trip the fallback (value-equal is
+    /// byte-equal for byval).
+    #[test]
+    fn numeric_representation_tie_D1() {
+        let before = numeric_tie_fallback_count();
+        // nummultirange (t=2) literals that ACTUALLY diverge: 3+ value groups
+        // with dscale variety, ordered so C's unstable qsort keeps a different
+        // representative than pgrust's stable sort (verified to fire). The last
+        // is the verbatim CI cluster reproducer for D1.
+        for lit in [
+            &b"{[5,6),[3,4),[1,2),[5,6.0),[3,4.0),[1,2.0),[5,6.00),[3,4.00)}"[..],
+            b"{[7,8),[7,8.0),[7,8.00),[1,2),[1,2.0),[9,10),[9,10.00)}",
+            b"{[20,0204),[\t0,2),[1,2),[3,42),[\t1,2),[3,42),[\t1,2),[3,42),[3,4),[3,42\n),[3,44),[\t1,2),[1,2.0000)}",
+        ] {
+            let mut v = vec![0u8, 2];
+            v.extend_from_slice(lit);
+            run(&v);
+        }
+        assert!(
+            numeric_tie_fallback_count() > before,
+            "the D1 tie fallback did not fire — the value-level path is dead \
+             (a byte-exact-only comparator would have panicked on the divergence instead)"
+        );
+        // byval instantiations: the same literal shapes must never fallback.
+        let mid = numeric_tie_fallback_count();
+        for t in [0u8, 1] {
+            for lit in [&b"{[1,2),[1,2)}"[..], b"{[0,10),[0,10),[3,4)}", b"{[3,4),[1,2)}"] {
+                let mut v = vec![0u8, t];
+                v.extend_from_slice(lit);
+                run(&v);
+            }
+        }
+        assert_eq!(
+            numeric_tie_fallback_count(),
+            mid,
+            "a byval instantiation took the numeric-tie fallback — it must not"
+        );
     }
 
     /// WITNESS PAIRS (skill obligation): inputs differing in EXACTLY one field
