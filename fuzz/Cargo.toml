@@ -321,6 +321,10 @@ path = "fuzz_targets/rowtypes_diff.rs"
 [[bin]]
 name = "jsonbio_diff"
 path = "fuzz_targets/jsonbio_diff.rs"
+# like_diff: scaffolded by fuzz/scaffold.py — see README-TODO-like_diff.md.
+[[bin]]
+name = "like_diff"
+path = "fuzz_targets/like_diff.rs"
 test = false
 doc = false
 bench = false
@@ -384,6 +388,10 @@ doc = false
 [[bin]]
 name = "datetime_closeout_diff"
 path = "fuzz_targets/datetime_closeout_diff.rs"
+# regexp_diff: scaffolded by fuzz/scaffold.py — see README-TODO-regexp_diff.md.
+[[bin]]
+name = "regexp_diff"
+path = "fuzz_targets/regexp_diff.rs"
 test = false
 doc = false
 bench = false

@@ -43,6 +43,14 @@ fn main() {
         // section of pg_multirangetypes_io.c's header for why including beats
         // re-vendoring or extern-promoting them.
         .file("csrc/pg_multirangetypes_io.c")
+        // COMPILE GATE (regexp_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_regexp_io.c is filled
+        // with verbatim vendored C (README-TODO-regexp_diff.md step 1).
+        // .file("csrc/pg_regexp_io.c")
+        // COMPILE GATE (like_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_like_io.c is filled
+        // with verbatim vendored C (README-TODO-like_diff.md step 1).
+        // .file("csrc/pg_like_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).

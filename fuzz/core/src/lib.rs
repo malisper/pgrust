@@ -474,3 +474,10 @@ pub use numericfam::{numeric_io_diff, numeric_ops_diff};
 // vs C + the owed fc-wrapper plane) — see core/src/datetime_closeout_diff.rs.
 pub mod datetime_closeout_diff;
 pub use datetime_closeout_diff::datetime_closeout_diff;
+// like_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-like_diff.md.
+pub mod like_diff;
+pub use like_diff::like_diff;
+
+// regexp_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-regexp_diff.md.
+pub mod regexp_diff;
+pub use regexp_diff::regexp_diff;

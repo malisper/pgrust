@@ -128,6 +128,8 @@ adt_multirangetypes = { path = "../../crates/backend/utils/adt/multirangetypes" 
 # compressor; both sides then decompress the identical bytes (C: verbatim
 # vendored pglz_decompress; Rust: the shipped detoast path).
 pglz = { path = "../../crates/common/pglz" }
+adt_like = { path = "../../crates/backend/utils/adt/like" }  # like_diff (scaffold.py)
+adt_regexp = { path = "../../crates/backend/utils/adt/regexp" }  # regexp_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"
