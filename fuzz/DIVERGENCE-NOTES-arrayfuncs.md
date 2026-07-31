@@ -174,3 +174,91 @@ seed committed in fuzz/corpus/arrayfuncs_diff/.
   u8 width — the width the TYPE defines — and asserts the full Datum word
   for every other width. Documented in the target header; this is C
   platform variance, not a pgrust deviation.
+
+# COVERAGE RESIDUAL CLASSIFICATION (extension pass, 2026-07-31)
+
+Per-file fuzz-covered SLOC-v2 lines, baseline -> final (local measurement,
+`cargo +nightly fuzz coverage` over the banked corpus + merge-coverage.py
+--sloc-rule v2):
+
+| file | sloc | base | final | uncovered = zero-region + real |
+|---|---|---|---|---|
+| element.rs    | 764 | 708 | 744 | 20 = 15 + 5 |
+| construct.rs  | 250 | 207 | 230 | 20 =  2 + 18 |
+| foundation.rs | 115 |  88 |  95 | 20 =  1 + 19 |
+| io.rs         | 550 | 419 | 421 | 129 = 8 + 121 |
+| TOTAL         |     |1422 |1490 | (+68) |
+
+ZERO-REGION vs REAL is measured, not asserted: `llvm-cov show` emits NO
+coverage region for those lines at all (blank count column), so SLOC-v2
+counts them while the instrumentation can never credit them. The
+merge-coverage run confirms this independently ("macro attribution: 0
+regions attributed to invocation lines"). Verified example — io.rs 222 is
+blank while its enclosing arm shows 26 executions:
+
+    218|  2.80k|        if ndim >= MAXDIM {
+    219|     26|            return soft(
+    221|     26|                PgError::error(alloc::format!(
+    222|       |                    "number of array dimensions exceeds ..."
+    224|     26|                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+
+So the MAXDIM / size-exceeded / dims-mismatch arms named in the extension
+brief ARE driven; their format!-body and bare-declaration lines are simply
+unmeasurable. This is the same false-UNCOVERED class already recorded for
+`fc*!` lines tree-wide.
+
+## Classification of every remaining line
+
+element.rs — 15 zero-region (format!/decl lines of arms that DO run:
+185-186, 204-205, 423, 453-454, 630, 720, 728, 819, 980, 1063, 1070-1072).
+REAL 5, all DEFENSIVE-UNREACHABLE and matching C's own dead branches:
+  - 338, 603: `construct_empty_array` / `upper_lt_lower` in the
+    fill-missing-subscripts loops. Both need dims[i] == 0 in a >=1-dim
+    image, which construct_md_array (and C's) can never produce — a zero
+    dim collapses the array to 0-dim. C carries the identical dead branch.
+  - 346: the `?` error edge of slice_size, which cannot fail for a
+    well-formed image.
+  - 643, 700: the ndim>1 arms of array_set_slice (slice_size for
+    olditemsize; insert_slice). STILL-COVERABLE — driven by the new big
+    multi-dim seeds but not yet hit within 400k local execs; the CI cluster's
+    10M budget is the right vehicle. Not defensive.
+
+construct.rs — 2 zero-region (45-46). REAL 18:
+  - 35: builtin_meta's panic arm — deliberately NOT driven (KNOWN-DIV-5:
+    a panic cannot be compared past). CARVE by decision, and itself a
+    reported finding.
+  - 42-44, 48, 257: the >1 GiB `array size exceeds the maximum allowed`
+    arm. Needs a real gigabyte of element data per iteration —
+    DEFENSIVE at fuzz scale (an exec-rate/OOM tradeoff, not a gap).
+  - 138: `array_get_n_items` Err inside array_contains_nulls, i.e. a
+    corrupt header. CARVE (the corrupt-image plane is fenced because C
+    reads out of bounds there).
+  - 241-243, 245-247, 250, 285, 288-290: the detoast element paths —
+    explicit seam CARVE, out of scope per the brief.
+
+foundation.rs — 1 zero-region (250). REAL 19:
+  - 31, 213, 223-224: `panic!` arms for an unknown typalign / unsupported
+    byval length. DEFENSIVE (no valid meta reaches them; C has no
+    counterpart check at all).
+  - 101, 114-118, 120-121, 123: the ndim-out-of-range early return of
+    read_dims_lbounds, and read_dims in full. CARVE — the early return
+    needs a corrupt header (fenced), and read_dims' only non-test callers
+    are builtins.rs:179/236 (fc wrapper layer, carved).
+  - 163-167, 170: varsize_any's TOAST arms (1B_E / external / vartag).
+    CARVE — toast plane out of scope.
+
+io.rs — 8 zero-region (222, 235, 276-277, 458, 510-511, 518). REAL 121:
+  - 744-882 (119 lines): array_recv / array_send. Explicit OUT-carve.
+    In-scope io.rs is therefore ~430 lines, of which 421 are covered.
+  - 18-23: call1_armed. NOT reachable from core entries — its only caller
+    is builtins.rs:471 (`array_to_text` family), which needs
+    catalog-backed get_type_io_data. BUILTINS CARVE, class it there.
+  - 507-509, 513: the `nitems >= MAX_ARRAY_SIZE` guard inside
+    ReadArrayStr — needs 268M parsed elements. DEFENSIVE at fuzz scale.
+  - 546, 574-576: `mcx.oom()` / try_reserve failure arms. DEFENSIVE
+    (allocator-failure injection, not a fuzz input).
+  - 148, 644: `Ok(Some(img))` tail of array_in and the get_unchecked
+    closure body inside array_out's element loop — both inside paths that
+    demonstrably run thousands of times; llvm attributes their regions to
+    the enclosing lines. Treat as ZERO-REGION-equivalent (region exists
+    but is folded), i.e. a measurement artifact, not a gap.
