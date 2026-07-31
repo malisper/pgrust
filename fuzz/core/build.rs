@@ -49,5 +49,20 @@ fn main() {
         .flag_if_supported("-fwrapv")
         .compile("pg_difffuzz_cryptofam");
 
+    // tablesfam_diff oracle (p1-lanef): verbatim 18.3 kwlookup/keywords/
+    // unicode_category, FRONTEND arms, own shim include tree.
+    cc::Build::new()
+        .file("csrc/tablesfam/kwlookup.c")
+        .file("csrc/tablesfam/keywords.c")
+        .file("csrc/tablesfam/unicode_category.c")
+        .file("csrc/tablesfam/pg_diff_tablesfam.c")
+        .include("csrc/tablesfam/shim_fe")
+        .include("csrc/tablesfam/include")
+        .include("csrc/tablesfam")
+        .define("FRONTEND", None)
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .compile("pg_difffuzz_tablesfam");
+
     println!("cargo:rerun-if-changed=csrc");
 }

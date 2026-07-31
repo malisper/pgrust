@@ -247,6 +247,11 @@ pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff,
 pub mod cryptofam;
 pub use cryptofam::cryptofam_diff;
 
+// tablesfam_diff (p1-lanef tables batch): keywords + unicode_category vs
+// vendored 18.3 C. See tablesfam.rs.
+pub mod tablesfam;
+pub use tablesfam::tablesfam_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;

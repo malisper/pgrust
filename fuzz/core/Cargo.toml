@@ -35,6 +35,9 @@ cryptohashfuncs = { path = "../../crates/backend/utils/adt/cryptohashfuncs" }
 types_fmgr = { path = "../../crates/_support/types/fmgr" }
 datum = { path = "../../crates/_support/types/datum" }
 postgres_seams = { path = "../../crates/backend/tcop/postgres_seams" }
+# tablesfam_diff (p1-lanef tables batch):
+keywords = { path = "../../crates/common/keywords" }
+unicode_category = { path = "../../crates/common/unicode_category" }
 
 [build-dependencies]
 cc = "1"
