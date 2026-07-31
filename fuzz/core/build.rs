@@ -63,6 +63,10 @@ fn main() {
         .include("csrc/tablesfam/shim_fe")
         .include("csrc/tablesfam/include")
         .include("csrc/tablesfam")
+        // kwlist_d.h comes from THE SHIPPED CRATE (not a private copy), so a
+        // transcription drift between the crate's generated tables and the C
+        // oracle's is a divergence instead of an invisible agreement.
+        .include("../../crates/common/keywords")
         .define("FRONTEND", None)
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")

@@ -1,7 +1,10 @@
 //! Target: tablesfam_diff — the p1-lanef tables batch (common/keywords,
 //! common/unicode_category) shipped Rust vs vendored PostgreSQL 18.3 C
-//! (csrc/tablesfam/, verbatim @ 62d6c7d3df; kwlist_d.h = the crate's
-//! committed 18.3 gen_keywordlist.pl output) in-process.
+//! (csrc/tablesfam/, verbatim @ 62d6c7d3df) in-process. The oracle compiles
+//! against THE SHIPPED CRATE'S OWN kwlist_d.h (build.rs adds
+//! crates/common/keywords to the include path) — not a private copy — so a
+//! transcription drift between the crate's generated tables and the C side is
+//! a divergence rather than an invisible agreement.
 //!
 //! Comparison planes: keyword lookup index + keyword text/category/bare-label
 //! tables (index probes), unicode general category + all 18 property/classify
@@ -10,9 +13,16 @@
 //! is a divergence reproducer.
 //!
 //! Domain carves (documented, ratified non-surfaces):
-//!   - C `ScanKeywordLookup` takes a NUL-terminated string: lookup input is
-//!     truncated at the first NUL before BOTH sides (the scanner only ever
-//!     passes NUL-free identifier text).
+//!   1. C `ScanKeywordLookup` takes a NUL-terminated string: lookup input is
+//!      truncated at the first NUL before BOTH sides (the scanner only ever
+//!      passes NUL-free identifier text).
+//!   2. GetScanKeyword out-of-range index is NOT a parity plane. Verbatim C
+//!      (kwlookup.h:38-42) indexes `kw_offsets[n]` with no range check, so
+//!      out-of-range is C UB; the shim's guard is HARNESS PLUMBING WE ADDED and
+//!      is never used as an oracle. The shipped Rust `None` arm is pgrust
+//!      hardening with no C counterpart (PARITY-SCOPE NOTE at the head of
+//!      proofs/coverage/lanef/residual-rows-lanef.tsv; same shape as lane-C's
+//!      relpath forkNames row). Parity claims cover in-range indexes only.
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint};
@@ -71,15 +81,18 @@ fn diff_keyword_lookup(payload: &[u8]) {
 }
 
 fn diff_keyword_index(raw: usize) {
-    // Out-of-range plane first: Rust None must pair with C NULL (the C shim
-    // range-guards exactly as GetScanKeyword's callers do).
+    // OUT-OF-RANGE ARM — NOT A PARITY CLAIM (see header carve 2). Verbatim C
+    // `GetScanKeyword` (src/include/common/kwlookup.h:38-42) is guard-free:
+    // `keywords->kw_string + keywords->kw_offsets[n]`, so an out-of-range n is
+    // C UB, not a comparable behavior. The shipped Rust returns None there
+    // (pgrust hardening with no C counterpart). We assert only the RUST side —
+    // a self-consistency claim audited by every exec — and never compare it to
+    // the oracle, whose range guard is harness plumbing we added.
     let oob = raw.max(keywords::SCANKEYWORDS_NUM_KEYWORDS);
     assert!(
         keywords::GetScanKeyword(oob, &keywords::ScanKeywords).is_none(),
-        "GetScanKeyword({oob}) must be None"
+        "GetScanKeyword({oob}) must be None (pgrust hardening arm)"
     );
-    // SAFETY: total function; returns NULL out of range.
-    assert!(unsafe { pg_diff_get_scan_keyword(oob.min(i32::MAX as usize) as c_int) }.is_null());
 
     let n = raw % keywords::SCANKEYWORDS_NUM_KEYWORDS;
     let r_kw = keywords::GetScanKeyword(n, &keywords::ScanKeywords).expect("in range");

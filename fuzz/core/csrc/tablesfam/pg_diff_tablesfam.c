@@ -17,7 +17,16 @@ pg_diff_scan_keyword_lookup(const char *str)
 	return ScanKeywordLookup(str, &ScanKeywords);
 }
 
-/* keyword text for index n (from the offsets table), or NULL. */
+/*
+ * Keyword text for index n.
+ *
+ * HARNESS PLUMBING, NOT VENDORED BEHAVIOR: verbatim GetScanKeyword
+ * (src/include/common/kwlookup.h:38-42) is `kw_string + kw_offsets[n]` with NO
+ * range check — an out-of-range n is C UB. The guard below exists only so the
+ * driver cannot read out of bounds; NO PARITY CLAIM is made against its NULL
+ * return (see the carve in fuzz/core/src/tablesfam.rs). Only in-range calls
+ * are oracle calls.
+ */
 const char *
 pg_diff_get_scan_keyword(int n)
 {
