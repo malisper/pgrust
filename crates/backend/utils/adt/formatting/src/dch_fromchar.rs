@@ -595,9 +595,9 @@ pub fn dch_from_char<'mcx>(
                 skip_thth(&mut cur, suffix);
             }
             DCH_Y_YYY => {
-                let (millennia, years0, nch) = match parse_y_yyy(cur.rest()) {
-                    Some(t) => t,
-                    None => {
+                let (years, nch) = match parse_y_yyy(cur.rest()) {
+                    YyyyScan::Ok { years, nch } => (years, nch),
+                    YyyyScan::Invalid => {
                         errsave(
                             escontext.as_deref_mut(),
                             PgError::error(format!(
@@ -609,13 +609,7 @@ pub fn dch_from_char<'mcx>(
                         )?;
                         return Ok(false);
                     }
-                };
-                let years = match millennia
-                    .checked_mul(1000)
-                    .and_then(|m| years0.checked_add(m))
-                {
-                    Some(v) => v,
-                    None => {
+                    YyyyScan::OutOfRange => {
                         errsave(
                             escontext.as_deref_mut(),
                             PgError::error(
@@ -754,27 +748,72 @@ pub fn dch_from_char<'mcx>(
     Ok(true)
 }
 
-/// C: `sscanf(s, "%d,%03d%n", ...)` with `matched >= 2`.
-fn parse_y_yyy(s: &[u8]) -> Option<(i32, i32, usize)> {
+/// Outcome of one `%d`-style field scan in `parse_y_yyy`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScanInt {
+    /// Field parsed and its true magnitude fits `int`.
+    Value(i32),
+    /// Field parsed but its true magnitude is outside `int`. C's `sscanf`
+    /// `%d` truncates here (formally UB; glibc saturates in `strtol` then
+    /// assigns to `int`), which silently defeats the `pg_mul_s32_overflow` /
+    /// `pg_add_s32_overflow` guard that formatting.c places on the very next
+    /// line. We report the true out-of-range-ness so that guard can fire, the
+    /// same rejection `from_char_parse_int_len` (formatting.c:2272) applies to
+    /// every other numeric DCH field. DELIBERATE divergence from C's observed
+    /// glibc behavior — recorded on ledger oids 1778/1780 in
+    /// proofs/USER_FACING_FUNCTIONS.tsv; see notes/y-yyy-range-lane.md.
+    OutOfRange,
+}
+
+/// Outcome of the whole `"%d,%03d%n"` scan.
+enum YyyyScan {
+    Ok { years: i32, nch: usize },
+    /// `matched < 2`: C's "invalid value ... for Y,YYY".
+    Invalid,
+    /// A field's true magnitude, or `millennia * 1000 + years`, overflows
+    /// `int`: C's "value for Y,YYY in source string is out of range".
+    OutOfRange,
+}
+
+/// C: `sscanf(s, "%d,%03d%n", ...)` with `matched >= 2`, followed by
+/// formatting.c's `pg_mul_s32_overflow` / `pg_add_s32_overflow` guard
+/// (formatting.c:3589-3601). Both fields are accumulated at full width first
+/// and range-checked afterwards, so the guard sees the true magnitude rather
+/// than a truncated or clamped one.
+fn parse_y_yyy(s: &[u8]) -> YyyyScan {
     let mut i = 0usize;
     while i < s.len() && is_c_space(s[i]) {
         i += 1;
     }
-    let (mil, ni) = scan_signed_int(s, i, None)?;
+    let (mil, ni) = match scan_signed_int(s, i, None) {
+        Some(t) => t,
+        None => return YyyyScan::Invalid,
+    };
     i = ni;
     if i >= s.len() || s[i] != b',' {
-        return None;
+        return YyyyScan::Invalid;
     }
     i += 1;
     while i < s.len() && is_c_space(s[i]) {
         i += 1;
     }
-    let (yrs, ni) = scan_signed_int(s, i, Some(3))?;
+    let (yrs, ni) = match scan_signed_int(s, i, Some(3)) {
+        Some(t) => t,
+        None => return YyyyScan::Invalid,
+    };
     i = ni;
-    Some((mil, yrs, i))
+
+    // C: years += millennia * 1000, both steps overflow-checked.
+    let (ScanInt::Value(mil), ScanInt::Value(yrs)) = (mil, yrs) else {
+        return YyyyScan::OutOfRange;
+    };
+    match mil.checked_mul(1000).and_then(|m| yrs.checked_add(m)) {
+        Some(years) => YyyyScan::Ok { years, nch: i },
+        None => YyyyScan::OutOfRange,
+    }
 }
 
-fn scan_signed_int(s: &[u8], start: usize, max_width: Option<usize>) -> Option<(i32, usize)> {
+fn scan_signed_int(s: &[u8], start: usize, max_width: Option<usize>) -> Option<(ScanInt, usize)> {
     let mut i = start;
     let mut neg = false;
     if i < s.len() && (s[i] == b'+' || s[i] == b'-') && max_width.is_none_or(|max| max > 0) {
@@ -782,24 +821,36 @@ fn scan_signed_int(s: &[u8], start: usize, max_width: Option<usize>) -> Option<(
         i += 1;
     }
     let ds = i;
+    // Accumulate the true magnitude; once it is past `int` range there is no
+    // need to keep the exact value, only the fact that it is out of range
+    // (and stopping keeps the i64 accumulator from overflowing on long
+    // digit runs).
     let mut acc: i64 = 0;
+    let mut out_of_range = false;
     while i < s.len() && s[i].is_ascii_digit() {
         if let Some(max) = max_width {
             if i - start >= max {
                 break;
             }
         }
-        acc = acc * 10 + (s[i] - b'0') as i64;
-        if acc > i32::MAX as i64 + 1 {
-            acc = i32::MAX as i64 + 1;
+        if !out_of_range {
+            acc = acc * 10 + (s[i] - b'0') as i64;
+            let signed = if neg { -acc } else { acc };
+            if signed < i32::MIN as i64 || signed > i32::MAX as i64 {
+                out_of_range = true;
+            }
         }
         i += 1;
     }
     if i == ds {
         return None;
     }
-    let v = if neg { -acc } else { acc };
-    Some((v as i32, i))
+    let v = if out_of_range {
+        ScanInt::OutOfRange
+    } else {
+        ScanInt::Value(if neg { -acc } else { acc } as i32)
+    };
+    Some((v, i))
 }
 
 /// C: `DCH_datetime_type` (formatting.c:3737).
