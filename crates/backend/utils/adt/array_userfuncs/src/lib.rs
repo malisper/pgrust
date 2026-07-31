@@ -278,11 +278,14 @@ pub fn array_position_internal(
     eqproc: &mut FmgrInfo,
 ) -> PgResult<Option<i32>> {
     let (_nd, _dims, lbs) = read_dims_lbounds(array);
-    let mut position = lbs[0] - 1;
+    // C array_position_common computes `position = (ARR_LBOUND(array))[0] - 1`
+    // bare under -fwrapv; lbs[0] == i32::MIN is a valid SQL-reachable array
+    // lower bound, so the subtraction must wrap (DIV-1, p1-laneai).
+    let mut position = lbs[0].wrapping_sub(1);
     let position_min = s.position_min.unwrap_or(lbs[0]);
     let (elems, nulls) = deconstruct_array(mcx, array, meta.typlen, meta.typbyval, meta.typalign, true)?;
     for (i, &value) in elems.iter().enumerate() {
-        position += 1;
+        position = position.wrapping_add(1);
         if position < position_min {
             continue;
         }
@@ -316,10 +319,11 @@ pub fn array_positions_internal<'m>(
     astate.typalign = b'i';
 
     let (_nd, _dims, lbs) = read_dims_lbounds(array);
-    let mut position = lbs[0] - 1;
+    // Wrapping: C -fwrapv parity for lbs[0] == i32::MIN (DIV-1, p1-laneai).
+    let mut position = lbs[0].wrapping_sub(1);
     let (elems, nulls) = deconstruct_array(mcx, array, meta.typlen, meta.typbyval, meta.typalign, true)?;
     for (i, &value) in elems.iter().enumerate() {
-        position += 1;
+        position = position.wrapping_add(1);
         let isnull = nulls[i];
         let hit = if isnull || s.null_search {
             isnull && s.null_search
