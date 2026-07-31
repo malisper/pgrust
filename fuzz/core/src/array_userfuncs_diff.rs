@@ -81,6 +81,7 @@ extern "C" {
 
     fn pg_diff_array_append(
         elemsel: i32,
+        argmode: i32,
         arr: *const u8,
         elem_null: i32,
         elem: *const u8,
@@ -89,12 +90,14 @@ extern "C" {
     ) -> i32;
     fn pg_diff_array_prepend(
         elemsel: i32,
+        argmode: i32,
         arr: *const u8,
         elem_null: i32,
         elem: *const u8,
         out: *mut u8,
         outcap: i32,
     ) -> i32;
+    fn pg_diff_array_support(is_append: i32) -> i32;
     fn pg_diff_array_cat(a1: *const u8, a2: *const u8, out: *mut u8, outcap: i32) -> i32;
     fn pg_diff_array_position(
         elemsel: i32,
@@ -122,6 +125,7 @@ extern "C" {
     fn pg_diff_array_sample(arr: *const u8, n: i32, seed: u64, out: *mut u8, outcap: i32) -> i32;
     fn pg_diff_array_agg_pipeline(
         elemsel: i32,
+        argmode: i32,
         nimgs: i32,
         imgs: *const u8,
         offs: *const i32,
@@ -388,6 +392,11 @@ impl<'a> Rd<'a> {
 enum Elem {
     Int4,
     Text,
+    /// int8 is IN the pinned type universe (both sides) but has NO eq
+    /// operator in either pinned catalog — it exists to drive the
+    /// "could not identify an equality operator" arm of the position
+    /// family, plus 8-byte ('d'-align) element walks everywhere else.
+    Int8,
 }
 
 impl Elem {
@@ -395,18 +404,21 @@ impl Elem {
         match self {
             Elem::Int4 => INT4OID,
             Elem::Text => TEXTOID,
+            Elem::Int8 => INT8OID,
         }
     }
     fn arr_oid(self) -> Oid {
         match self {
             Elem::Int4 => INT4ARRAYOID,
             Elem::Text => TEXTARRAYOID,
+            Elem::Int8 => INT8ARRAYOID,
         }
     }
     fn sel(self) -> i32 {
         match self {
             Elem::Int4 => 0,
             Elem::Text => 1,
+            Elem::Int8 => 2,
         }
     }
 }
@@ -417,6 +429,7 @@ impl Elem {
 fn read_elem(r: &mut Rd<'_>, e: Elem) -> Aligned {
     match e {
         Elem::Int4 => Aligned::from_bytes(&r.bytes(4)),
+        Elem::Int8 => Aligned::from_bytes(&r.bytes(8)),
         Elem::Text => {
             let len = (r.u8() as usize) % 12;
             let body = r.bytes(len);
@@ -508,14 +521,16 @@ fn clamp_lb(raw: i32, dim: i32) -> i32 {
 /// lbs fully fuzzed i32 (bounds-check arms); per-element null flags.
 fn read_array(r: &mut Rd<'_>, e: Elem) -> Aligned {
     let mode = r.u8();
-    let ndims = (mode % 4) as i32; // 0 = empty array
+    // 0 = empty array; up to MAXDIM(6) dims so the ndims+1 > MAXDIM
+    // accumulation arm is reachable.
+    let ndims = (mode % 7) as i32;
     if ndims == 0 {
         return build_array(e, 0, &[], &[], &[], &[]);
     }
     let nelems_want = (r.u8() as usize) % 17;
-    let mut dims = [0i32; 3];
-    let mut lbs = [0i32; 3];
-    let mut raw_lbs = [0i32; 3];
+    let mut dims = [0i32; 6];
+    let mut lbs = [0i32; 6];
+    let mut raw_lbs = [0i32; 6];
     for d in 0..ndims as usize {
         dims[d] = (r.u8() as i32) % 4 + 1;
         raw_lbs[d] = r.i32();
@@ -574,6 +589,13 @@ fn build_array(
         }
         match e {
             Elem::Int4 => data.extend_from_slice(el),
+            Elem::Int8 => {
+                // 'd' align; datastart is 8-aligned so relative == absolute.
+                while data.len() % 8 != 0 {
+                    data.push(0);
+                }
+                data.extend_from_slice(el);
+            }
             Elem::Text => {
                 // 'i' align each varlena element
                 while data.len() % 4 != 0 {
@@ -710,8 +732,14 @@ pub fn array_userfuncs_diff(data: &[u8]) {
         return;
     };
     let mut r = Rd { b: payload, i: 0 };
-    let e = if flags & 1 == 0 { Elem::Int4 } else { Elem::Text };
-    match sel % 12 {
+    let e = if flags & 16 != 0 {
+        Elem::Int8
+    } else if flags & 1 == 0 {
+        Elem::Int4
+    } else {
+        Elem::Text
+    };
+    match sel % 13 {
         0 => append_prepend_arm(true, flags, e, &mut r),
         1 => append_prepend_arm(false, flags, e, &mut r),
         2 => cat_arm(flags, e, &mut r),
@@ -722,80 +750,157 @@ pub fn array_userfuncs_diff(data: &[u8]) {
         7 => reverse_arm(e, &mut r),
         8 => shuffle_arm(e, &mut r),
         9 => sample_arm(e, &mut r),
-        10 => agg_pipeline_arm(e, &mut r),
-        _ => deserialize_raw_arm(e, &mut r),
+        10 => agg_pipeline_arm(flags, e, &mut r),
+        11 => deserialize_raw_arm(e, &mut r),
+        _ => support_arm(flags),
     }
 }
 
+/// array_append_support / array_prepend_support (oids 6378/6379): C falls
+/// through to PG_RETURN_POINTER(NULL) for any request that is not a
+/// SupportRequestModifyInPlace; the Rust wrappers return the same NULL
+/// pointer datum unconditionally (the support-node vocabulary carve,
+/// documented at builtins.rs). The diffable domain is therefore exactly the
+/// non-SupportRequestModifyInPlace request space, pinned here via a
+/// fabricated plain Node on the C side.
+fn support_arm(flags: u8) {
+    let is_append = flags & 2 == 0;
+    let cst = unsafe { pg_diff_array_support(is_append as i32) };
+    let cx = mcx::MemoryContext::new("aufuzz");
+    let m = cx.mcx();
+    let (f, oid): (PGFunction, Oid) = if is_append {
+        (ab::fc_array_append_support, 6378)
+    } else {
+        (ab::fc_array_prepend_support, 6379)
+    };
+    let mut fl = FmgrInfo::new(f, oid, 1, true, false);
+    // Arg 0 is an `internal` Node*; the Rust wrapper ignores it entirely.
+    let (res, _) = fc_call(f, &mut fl, C_COLLATION, m, None, [(Datum::from_usize(8), false)]);
+    let name = if is_append { "array_append_support" } else { "array_prepend_support" };
+    match res {
+        Ok(d) => assert!(
+            cst == 0 && d.as_usize() == 0,
+            "{name} DIVERGENCE: C status {cst}, Rust {:#x}",
+            d.as_usize()
+        ),
+        Err(e2) => panic!("{name} DIVERGENCE: C status {cst}, Rust Err {}", e2.message),
+    }
+}
+
+/// flags: bit1 arr-null, bit2 elem-null, bit3 argmode=1 (argtype pin
+/// InvalidOid: the "could not determine input data type" arm), bit5
+/// argmode=2 (pin = the SCALAR element oid: the "input data type is not an
+/// array" arm; both only observable on the NULL-array leg), bit6 = arm the
+/// Rust call with a fabricated agg context (C array_append has no
+/// agg-context read; the Rust mcx-selection branch is context-only, value
+/// plane identical), bit7 = a SECOND call reusing the same FmgrInfo on an
+/// OTHER-element-type array (drives the fn_extra memo stale-type leg).
 fn append_prepend_arm(is_append: bool, flags: u8, e: Elem, r: &mut Rd<'_>) {
     let arr_null = flags & 2 != 0;
     let elem_null = flags & 4 != 0;
-    let arr = if arr_null { None } else { Some(read_array(r, e)) };
-    let elem = if elem_null { Aligned::from_bytes(&[0u8; 4]) } else { read_elem(r, e) };
-    let elem_bytes = elem.as_bytes();
-    ARGTYPE_PIN.with(|c| c.set(e.arr_oid()));
-
-    let mut cout = vec![0u8; OUTCAP];
-    let cst = unsafe {
-        if is_append {
-            pg_diff_array_append(
-                e.sel(),
-                ptr_or_null(arr.as_ref().map(|a| a.as_bytes())),
-                elem_null as i32,
-                elem_bytes.as_ptr(),
-                cout.as_mut_ptr(),
-                OUTCAP as i32,
-            )
-        } else {
-            pg_diff_array_prepend(
-                e.sel(),
-                ptr_or_null(arr.as_ref().map(|a| a.as_bytes())),
-                elem_null as i32,
-                elem_bytes.as_ptr(),
-                cout.as_mut_ptr(),
-                OUTCAP as i32,
-            )
-        }
-    };
-
-    let cx = mcx::MemoryContext::new("aufuzz");
-    let m = cx.mcx();
-    let mut fl = FmgrInfo::new(
-        if is_append { ab::fc_array_append } else { ab::fc_array_prepend },
-        if is_append { 378 } else { 379 },
-        2,
-        false,
-        false,
-    );
-    let elem_datum = if elem_null {
-        Datum::null()
+    let argmode: i32 = if flags & 8 != 0 {
+        1
+    } else if flags & 32 != 0 {
+        2
     } else {
-        match e {
-            Elem::Int4 => Datum::from_i32(i32::from_le_bytes(elem_bytes[..4].try_into().unwrap())),
-            Elem::Text => Datum::from_usize(elem_bytes.as_ptr() as usize),
-        }
+        0
     };
-    let arr_datum = arr
-        .as_ref()
-        .map(|a| Datum::from_usize(a.as_bytes().as_ptr() as usize))
-        .unwrap_or(Datum::null());
-    // C arg order: append(arr, elem), prepend(elem, arr).
-    let args = if is_append {
-        [(arr_datum, arr_null), (if elem_null { Datum::null() } else { elem_datum }, elem_null)]
-    } else {
-        [(if elem_null { Datum::null() } else { elem_datum }, elem_null), (arr_datum, arr_null)]
-    };
-    let res = fc_call(
-        if is_append { ab::fc_array_append } else { ab::fc_array_prepend },
-        &mut fl,
-        C_COLLATION,
-        m,
-        None,
-        args,
-    );
+    let with_agg = flags & 64 != 0;
+    let second = flags & 128 != 0 && !arr_null;
+
+    let f: PGFunction = if is_append { ab::fc_array_append } else { ab::fc_array_prepend };
+    let mut fl = FmgrInfo::new(f, if is_append { 378 } else { 379 }, 2, false, false);
     let name = if is_append { "array_append" } else { "array_prepend" };
-    compare_imgres(name, cst, &cout, res);
-    core::hint::black_box((&arr, &elem));
+
+    let aggcx = mcx::MemoryContext::new("aufuzz_agg");
+    let mut node = AggStateNode::new(aggcx);
+
+    let mut pass = 0u8;
+    loop {
+        // Pass 1 (bit7): same flinfo, other element type — memo goes stale.
+        let ep = if pass == 0 {
+            e
+        } else if e == Elem::Int4 {
+            Elem::Text
+        } else {
+            Elem::Int4
+        };
+        let arr = if arr_null { None } else { Some(read_array(r, ep)) };
+        let elem = if elem_null { Aligned::from_bytes(&[0u8; 8]) } else { read_elem(r, ep) };
+        let elem_bytes = elem.as_bytes();
+        ARGTYPE_PIN.with(|c| {
+            c.set(match argmode {
+                1 => 0,
+                2 => ep.oid(),
+                _ => ep.arr_oid(),
+            })
+        });
+
+        let mut cout = vec![0u8; OUTCAP];
+        let cst = unsafe {
+            if is_append {
+                pg_diff_array_append(
+                    ep.sel(),
+                    argmode,
+                    ptr_or_null(arr.as_ref().map(|a| a.as_bytes())),
+                    elem_null as i32,
+                    elem_bytes.as_ptr(),
+                    cout.as_mut_ptr(),
+                    OUTCAP as i32,
+                )
+            } else {
+                pg_diff_array_prepend(
+                    ep.sel(),
+                    argmode,
+                    ptr_or_null(arr.as_ref().map(|a| a.as_bytes())),
+                    elem_null as i32,
+                    elem_bytes.as_ptr(),
+                    cout.as_mut_ptr(),
+                    OUTCAP as i32,
+                )
+            }
+        };
+
+        let cx = mcx::MemoryContext::new("aufuzz");
+        let m = cx.mcx();
+        let elem_datum = if elem_null {
+            Datum::null()
+        } else {
+            match ep {
+                Elem::Int4 => {
+                    Datum::from_i32(i32::from_le_bytes(elem_bytes[..4].try_into().unwrap()))
+                }
+                Elem::Int8 => {
+                    Datum::from_i64(i64::from_le_bytes(elem_bytes[..8].try_into().unwrap()))
+                }
+                Elem::Text => Datum::from_usize(elem_bytes.as_ptr() as usize),
+            }
+        };
+        let arr_datum = arr
+            .as_ref()
+            .map(|a| Datum::from_usize(a.as_bytes().as_ptr() as usize))
+            .unwrap_or(Datum::null());
+        // C arg order: append(arr, elem), prepend(elem, arr).
+        let args = if is_append {
+            [(arr_datum, arr_null), (elem_datum, elem_null)]
+        } else {
+            [(elem_datum, elem_null), (arr_datum, arr_null)]
+        };
+        let res = fc_call(
+            f,
+            &mut fl,
+            C_COLLATION,
+            m,
+            if with_agg { Some(&mut node) } else { None },
+            args,
+        );
+        compare_imgres(name, cst, &cout, res);
+        core::hint::black_box((&arr, &elem));
+        if pass == 1 || !second {
+            break;
+        }
+        pass = 1;
+    }
 }
 
 fn cat_arm(flags: u8, e: Elem, r: &mut Rd<'_>) {
@@ -838,17 +943,18 @@ fn cat_arm(flags: u8, e: Elem, r: &mut Rd<'_>) {
 fn position_arm(has_start: bool, flags: u8, e: Elem, r: &mut Rd<'_>) {
     let elem_null = flags & 2 != 0;
     let start_null = has_start && flags & 4 != 0;
+    let arr_null = flags & 8 != 0;
     let start = r.i32();
-    let arr = read_array(r, e);
-    let arr_b = arr.as_bytes();
-    let elem = if elem_null { Aligned::from_bytes(&[0u8; 4]) } else { read_elem(r, e) };
+    let arr = if arr_null { None } else { Some(read_array(r, e)) };
+    let arr_b: &[u8] = arr.as_ref().map(|a| a.as_bytes()).unwrap_or(&[]);
+    let elem = if elem_null { Aligned::from_bytes(&[0u8; 8]) } else { read_elem(r, e) };
     let elem_b = elem.as_bytes();
 
     let mut cpos: i32 = 0;
     let cst = unsafe {
         pg_diff_array_position(
             e.sel(),
-            arr_b.as_ptr(),
+            ptr_or_null(arr.as_ref().map(|a| a.as_bytes())),
             elem_null as i32,
             elem_b.as_ptr(),
             has_start as i32,
@@ -867,26 +973,44 @@ fn position_arm(has_start: bool, flags: u8, e: Elem, r: &mut Rd<'_>) {
         (ab::fc_array_position, 3277)
     };
     let mut fl = FmgrInfo::new(f, oid, if has_start { 3 } else { 2 }, false, false);
-    let da = Datum::from_usize(arr_b.as_ptr() as usize);
+    let da = if arr_null { Datum::null() } else { Datum::from_usize(arr_b.as_ptr() as usize) };
     let de = match e {
         Elem::Int4 if !elem_null => {
             Datum::from_i32(i32::from_le_bytes(elem_b[..4].try_into().unwrap()))
         }
+        Elem::Int8 if !elem_null => {
+            Datum::from_i64(i64::from_le_bytes(elem_b[..8].try_into().unwrap()))
+        }
         Elem::Text if !elem_null => Datum::from_usize(elem_b.as_ptr() as usize),
         _ => Datum::null(),
     };
-    let res = if has_start {
-        fc_call(
-            f,
-            &mut fl,
-            C_COLLATION,
-            m,
-            None,
-            [(da, false), (de, elem_null), (Datum::from_i32(start), start_null)],
-        )
-    } else {
-        fc_call::<2>(f, &mut fl, C_COLLATION, m, None, [(da, false), (de, elem_null)])
+    let call_rust = |fl: &mut FmgrInfo, m| {
+        if has_start {
+            fc_call(
+                f,
+                fl,
+                C_COLLATION,
+                m,
+                None,
+                [(da, arr_null), (de, elem_null), (Datum::from_i32(start), start_null)],
+            )
+        } else {
+            fc_call::<2>(f, fl, C_COLLATION, m, None, [(da, arr_null), (de, elem_null)])
+        }
     };
+    let res = call_rust(&mut fl, m);
+    // Second call on the SAME flinfo: the PosMemo hit leg (fn_extra already
+    // resolved for this element type). Must agree with the first result.
+    if res.0.is_ok() {
+        let res2 = call_rust(&mut fl, m);
+        match (&res, &res2) {
+            ((Ok(d1), n1), (Ok(d2), n2)) => assert!(
+                n1 == n2 && (*n1 || d1.as_i32() == d2.as_i32()),
+                "array_position memo-hit result drift"
+            ),
+            _ => panic!("array_position memo-hit verdict drift"),
+        }
+    }
     let name = if has_start { "array_position_start" } else { "array_position" };
     match res {
         (Ok(d), isnull) => {
@@ -915,16 +1039,17 @@ fn position_arm(has_start: bool, flags: u8, e: Elem, r: &mut Rd<'_>) {
 
 fn positions_arm(flags: u8, e: Elem, r: &mut Rd<'_>) {
     let elem_null = flags & 2 != 0;
-    let arr = read_array(r, e);
-    let arr_b = arr.as_bytes();
-    let elem = if elem_null { Aligned::from_bytes(&[0u8; 4]) } else { read_elem(r, e) };
+    let arr_null = flags & 8 != 0;
+    let arr = if arr_null { None } else { Some(read_array(r, e)) };
+    let arr_b: &[u8] = arr.as_ref().map(|a| a.as_bytes()).unwrap_or(&[]);
+    let elem = if elem_null { Aligned::from_bytes(&[0u8; 8]) } else { read_elem(r, e) };
     let elem_b = elem.as_bytes();
 
     let mut cout = vec![0u8; OUTCAP];
     let cst = unsafe {
         pg_diff_array_positions(
             e.sel(),
-            arr_b.as_ptr(),
+            ptr_or_null(arr.as_ref().map(|a| a.as_bytes())),
             elem_null as i32,
             elem_b.as_ptr(),
             C_COLLATION,
@@ -936,15 +1061,19 @@ fn positions_arm(flags: u8, e: Elem, r: &mut Rd<'_>) {
     let cx = mcx::MemoryContext::new("aufuzz");
     let m = cx.mcx();
     let mut fl = FmgrInfo::new(ab::fc_array_positions, 3279, 2, false, false);
-    let da = Datum::from_usize(arr_b.as_ptr() as usize);
+    let da = if arr_null { Datum::null() } else { Datum::from_usize(arr_b.as_ptr() as usize) };
     let de = match e {
         Elem::Int4 if !elem_null => {
             Datum::from_i32(i32::from_le_bytes(elem_b[..4].try_into().unwrap()))
         }
+        Elem::Int8 if !elem_null => {
+            Datum::from_i64(i64::from_le_bytes(elem_b[..8].try_into().unwrap()))
+        }
         Elem::Text if !elem_null => Datum::from_usize(elem_b.as_ptr() as usize),
         _ => Datum::null(),
     };
-    let res = fc_call(ab::fc_array_positions, &mut fl, C_COLLATION, m, None, [(da, false), (de, elem_null)]);
+    let res =
+        fc_call(ab::fc_array_positions, &mut fl, C_COLLATION, m, None, [(da, arr_null), (de, elem_null)]);
     compare_imgres("array_positions", cst, &cout, res);
     core::hint::black_box((&arr, &elem));
 }
@@ -1016,7 +1145,17 @@ fn sample_arm(e: Elem, r: &mut Rd<'_>) {
     core::hint::black_box(&arr);
 }
 
-fn agg_pipeline_arm(e: Elem, r: &mut Rd<'_>) {
+/// flags bit3 (8): argtype pin = InvalidOid ("could not determine input data
+/// type"); bit5 (32): pin = the SCALAR element oid ("data type %s is not an
+/// array type" in initArrayResultArr). Mirrored by the C entry's argmode.
+fn agg_pipeline_arm(flags: u8, e: Elem, r: &mut Rd<'_>) {
+    let argmode: i32 = if flags & 8 != 0 {
+        1
+    } else if flags & 32 != 0 {
+        2
+    } else {
+        0
+    };
     let nimgs = (r.u8() as usize) % 5;
     let split = if nimgs == 0 { 0 } else { (r.u8() as usize) % (nimgs + 1) };
     let mut flat: Vec<u8> = Vec::new();
@@ -1046,13 +1185,20 @@ fn agg_pipeline_arm(e: Elem, r: &mut Rd<'_>) {
     let imgs = Aligned::from_bytes(&flat);
     let imgs_b = imgs.as_bytes();
 
-    ARGTYPE_PIN.with(|c| c.set(e.arr_oid()));
+    ARGTYPE_PIN.with(|c| {
+        c.set(match argmode {
+            1 => 0,
+            2 => e.oid(),
+            _ => e.arr_oid(),
+        })
+    });
     let mut ser_c = vec![0u8; OUTCAP];
     let mut ser_len_c: i32 = -1;
     let mut cout = vec![0u8; OUTCAP];
     let cst = unsafe {
         pg_diff_array_agg_pipeline(
             e.sel(),
+            argmode,
             nimgs as i32,
             imgs_b.as_ptr(),
             offs.as_ptr(),

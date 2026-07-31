@@ -4715,7 +4715,7 @@ pg_diff_au_emit(Datum d, uint8_t *out, int outcap)
 static Oid
 pg_diff_au_elemsel_arrtype(int elemsel)
 {
-	return elemsel == 0 ? 1007 : 1009;
+	return elemsel == 0 ? 1007 : (elemsel == 2 ? 1016 : 1009);
 }
 
 static Datum
@@ -4728,6 +4728,13 @@ pg_diff_au_elem_datum(int elemsel, const uint8_t *elem)
 		memcpy(&v, elem, 4);
 		return Int32GetDatum(v);
 	}
+	if (elemsel == 2)
+	{
+		int64		v8;
+
+		memcpy(&v8, elem, 8);
+		return Int64GetDatum(v8);
+	}
 	return PointerGetDatum(elem);
 }
 
@@ -4738,7 +4745,8 @@ pg_diff_au_seed_prng(uint64_t seed)
 }
 
 static int
-pg_diff_au_append_prepend(int is_append, int elemsel, const uint8_t *arr,
+pg_diff_au_append_prepend(int is_append, int elemsel, int argmode,
+						  const uint8_t *arr,
 						  int elem_null, const uint8_t *elem,
 						  uint8_t *out, int outcap)
 {
@@ -4754,7 +4762,15 @@ pg_diff_au_append_prepend(int is_append, int elemsel, const uint8_t *arr,
 
 	pg_diff_arena_reset();
 	pg_diff_errcode = 0;
-	pg_diff_au_argtype_pin = pg_diff_au_elemsel_arrtype(elemsel);
+	/* argmode: 0 = the array type (normal); 1 = InvalidOid (the "could not
+	 * determine input data type" arm); 2 = the SCALAR element oid (the
+	 * "input data type is not an array" arm). Mirrors the Rust ARGTYPE_PIN. */
+	if (argmode == 1)
+		pg_diff_au_argtype_pin = InvalidOid;
+	else if (argmode == 2)
+		pg_diff_au_argtype_pin = (elemsel == 0 ? 23 : (elemsel == 2 ? 20 : 25));
+	else
+		pg_diff_au_argtype_pin = pg_diff_au_elemsel_arrtype(elemsel);
 	if (setjmp(pg_diff_au_jmp) != 0)
 		return -1;
 
@@ -4813,17 +4829,93 @@ pg_diff_au_append_prepend(int is_append, int elemsel, const uint8_t *arr,
 }
 
 int
-pg_diff_array_append(int elemsel, const uint8_t *arr, int elem_null,
+pg_diff_array_append(int elemsel, int argmode, const uint8_t *arr, int elem_null,
 					 const uint8_t *elem, uint8_t *out, int outcap)
 {
-	return pg_diff_au_append_prepend(1, elemsel, arr, elem_null, elem, out, outcap);
+	return pg_diff_au_append_prepend(1, elemsel, argmode, arr, elem_null, elem, out, outcap);
 }
 
 int
-pg_diff_array_prepend(int elemsel, const uint8_t *arr, int elem_null,
+pg_diff_array_prepend(int elemsel, int argmode, const uint8_t *arr, int elem_null,
 					  const uint8_t *elem, uint8_t *out, int outcap)
 {
-	return pg_diff_au_append_prepend(0, elemsel, arr, elem_null, elem, out, outcap);
+	return pg_diff_au_append_prepend(0, elemsel, argmode, arr, elem_null, elem, out, outcap);
+}
+
+/* ---- array_append_support / array_prepend_support (oids 6378/6379) ----
+ * VERBATIM bodies from array_userfuncs.c:192 / :246 (18.3). Node shims
+ * (plumbing only): the harness only ever fabricates a request that is NOT a
+ * SupportRequestModifyInPlace, so the IsA test fails and the verbatim body
+ * falls through to PG_RETURN_POINTER(NULL); the true branch's planner types
+ * (Param/linitial/paramkind) are declared just enough to compile, never
+ * executed (the Rust side's support-node vocabulary has no
+ * SupportRequestModifyInPlace yet — that is the diffable-domain pin, see
+ * the driver's support_arm doc). */
+
+typedef enum PgDiffNodeTag
+{
+	PGDIFF_T_Invalid = 0,
+	PGDIFF_T_SupportRequestModifyInPlace = 401,	/* value irrelevant; never fabricated */
+	PGDIFF_T_Param = 402
+} PgDiffNodeTag;
+
+typedef struct PgDiffNode
+{
+	PgDiffNodeTag type;
+} PgDiffNode;
+
+typedef struct PgDiffSupportRequestModifyInPlace
+{
+	PgDiffNodeTag type;
+	void	   *args;
+	int			paramid;
+} PgDiffSupportRequestModifyInPlace;
+
+typedef struct PgDiffParam
+{
+	PgDiffNodeTag type;
+	int			paramkind;
+	int			paramid;
+} PgDiffParam;
+
+#define PGDIFF_PARAM_EXTERN 0
+
+static Datum
+pg_diff_au_support_common(int is_append, PgDiffNode *rawreq)
+{
+	/* VERBATIM value logic of array_append_support/array_prepend_support:
+	 * both bodies are identical modulo the doc comment (18.3). */
+	PgDiffNode *ret = NULL;
+
+	if (rawreq->type == PGDIFF_T_SupportRequestModifyInPlace)
+	{
+		PgDiffSupportRequestModifyInPlace *req = (PgDiffSupportRequestModifyInPlace *) rawreq;
+		PgDiffParam *arg = (PgDiffParam *) req->args;	/* linitial(req->args) */
+
+		if (arg && arg->type == PGDIFF_T_Param &&
+			arg->paramkind == PGDIFF_PARAM_EXTERN &&
+			arg->paramid == req->paramid)
+			ret = (PgDiffNode *) arg;
+	}
+
+	(void) is_append;
+	return PointerGetDatum(ret);
+}
+
+int
+pg_diff_array_support(int is_append)
+{
+	PgDiffNode	req;
+	Datum		d;
+
+	pg_diff_arena_reset();
+	pg_diff_errcode = 0;
+	if (setjmp(pg_diff_au_jmp) != 0)
+		return -1;
+
+	req.type = PGDIFF_T_Invalid;
+	d = pg_diff_au_support_common(is_append, &req);
+	return DatumGetPointer(d) == NULL ? 0 : 1;
 }
 
 /* array_cat through the VERBATIM fmgr wrapper. NULL image = SQL NULL arg.
@@ -4992,7 +5084,7 @@ pg_diff_array_sample(const uint8_t *arr, int32_t n, uint64_t seed,
  * when state2 never existed.
  */
 int
-pg_diff_array_agg_pipeline(int elemsel, int nimgs, const uint8_t *imgs,
+pg_diff_array_agg_pipeline(int elemsel, int argmode, int nimgs, const uint8_t *imgs,
 						   const int32_t *offs, const uint8_t *nullflags,
 						   int split, uint8_t *ser_out, int ser_cap,
 						   int32_t *ser_len, uint8_t *out, int outcap)
@@ -5008,7 +5100,15 @@ pg_diff_array_agg_pipeline(int elemsel, int nimgs, const uint8_t *imgs,
 
 	pg_diff_arena_reset();
 	pg_diff_errcode = 0;
-	pg_diff_au_argtype_pin = pg_diff_au_elemsel_arrtype(elemsel);
+	/* argmode mirrors append/prepend: 0 normal, 1 InvalidOid ("could not
+	 * determine input data type"), 2 scalar element oid ("data type %s is
+	 * not an array type"). */
+	if (argmode == 1)
+		pg_diff_au_argtype_pin = InvalidOid;
+	else if (argmode == 2)
+		pg_diff_au_argtype_pin = (elemsel == 0 ? 23 : (elemsel == 2 ? 20 : 25));
+	else
+		pg_diff_au_argtype_pin = pg_diff_au_elemsel_arrtype(elemsel);
 	*ser_len = -1;
 	if (setjmp(pg_diff_au_jmp) != 0)
 		return -1;
