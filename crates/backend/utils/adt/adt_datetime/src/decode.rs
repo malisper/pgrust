@@ -355,13 +355,17 @@ pub fn ParseFractionalSecond(cp: &[u8], fsec: &mut fsec_t) -> i32 {
 
 /// `dt2time` (timestamp.c core; in-unit).
 pub fn dt2time(jd: TimeOffset, hour: &mut i32, min: &mut i32, sec: &mut i32, fsec: &mut fsec_t) {
+    // C's int64 subtractions here rely on -fwrapv for out-of-day-range jd
+    // (the int assignments truncate first, so the products can exceed what
+    // remains in `time`); checked subs are a ported-in panic (found by
+    // proofs/datetime-b hlp::eq_dt2time_spots at jd=i64::MIN).
     let mut time = jd;
     *hour = (time / USECS_PER_HOUR) as i32;
-    time -= *hour as i64 * USECS_PER_HOUR;
+    time = time.wrapping_sub(*hour as i64 * USECS_PER_HOUR);
     *min = (time / USECS_PER_MINUTE) as i32;
-    time -= *min as i64 * USECS_PER_MINUTE;
+    time = time.wrapping_sub(*min as i64 * USECS_PER_MINUTE);
     *sec = (time / USECS_PER_SEC) as i32;
-    *fsec = (time - *sec as i64 * USECS_PER_SEC) as fsec_t;
+    *fsec = time.wrapping_sub(*sec as i64 * USECS_PER_SEC) as fsec_t;
 }
 
 /// `time_overflows` (date.c core; in-unit).

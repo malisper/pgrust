@@ -42,7 +42,11 @@ pub fn j2date(jd: i32, year: &mut i32, month: &mut i32, day: &mut i32) {
     julian = julian.wrapping_add(32044);
     let mut quad = julian / 146097;
     let extra = (julian - quad * 146097) * 4 + 3;
-    julian += 60 + quad * 3 + extra / 146097;
+    // C computes in unsigned int, which wraps by definition; a checked add
+    // here is a ported-in panic for out-of-Julian-range inputs (same family
+    // as the date2j -fwrapv note above; found by proofs/datetime-b
+    // hlp::eq_j2date_spots at jd=i32::MAX).
+    julian = julian.wrapping_add(60 + quad * 3 + extra / 146097);
     quad = julian / 1461;
     julian -= quad * 1461;
     let mut y = (julian * 4 / 1461) as i32;

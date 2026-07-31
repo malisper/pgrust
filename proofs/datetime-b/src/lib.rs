@@ -3160,3 +3160,436 @@ mod rem {
         eq_date_mi_interval_noend:   adt_date::builtins::fc_date_mi_interval, pg_adr_date_mi_interval, i64::MAX, i32::MAX, i32::MAX;
     }
 }
+
+// ============================================================================
+// hlp — p1-lanel adt_datetime pure-helper rows (2026-07-31).
+//
+// Dual-exec vs the verbatim C appended to c/pg_datetime_b.c (provenance in
+// that file's p1-lanel section header). No allocator, no fmgr, no stubs:
+// every function here is scalar/table arithmetic, so harnesses compare raw
+// values only.
+//
+// Domain notes (fences are LITERAL-MASKED, never assumes):
+//   - eq_dtk_m / eq_interval_mask: t = raw & 31 — the full VALID shift
+//     domain; t >= 32 or t < 0 is shift-overflow UB in C and a Rust panic,
+//     out of both sides' contract (callers pass token constants 0..=37 only
+//     through DTK_M(t<=31) sites).
+//   - j2day/date2j/j2date/isoweek2j run on full i32 (C compiled -fwrapv;
+//     the Rust bodies use wrapping ops — bit-level equivalence is exactly
+//     the claim).
+//   - LADDER harnesses (_full over divider chains) may wall per the
+//     band-immune law; the spot grids + the datetime_io_diff fuzz target
+//     are the standing coverage for the bulk domain.
+// ============================================================================
+#[cfg(kani)]
+mod hlp {
+    use adt_datetime::calendar::{
+        date2isoweek, date2isoyear, date2isoyearday, date2j, isleap, isoweek2date, isoweek2j,
+        isoweekdate2date, j2date, j2day,
+    };
+    use adt_datetime::consts::{
+        DateTkn, DTK_M, INTERVAL_MASK, IS_VALID_JULIAN, MICROSECOND, MILLISECOND, SECOND,
+    };
+    use adt_datetime::decode::{
+        datebsearch, dt2time, time_overflows, CheckDateTokenTables, DecodeSpecial, DecodeUnits,
+    };
+    use adt_datetime::tables::{DATETKTBL, DELTATKTBL};
+    use std::os::raw::{c_char, c_int};
+
+    extern "C" {
+        fn pg_hlp_dtk_m(t: c_int) -> c_int;
+        fn pg_hlp_interval_mask(b: c_int) -> c_int;
+        fn pg_hlp_is_valid_julian(y: c_int, m: c_int, d: c_int) -> c_int;
+        fn pg_hlp_isleap(y: c_int) -> c_int;
+        fn pg_hlp_j2day(date: c_int) -> c_int;
+        fn pg_hlp_j2date(jd: c_int, year: *mut c_int, month: *mut c_int, day: *mut c_int) -> c_int;
+        fn pg_hlp_date2j(y: c_int, m: c_int, d: c_int) -> c_int;
+        fn pg_hlp_dt2time(jd: i64, hour: *mut c_int, min: *mut c_int, sec: *mut c_int, fsec: *mut i32) -> c_int;
+        fn pg_hlp_time_overflows(hour: c_int, min: c_int, sec: c_int, fsec: i32) -> c_int;
+        fn pg_hlp_isoweek2j(year: c_int, week: c_int) -> c_int;
+        fn pg_hlp_isoweek2date(woy: c_int, year: *mut c_int, mon: *mut c_int, mday: *mut c_int) -> c_int;
+        fn pg_hlp_isoweekdate2date(
+            isoweek: c_int,
+            wday: c_int,
+            year: *mut c_int,
+            mon: *mut c_int,
+            mday: *mut c_int,
+        ) -> c_int;
+        fn pg_hlp_date2isoweek(year: c_int, mon: c_int, mday: c_int) -> c_int;
+        fn pg_hlp_date2isoyear(year: c_int, mon: c_int, mday: c_int) -> c_int;
+        fn pg_hlp_date2isoyearday(year: c_int, mon: c_int, mday: c_int) -> c_int;
+        fn pg_hlp_datebsearch_date(key: *const c_char, idx: *mut c_int) -> c_int;
+        fn pg_hlp_datebsearch_delta(key: *const c_char, idx: *mut c_int) -> c_int;
+        fn pg_hlp_decode_special(field: c_int, lowtoken: *const c_char, val: *mut c_int) -> c_int;
+        fn pg_hlp_decode_units(field: c_int, lowtoken: *const c_char, val: *mut c_int) -> c_int;
+        fn pg_hlp_check_date_token_tables() -> c_int;
+    }
+
+    /// Full valid shift domain (see module header) + the composite masks.
+    #[kani::proof]
+    fn eq_dtk_m_shiftdom() {
+        let raw: u8 = kani::any();
+        let t: i32 = (raw & 31) as i32;
+        assert!(DTK_M(t) == unsafe { pg_hlp_dtk_m(t) });
+        // composite mask constants ride the same C macro
+        let c_all_secs = unsafe {
+            pg_hlp_dtk_m(SECOND) | pg_hlp_dtk_m(MILLISECOND) | pg_hlp_dtk_m(MICROSECOND)
+        };
+        assert!(adt_datetime::consts::DTK_ALL_SECS_M == c_all_secs);
+    }
+
+    /// Full valid shift domain.
+    #[kani::proof]
+    fn eq_interval_mask_shiftdom() {
+        let raw: u8 = kani::any();
+        let b: i32 = (raw & 31) as i32;
+        assert!(INTERVAL_MASK(b) == unsafe { pg_hlp_interval_mask(b) });
+    }
+
+    /// Full-domain: pure compares, no dividers.
+    #[kani::proof]
+    fn eq_is_valid_julian_full() {
+        let (y, m, d): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        assert!(IS_VALID_JULIAN(y, m, d) == (unsafe { pg_hlp_is_valid_julian(y, m, d) } != 0));
+    }
+
+    /// Full-i32: %4/%100/%400 small-constant mods.
+    #[kani::proof]
+    fn eq_isleap_full() {
+        let y: i32 = kani::any();
+        assert!(isleap(y) == (unsafe { pg_hlp_isleap(y) } != 0));
+    }
+
+    /// Full-i32 incl. the INT_MAX wrap (+1 under -fwrapv) and negative fixup.
+    #[kani::proof]
+    fn eq_j2day_full() {
+        let d: i32 = kani::any();
+        assert!(j2day(d) == unsafe { pg_hlp_j2day(d) });
+    }
+
+    /// LADDER (honest full-domain screen over the /100 and /4 dividers).
+    #[kani::proof]
+    fn eq_date2j_full() {
+        let (y, m, d): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        assert!(date2j(y, m, d) == unsafe { pg_hlp_date2j(y, m, d) });
+    }
+
+    /// LADDER (unsigned /146097, /1461, %365/%366 chain).
+    #[kani::proof]
+    fn eq_j2date_full() {
+        let jd: i32 = kani::any();
+        let (mut ry, mut rm, mut rd) = (0i32, 0i32, 0i32);
+        j2date(jd, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (0i32, 0i32, 0i32);
+        unsafe { pg_hlp_j2date(jd, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// Julian boundary spots (symbolic index over a concrete grid).
+    #[kani::proof]
+    fn eq_j2date_spots() {
+        const G: &[i32] = &[
+            0, 1, -1, 32044, -32045, 146096, 146097, 1461, 1460, 2451545, 2440588, 1721426,
+            2361222, 2147483493, 2147483494, i32::MAX, i32::MIN, 60, 59,
+        ];
+        let idx: usize = kani::any();
+        kani::assume(idx < G.len());
+        let jd = G[idx];
+        let (mut ry, mut rm, mut rd) = (0i32, 0i32, 0i32);
+        j2date(jd, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (0i32, 0i32, 0i32);
+        unsafe { pg_hlp_j2date(jd, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// LADDER (64-bit /USECS_PER_HOUR//MINUTE//SEC divider chain).
+    #[kani::proof]
+    fn eq_dt2time_full() {
+        let jd: i64 = kani::any();
+        let (mut rh, mut rmin, mut rs, mut rf) = (0i32, 0i32, 0i32, 0i32);
+        dt2time(jd, &mut rh, &mut rmin, &mut rs, &mut rf);
+        let (mut ch, mut cmin, mut cs, mut cf) = (0i32, 0i32, 0i32, 0i32);
+        unsafe { pg_hlp_dt2time(jd, &mut ch, &mut cmin, &mut cs, &mut cf) };
+        assert!(rh == ch && rmin == cmin && rs == cs && rf == cf);
+    }
+
+    /// Divider-chain boundary spots.
+    #[kani::proof]
+    fn eq_dt2time_spots() {
+        const G: &[i64] = &[
+            0,
+            1,
+            -1,
+            999_999,
+            1_000_000,
+            59_999_999,
+            60_000_000,
+            3_599_999_999,
+            3_600_000_000,
+            43_200_000_000,
+            86_399_999_999,
+            86_400_000_000,
+            12_345_678_901_234,
+            i64::MAX,
+            i64::MIN,
+        ];
+        let idx: usize = kani::any();
+        kani::assume(idx < G.len());
+        let jd = G[idx];
+        let (mut rh, mut rmin, mut rs, mut rf) = (0i32, 0i32, 0i32, 0i32);
+        dt2time(jd, &mut rh, &mut rmin, &mut rs, &mut rf);
+        let (mut ch, mut cmin, mut cs, mut cf) = (0i32, 0i32, 0i32, 0i32);
+        unsafe { pg_hlp_dt2time(jd, &mut ch, &mut cmin, &mut cs, &mut cf) };
+        assert!(rh == ch && rmin == cmin && rs == cs && rf == cf);
+    }
+
+    /// Full 4xi32 domain: individual range checks fence the i64 total.
+    #[kani::proof]
+    fn eq_time_overflows_full() {
+        let (h, m, s, f): (i32, i32, i32, i32) = (kani::any(), kani::any(), kani::any(), kani::any());
+        assert!(time_overflows(h, m, s, f) == (unsafe { pg_hlp_time_overflows(h, m, s, f) } != 0));
+    }
+
+    /// AD-band year (literal-masked, covers the Julian-valid window) x full
+    /// symbolic week (the (week-1)*7 face wraps on both sides).
+    #[kani::proof]
+    fn eq_isoweek2j_ad_band() {
+        let raw: u32 = kani::any();
+        let year: i32 = 1 + (raw & 0x007F_FFFF) as i32;
+        let week: i32 = kani::any();
+        assert!(isoweek2j(year, week) == unsafe { pg_hlp_isoweek2j(year, week) });
+    }
+
+    /// BC/zero-band year x full symbolic week.
+    #[kani::proof]
+    fn eq_isoweek2j_bc_band() {
+        let raw: u32 = kani::any();
+        let year: i32 = -((raw & 0x007F_FFFF) as i32);
+        let week: i32 = kani::any();
+        assert!(isoweek2j(year, week) == unsafe { pg_hlp_isoweek2j(year, week) });
+    }
+
+    const ISO_GRID: &[(i32, i32, i32)] = &[
+        (2005, 1, 1),   // ISO week 53 of 2004
+        (2005, 1, 2),
+        (2005, 1, 3),
+        (2006, 1, 1),
+        (2008, 12, 29), // ISO week 1 of 2009
+        (2008, 12, 28),
+        (2004, 12, 31),
+        (2010, 1, 3),
+        (2010, 1, 4),
+        (2024, 2, 29),
+        (2000, 2, 29),
+        (1, 1, 1),
+        (-4713, 11, 24),
+        (5874897, 12, 31),
+        (1981, 12, 31),
+        (1982, 1, 1),
+    ];
+
+    /// ISO-week rollover spots + a masked mday face on two cells.
+    #[kani::proof]
+    fn eq_date2isoweek_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < ISO_GRID.len());
+        let (y, m, d) = ISO_GRID[idx];
+        assert!(date2isoweek(y, m, d) == unsafe { pg_hlp_date2isoweek(y, m, d) });
+    }
+
+    #[kani::proof]
+    fn eq_date2isoyear_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < ISO_GRID.len());
+        let (y, m, d) = ISO_GRID[idx];
+        assert!(date2isoyear(y, m, d) == unsafe { pg_hlp_date2isoyear(y, m, d) });
+    }
+
+    #[kani::proof]
+    fn eq_date2isoyearday_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < ISO_GRID.len());
+        let (y, m, d) = ISO_GRID[idx];
+        assert!(date2isoyearday(y, m, d) == unsafe { pg_hlp_date2isoyearday(y, m, d) });
+    }
+
+    /// Masked-mday face: concrete (y, m) cells x mday in [-16, 47].
+    #[kani::proof]
+    fn eq_date2isoweek_mday_face() {
+        let cell: bool = kani::any();
+        let (y, m) = if cell { (2005, 1) } else { (2008, 12) };
+        let raw: u8 = kani::any();
+        let d: i32 = (raw & 63) as i32 - 16;
+        assert!(date2isoweek(y, m, d) == unsafe { pg_hlp_date2isoweek(y, m, d) });
+        assert!(date2isoyear(y, m, d) == unsafe { pg_hlp_date2isoyear(y, m, d) });
+    }
+
+    /// isoweek2date over (year, woy) spot cells incl. out-of-convention woy.
+    #[kani::proof]
+    fn eq_isoweek2date_spots() {
+        const G: &[(i32, i32)] = &[
+            (2004, 53),
+            (2005, 1),
+            (2005, 52),
+            (2009, 1),
+            (2009, 53),
+            (2020, 10),
+            (1, 1),
+            (2024, 0),
+            (2024, -5),
+            (2024, 54),
+            (-100, 2),
+        ];
+        let idx: usize = kani::any();
+        kani::assume(idx < G.len());
+        let (iso_year, woy) = G[idx];
+        let (mut ry, mut rm, mut rd) = (iso_year, 0i32, 0i32);
+        isoweek2date(woy, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (iso_year, 0i32, 0i32);
+        unsafe { pg_hlp_isoweek2date(woy, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// isoweekdate2date: concrete (year, week) cells x masked wday band
+    /// [-4, 11] (covers the 1..=7 convention + both out-of-convention
+    /// sides; FULL symbolic wday shifts j2date's whole divider chain
+    /// symbolic and walls — LADDER attempt recorded 500s timeout, kissat).
+    #[kani::proof]
+    fn eq_isoweekdate2date_wday_band() {
+        let cell: bool = kani::any();
+        let (iso_year, isoweek) = if cell { (2005, 1) } else { (2009, 53) };
+        let raw: u8 = kani::any();
+        let wday: i32 = (raw & 15) as i32 - 4;
+        let (mut ry, mut rm, mut rd) = (iso_year, 0i32, 0i32);
+        isoweekdate2date(isoweek, wday, &mut ry, &mut rm, &mut rd);
+        let (mut cy, mut cm, mut cd) = (iso_year, 0i32, 0i32);
+        unsafe { pg_hlp_isoweekdate2date(isoweek, wday, &mut cy, &mut cm, &mut cd) };
+        assert!(ry == cy && rm == cm && rd == cd);
+    }
+
+    /// WALL (recorded 2026-07-31): a fully/partially SYMBOLIC key makes
+    /// datebsearch's data-dependent binary-search loop unboundable for
+    /// CBMC — the unwinding assertion fails at unwind 16 AND 80 (> table
+    /// size) because merged states lose the interval-shrinkage argument;
+    /// SYMEX/unwinding phase, solver-irrelevant. Named remedy per TRIAGE =
+    /// concrete-cell spots (below; every cell folds the search concrete)
+    /// + the datetime_io_diff CGF target (DecodeSpecial/DecodeUnits sit on
+    /// every parse path, C side sancov'd), which owns the bulk key domain.
+    const DATE_KEYS: &[&[u8]] = &[
+        b"+infinity\0",
+        b"allballs\0\0",
+        b"am\0\0\0\0\0\0\0\0",
+        b"apr\0\0\0\0\0\0\0",
+        b"april\0\0\0\0\0",
+        b"aprila\0\0\0\0",
+        b"bc\0\0\0\0\0\0\0\0",
+        b"j\0\0\0\0\0\0\0\0\0",
+        b"yesterday\0",
+        b"zulu\0\0\0\0\0\0",
+        b"z\0\0\0\0\0\0\0\0\0",
+        b"\0\0\0\0\0\0\0\0\0\0",
+        b"\xff\xfe\0\0\0\0\0\0\0\0",
+        b"septembers",
+    ];
+    const DELTA_KEYS: &[&[u8]] = &[
+        b"@\0\0\0\0\0\0\0\0\0",
+        b"ago\0\0\0\0\0\0\0",
+        b"c\0\0\0\0\0\0\0\0\0",
+        b"centuries\0",
+        b"hr\0\0\0\0\0\0\0\0",
+        b"usecond\0\0\0",
+        b"w\0\0\0\0\0\0\0\0\0",
+        b"week\0\0\0\0\0\0",
+        b"yr\0\0\0\0\0\0\0\0",
+        b"yrs\0\0\0\0\0\0\0",
+        b"xyz\0\0\0\0\0\0\0",
+        b"\0\0\0\0\0\0\0\0\0\0",
+    ];
+
+    fn check_datebsearch_cell(
+        key10: &[u8],
+        table: &'static [DateTkn],
+        c_side: unsafe extern "C" fn(*const c_char, *mut c_int) -> c_int,
+    ) {
+        let mut kbuf = [0u8; 11];
+        kbuf[..10].copy_from_slice(&key10[..10]);
+        let r = datebsearch(&kbuf, table);
+        let mut c_idx: c_int = -1;
+        let c_hit = unsafe { c_side(kbuf.as_ptr() as *const c_char, &mut c_idx) };
+        match r {
+            None => assert!(c_hit == 0),
+            Some(tp) => {
+                assert!(c_hit == 1);
+                let r_idx = (tp as *const DateTkn as usize - table.as_ptr() as usize)
+                    / core::mem::size_of::<DateTkn>();
+                assert!(r_idx == c_idx as usize);
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn eq_datebsearch_date_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < DATE_KEYS.len());
+        check_datebsearch_cell(DATE_KEYS[idx], &DATETKTBL, pg_hlp_datebsearch_date);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn eq_datebsearch_delta_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < DELTA_KEYS.len());
+        check_datebsearch_cell(DELTA_KEYS[idx], &DELTATKTBL, pg_hlp_datebsearch_delta);
+    }
+
+    /// Cache-miss then cache-hit path (double call, field 0), spot keys
+    /// (same wall + remedy as the datebsearch rows).
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn eq_decode_special_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < DATE_KEYS.len());
+        let mut kbuf = [0u8; 11];
+        kbuf[..10].copy_from_slice(&DATE_KEYS[idx][..10]);
+        for _ in 0..2 {
+            let mut r_val: i32 = -99;
+            let r_type = DecodeSpecial(0, &kbuf, &mut r_val);
+            let mut c_val: c_int = -99;
+            let c_type =
+                unsafe { pg_hlp_decode_special(0, kbuf.as_ptr() as *const c_char, &mut c_val) };
+            assert!(r_type == c_type && r_val == c_val);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn eq_decode_units_spots() {
+        let idx: usize = kani::any();
+        kani::assume(idx < DELTA_KEYS.len());
+        let mut kbuf = [0u8; 11];
+        kbuf[..10].copy_from_slice(&DELTA_KEYS[idx][..10]);
+        for _ in 0..2 {
+            let mut r_val: i32 = -99;
+            let r_type = DecodeUnits(0, &kbuf, &mut r_val);
+            let mut c_val: c_int = -99;
+            let c_type =
+                unsafe { pg_hlp_decode_units(0, kbuf.as_ptr() as *const c_char, &mut c_val) };
+            assert!(r_type == c_type && r_val == c_val);
+        }
+    }
+
+    /// Concrete: both sides accept the SHIPPED tables (ordering + length).
+    #[kani::proof]
+    #[kani::unwind(80)]
+    fn check_date_token_tables_concrete() {
+        assert!(CheckDateTokenTables());
+        assert!(unsafe { pg_hlp_check_date_token_tables() } == 1);
+    }
+
+    /// Negative control (MUST FAIL, default solver): j2day off-by-one skew.
+    #[kani::proof]
+    fn control_hlp_j2day_skew() {
+        assert!(j2day(5) == unsafe { pg_hlp_j2day(5) } + 1);
+    }
+}
