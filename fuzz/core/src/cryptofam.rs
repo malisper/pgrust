@@ -498,6 +498,23 @@ mod tests {
         assert_eq!(r, c);
     }
 
+    // CI regression rail: replay the banked corpus (CI cluster 12M-exec campaign
+    // survivors + seeds) through the full comparator on every test run.
+    #[test]
+    fn cryptofam_corpus_replay() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/cryptofam_diff");
+        let mut n = 0;
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if e.path().is_file() {
+                    cryptofam_diff(&std::fs::read(e.path()).unwrap());
+                    n += 1;
+                }
+            }
+        }
+        assert!(n >= 60, "corpus bank missing or truncated ({n} units)");
+    }
+
     #[test]
     fn password_nul_truncation_carve_is_symmetric() {
         // Interior NUL: both sides must see "ab".
