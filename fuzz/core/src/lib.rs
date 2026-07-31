@@ -556,3 +556,7 @@ pub use tsrank_diff::tsrank_diff;
 // int_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-int_diff.md.
 pub mod int_diff;
 pub use int_diff::int_diff;
+
+// network_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-network_diff.md.
+pub mod network_diff;
+pub use network_diff::network_diff;

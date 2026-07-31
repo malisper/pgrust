@@ -525,3 +525,11 @@ path = "fuzz_targets/int_diff.rs"
 test = false
 doc = false
 bench = false
+
+# network_diff: scaffolded by fuzz/scaffold.py — see README-TODO-network_diff.md.
+[[bin]]
+name = "network_diff"
+path = "fuzz_targets/network_diff.rs"
+test = false
+doc = false
+bench = false
