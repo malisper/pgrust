@@ -940,6 +940,23 @@ mod smoke {
     use super::*;
 
     /// Deterministic pseudo-random smoke over all families.
+    /// Replay the COMMITTED corpus through the full dual-exec differential
+    /// on stable (the banked corpus is the regression suite — any C/Rust
+    /// divergence or harness panic fails this test per-commit).
+    #[test]
+    fn wcharfam_corpus_replay() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/wcharfam_diff");
+        let mut n = 0usize;
+        for entry in std::fs::read_dir(dir).expect("committed corpus present") {
+            let p = entry.unwrap().path();
+            if p.is_file() {
+                wcharfam_diff(&std::fs::read(&p).unwrap());
+                n += 1;
+            }
+        }
+        assert!(n > 1000, "corpus unexpectedly small: {n} units");
+    }
+
     #[test]
     fn wcharfam_diff_smoke() {
         let mut x: u64 = 0x243f_6a88_85a3_08d3;
