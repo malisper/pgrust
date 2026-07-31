@@ -31,7 +31,7 @@ use adt_datetime::{DecodeISO8601Interval, DecodeInterval, ParseDateTime};
 
 extern "C" {
     fn pg_diff_decode_interval(
-        str_: *const i8,
+        str_: *const std::ffi::c_char,
         range: i32,
         istyle: i32,
         usec: *mut i64,
@@ -41,7 +41,7 @@ extern "C" {
         dtype: *mut i32,
     ) -> i32;
     fn pg_diff_decode_iso8601_interval(
-        str_: *const i8,
+        str_: *const std::ffi::c_char,
         usec: *mut i64,
         mday: *mut i32,
         mon: *mut i32,

@@ -74,13 +74,13 @@ use adt_datetime::{
 };
 
 extern "C" {
-    fn pg_diff_date_in(str_: *const i8, style: i32, order: i32, out: *mut i32) -> i32;
+    fn pg_diff_date_in(str_: *const std::ffi::c_char, style: i32, order: i32, out: *mut i32) -> i32;
     fn pg_diff_date_out(date: i32, style: i32, order: i32, buf: *mut u8) -> i32;
-    fn pg_diff_time_in(str_: *const i8, typmod: i32, style: i32, order: i32, out: *mut i64)
+    fn pg_diff_time_in(str_: *const std::ffi::c_char, typmod: i32, style: i32, order: i32, out: *mut i64)
         -> i32;
     fn pg_diff_time_out(time: i64, style: i32, order: i32, buf: *mut u8) -> i32;
     fn pg_diff_timetz_in(
-        str_: *const i8,
+        str_: *const std::ffi::c_char,
         typmod: i32,
         style: i32,
         order: i32,
@@ -279,7 +279,7 @@ fn fc_check_value(
 fn datum_cstr_bytes<'a>(d: Datum) -> &'a [u8] {
     // SAFETY: the wrapper returned a NUL-terminated cstring allocation live
     // in the fc-call context (read before the context drops).
-    unsafe { std::ffi::CStr::from_ptr(d.as_usize() as *const i8).to_bytes() }
+    unsafe { std::ffi::CStr::from_ptr(d.as_usize() as *const std::ffi::c_char).to_bytes() }
 }
 
 // ---------------------------------------------------------------------------
