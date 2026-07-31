@@ -809,7 +809,33 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // NOTE for whoever merges this to main: the same one declaration lands on a
     // DIFFERENT absolute total there (562 -> 563 at t56). Re-derive the pin at
     // the tip it will be enforced against; do not carry this number across.
-    assert_eq!(count_tree(crates), 544, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // (Resolved: the pin below IS re-derived at the enforcement tip; main's
+    // count at re-pin was 547, not the 562/563 the donor tree carried.)
+    // Post-544 reconciliation (544 -> 547): three landings added TLS without
+    // classifying here; all three audited non-session, none a
+    // SESSION_ENVELOPE_MANIFEST member, none on the session_sources tripwire.
+    //   86. storage/ipc/procsignal/src/lib.rs — MY_PRE_IDENTITY (4218efb870,
+    //      the fast-shutdown startup-packet wedge fix): the calling thread's
+    //      adopted PRE-IDENTITY signal registration (pid + shared pending
+    //      word). Live ONLY in the window before ProcSignalInit — i.e.
+    //      before any session identity exists — and consumed exactly at
+    //      that boundary (take_pre_identity_registration at ProcSignalInit,
+    //      PreIdentitySignalRelease on every earlier exit path). Deliberately
+    //      non-session TLS: there is no session in its live window for an
+    //      envelope to capture, and wake routing is by the pid-keyed global
+    //      registry, not by this slot — the TLS is only the owning thread's
+    //      consume/drain handle.
+    //   +1 utils/adt/ri_triggers/src/tests.rs — CTX (c2350a3719): cfg(test)
+    //      leaked MemoryContext scratch for the constraint-cache
+    //      invalidation tests; absent from every shipped profile, counted
+    //      only because the census counter is textual. (The product
+    //      RI_CONSTRAINT_CACHE/RI_QUERY_CACHE block in ri_triggers/src/lib.rs
+    //      pre-existed this pin; unchanged.)
+    //   +1 utils/adt/rowtypes/src/tests_ws.rs — OUT_SCRATCH (8cf91f5343 via
+    //      the laneai test-module rename): cfg(test) per-thread output
+    //      buffer for the whitespace tests' identity text codec; same
+    //      test-only textual-count class as the row above.
+    assert_eq!(count_tree(crates), 547, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
