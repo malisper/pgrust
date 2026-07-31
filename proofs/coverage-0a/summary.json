@@ -14,7 +14,8 @@
   "const-table": 105,
   "typedef": 4,
   "loop-only": 2,
-  "const-static": 1
+  "const-static": 4,
+  "type-alias": 1
  },
  "line_table_inputs": [
   "/tmp/fuzz-char_diff.lcov",
@@ -564,16 +565,16 @@
   "crates/backend/utils/adt/pg_lsn"
  ],
  "totals": {
-  "sloc": 665,
+  "sloc": 676,
   "kani": 276,
-  "fuzz": 514,
+  "fuzz": 525,
   "regress": 0,
-  "any": 612,
+  "any": 623,
   "pct": {
-   "kani": 41.5,
-   "fuzz": 77.29,
+   "kani": 40.83,
+   "fuzz": 77.66,
    "regress": 0.0,
-   "any": 92.03
+   "any": 92.16
   }
  },
  "tree_touched": {
@@ -680,16 +681,16 @@
   {
    "name": "pg_lsn",
    "path": "crates/backend/utils/adt/pg_lsn",
-   "sloc": 158,
+   "sloc": 169,
    "kani": 40,
-   "fuzz": 149,
+   "fuzz": 160,
    "regress": 0,
-   "any": 155,
+   "any": 166,
    "pct": {
-    "kani": 25.32,
-    "fuzz": 94.3,
+    "kani": 23.67,
+    "fuzz": 94.67,
     "regress": 0.0,
-    "any": 98.1
+    "any": 98.22
    },
    "files": [
     {
@@ -703,11 +704,11 @@
     },
     {
      "path": "crates/backend/utils/adt/pg_lsn/src/lib.rs",
-     "sloc": 82,
+     "sloc": 93,
      "kani": 26,
-     "fuzz": 82,
+     "fuzz": 93,
      "regress": 0,
-     "any": 82,
+     "any": 93,
      "detail": "files/crates__backend__utils__adt__pg_lsn__src__lib.rs.json"
     },
     {
@@ -765,5 +766,10 @@
     }
    ]
   }
- ]
+ ],
+ "residue_amendment": {
+  "date": "2026-07-31",
+  "by": "sloc-residue cleanup (fix/sloc-residue)",
+  "what": "pg_lsn lib.rs denominator re-baselined under the 2026-07-31 structural test-scope fix: +11 lines (25-28,30-33,35-37 = pg_lsn_in_internal body, omitted by the superseded scanner). MEASURED fuzz-covered by a fresh local full-corpus cov-export.sh pg_lsn_diff replay (1773 corpus inputs, sources bit-identical to head_sha for this crate; DA counts 45-1230 on all 11 lines). Crate now 169 sloc / 166 measured (kani 40, fuzz 160) + 3 exception rows = 169 accounted. Evidence: fuzz-pg_lsn_diff-residue-20260731.lcov.gz"
+ }
 }
