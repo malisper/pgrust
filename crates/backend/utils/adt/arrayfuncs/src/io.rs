@@ -4,7 +4,7 @@ use core::ffi::CStr;
 use ::datum::Datum;
 use ::mcx::{vec_new_in, vec_with_capacity_in, Mcx, PgVec};
 use ::stringinfo::StringInfo;
-use ::types_core::{primitive::InvalidOid, Oid};
+use ::types_core::{catalog::FirstGenbkiObjectId, primitive::InvalidOid, Oid};
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_fmgr::{
@@ -769,8 +769,43 @@ pub fn array_recv<'mcx>(
             PgError::error("invalid array flags").with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION),
         ));
     }
-    // Element type recorded in the data (we trust the caller's spec type).
-    let _elem_type_wire = ::pqformat::pq_getmsgint(buf, 4)?;
+    // Check element type recorded in the data.
+    let element_type: Oid = ::pqformat::pq_getmsgint(buf, 4)?;
+
+    // From a security standpoint, it doesn't matter whether the input's
+    // element type matches what we expect: the element type's receive
+    // function has to be robust enough to cope with invalid data.  However,
+    // from a user-friendliness standpoint, it's nicer to complain about type
+    // mismatches than to throw "improper binary format" errors.  But there's
+    // a problem: only built-in types have OIDs that are stable enough to
+    // believe that a mismatch is a real issue.  So complain only if both OIDs
+    // are in the built-in range.  Otherwise, carry on with the element type
+    // we "should" be getting (which the rest of this function does anyway, by
+    // using meta.element_type throughout).
+    if element_type != meta.element_type
+        && element_type < FirstGenbkiObjectId
+        && meta.element_type < FirstGenbkiObjectId
+    {
+        return Err(Box::new(
+            PgError::error(alloc::format!(
+                "binary data has array element type {element_type} ({}) instead of expected {} ({})",
+                ::format_type::format_type_extended(
+                    element_type,
+                    -1,
+                    ::format_type::FORMAT_TYPE_ALLOW_INVALID,
+                )?
+                .expect("no FORMAT_TYPE_INVALID_AS_NULL"),
+                meta.element_type,
+                ::format_type::format_type_extended(
+                    meta.element_type,
+                    -1,
+                    ::format_type::FORMAT_TYPE_ALLOW_INVALID,
+                )?
+                .expect("no FORMAT_TYPE_INVALID_AS_NULL"),
+            ))
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+        ));
+    }
     let mut dim = [0i32; MAXDIM];
     let mut lbound = [0i32; MAXDIM];
     for i in 0..ndim as usize {

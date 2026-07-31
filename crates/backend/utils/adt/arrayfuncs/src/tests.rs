@@ -191,6 +191,64 @@ fn text_send_recv_roundtrip() {
     assert_eq!(as_str(&array_out(mcx, &img2, &m, &mut op).unwrap()), r#"{a,"b,c",d}"#);
 }
 
+// KNOWN-DIV-1 (p1-lanewire): C array_recv complains (42804) when the element
+// type OID recorded in the wire image differs from the expected element type
+// and BOTH OIDs are in the built-in range (< FirstGenbkiObjectId); for a
+// mismatch involving a non-built-in OID it carries on with the expected type
+// (arrayfuncs.c array_recv).
+#[test]
+fn recv_wrong_element_type() {
+    // The 42804 message path renders both type names via
+    // format_type_extended(..., ALLOW_INVALID); unknown types print "???".
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            ::syscache_seams::lookup_pg_type_typcache_shape::set(|_typid| Ok(None));
+        });
+    }
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let m = meta_text();
+
+    // 1-D one-element array wire image with an overridable element-type word.
+    let build = |elem_oid: u32| {
+        let mut w: std::vec::Vec<u8> = std::vec::Vec::new();
+        w.extend_from_slice(&1i32.to_be_bytes()); // ndim
+        w.extend_from_slice(&0i32.to_be_bytes()); // flags
+        w.extend_from_slice(&elem_oid.to_be_bytes()); // element type
+        w.extend_from_slice(&1i32.to_be_bytes()); // dim[0]
+        w.extend_from_slice(&1i32.to_be_bytes()); // lbound[0]
+        w.extend_from_slice(&2i32.to_be_bytes()); // itemlen
+        w.extend_from_slice(b"ab");
+        w
+    };
+
+    // Built-in vs built-in mismatch (int4 in the wire image, text expected).
+    let payload = build(INT4OID);
+    let mut buf = StringInfo::with_capacity_in(mcx, payload.len()).unwrap();
+    buf.append_bytes(&payload).unwrap();
+    let mut rp = FmgrInfo::new(fc_mytextrecv, 46, 1, true, false);
+    let e = array_recv(mcx, &mut buf, &m, &mut rp, -1).unwrap_err();
+    assert_eq!(
+        core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap(),
+        "42804"
+    );
+    assert_eq!(
+        e.message(),
+        "binary data has array element type 23 (???) instead of expected 25 (???)"
+    );
+
+    // Mismatch where the wire OID is outside the built-in range: C carries on
+    // with the expected element type and decodes normally.
+    let payload = build(20000);
+    let mut buf = StringInfo::with_capacity_in(mcx, payload.len()).unwrap();
+    buf.append_bytes(&payload).unwrap();
+    let mut rp = FmgrInfo::new(fc_mytextrecv, 46, 1, true, false);
+    let img = array_recv(mcx, &mut buf, &m, &mut rp, -1).unwrap();
+    let mut op = text_out();
+    assert_eq!(as_str(&array_out(mcx, &img, &m, &mut op).unwrap()), "{ab}");
+}
+
 #[test]
 fn element_fetch_and_slice() {
     let ctx = MemoryContext::new_bump("t");
