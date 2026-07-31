@@ -141,6 +141,10 @@ pub fn arrayutils_diff(data: &[u8]) {
                 let short = &dims[..nu - 1];
                 let e = array_get_n_items(n, short).unwrap_err();
                 assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+                // soft path: -1 sentinel exactly (mutants-audit survivor fix)
+                let mut esc2 = SoftErrorContext::new(true);
+                assert_eq!(array_get_n_items_safe(n, short, Some(&mut esc2)).unwrap(), -1);
+                assert!(esc2.error_occurred());
             }
         }
         1 => {

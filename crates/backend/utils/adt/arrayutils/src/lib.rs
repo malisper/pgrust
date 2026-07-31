@@ -204,6 +204,23 @@ mod tests {
     }
 
     #[test]
+    fn nitems_max_array_size_boundary() {
+        // exactly MaxArraySize must be accepted; +1 must raise (kills the
+        // `>` -> `>=` boundary mutant, mutants-audit -3537 survivor)
+        assert_eq!(
+            array_get_n_items(1, &[MAX_ARRAY_SIZE as i32]).unwrap() as i64,
+            MAX_ARRAY_SIZE
+        );
+        assert!(array_get_n_items(1, &[MAX_ARRAY_SIZE as i32 + 1]).is_err());
+        // and the ndims-exceeded SOFT path returns the -1 sentinel exactly
+        // (kills the `delete -` sentinel mutant, same audit)
+        let mut esc = SoftErrorContext::new(true);
+        let r = array_get_n_items_safe(3, &[2, 2], Some(&mut esc)).unwrap();
+        assert_eq!(r, -1);
+        assert!(esc.error_occurred());
+    }
+
+    #[test]
     fn check_bounds_detects_overflow() {
         assert!(array_check_bounds(1, &[10], &[1]).is_ok());
         assert!(array_check_bounds(1, &[10], &[i32::MAX - 5]).is_err());
