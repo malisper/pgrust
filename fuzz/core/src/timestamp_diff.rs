@@ -200,6 +200,19 @@ extern "C" {
         om: *mut i32,
     ) -> i32;
     fn pg_tsdiff_timestamp_mi(a: i64, b: i64, ot: *mut i64, od: *mut i32, om: *mut i32) -> i32;
+    fn pg_tsdiff_timestamp_difference(
+        start: i64,
+        stop: i64,
+        osecs: *mut i64,
+        ousecs: *mut i32,
+    ) -> i32;
+    fn pg_tsdiff_timestamp_difference_ms(start: i64, stop: i64) -> i64;
+    fn pg_tsdiff_timestamp_difference_exceeds(start: i64, stop: i64, msec: i32) -> i32;
+    fn pg_tsdiff_timestamp_difference_exceeds_secs(
+        start: i64,
+        stop: i64,
+        threshold_sec: i32,
+    ) -> i32;
     fn pg_tsdiff_timestamp_plmi_interval(
         tz: i32,
         ismi: i32,
@@ -1635,6 +1648,42 @@ fn timestamp_mi_arm(payload: &[u8]) {
         (Err(ce), Err(fe)) => assert!(ce.sqlstate == fe.sqlstate, "timestamp_mi FC-PLANE sqlstate"),
         _ => panic!("timestamp_mi FC-PLANE verdict mismatch"),
     }
+
+    // TimestampDifference family (pure arithmetic over (a, b); measured
+    // here instead of the retired excluded-state carve — exceptions-ledger
+    // flagfix 2026-07-31). msec/threshold ride optional tail bytes so the
+    // existing 16-byte corpus keeps driving every entry.
+    let msec = if payload.len() >= 20 { rd_i32(payload, 16) } else { b as i32 };
+    // Domain fence: TimestampDifference/TimestampDifferenceExceeds subtract
+    // raw; the C twins wrap (-fwrapv) where the shipped Rust (and this
+    // build's overflow checks) would not. Backend callers only pass sane
+    // clock pairs; compare on the non-overflowing domain.
+    if b.checked_sub(a).is_some() {
+        let (mut cs, mut cus) = (0i64, 0i32);
+        // SAFETY: out pointers valid for the call.
+        unsafe { pg_tsdiff_timestamp_difference(a, b, &mut cs, &mut cus) };
+        let (rs, rus) = adt_timestamp::TimestampDifference(a, b);
+        assert!(
+            (cs, cus) == (rs, rus),
+            "TimestampDifference DIVERGENCE: C({cs},{cus}) vs Rust({rs},{rus})"
+        );
+
+        // SAFETY: pure C call.
+        let ce = unsafe { pg_tsdiff_timestamp_difference_exceeds(a, b, msec) } != 0;
+        let re = adt_timestamp::TimestampDifferenceExceeds(a, b, msec);
+        assert!(ce == re, "TimestampDifferenceExceeds DIVERGENCE: C {ce} vs Rust {re}");
+
+        // SAFETY: pure C call.
+        let cx = unsafe { pg_tsdiff_timestamp_difference_exceeds_secs(a, b, msec) } != 0;
+        let rx = adt_timestamp::TimestampDifferenceExceedsSeconds(a, b, msec);
+        assert!(cx == rx, "TimestampDifferenceExceedsSeconds DIVERGENCE: C {cx} vs Rust {rx}");
+    }
+    // Full-domain: TimestampDifferenceMilliseconds detects its own overflow
+    // on both sides (pg_sub_s64_overflow / checked_sub).
+    // SAFETY: pure C call.
+    let cms = unsafe { pg_tsdiff_timestamp_difference_ms(a, b) };
+    let rms = adt_timestamp::TimestampDifferenceMilliseconds(a, b);
+    assert!(cms == rms, "TimestampDifferenceMilliseconds DIVERGENCE: C {cms} vs Rust {rms}");
 }
 
 fn ts_plmi_interval_arm(payload: &[u8]) {

@@ -100,6 +100,15 @@ def main(out):
     ]:
         sec(f"src/backend/utils/adt/timestamp.c {f}", extract_fn(ts, f))
 
+    # ---- pure difference helpers (backend instrument/timeout callers; the
+    # adt_timestamp crate ships them as pure arithmetic — excreview-flagfix
+    # 2026-07-31 measures them differentially instead of carving) ----
+    for f in [
+        "TimestampDifference", "TimestampDifferenceMilliseconds",
+        "TimestampDifferenceExceeds", "TimestampDifferenceExceedsSeconds",
+    ]:
+        sec(f"src/backend/utils/adt/timestamp.c {f}", extract_fn(ts, f))
+
     # ---- trunc / part / extract ----
     for f in [
         "timestamp_trunc", "timestamptz_trunc_internal", "timestamptz_trunc",

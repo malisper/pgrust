@@ -2824,6 +2824,73 @@ timestamptz_izone(PG_FUNCTION_ARGS)
 	PG_RETURN_TIMESTAMP(result);
 }
 
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c TimestampDifference ==== */
+
+void
+TimestampDifference(TimestampTz start_time, TimestampTz stop_time,
+					long *secs, int *microsecs)
+{
+	TimestampTz diff = stop_time - start_time;
+
+	if (diff <= 0)
+	{
+		*secs = 0;
+		*microsecs = 0;
+	}
+	else
+	{
+		*secs = (long) (diff / USECS_PER_SEC);
+		*microsecs = (int) (diff % USECS_PER_SEC);
+	}
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c TimestampDifferenceMilliseconds ==== */
+
+long
+TimestampDifferenceMilliseconds(TimestampTz start_time, TimestampTz stop_time)
+{
+	TimestampTz diff;
+
+	/* Deal with zero or negative elapsed time quickly. */
+	if (start_time >= stop_time)
+		return 0;
+	/* To not fail with timestamp infinities, we must detect overflow. */
+	if (pg_sub_s64_overflow(stop_time, start_time, &diff))
+		return (long) INT_MAX;
+	if (diff >= (INT_MAX * INT64CONST(1000) - 999))
+		return (long) INT_MAX;
+	else
+		return (long) ((diff + 999) / 1000);
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c TimestampDifferenceExceeds ==== */
+
+bool
+TimestampDifferenceExceeds(TimestampTz start_time,
+						   TimestampTz stop_time,
+						   int msec)
+{
+	TimestampTz diff = stop_time - start_time;
+
+	return (diff >= msec * INT64CONST(1000));
+}
+
+/* ==== VERBATIM: src/backend/utils/adt/timestamp.c TimestampDifferenceExceedsSeconds ==== */
+
+bool
+TimestampDifferenceExceedsSeconds(TimestampTz start_time,
+								  TimestampTz stop_time,
+								  int threshold_sec)
+{
+	long		secs;
+	int			usecs;
+
+	/* Calculate the difference in seconds */
+	TimestampDifference(start_time, stop_time, &secs, &usecs);
+
+	return (secs >= threshold_sec);
+}
+
 /* ==== VERBATIM: src/backend/utils/adt/timestamp.c timestamp_trunc ==== */
 
 Datum

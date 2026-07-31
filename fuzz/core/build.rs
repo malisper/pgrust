@@ -534,6 +534,8 @@ fn main() {
         "pg_localtime", "pg_next_dst_boundary", "pg_timezone_abbrev_is_known", "pg_tolower",
         "pg_toupper", "pg_ts_numchain", "pg_tzset", "pg_ultoa_n",
         "pg_ultostr", "pg_ultostr_zeropad", "session_timezone", "strtoint",
+        "TimestampDifference", "TimestampDifferenceMilliseconds",
+        "TimestampDifferenceExceeds", "TimestampDifferenceExceedsSeconds",
         "time_in", "time_mi_interval", "time_out", "time_overflows",
         "time_part", "time_pl_interval", "time2tm", "timestamp_age",
         "timestamp_bin", "timestamp_cmp_internal", "timestamp_date", "timestamp_in",

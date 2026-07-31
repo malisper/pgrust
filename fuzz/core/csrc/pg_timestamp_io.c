@@ -1527,6 +1527,40 @@ pg_tsdiff_timestamp_mi(int64 a, int64 b, int64 *ot, int32 *od, int32 *om)
 	return 0;
 }
 
+/* Pure difference helpers (no ereport paths; no setjmp needed). The C
+ * TimestampDifference/TimestampDifferenceExceeds subtract raw (UB on
+ * overflow; -fwrapv here) — the harness fences the compared domain to
+ * non-overflowing (stop - start) pairs for those two entries. */
+int
+pg_tsdiff_timestamp_difference(int64 start, int64 stop, int64 *osecs, int32 *ousecs)
+{
+	long		secs;
+	int			usecs;
+
+	TimestampDifference(start, stop, &secs, &usecs);
+	*osecs = (int64) secs;
+	*ousecs = (int32) usecs;
+	return 0;
+}
+
+int64
+pg_tsdiff_timestamp_difference_ms(int64 start, int64 stop)
+{
+	return (int64) TimestampDifferenceMilliseconds(start, stop);
+}
+
+int
+pg_tsdiff_timestamp_difference_exceeds(int64 start, int64 stop, int32 msec)
+{
+	return TimestampDifferenceExceeds(start, stop, msec) ? 1 : 0;
+}
+
+int
+pg_tsdiff_timestamp_difference_exceeds_secs(int64 start, int64 stop, int32 threshold_sec)
+{
+	return TimestampDifferenceExceedsSeconds(start, stop, threshold_sec) ? 1 : 0;
+}
+
 int
 pg_tsdiff_timestamp_plmi_interval(int tz, int ismi, int64 ts,
 								  int64 t, int32 day, int32 month, int64 *out)
