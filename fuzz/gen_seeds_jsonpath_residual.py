@@ -87,6 +87,24 @@ TEXTS += [
     '.1', '1.', '1e', '00', '1..2', '$.',  # scanner error arms
     '$ ?? 1', '$ ? (1 ==== 2)', 'strict', 'lax', '@', '@.a',
 ]
+# Round 4 (coverage close-out, final REVIEW drive):
+#  - \u{XXXXXX} escapes above U+10FFFF: drives add_unicode_char's
+#    pg_unicode_to_server_noerror None branch (scan.rs ~493-501) in soft
+#    mode and the hard-error twin; brace escapes admit up to 6 hex digits
+#    so 0x110000..0xFFFFFF are lexable but unassignable codepoints.
+#  - `to`-subscript expressions whose flatten soft-fails ("@ is not allowed
+#    in root expressions"): drives the IndexArray to-branch None propagation
+#    (path.rs:377).
+TEXTS += [
+    '$."\\u{110000}"',          # invalid codepoint in quoted string
+    '$."a\\u{FFFFFF}b"',        # max 6-hex-digit brace escape, invalid
+    '$"v\\u{110000}"',          # same, variable-quoted (xvq)
+    '$.\\u{110000}',            # same, unquoted identifier escape (xnq)
+    '$."\\u0041\\u{110000}"',   # valid escape then invalid in one run
+    '$[0 to @]',                # flatten soft error inside `to` subscript
+    '$[0 to @ + 1]',
+    '$[last to @]',
+]
 
 def emit(seed: bytes):
     h = hashlib.sha1(seed).hexdigest()[:16]

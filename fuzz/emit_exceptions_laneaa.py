@@ -44,10 +44,22 @@ ap.add_argument("--carve-file", default="")
 ap.add_argument("--carve-fn", default="")
 ap.add_argument("--author", default="p1-laneaa")
 ap.add_argument("--carve-note", default="")
+ap.add_argument("--manual-file", default="",
+                help="TSV of reviewed per-line rows: basename<TAB>line<TAB>class"
+                     "<TAB>c_counterpart<TAB>justification (# comments ok)")
 a = ap.parse_args()
 
 carve_files = {x for x in a.carve_file.split(",") if x}
 carve_fns = {x for x in a.carve_fn.split(",") if x}
+
+manual = {}
+if a.manual_file:
+    for raw in open(a.manual_file):
+        raw = raw.rstrip("\n")
+        if not raw or raw.startswith("#"):
+            continue
+        base_m, ln_m, cls_m, c_m, just_m = raw.split("\t")
+        manual[(base_m, int(ln_m))] = (cls_m, c_m, just_m)
 
 da = {}
 cur = None
@@ -61,10 +73,16 @@ for line in open(a.lcov):
 
 PAT_CONT = re.compile(r"^\s*\|\s*\S")
 PAT_LABEL = re.compile(r"^\s*(?:\w+::)+\w+(?:\s*\{[^}]*\}|\s*\([^)]*\))?\s*(?:=>)?\s*$")
-LET_DECL = re.compile(r"^\s*let\s+(?:mut\s+)?\w+\s*:\s*[^=;]+;\s*$")
+LET_DECL = re.compile(r"^\s*let\s+(?:mut\s+)?\w+\s*(?::\s*[^=;]+)?;\s*$")
 TRIVIA = re.compile(r"^\s*(?:[\)\}\]]+\??[;,]?|=>\s*\{?|\{|\.\w+\(\)\??[;,]?|(?:true|false|None|self|\d+)\s*,)\s*$")
 UNREACH = re.compile(r"(?:unreachable!|panic!)\s*[\(!]")
 STRLIT_CONT = re.compile(r'^\s*"')
+# struct-literal / call-argument continuation heads and bare-identifier
+# argument lines: rustc attaches the enclosing expression's DA record to the
+# expression head, not these lines.
+STRUCT_HEAD = re.compile(r"^\s*(?:[\w.]+\s*=\s*|Ok\(|Some\(|self\.\w+\s*=\s*)?[\w:]+\s*\{\s*$")
+BARE_ARG = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:.]*\s*,\s*$")
+CONST_TABLE_HEAD = re.compile(r"^\s*pub\s+const\s+\w+\s*:\s*.*=\s*&?\[\s*$")
 
 rows, review = [], []
 for f in sorted(glob.glob(os.path.join(a.outdir, "files", "*.json"))):
@@ -75,10 +93,25 @@ for f in sorted(glob.glob(os.path.join(a.outdir, "files", "*.json"))):
         continue
     src = open(os.path.join(a.srcroot, base)).read().splitlines()
     starts = []
+    const_fns = set()
     for i, l in enumerate(src, 1):
         m = re.match(r"\s*(?:pub(?:\([^)]*\))? )?(?:const |unsafe |extern )*fn (\w+)", l)
         if m:
             starts.append((i, m.group(1)))
+            if re.match(r"\s*(?:pub(?:\([^)]*\))? )?const fn ", l):
+                const_fns.add(m.group(1))
+    # macro_rules! definition bodies: no DA records are ever emitted for the
+    # body lines themselves (expansion regions map to call sites / decl line).
+    macro_lines = set()
+    depth = 0
+    for i, l in enumerate(src, 1):
+        if depth == 0 and re.match(r"\s*macro_rules!\s*\w+", l):
+            depth = l.count("{") - l.count("}")
+            macro_lines.add(i)
+            continue
+        if depth > 0:
+            macro_lines.add(i)
+            depth += l.count("{") - l.count("}")
 
     def fn_of(ln):
         n = "<module>"
@@ -101,17 +134,32 @@ for f in sorted(glob.glob(os.path.join(a.outdir, "files", "*.json"))):
         elif fn in carve_fns:
             rows.append((rel, ln, "excluded-state", f"claim carve: {fn}",
                          f"named carve in the p1-laneaa claim scope_note (session-TZ datetime family / SRF plumbing / fmgr-datum entry); C counterpart executes the same region under session state"))
+        elif (base, ln) in manual:
+            cls_m, c_m, just_m = manual[(base, ln)]
+            rows.append((rel, ln, cls_m, c_m, just_m))
+        elif fn in const_fns or CONST_TABLE_HEAD.match(text):
+            rows.append((rel, ln, "const-eval-only", f"{fn} (const context)",
+                         "const fn body / const-table head evaluated at compile time (JSONPATH_EXEC_BUILTINS is linked by the driver as _EXEC_BUILTINS); runtime instruments cannot observe it"))
+        elif noda and ln in macro_lines:
+            rows.append((rel, ln, "instrument-unmappable", f"{fn} (macro_rules! body)",
+                         f"macro_rules! definition body line: rustc attributes expansion regions to call sites, never the body (verified no DA record in {os.path.basename(a.lcov)}); the macro's expansions are exercised at its return_error!/call sites"))
         elif UNREACH.search(text):
-            rows.append((rel, ln, "unreachable-arm", "TODO-C-counterpart",
+            rows.append((rel, ln, "unreachable-arm",
+                         "elog(ERROR) internal-error mirror (jsonpath_exec.c / jsonb_util.c; the panic message matches the C elog text)",
                          f"defensive internal-error arm in {fn}: {text.strip()[:90]}"))
         elif noda and (PAT_CONT.match(text) or PAT_LABEL.match(text) or LET_DECL.match(text)
-                       or TRIVIA.match(text) or STRLIT_CONT.match(text)):
+                       or TRIVIA.match(text) or STRLIT_CONT.match(text)
+                       or STRUCT_HEAD.match(text) or BARE_ARG.match(text)):
             if PAT_CONT.match(text) or PAT_LABEL.match(text):
                 shape = "match-arm alternation/pattern continuation"
             elif LET_DECL.match(text):
-                shape = "bare `let x: T;` declaration"
+                shape = "bare `let x;` declaration"
             elif STRLIT_CONT.match(text):
                 shape = "string-literal continuation line of a multiline macro call"
+            elif STRUCT_HEAD.match(text):
+                shape = "struct-literal/expression head of a multiline expression"
+            elif BARE_ARG.match(text):
+                shape = "bare-identifier argument continuation line"
             else:
                 shape = "closing/argument continuation line of a multiline call"
             rows.append((rel, ln, "instrument-unmappable", f"{fn} ({shape})",
