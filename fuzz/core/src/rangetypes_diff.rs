@@ -127,15 +127,23 @@ extern "C" {
         upper_len: *mut i32,
         upper_null: *mut i32,
         bools: *mut u8,
+        errs: *mut i32,
         outcap: i32,
     ) -> i32;
-    fn pg_diff_range_ops(img1: *const u8, img2: *const u8, res: *mut i32) -> i32;
+    fn pg_diff_range_ops(
+        img1: *const u8,
+        img2: *const u8,
+        res: *mut i32,
+        errs: *mut i32,
+    ) -> i32;
     fn pg_diff_range_contains_elem(
         img: *const u8,
         v: i64,
         numptr: *const u8,
         contains: *mut i32,
         contained: *mut i32,
+        err_contains: *mut i32,
+        err_contained: *mut i32,
     ) -> i32;
     fn pg_diff_range_setop(
         which: i32,
@@ -850,6 +858,7 @@ fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let mut upb = vec![0u8; OUTCAP];
     let (mut lol, mut lon, mut upl, mut upn) = (0i32, 0i32, 0i32, 0i32);
     let mut bools = [0u8; 5];
+    let mut aerrs = [0i32; 7];
     let cret = unsafe {
         pg_diff_range_accessors(
             img.as_ptr(),
@@ -860,6 +869,7 @@ fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
             &mut upl,
             &mut upn,
             bools.as_mut_ptr(),
+            aerrs.as_mut_ptr(),
             OUTCAP as i32,
         )
     };
@@ -870,10 +880,29 @@ fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         ("lower", rb::fc_range_lower, lon, &lob, lol),
         ("upper", rb::fc_range_upper, upn, &upb, upl),
     ];
-    for (which, fc, cnull, cbytes, clen) in acc {
+    for (idx, (which, fc, cnull, cbytes, clen)) in acc.into_iter().enumerate() {
         let mut fl = ops_flinfo(t);
         let r = fc_call(fc, Some(&mut fl), mcx, [Some(Datum::from_usize(img.as_ptr() as usize))]);
-        let d = r.result.expect("lower/upper infallible");
+        let d = match r.result {
+            Ok(d) => {
+                assert!(
+                    aerrs[idx] == 0,
+                    "range_{which} DIVERGENCE {dbg}: C err {} vs Rust Ok",
+                    aerrs[idx]
+                );
+                d
+            }
+            Err(e) => {
+                assert!(
+                    aerrs[idx] == err_class(&e),
+                    "range_{which} DIVERGENCE {dbg}: C err {} vs Rust {} ({})",
+                    aerrs[idx],
+                    err_class(&e),
+                    e.message
+                );
+                continue;
+            }
+        };
         assert!(
             r.isnull == (cnull != 0),
             "range_{which} NULLNESS DIVERGENCE {dbg}: C null={cnull} Rust null={}",
@@ -904,7 +933,25 @@ fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     for (i, fc) in bfcs.into_iter().enumerate() {
         let mut fl = ops_flinfo(t);
         let r = fc_call(fc, Some(&mut fl), mcx, [Some(Datum::from_usize(img.as_ptr() as usize))]);
-        let d = r.result.expect("bool accessors infallible");
+        let d = match r.result {
+            Ok(d) => {
+                assert!(
+                    aerrs[2 + i] == 0,
+                    "bool accessor {i} DIVERGENCE {dbg}: C err {} vs Rust Ok",
+                    aerrs[2 + i]
+                );
+                d
+            }
+            Err(e) => {
+                assert!(
+                    aerrs[2 + i] == err_class(&e),
+                    "bool accessor {i} DIVERGENCE {dbg}: C err {} vs Rust {}",
+                    aerrs[2 + i],
+                    err_class(&e)
+                );
+                continue;
+            }
+        };
         assert!(
             (d.as_usize() != 0) == (bools[i] != 0),
             "bool accessor {i} DIVERGENCE {dbg}: C={} Rust={}",
@@ -928,7 +975,13 @@ fn arm_ops(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let img1 = build_image(t, flags1, &lo1, &up1);
     let img2 = build_image(t, flags2, &lo2, &up2);
     let mut cres = [0i32; 15];
-    let cret = unsafe { pg_diff_range_ops(img1.as_ptr(), img2.as_ptr(), cres.as_mut_ptr()) };
+    let mut cerrs = [0i32; 15];
+    // PER-OPERATOR errcodes: range_adjacent can legitimately raise 22003 via
+    // int4range_canonical at INT32_MAX while its 14 siblings succeed on the
+    // same pair, so one shared code cannot express the outcome.
+    let cret =
+        unsafe { pg_diff_range_ops(img1.as_ptr(), img2.as_ptr(), cres.as_mut_ptr(), cerrs.as_mut_ptr()) };
+    assert!(cret == 0, "range_ops: oracle entry failed ({cret})");
     let dbg = format!("t={t} f1={flags1:02x} f2={flags2:02x}");
     let fcs: [(&str, PGFunction, bool); 15] = [
         ("eq", rb::fc_range_eq, true),
@@ -960,20 +1013,22 @@ fn arm_ops(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         );
         match r.result {
             Ok(d) => {
-                assert!(cret == 0, "range_{name} DIVERGENCE {dbg}: C err {cret} vs Ok");
+                assert!(
+                    cerrs[i] == 0,
+                    "range_{name} DIVERGENCE {dbg}: C err {} vs Rust Ok",
+                    cerrs[i]
+                );
                 let rv = if isbool { (d.as_usize() != 0) as i32 } else { d.as_i32() };
                 assert!(rv == cres[i], "range_{name} DIVERGENCE {dbg}: C={} Rust={rv}", cres[i]);
             }
             Err(e) => {
-                // The C bundle aborts at its FIRST error; every arm sees the
-                // same images, so any Rust error must match the C class.
                 assert!(
-                    cret == err_class(&e),
-                    "range_{name} DIVERGENCE {dbg}: C err {cret} vs Rust {} ({})",
+                    cerrs[i] == err_class(&e),
+                    "range_{name} DIVERGENCE {dbg}: C err {} vs Rust {} ({})",
+                    cerrs[i],
                     err_class(&e),
                     e.message
                 );
-                return;
             }
         }
     }
@@ -989,7 +1044,11 @@ fn arm_elem(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let img = build_image(t, flags, &lo, &up);
     let (ev, en) = el.c_args();
     let (mut c1, mut c2) = (0i32, 0i32);
-    let cret = unsafe { pg_diff_range_contains_elem(img.as_ptr(), ev, en, &mut c1, &mut c2) };
+    let (mut e1, mut e2) = (0i32, 0i32);
+    let cret = unsafe {
+        pg_diff_range_contains_elem(img.as_ptr(), ev, en, &mut c1, &mut c2, &mut e1, &mut e2)
+    };
+    assert!(cret == 0, "contains_elem: oracle entry failed ({cret})");
     let dbg = format!("t={t} flags={flags:02x}");
     let mut fl = ops_flinfo(t);
     let r = fc_call(
@@ -1000,13 +1059,13 @@ fn arm_elem(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     );
     match r.result {
         Ok(d) => assert!(
-            cret == 0 && (d.as_usize() != 0) as i32 == c1,
-            "contains_elem DIVERGENCE {dbg}: C=({cret},{c1}) Rust={}",
+            e1 == 0 && (d.as_usize() != 0) as i32 == c1,
+            "contains_elem DIVERGENCE {dbg}: C=({e1},{c1}) Rust={}",
             d.as_usize()
         ),
         Err(e) => assert!(
-            cret == err_class(&e),
-            "contains_elem DIVERGENCE {dbg}: C err {cret} vs {}",
+            e1 == err_class(&e),
+            "contains_elem DIVERGENCE {dbg}: C err {e1} vs {}",
             err_class(&e)
         ),
     }
@@ -1019,13 +1078,13 @@ fn arm_elem(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     );
     match r.result {
         Ok(d) => assert!(
-            cret == 0 && (d.as_usize() != 0) as i32 == c2,
-            "elem_contained_by DIVERGENCE {dbg}: C=({cret},{c2}) Rust={}",
+            e2 == 0 && (d.as_usize() != 0) as i32 == c2,
+            "elem_contained_by DIVERGENCE {dbg}: C=({e2},{c2}) Rust={}",
             d.as_usize()
         ),
         Err(e) => assert!(
-            cret == err_class(&e),
-            "elem_contained_by DIVERGENCE {dbg}: C err {cret} vs {}",
+            e2 == err_class(&e),
+            "elem_contained_by DIVERGENCE {dbg}: C err {e2} vs {}",
             err_class(&e)
         ),
     }

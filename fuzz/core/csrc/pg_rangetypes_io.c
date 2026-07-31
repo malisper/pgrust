@@ -8804,6 +8804,28 @@ tstzrange_subdiff(PG_FUNCTION_ARGS)
 			return pg_diff_errcode ? pg_diff_errcode : 99; \
 	} while (0)
 
+/*
+ * PER-CALL GUARD. The bundled entries below drive SEVERAL fmgr calls per
+ * invocation for cheap coverage, but each call must carry its OWN errcode:
+ * one shared code conflated "which operator errored" and made
+ * range_adjacent's legitimate 22003 (int4range_canonical at INT32_MAX) abort
+ * the whole bundle, which the driver then compared against range_eq's
+ * perfectly good result — a false divergence (harness defect, 2026-07-31).
+ * The shipped Rust calls every wrapper independently, so the oracle must too.
+ */
+#define PG_DIFF_CALL(errslot, stmt) \
+	do { \
+		pg_diff_arena_reset(); \
+		pg_diff_errcode = 0; \
+		if (setjmp(pg_diff_rt_jmp)) \
+			(errslot) = pg_diff_errcode ? pg_diff_errcode : 99; \
+		else \
+		{ \
+			stmt; \
+			(errslot) = 0; \
+		} \
+	} while (0)
+
 static Oid
 pg_rt_typ_oid(int typ)
 {
@@ -9011,7 +9033,9 @@ int
 pg_diff_range_accessors(const unsigned char *img,
 						unsigned char *lower_out, int *lower_len, int *lower_null,
 						unsigned char *upper_out, int *upper_len, int *upper_null,
-						unsigned char *bools /* [5] */, int outcap)
+						unsigned char *bools /* [5] */,
+						int32 *errs /* [7]: lower, upper, then the 5 bools */,
+						int outcap)
 {
 	Datum		args[1];
 	Datum		d;
@@ -9044,7 +9068,15 @@ pg_diff_range_accessors(const unsigned char *img,
 	acc[1].nul = upper_null;
 	for (i = 0; i < 2; i++)
 	{
-		d = pg_rt_call(acc[i].fn, InvalidOid, 1, args, NULL, &isnull);
+		isnull = false;
+		PG_DIFF_CALL(errs[i],
+					 d = pg_rt_call(acc[i].fn, InvalidOid, 1, args, NULL, &isnull));
+		if (errs[i])
+		{
+			*acc[i].nul = 0;
+			*acc[i].len = 0;
+			continue;
+		}
 		*acc[i].nul = isnull;
 		*acc[i].len = 0;
 		if (!isnull)
@@ -9074,11 +9106,24 @@ pg_diff_range_accessors(const unsigned char *img,
 			}
 		}
 	}
-	bools[0] = DatumGetBool(pg_rt_call(range_empty, InvalidOid, 1, args, NULL, NULL));
-	bools[1] = DatumGetBool(pg_rt_call(range_lower_inc, InvalidOid, 1, args, NULL, NULL));
-	bools[2] = DatumGetBool(pg_rt_call(range_upper_inc, InvalidOid, 1, args, NULL, NULL));
-	bools[3] = DatumGetBool(pg_rt_call(range_lower_inf, InvalidOid, 1, args, NULL, NULL));
-	bools[4] = DatumGetBool(pg_rt_call(range_upper_inf, InvalidOid, 1, args, NULL, NULL));
+	{
+		static PGFunction bfns[5];
+		int			k;
+
+		bfns[0] = range_empty;
+		bfns[1] = range_lower_inc;
+		bfns[2] = range_upper_inc;
+		bfns[3] = range_lower_inf;
+		bfns[4] = range_upper_inf;
+		for (k = 0; k < 5; k++)
+		{
+			Datum		bd = (Datum) 0;
+
+			PG_DIFF_CALL(errs[2 + k],
+						 bd = pg_rt_call(bfns[k], InvalidOid, 1, args, NULL, NULL));
+			bools[k] = errs[2 + k] ? 0 : (unsigned char) DatumGetBool(bd);
+		}
+	}
 	return 0;
 }
 
@@ -9089,51 +9134,69 @@ pg_diff_range_accessors(const unsigned char *img,
  */
 int
 pg_diff_range_ops(const unsigned char *img1, const unsigned char *img2,
-				  int32 *res)
+				  int32 *res, int32 *errs)
 {
 	Datum		args[2];
+	int			i;
+	static PGFunction fns[15];
+	static const int isbool[15] = {1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1};
 
-	PG_DIFF_ENTER();
+	fns[0] = range_eq;
+	fns[1] = range_ne;
+	fns[2] = range_lt;
+	fns[3] = range_le;
+	fns[4] = range_gt;
+	fns[5] = range_ge;
+	fns[6] = range_cmp;
+	fns[7] = range_overlaps;
+	fns[8] = range_contains;
+	fns[9] = range_contained_by;
+	fns[10] = range_before;
+	fns[11] = range_after;
+	fns[12] = range_adjacent;
+	fns[13] = range_overleft;
+	fns[14] = range_overright;
+
+	pg_diff_arena_reset();
+	pg_diff_errcode = 0;
 	args[0] = PointerGetDatum(img1);
 	args[1] = PointerGetDatum(img2);
-	res[0] = (int32) DatumGetBool(pg_rt_call(range_eq, InvalidOid, 2, args, NULL, NULL));
-	res[1] = (int32) DatumGetBool(pg_rt_call(range_ne, InvalidOid, 2, args, NULL, NULL));
-	res[2] = (int32) DatumGetBool(pg_rt_call(range_lt, InvalidOid, 2, args, NULL, NULL));
-	res[3] = (int32) DatumGetBool(pg_rt_call(range_le, InvalidOid, 2, args, NULL, NULL));
-	res[4] = (int32) DatumGetBool(pg_rt_call(range_gt, InvalidOid, 2, args, NULL, NULL));
-	res[5] = (int32) DatumGetBool(pg_rt_call(range_ge, InvalidOid, 2, args, NULL, NULL));
-	res[6] = DatumGetInt32(pg_rt_call(range_cmp, InvalidOid, 2, args, NULL, NULL));
-	res[7] = (int32) DatumGetBool(pg_rt_call(range_overlaps, InvalidOid, 2, args, NULL, NULL));
-	res[8] = (int32) DatumGetBool(pg_rt_call(range_contains, InvalidOid, 2, args, NULL, NULL));
-	res[9] = (int32) DatumGetBool(pg_rt_call(range_contained_by, InvalidOid, 2, args, NULL, NULL));
-	res[10] = (int32) DatumGetBool(pg_rt_call(range_before, InvalidOid, 2, args, NULL, NULL));
-	res[11] = (int32) DatumGetBool(pg_rt_call(range_after, InvalidOid, 2, args, NULL, NULL));
-	res[12] = (int32) DatumGetBool(pg_rt_call(range_adjacent, InvalidOid, 2, args, NULL, NULL));
-	res[13] = (int32) DatumGetBool(pg_rt_call(range_overleft, InvalidOid, 2, args, NULL, NULL));
-	res[14] = (int32) DatumGetBool(pg_rt_call(range_overright, InvalidOid, 2, args, NULL, NULL));
+	for (i = 0; i < 15; i++)
+	{
+		Datum		d = (Datum) 0;
+
+		PG_DIFF_CALL(errs[i], d = pg_rt_call(fns[i], InvalidOid, 2, args, NULL, NULL));
+		res[i] = errs[i] ? 0 : (isbool[i] ? (int32) DatumGetBool(d) : DatumGetInt32(d));
+	}
 	return 0;
 }
 
 int
 pg_diff_range_contains_elem(const unsigned char *img,
 							int64 v, const unsigned char *numptr,
-							int32 *contains, int32 *contained)
+							int32 *contains, int32 *contained,
+							int32 *err_contains, int32 *err_contained)
 {
 	RangeType  *r = (RangeType *) img;
 	int			typ;
 	Datum		args[2];
+	Datum		swapped[2];
+	Datum		d = (Datum) 0;
 
-	PG_DIFF_ENTER();
+	pg_diff_arena_reset();
+	pg_diff_errcode = 0;
 	typ = (RangeTypeGetOid(r) == INT4RANGEOID) ? 0 :
 		(RangeTypeGetOid(r) == INT8RANGEOID) ? 1 : 2;
 	args[0] = PointerGetDatum(img);
 	args[1] = pg_rt_bound_datum(typ, v, numptr);
-	*contains = (int32) DatumGetBool(pg_rt_call(range_contains_elem, InvalidOid, 2, args, NULL, NULL));
-	{
-		Datum		swapped[2] = {args[1], args[0]};
-
-		*contained = (int32) DatumGetBool(pg_rt_call(elem_contained_by_range, InvalidOid, 2, swapped, NULL, NULL));
-	}
+	PG_DIFF_CALL(*err_contains,
+				 d = pg_rt_call(range_contains_elem, InvalidOid, 2, args, NULL, NULL));
+	*contains = *err_contains ? 0 : (int32) DatumGetBool(d);
+	swapped[0] = args[1];
+	swapped[1] = args[0];
+	PG_DIFF_CALL(*err_contained,
+				 d = pg_rt_call(elem_contained_by_range, InvalidOid, 2, swapped, NULL, NULL));
+	*contained = *err_contained ? 0 : (int32) DatumGetBool(d);
 	return 0;
 }
 
