@@ -134,15 +134,6 @@ fn set_config_argv(name: &str, value: &str) -> PgResult<()> {
     guc::SetConfigOption(name, Some(value), GucContext::PGC_POSTMASTER, GucSource::PGC_S_ARGV)
 }
 
-// SplitGUCList reduced to the unquoted comma form; quoted list items arrive
-// with the guc list-parsing owner.
-fn split_list(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     let mut user_d_option: Option<String> = None;
     let mut output_config_variable: Option<String> = None;
@@ -490,7 +481,17 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     let listen_addresses = guc_tables::vars::ListenAddresses.read();
     if let Some(listen_addresses) = listen_addresses.filter(|s| !s.is_empty()) {
         let mut success = 0;
-        let elems = split_list(&listen_addresses);
+        // SplitGUCList(rawstring, ',', &elemlist) (postmaster.c:1125): empty
+        // items and whitespace-separated unquoted items are syntax errors
+        // (postgres:18.3: listen_addresses='localhost,,127.0.0.1' and
+        // 'localhost 127.0.0.1' both -> FATAL: invalid list syntax in
+        // parameter "listen_addresses").
+        let Ok(elems) = pg_string::split_guc_list(&listen_addresses, b',') else {
+            return elog::ereport(FATAL)
+                .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("invalid list syntax in parameter \"listen_addresses\"")
+                .finish(loc(1129, "PostmasterMain"));
+        };
         for curhost in &elems {
             let host = if curhost == "*" { None } else { Some(curhost.as_str()) };
             let port = guc_tables::vars::PostPortNumber.read() as u16;
@@ -528,7 +529,17 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     let unix_dirs = guc_tables::vars::Unix_socket_directories.read();
     if let Some(unix_dirs) = unix_dirs.filter(|s| !s.is_empty()) {
         let mut success = 0;
-        let elems = split_list(&unix_dirs);
+        // SplitDirectoriesString(rawstring, ',', &elemlist)
+        // (postmaster.c:1227): quoted directories may embed commas, empty
+        // items are FATAL invalid-list-syntax, and each extracted name is
+        // canonicalize_path()'d as C's splitter does.
+        let Ok(elems) = pg_string::split_directories_string(&unix_dirs, b',') else {
+            return elog::ereport(FATAL)
+                .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("invalid list syntax in parameter \"unix_socket_directories\"")
+                .finish(loc(1231, "PostmasterMain"));
+        };
+        let elems: Vec<String> = elems.iter().map(|d| pg_path::canonicalize_path(d)).collect();
         for socketdir in &elems {
             let port = guc_tables::vars::PostPortNumber.read() as u16;
             let status = with_pm(|pm| {

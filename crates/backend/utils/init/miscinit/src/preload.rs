@@ -1,8 +1,11 @@
 use std::cell::Cell;
 use std::sync::RwLock;
 
+use elog::ereport;
 use guc_tables::{vars, GucVarAccessors};
-use types_error::PgResult;
+use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, LOG};
+
+use crate::process::loc;
 
 static SHARED_PRELOAD_LIBRARIES: RwLock<Option<String>> = RwLock::new(None);
 static PRELOAD_CONTRIB: RwLock<Option<String>> = RwLock::new(None);
@@ -36,13 +39,28 @@ fn string_get(cell: &'static RwLock<Option<String>>) -> Option<String> {
 // load_libraries (miscinit.c): names resolve through the dfmgr
 // builtin-library registry (no dlopen); an unknown name errors like C's
 // "could not access file".
-fn load_libraries(libraries: Option<&str>, _gucname: &str) -> PgResult<()> {
+fn load_libraries(libraries: Option<&str>, gucname: &str) -> PgResult<()> {
     let Some(list) = libraries else { return Ok(()) };
-    for item in list.split(',') {
-        let name = item.trim().trim_matches('"');
-        if !name.is_empty() {
-            dfmgr::load_file(name)?;
-        }
+    if list.is_empty() {
+        return Ok(()); // nothing to do
+    }
+    // SplitDirectoriesString(rawstring, ',', &elemlist): quoted names may
+    // embed commas ('""' collapses to '"'), unquoted names trim C-locale
+    // whitespace only, and empty items are a syntax error that C reports at
+    // LOG and then skips the whole list (postgres:18.3:
+    // shared_preload_libraries='foo,,bar' -> LOG: invalid list syntax in
+    // parameter "shared_preload_libraries"; server starts with none loaded;
+    // '"a,b"' -> one item, FATAL: could not access file "a,b").
+    let Ok(elemlist) = pg_string::split_directories_string(list, b',') else {
+        return ereport(LOG)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("invalid list syntax in parameter \"{gucname}\""))
+            .finish(loc(1869, "load_libraries"));
+    };
+    for name in &elemlist {
+        // C's SplitDirectoriesString canonicalize_path()s each name.
+        let name = pg_path::canonicalize_path(name);
+        dfmgr::load_file(&name)?;
     }
     Ok(())
 }
@@ -69,15 +87,7 @@ pub fn process_preload_contrib() -> PgResult<()> {
     // Same boot window as shared_preload_libraries: a pg_init loaded here may
     // install hooks/shmem exactly as if preloaded.
     IN_PROGRESS.set(true);
-    let r = (|| {
-        for item in list.split(',') {
-            let name = item.trim().trim_matches('"');
-            if !name.is_empty() {
-                dfmgr::load_file(name)?;
-            }
-        }
-        Ok(())
-    })();
+    let r = load_libraries(Some(&list), "preload_contrib");
     IN_PROGRESS.set(false);
     r
 }

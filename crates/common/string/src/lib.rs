@@ -194,6 +194,146 @@ pub fn strtoul_base0(s: &[u8]) -> StrtoulBase0 {
     StrtoulBase0 { value, consumed: i, range_err }
 }
 
+/// C: `SplitGUCList(rawstring, separator, &namelist)` (varlena.c:3829).
+///
+/// Splits a GUC_LIST_QUOTE-style list. Items are either double-quoted (quote
+/// pairs `""` collapse to one literal `"`; embedded separators and whitespace
+/// stay in the item; an empty `""` item is legal) or unquoted runs that end at
+/// the separator or at whitespace. After an item and its trailing whitespace,
+/// the next byte must be the separator or end-of-string — whitespace is NOT
+/// itself a separator, so `data wal` is a syntax error, exactly as in C
+/// (verified against postgres:18.3: FATAL 'invalid value for parameter
+/// "debug_io_direct": "data wal"' / DETAIL 'Invalid list syntax...').
+/// Empty unquoted items (`a,,b`, trailing `a,`) are syntax errors. No
+/// downcasing, no truncation. `Err(())` is C's `false` return.
+///
+/// The whitespace set is C's `scanner_isspace` (scansup.c) = space, \t, \n,
+/// \r, \v, \f — identical to [`isspace_c_locale`].
+pub fn split_guc_list(raw: &str, separator: u8) -> Result<Vec<String>, ()> {
+    split_list_common(raw, separator, false)
+}
+
+/// C: `SplitDirectoriesString(rawstring, separator, &namelist)`
+/// (varlena.c:3708), minus the trailing `canonicalize_path()` C applies to
+/// each extracted name — callers apply `pg_path::canonicalize_path` to each
+/// returned item to complete the C behavior (pg_string stays dependency-free).
+///
+/// Differs from [`split_guc_list`] only in the unquoted-item rule: an
+/// unquoted name extends to the separator or end of string, so embedded
+/// whitespace is allowed; trailing whitespace is excluded from the name.
+/// Quoting, quote-pair collapsing, empty-item rejection ('a,,b' and 'a,' are
+/// syntax errors) and the empty-input fast path are the same. C truncates
+/// each name to MAXPGPATH-1 (1023) bytes; we do too (backing up to a char
+/// boundary, since C's mid-UTF-8 cut is unrepresentable in a `String`).
+pub fn split_directories_string(raw: &str, separator: u8) -> Result<Vec<String>, ()> {
+    // MAXPGPATH (pg_config_manual.h) — keep in sync with pg_path::MAXPGPATH.
+    const MAXPGPATH: usize = 1024;
+    let mut list = split_list_common(raw, separator, true)?;
+    for name in &mut list {
+        if name.len() >= MAXPGPATH {
+            let mut end = MAXPGPATH - 1;
+            while !name.is_char_boundary(end) {
+                end -= 1;
+            }
+            name.truncate(end);
+        }
+    }
+    Ok(list)
+}
+
+/// Shared body of SplitGUCList / SplitDirectoriesString: the two C functions
+/// are line-for-line identical except for where an unquoted name ends
+/// (`whitespace_ends_unquoted`) and the caller-side truncate/canonicalize
+/// post-passes.
+fn split_list_common(
+    raw: &str,
+    separator: u8,
+    unquoted_may_contain_whitespace: bool,
+) -> Result<Vec<String>, ()> {
+    let s = raw.as_bytes();
+    let mut list = Vec::new();
+    let mut p = 0usize;
+
+    while p < s.len() && isspace_c_locale(s[p]) {
+        p += 1; // skip leading whitespace
+    }
+    if p >= s.len() {
+        return Ok(list); // allow empty string
+    }
+
+    // At the top of the loop, we are at start of a new item.
+    loop {
+        let item: String;
+        if s[p] == b'"' {
+            // Quoted name --- collapse quote-quote pairs.
+            let mut buf: Vec<u8> = Vec::new();
+            p += 1;
+            loop {
+                let rel = s[p..].iter().position(|&b| b == b'"').ok_or(())?; // mismatched quotes
+                buf.extend_from_slice(&s[p..p + rel]);
+                p += rel + 1; // past the quote just found
+                if p < s.len() && s[p] == b'"' {
+                    // Adjacent quotes collapse into one literal quote.
+                    buf.push(b'"');
+                    p += 1;
+                } else {
+                    break; // that was the terminating quote
+                }
+            }
+            // Slices were cut at ASCII '"' boundaries of a valid &str, so the
+            // bytes are valid UTF-8.
+            item = String::from_utf8(buf).expect("ASCII-delimited slices of a str");
+        } else if unquoted_may_contain_whitespace {
+            // Unquoted name --- extends to separator or end of string;
+            // trailing whitespace not included.
+            let start = p;
+            let mut end = p;
+            while p < s.len() && s[p] != separator {
+                if !isspace_c_locale(s[p]) {
+                    end = p + 1;
+                }
+                p += 1;
+            }
+            if start == end {
+                return Err(()); // empty unquoted name not allowed
+            }
+            item = raw[start..end].to_string();
+        } else {
+            // Unquoted name --- extends to separator or whitespace.
+            let start = p;
+            while p < s.len() && s[p] != separator && !isspace_c_locale(s[p]) {
+                p += 1;
+            }
+            if start == p {
+                return Err(()); // empty unquoted name not allowed
+            }
+            item = raw[start..p].to_string();
+        }
+
+        while p < s.len() && isspace_c_locale(s[p]) {
+            p += 1; // skip trailing whitespace
+        }
+
+        list.push(item);
+        if p >= s.len() {
+            return Ok(list);
+        }
+        if s[p] != separator {
+            return Err(()); // invalid syntax
+        }
+        p += 1;
+        while p < s.len() && isspace_c_locale(s[p]) {
+            p += 1; // skip leading whitespace for next item
+        }
+        // We expect another item; if the string ended here (trailing
+        // separator) the next loop iteration rejects the empty unquoted name,
+        // exactly as C does at the top of its do-loop.
+        if p >= s.len() {
+            return Err(());
+        }
+    }
+}
+
 pub fn init_seams() {
     string_seams::pg_clean_ascii::set(pg_clean_ascii);
 }
@@ -365,6 +505,100 @@ mod tests {
         // The whole point: Rust's ASCII whitespace omits VT.
         assert!(isspace_c_locale(0x0b));
         assert!(!0x0bu8.is_ascii_whitespace());
+    }
+
+    /// Expectations verified against PostgreSQL 18.3 (docker postgres:18.3,
+    /// 2026-07-31) via postmaster-start with each value:
+    ///   debug_io_direct='data wal'  -> FATAL: invalid value for parameter
+    ///       "debug_io_direct": "data wal" / DETAIL: Invalid list syntax in
+    ///       parameter "debug_io_direct".   (whitespace is NOT a separator)
+    ///   debug_io_direct='data,,wal' -> same FATAL/DETAIL (empty item)
+    ///   debug_io_direct='"data",wal' -> server started (quoted item OK)
+    ///   debug_io_direct='data,wal ' -> server started (trailing ws OK)
+    ///   listen_addresses='localhost,,127.0.0.1' -> FATAL: invalid list
+    ///       syntax in parameter "listen_addresses"
+    ///   listen_addresses='localhost 127.0.0.1' -> same FATAL
+    #[test]
+    fn split_guc_list_matches_c() {
+        let ok = |items: &[&str]| Ok(items.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+
+        // Plain lists, empty input, surrounding whitespace.
+        assert_eq!(split_guc_list("data,wal", b','), ok(&["data", "wal"]));
+        assert_eq!(split_guc_list("data", b','), ok(&["data"]));
+        assert_eq!(split_guc_list("", b','), ok(&[]));
+        assert_eq!(split_guc_list("  \t\x0b ", b','), ok(&[])); // all-ws incl VT
+        assert_eq!(split_guc_list(" data , wal ", b','), ok(&["data", "wal"]));
+        assert_eq!(split_guc_list("data,wal ", b','), ok(&["data", "wal"]));
+        // VT (0x0b) is scanner_isspace whitespace — trimmed like any other.
+        assert_eq!(split_guc_list("\x0bdata\x0b,\x0bwal", b','), ok(&["data", "wal"]));
+
+        // Whitespace does NOT separate items: 'data wal' is a syntax error.
+        assert_eq!(split_guc_list("data wal", b','), Err(()));
+        assert_eq!(split_guc_list("data\x0bwal", b','), Err(()));
+
+        // Empty items are syntax errors.
+        assert_eq!(split_guc_list("data,,wal", b','), Err(()));
+        assert_eq!(split_guc_list(",data", b','), Err(()));
+        assert_eq!(split_guc_list("data,", b','), Err(())); // trailing separator
+        assert_eq!(split_guc_list(",", b','), Err(()));
+
+        // Quoting: embedded separators/whitespace, doubled quotes, empty item.
+        assert_eq!(split_guc_list("\"data\",wal", b','), ok(&["data", "wal"]));
+        assert_eq!(split_guc_list("\"a,b\"", b','), ok(&["a,b"]));
+        assert_eq!(split_guc_list("\"a b\",c", b','), ok(&["a b", "c"]));
+        assert_eq!(split_guc_list("\"a\"\"b\"", b','), ok(&["a\"b"]));
+        assert_eq!(split_guc_list("\"\"\"\"", b','), ok(&["\""]));
+        assert_eq!(split_guc_list("\"\"", b','), ok(&[""])); // quoted empty OK
+        assert_eq!(split_guc_list("\"a\" , \"b\"", b','), ok(&["a", "b"]));
+        // Mismatched quotes and junk after a closing quote.
+        assert_eq!(split_guc_list("\"a", b','), Err(()));
+        assert_eq!(split_guc_list("\"a\"\"", b','), Err(()));
+        assert_eq!(split_guc_list("\"a\"b", b','), Err(()));
+        // A quote mid-item starts nothing: quotes only matter at item start.
+        assert_eq!(split_guc_list("a\"b\",c", b','), ok(&["a\"b\"", "c"]));
+    }
+
+    /// SplitDirectoriesString differences verified against PostgreSQL 18.3
+    /// (docker postgres:18.3, 2026-07-31):
+    ///   shared_preload_libraries='foo,,bar' -> LOG: invalid list syntax in
+    ///       parameter "shared_preload_libraries" (server continues, list
+    ///       dropped)
+    ///   shared_preload_libraries='"a,b"' -> FATAL: could not access file
+    ///       "a,b" (quoted comma stays in one item)
+    ///   shared_preload_libraries='a""b' -> FATAL: could not access file
+    ///       "a""b" (mid-item quotes are literal)
+    #[test]
+    fn split_directories_string_matches_c() {
+        let ok = |items: &[&str]| Ok(items.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+
+        assert_eq!(split_directories_string("a,b", b','), ok(&["a", "b"]));
+        assert_eq!(split_directories_string("", b','), ok(&[]));
+        assert_eq!(split_directories_string("  ", b','), ok(&[]));
+
+        // Unquoted names may contain embedded whitespace; trailing ws trimmed.
+        assert_eq!(split_directories_string("a b", b','), ok(&["a b"]));
+        assert_eq!(split_directories_string(" /tmp/x y , /var/z ", b','), ok(&["/tmp/x y", "/var/z"]));
+        assert_eq!(split_directories_string("a\x0bb", b','), ok(&["a\x0bb"])); // VT embedded
+        assert_eq!(split_directories_string("a b \x0b,c", b','), ok(&["a b", "c"]));
+
+        // Empty items are syntax errors.
+        assert_eq!(split_directories_string("foo,,bar", b','), Err(()));
+        assert_eq!(split_directories_string(",foo", b','), Err(()));
+        assert_eq!(split_directories_string("foo,", b','), Err(()));
+
+        // Quoting.
+        assert_eq!(split_directories_string("\"a,b\"", b','), ok(&["a,b"]));
+        assert_eq!(split_directories_string("\"a\"\"b\"", b','), ok(&["a\"b"]));
+        assert_eq!(split_directories_string("a\"\"b", b','), ok(&["a\"\"b"])); // literal mid-item quotes
+        assert_eq!(split_directories_string("\"a", b','), Err(()));
+        assert_eq!(split_directories_string("\"a\"b", b','), Err(()));
+
+        // MAXPGPATH-1 byte truncation.
+        let long = "x".repeat(2000);
+        assert_eq!(
+            split_directories_string(&long, b',').unwrap(),
+            vec!["x".repeat(1023)]
+        );
     }
 
     #[test]

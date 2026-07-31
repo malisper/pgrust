@@ -33,6 +33,7 @@ pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
 libc = "0.2"
 libpq_pqsignal = { path = "../../../libpq/libpq_pqsignal" }
 pg_path = { path = "../../../../port/pg_path" }
+pg_string = { path = "../../../../common/string" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }
 dfmgr = { path = "../../fmgr/dfmgr" }
 pg_prng = { path = "../../../../common/pg_prng" }

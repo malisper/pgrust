@@ -609,3 +609,33 @@ fn a_live_owner_refuses_before_the_segment_is_ever_probed() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// load_libraries (miscinit.c) list parsing = SplitDirectoriesString.
+/// Verified against postgres:18.3 (2026-07-31):
+///   shared_preload_libraries='foo,,bar' -> LOG: invalid list syntax in
+///       parameter "shared_preload_libraries"; the server still starts and
+///       loads NOTHING from the list (no per-item error follows).
+///   shared_preload_libraries='"a,b"' -> FATAL: could not access file "a,b":
+///       No such file or directory (quoted comma stays inside one item).
+///   shared_preload_libraries='a""b' -> FATAL: could not access file "a""b"
+///       (quotes not at item start are literal).
+#[test]
+fn preload_list_parsing_matches_split_directories_string() {
+    setup();
+
+    // Empty items: LOG + skip the whole list, not an error and not a load.
+    preload::session_preload_libraries_string_set(Some("foo,,bar".into()));
+    assert!(preload::process_session_preload_libraries().is_ok());
+
+    // Quoted item keeps its embedded comma: one lookup for `a,b`.
+    preload::session_preload_libraries_string_set(Some("\"a,b\"".into()));
+    let err = preload::process_session_preload_libraries().unwrap_err();
+    assert!(err.message().contains("could not access file \"a,b\""), "{}", err.message());
+
+    // Mid-item quotes are literal.
+    preload::session_preload_libraries_string_set(Some("a\"\"b".into()));
+    let err = preload::process_session_preload_libraries().unwrap_err();
+    assert!(err.message().contains("could not access file \"a\"\"b\""), "{}", err.message());
+
+    preload::session_preload_libraries_string_set(Some("".into()));
+}

@@ -21,6 +21,7 @@ types_guc = { path = "../../../_support/types/types_guc" }
 elog = { path = "../../utils/error/elog" }
 init_small = { path = "../../utils/init/init_small" }
 pg_path = { path = "../../../port/pg_path" }
+pg_string = { path = "../../../common/string" }
 miscinit = { path = "../../utils/init/miscinit" }
 postinit = { path = "../../utils/init/postinit" }
 pg_locale = { path = "../../utils/adt/pg_locale" }

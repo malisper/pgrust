@@ -716,13 +716,20 @@ pub fn check_debug_io_direct(newval: &str) -> PgResult<i32> {
     use ::types_error::PgError;
     use ::types_storage::{IO_DIRECT_DATA, IO_DIRECT_WAL, IO_DIRECT_WAL_INIT};
 
+    // SplitGUCList(rawstring, ',', &elemlist): quoted items allowed, empty
+    // items and whitespace-separated unquoted items are syntax errors
+    // (postgres:18.3 rejects both 'data,,wal' and 'data wal' with
+    // FATAL: invalid value for parameter "debug_io_direct" /
+    // DETAIL: Invalid list syntax in parameter "debug_io_direct".).
+    let Ok(elemlist) = pg_string::split_guc_list(newval, b',') else {
+        return Err(PgError::error(
+            "Invalid list syntax in parameter \"debug_io_direct\".".to_string(),
+        )
+        .into());
+    };
+
     let mut flags = 0;
-    for item in newval.split(',') {
-        // SplitGUCList over these unquoted identifiers is comma-split + trim.
-        let item = item.trim();
-        if item.is_empty() {
-            continue;
-        }
+    for item in &elemlist {
         if item.eq_ignore_ascii_case("data") {
             flags |= IO_DIRECT_DATA;
         } else if item.eq_ignore_ascii_case("wal") {

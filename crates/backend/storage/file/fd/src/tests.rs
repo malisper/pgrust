@@ -482,6 +482,27 @@ fn check_debug_io_direct_parses_flag_list() {
     );
     let err = vfd::check_debug_io_direct("bogus").unwrap_err();
     assert!(err.message().contains("Invalid option \"bogus\"."));
+
+    // SplitGUCList semantics, verified against postgres:18.3 (2026-07-31):
+    // 'data wal' -> FATAL: invalid value for parameter "debug_io_direct":
+    // "data wal" / DETAIL: Invalid list syntax in parameter
+    // "debug_io_direct".  (whitespace does NOT separate unquoted items)
+    let err = vfd::check_debug_io_direct("data wal").unwrap_err();
+    assert!(err.message().contains("Invalid list syntax in parameter \"debug_io_direct\"."));
+    // 'data,,wal' -> same FATAL/DETAIL (empty items are a syntax error).
+    let err = vfd::check_debug_io_direct("data,,wal").unwrap_err();
+    assert!(err.message().contains("Invalid list syntax in parameter \"debug_io_direct\"."));
+    assert!(vfd::check_debug_io_direct("data,").is_err());
+    // '"data",wal' -> server started (double-quoted items are legal).
+    assert_eq!(
+        vfd::check_debug_io_direct("\"data\",wal").unwrap(),
+        IO_DIRECT_DATA | IO_DIRECT_WAL
+    );
+    // 'data,wal ' -> server started (trailing whitespace trimmed).
+    assert_eq!(
+        vfd::check_debug_io_direct("data,wal ").unwrap(),
+        IO_DIRECT_DATA | IO_DIRECT_WAL
+    );
 }
 
 #[test]
