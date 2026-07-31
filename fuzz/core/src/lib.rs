@@ -295,3 +295,15 @@ mod tests {
 // encode_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-encode_diff.md.
 pub mod encode_diff;
 pub use encode_diff::encode_diff;
+
+// pg_prng_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-pg_prng_diff.md.
+pub mod pg_prng_diff;
+pub use pg_prng_diff::pg_prng_diff;
+
+// arrayutils_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-arrayutils_diff.md.
+pub mod arrayutils_diff;
+pub use arrayutils_diff::arrayutils_diff;
+
+// hashfn_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-hashfn_diff.md.
+pub mod hashfn_diff;
+pub use hashfn_diff::hashfn_diff;

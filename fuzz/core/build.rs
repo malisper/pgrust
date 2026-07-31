@@ -4,6 +4,18 @@
 // no Kani arm here (the fuzz workspace never builds under cargo-kani).
 fn main() {
     cc::Build::new()
+        // COMPILE GATE (hashfn_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_hashfn_io.c is filled
+        // with verbatim vendored C (README-TODO-hashfn_diff.md step 1).
+        // .file("csrc/pg_hashfn_io.c")
+        // COMPILE GATE (arrayutils_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_arrayutils_io.c is filled
+        // with verbatim vendored C (README-TODO-arrayutils_diff.md step 1).
+        // .file("csrc/pg_arrayutils_io.c")
+        // COMPILE GATE (pg_prng_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_pg_prng_io.c is filled
+        // with verbatim vendored C (README-TODO-pg_prng_diff.md step 1).
+        // .file("csrc/pg_pg_prng_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).

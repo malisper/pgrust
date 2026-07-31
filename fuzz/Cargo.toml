@@ -107,3 +107,27 @@ path = "fuzz_targets/encode_diff.rs"
 test = false
 doc = false
 bench = false
+
+# pg_prng_diff: scaffolded by fuzz/scaffold.py — see README-TODO-pg_prng_diff.md.
+[[bin]]
+name = "pg_prng_diff"
+path = "fuzz_targets/pg_prng_diff.rs"
+test = false
+doc = false
+bench = false
+
+# arrayutils_diff: scaffolded by fuzz/scaffold.py — see README-TODO-arrayutils_diff.md.
+[[bin]]
+name = "arrayutils_diff"
+path = "fuzz_targets/arrayutils_diff.rs"
+test = false
+doc = false
+bench = false
+
+# hashfn_diff: scaffolded by fuzz/scaffold.py — see README-TODO-hashfn_diff.md.
+[[bin]]
+name = "hashfn_diff"
+path = "fuzz_targets/hashfn_diff.rs"
+test = false
+doc = false
+bench = false
