@@ -291,3 +291,7 @@ mod tests {
         }
     }
 }
+
+// encode_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-encode_diff.md.
+pub mod encode_diff;
+pub use encode_diff::encode_diff;
