@@ -61,6 +61,18 @@ extern "C" {
     // thread-local error-class flag accessors (csrc/mbconv_glue.c)
     fn pg_mbconv_err_get() -> c_int;
     fn pg_mbconv_err_reset();
+    // vendored fcinfo arg check (pg_conv_check.c): returns the error CLASS
+    // (0 = args accepted), same convention as pg_mbconv_err
+    fn pg_check_encoding_conversion_args(
+        src_encoding: c_int,
+        dest_encoding: c_int,
+        len: c_int,
+        expected_src_encoding: c_int,
+        expected_dest_encoding: c_int,
+    ) -> c_int;
+    // verbatim 18.3 appendStringInfoStringQuoted over a flat buffer
+    // (csrc/mbconv_glue.c; pg_mbcliplen = pg_name_io.c's UTF8-pinned copy)
+    fn pg_diff_append_quoted(s: *const u8, maxlen: c_int, out: *mut u8) -> c_int;
 
     // cyrillic_and_mic
     fn pg_koi8r_to_mic(s: *const u8, d: *mut u8, l: c_int, ne: bool) -> c_int;
@@ -318,7 +330,11 @@ pub fn diff_one(pair: &Pair, enc_sub: u8, no_error: bool, src: &[u8]) {
             (r, e, pair.src_enc, pair.dst_enc)
         }
         COracle::Enc(cfn, band, to_utf8) => {
-            let enc = band[enc_sub as usize % band.len()];
+            // index == band.len() selects the OUT-OF-FAMILY arm: a valid
+            // encoding outside the band (PG_SQL_ASCII) must yield the
+            // "unexpected encoding ID" internal error (class 3) on both sides
+            let idx = enc_sub as usize % (band.len() + 1);
+            let enc = if idx == band.len() { 0 } else { band[idx] };
             let (r, e) = unsafe {
                 pg_mbconv_err_reset();
                 let r = cfn(enc, src.as_ptr(), cdst.as_mut_ptr(), len as c_int, no_error);
@@ -341,7 +357,12 @@ pub fn diff_one(pair: &Pair, enc_sub: u8, no_error: bool, src: &[u8]) {
     fcinfo.set_arg(3, Datum::from_usize(rdst.as_mut_ptr() as usize));
     fcinfo.set_arg(4, Datum::from_i32(len as i32));
     fcinfo.set_arg(5, Datum::from_bool(no_error));
-    let r = (pair.fc)(None, &mut fcinfo);
+    // Route through the SHIPPED pg_proc lookup so conv_builtin's
+    // binary-search wrapper is inside the differential every exec (the
+    // CONV_BUILTINS wiring content itself is Kani-proved by
+    // wiring_conv_builtins).
+    let builtin = conv::conv_builtin(pair.oid).expect("conv_builtin lookup");
+    let r = (builtin.func)(None, &mut fcinfo);
 
     match r {
         Ok(d) => {
@@ -379,15 +400,116 @@ pub fn diff_one(pair: &Pair, enc_sub: u8, no_error: bool, src: &[u8]) {
     }
 }
 
+/// Wrong-argument frames: run the shipped fc with a MISMATCHED fcinfo
+/// (wrong src/dst encoding or negative len) and diff the rejection against
+/// the vendored C check (pg_check_encoding_conversion_args, the macro every
+/// C conversion proc opens with). Only rejecting frames are asserted here —
+/// accepted frames are diff_one's ordinary domain.
+pub fn diff_bad_args(pair: &Pair, src_enc: i32, dst_enc: i32, len: i32) {
+    let (exp_src, exp_dst) = match pair.c {
+        COracle::Plain(_) => (pair.src_enc, pair.dst_enc),
+        COracle::Enc(_, _, to_utf8) => {
+            if to_utf8 {
+                (-1, PG_UTF8)
+            } else {
+                (PG_UTF8, -1)
+            }
+        }
+    };
+    let cerr =
+        unsafe { pg_check_encoding_conversion_args(src_enc, dst_enc, len, exp_src, exp_dst) };
+    if cerr == 0 {
+        return; // accepted frame — ordinary conversion domain (diff_one)
+    }
+    let src = [0u8; 4];
+    let mut rdst = [0xAAu8; 32];
+    let mut fcinfo = LocalFcinfo::<6>::new(0);
+    fcinfo.set_arg(0, Datum::from_i32(src_enc));
+    fcinfo.set_arg(1, Datum::from_i32(dst_enc));
+    fcinfo.set_arg(2, Datum::from_usize(src.as_ptr() as usize));
+    fcinfo.set_arg(3, Datum::from_usize(rdst.as_mut_ptr() as usize));
+    fcinfo.set_arg(4, Datum::from_i32(len));
+    fcinfo.set_arg(5, Datum::from_bool(false));
+    let builtin = conv::conv_builtin(pair.oid).expect("conv_builtin lookup");
+    match (builtin.func)(None, &mut fcinfo) {
+        Ok(_) => panic!(
+            "[{}] Rust ACCEPTED args C rejected (class {cerr}): src_enc={src_enc} dst_enc={dst_enc} len={len}",
+            pair.name
+        ),
+        Err(e) => {
+            // C class 9 = elog(ERROR, "invalid source/destination encoding
+            // ID") — a real ereport(XX000)-equivalent in C (not the
+            // conversion-loop defensive arm), so it maps to the Rust
+            // internal-error class 3.
+            let expect = if cerr == 9 { 3 } else { cerr };
+            assert!(
+                expect == rust_err_class(&e),
+                "[{}] arg-rejection class divergence: C={cerr} Rust sqlstate={:?} src_enc={src_enc} dst_enc={dst_enc} len={len}",
+                pair.name,
+                e.sqlstate
+            );
+        }
+    }
+}
+
+/// Pin the thread's database encoding to UTF8 (the quoted-append oracle's
+/// pg_mbcliplen is UTF8-pinned on the C side too — name_diff convention).
+fn pin_utf8() {
+    std::thread_local! {
+        static PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    PINNED.with(|c| {
+        if !c.get() {
+            mbutils::SetDatabaseEncoding(PG_UTF8).expect("UTF8 is a valid backend encoding");
+            c.set(true);
+        }
+    });
+}
+
+/// Differential for conv::append_string_info_string_quoted (verbatim 18.3
+/// stringinfo_mb.c oracle in csrc/mbconv_glue.c). Domain: valid UTF-8,
+/// NUL-free (the C side is NUL-terminated — a stream-representation
+/// non-surface, not a behavior difference), len < 2000.
+pub fn quoted_diff(s: &str, maxlen: i32) {
+    if s.len() >= 2000 || s.as_bytes().contains(&0) {
+        return;
+    }
+    pin_utf8();
+    let mut cs = Vec::with_capacity(s.len() + 1);
+    cs.extend_from_slice(s.as_bytes());
+    cs.push(0);
+    let mut cout = vec![0xAAu8; 2 * s.len() + 16];
+    let clen = unsafe { pg_diff_append_quoted(cs.as_ptr(), maxlen, cout.as_mut_ptr()) } as usize;
+
+    let mcx = mcx::MemoryContext::new("mbconv_quoted_diff");
+    let mut buf = mcx::PgString::new_in(mcx.mcx());
+    conv::append_string_info_string_quoted(&mut buf, s, maxlen)
+        .expect("append_string_info_string_quoted: oom");
+    assert!(
+        buf.as_bytes() == &cout[..clen],
+        "append_quoted divergence: s={s:?} maxlen={maxlen}\n  C   ={:?}\n  Rust={:?}",
+        String::from_utf8_lossy(&cout[..clen]),
+        buf.as_str()
+    );
+}
+
 /// Fuzz entry: [selector, flags, src...] (see module doc).
+/// selector 84 (mod 85) = quoted-append mode: flags = maxlen, src = utf8.
 pub fn mbconv_diff(data: &[u8]) {
     if data.len() < 2 {
         return;
     }
-    let pair = &PAIRS[data[0] as usize % PAIRS.len()];
+    let sel = data[0] as usize % (PAIRS.len() + 1);
+    let src = &data[2..data.len().min(2 + MAX_FUZZ_SRC)];
+    if sel == PAIRS.len() {
+        if let Ok(s) = std::str::from_utf8(src) {
+            quoted_diff(s, data[1] as i32 - 2); // -2, -1, 0.. band incl. negatives
+        }
+        return;
+    }
+    let pair = &PAIRS[sel];
     let no_error = data[1] & 1 != 0;
     let enc_sub = data[1] >> 1;
-    let src = &data[2..data.len().min(2 + MAX_FUZZ_SRC)];
     diff_one(pair, enc_sub, no_error, src);
 }
 
@@ -527,6 +649,95 @@ mod tests {
     }
 
     use std::sync::atomic::Ordering;
+
+    /// Wrong-argument frames for every pair: every (src,dst) in the full
+    /// valid-encoding square plus invalid ids and negative len, diffed
+    /// against the vendored C arg check. EXHAUSTIVE over the rejecting
+    /// domain at encoding granularity (len witnesses: -1, i32::MIN, 0).
+    #[test]
+    fn bad_args_all_pairs() {
+        let encs: Vec<i32> = (-2..=42).collect(); // valid band 0..=41 + invalid edges
+        for pair in PAIRS {
+            for &s in &encs {
+                for &d in &encs {
+                    diff_bad_args(pair, s, d, 4);
+                }
+            }
+            diff_bad_args(pair, pair.src_enc.max(0), pair.dst_enc.max(0), -1);
+            diff_bad_args(pair, pair.src_enc.max(0), pair.dst_enc.max(0), i32::MIN);
+            diff_bad_args(pair, i32::MAX, i32::MIN, 4);
+        }
+    }
+
+    /// Combined-map sweep (EUC_JIS_2004 / SHIFT_JIS_2004 two-codepoint
+    /// characters): for EVERY combined-map first codepoint utf1, pair it
+    /// with EVERY Unicode scalar as the following character (plus a bare
+    /// tail truncation) — total over the combined-lookup second-codepoint
+    /// domain. Also runs each map's local combined code through the reverse
+    /// direction (covered by k2 too; kept for the same-run witness).
+    #[test]
+    #[ignore = "exhaustive evidence run (minutes); run explicitly, bank the log"]
+    fn exhaustive_combined_second_codepoint() {
+        fn utf8_of(cp: u32) -> Option<Vec<u8>> {
+            char::from_u32(cp).map(|c| c.to_string().into_bytes())
+        }
+        fn bytes_of_packed(p: u32) -> Vec<u8> {
+            // maps store utf8 sequences packed big-endian into u32
+            p.to_be_bytes().iter().copied().skip_while(|&b| b == 0).collect()
+        }
+        for (pname, cmap) in [
+            ("utf8_to_euc_jis_2004", &conv::maps::euc2004::ULMAPEUC_JIS_2004_COMBINED[..]),
+            ("utf8_to_shift_jis_2004", &conv::maps::sjis2004::ULMAPSHIFT_JIS_2004_COMBINED[..]),
+        ] {
+            let pair = exhaustive::pair_by_name(pname);
+            let t = std::time::Instant::now();
+            let mut n = 0u64;
+            for e in cmap {
+                let u1 = bytes_of_packed(e.utf1);
+                // bare utf1 (combined lookup falls through to plain map)
+                for ne in [false, true] {
+                    diff_one(pair, 0, ne, &u1);
+                }
+                // utf1 followed by EVERY Unicode scalar
+                for cp in 0..=0x10FFFFu32 {
+                    if let Some(u2) = utf8_of(cp) {
+                        let mut buf = u1.clone();
+                        buf.extend_from_slice(&u2);
+                        diff_one(pair, 0, false, &buf);
+                        diff_one(pair, 0, true, &buf);
+                        n += 2;
+                    }
+                }
+            }
+            println!("combined {}: {} execs in {:.1}s", pname, n, t.elapsed().as_secs_f64());
+        }
+    }
+
+    /// Quoted-append differential: quote positions x multibyte boundaries x
+    /// the full maxlen lattice per string (maxlen in -2..=len+2 — total over
+    /// the clip-decision domain for each witness string).
+    #[test]
+    fn quoted_append_lattice() {
+        let cases: [&str; 12] = [
+            "",
+            "'",
+            "''",
+            "a'b''c'''d",
+            "hello world",
+            "'leading",
+            "trailing'",
+            "日本語のテキスト",
+            "mix日'本ed'語",
+            "\u{10348}\u{1F600}'x",
+            "é'è''ê",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        ];
+        for s in cases {
+            for maxlen in -2..=(s.len() as i32 + 2) {
+                quoted_diff(s, maxlen);
+            }
+        }
+    }
 
     /// Full 3-byte domain (2^24 x {noError} x band members) for EVERY pair —
     /// total per-character coverage for all source encodings with maxlen<=3
