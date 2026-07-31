@@ -655,3 +655,54 @@ fn datanh_matches_platform_libm() {
     assert!(funcs::datanh(1.5).is_err());
     assert_eq!(funcs::datanh(0.0).unwrap(), 0.0);
 }
+
+// strtod_c ERANGE model vs glibc ground truth (C probe run in the
+// postgres:18.3 Debian image, glibc 2.36, 2026-07-31; the
+// interval_engine_diff CI cluster campaign's "P1e-322" divergence). ISO C
+// underflow: ERANGE iff the result is subnormal-or-zero AND inexact;
+// EXACT subnormals set no errno; overflow always does.
+#[test]
+fn strtod_c_glibc_erange_model() {
+    let cases: &[(&str, bool)] = &[
+        ("1e-322", true),                  // subnormal, inexact
+        ("4.9406564584124654e-324", true), // ~min subnormal, inexact
+        ("1e-308", true),                  // below DBL_MIN -> subnormal
+        ("2.2250738585072014e-308", false), // DBL_MIN exactly (normal)
+        ("2.2250738585072011e-308", true), // just below DBL_MIN
+        ("1e-400", true),                  // rounds to zero
+        ("0x1p-1050", false),              // EXACT subnormal (hex)
+        ("0x1p-1074", false),              // min subnormal, exact
+        ("0x1p-1075", true),               // rounds to zero
+        ("0x1.8p-1074", true),             // ties-to-even, inexact
+        ("1e308", false),                  // large normal
+        ("1e309", true),                   // overflow -> inf
+        ("0", false),
+        ("0.0e5", false),
+        ("infinity", false),               // words: no errno
+    ];
+    for (s, want) in cases {
+        let (_, _, range) =
+            io::strtod_c(s.as_bytes()).unwrap_or_else(|| panic!("{s}: no token"));
+        assert_eq!(range, *want, "ERANGE mismatch for {s:?}");
+    }
+    // decimal spelling of an exact subnormal: 2^-1074 written in full is
+    // exact; glibc sets no errno for it. Build it as 5^1074 * 10^-1074.
+    let mut n = vec![1u8]; // little-endian digits of 5^1074
+    for _ in 0..1074 {
+        let mut carry = 0u16;
+        for d in n.iter_mut() {
+            let t = *d as u16 * 5 + carry;
+            *d = (t % 10) as u8;
+            carry = t / 10;
+        }
+        while carry > 0 {
+            n.push((carry % 10) as u8);
+            carry /= 10;
+        }
+    }
+    let digits: String = n.iter().rev().map(|d| (d + b'0') as char).collect();
+    let exact_min_subnormal = format!("0.{}{}", "0".repeat(1074 - digits.len()), digits);
+    let (v, _, range) = io::strtod_c(exact_min_subnormal.as_bytes()).unwrap();
+    assert_eq!(v.to_bits(), 1, "should parse to the minimum subnormal");
+    assert!(!range, "exact decimal subnormal must not set ERANGE");
+}

@@ -703,8 +703,13 @@ pub fn ValidateDate(fmask: i32, isjulian: bool, is2digits: bool, bc: bool, tm: &
     }
 
     if fmask & DTK_M(DOY) != 0 {
+        // C sums in plain int under -fwrapv; out-of-Julian-range years
+        // (date2j("5874898") is already near i32::MAX) must wrap, not
+        // panic — the MONTH/DAY range checks below reject the wrapped
+        // values exactly as C does (datetime_io_diff local run, input
+        // "5874898-301"; same family as the date2j/j2date/dt2time notes).
         j2date(
-            date2j(tm.tm_year, 1, 1) + tm.tm_yday - 1,
+            date2j(tm.tm_year, 1, 1).wrapping_add(tm.tm_yday).wrapping_sub(1),
             &mut tm.tm_year,
             &mut tm.tm_mon,
             &mut tm.tm_mday,

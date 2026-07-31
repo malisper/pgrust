@@ -328,8 +328,11 @@ fn out_of_range(errnumber: &str, fixed_type: &str) -> PgError {
 /// leading number token (after optional C-locale whitespace, exactly as
 /// strtod skips), returning (value, bytes_consumed, range_error).
 /// `range_error` mirrors glibc errno==ERANGE — decimal/hex overflow to
-/// +-inf, or nonzero digits rounding to zero — while the inf/nan WORDS
-/// parse with no errno. None = no token (strtod endptr == str).
+/// +-inf, nonzero digits rounding to zero, or ISO C gradual underflow: a
+/// subnormal result whose conversion was INEXACT (an exactly-representable
+/// subnormal like 0x1p-1074 sets no errno; probed on glibc 2.36,
+/// postgres:18.3 image, 2026-07-31) — while the inf/nan WORDS parse with
+/// no errno. None = no token (strtod endptr == str).
 /// Consumers needing C parse cascades verbatim (datetime.c
 /// ParseISO8601Number) call this instead of re-modeling strtod.
 pub fn strtod_c(s: &[u8]) -> Option<(f64, usize, bool)> {
@@ -348,10 +351,156 @@ pub fn strtod_c(s: &[u8]) -> Option<(f64, usize, bool)> {
                     .expect("scan_number yields a parseable decimal token"),
                 NumKind::Hex => parse_hex_float(token),
             };
-            let range = parsed.is_infinite() || (parsed == 0.0 && tok.nonzero);
+            let range = parsed.is_infinite()
+                || (parsed == 0.0 && tok.nonzero)
+                || subnormal_inexact(token, &tok.kind, parsed);
             Some((parsed, start + tok.len, range))
         }
         None => special_float8(rest).map(|(v, n)| (v, start + n, false)),
+    }
+}
+
+/// ISO C underflow test for strtod_c: true iff `parsed` is subnormal
+/// (0 < |v| < DBL_MIN) and `token` is not EXACTLY equal to it. Every
+/// subnormal is k*2^-1074 (0 < k < 2^52), i.e. the integer N = k*5^1074
+/// times 10^-1074, so decimal exactness is a digit-string comparison and
+/// hex exactness a bit comparison — no float arithmetic, no rounding.
+/// Cold path: runs only for subnormal results.
+fn subnormal_inexact(token: &[u8], kind: &NumKind, parsed: f64) -> bool {
+    if parsed == 0.0 || parsed.abs() >= f64::MIN_POSITIVE {
+        return false;
+    }
+    let k = parsed.to_bits() & ((1u64 << 52) - 1); /* biased exponent is 0 */
+
+    match kind {
+        NumKind::Hex => {
+            // literal = m * 2^h; exact iff m*2^h == k*2^-1074 after
+            // normalizing both to odd mantissas.
+            let mut i = 0usize;
+            if token[i] == b'+' || token[i] == b'-' {
+                i += 1;
+            }
+            i += 2; /* 0x */
+            let mut m: u128 = 0;
+            let mut h: i64 = 0;
+            let mut seen_dot = false;
+            while i < token.len() {
+                match token[i] {
+                    b'.' => seen_dot = true,
+                    b'p' | b'P' => break,
+                    c => {
+                        let nib = (c as char).to_digit(16).expect("hex token") as u128;
+                        if m >> 120 != 0 {
+                            if nib != 0 {
+                                return true; /* dropped nonzero bits: inexact */
+                            }
+                            if !seen_dot {
+                                h += 4;
+                            }
+                        } else {
+                            m = (m << 4) | nib;
+                            if seen_dot {
+                                h -= 4;
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            if i < token.len() {
+                i += 1; /* p */
+                let neg = matches!(token.get(i), Some(b'-'));
+                if matches!(token.get(i), Some(b'+') | Some(b'-')) {
+                    i += 1;
+                }
+                let mut e: i64 = 0;
+                while i < token.len() && token[i].is_ascii_digit() {
+                    e = e.saturating_mul(10).saturating_add((token[i] - b'0') as i64);
+                    i += 1;
+                }
+                h = h.saturating_add(if neg { -e } else { e });
+            }
+            debug_assert!(m != 0, "parsed != 0 implies nonzero mantissa");
+            let (m, h) = (m >> m.trailing_zeros(), h + m.trailing_zeros() as i64);
+            let (k, kexp) = (k >> k.trailing_zeros(), -1074 + k.trailing_zeros() as i64);
+            m != k as u128 || h != kexp
+        }
+        NumKind::Decimal => {
+            // literal = d * 10^-q; v = N * 10^-1074 with N = k*5^1074.
+            // Equal iff stripped digit strings match and the stripped
+            // decimal exponents agree.
+            let mut i = 0usize;
+            if token[i] == b'+' || token[i] == b'-' {
+                i += 1;
+            }
+            let mut d: Vec<u8> = Vec::new(); /* significant digits, no dot */
+            let mut frac: i64 = 0;
+            let mut seen_dot = false;
+            while i < token.len() {
+                match token[i] {
+                    b'.' => seen_dot = true,
+                    b'e' | b'E' => break,
+                    c => {
+                        if !(d.is_empty() && c == b'0') {
+                            d.push(c - b'0');
+                        }
+                        if seen_dot {
+                            frac += 1;
+                        } else if d.is_empty() {
+                            /* leading zeros before the dot: no digit kept,
+                             * no exponent effect */
+                        }
+                    }
+                }
+                i += 1;
+            }
+            let mut e10: i64 = 0;
+            if i < token.len() {
+                i += 1; /* e */
+                let neg = matches!(token.get(i), Some(b'-'));
+                if matches!(token.get(i), Some(b'+') | Some(b'-')) {
+                    i += 1;
+                }
+                let mut e: i64 = 0;
+                while i < token.len() && token[i].is_ascii_digit() {
+                    e = e.saturating_mul(10).saturating_add((token[i] - b'0') as i64);
+                    i += 1;
+                }
+                e10 = if neg { -e } else { e };
+            }
+            let q: i64 = frac - e10;
+            let tzd = d.iter().rev().take_while(|&&x| x == 0).count() as i64;
+            d.truncate(d.len() - tzd as usize);
+
+            // N = k * 5^1074, little-endian decimal digits.
+            let mut n: Vec<u8> = {
+                let mut v = Vec::new();
+                let mut x = k;
+                while x > 0 {
+                    v.push((x % 10) as u8);
+                    x /= 10;
+                }
+                v
+            };
+            for _ in 0..1074 {
+                let mut carry = 0u16;
+                for dig in n.iter_mut() {
+                    let t = *dig as u16 * 5 + carry;
+                    *dig = (t % 10) as u8;
+                    carry = t / 10;
+                }
+                while carry > 0 {
+                    n.push((carry % 10) as u8);
+                    carry /= 10;
+                }
+            }
+            let tzn = n.iter().take_while(|&&x| x == 0).count() as i64;
+            let n_stripped = &n[tzn as usize..];
+
+            n_stripped.len() != d.len()
+                || n_stripped.iter().rev().zip(d.iter()).any(|(a, b)| a != b)
+                || q + tzn != 1074 + tzd
+        }
     }
 }
 
