@@ -366,10 +366,59 @@ fn cash_numeric_numeric_cash_roundtrip() {
 
 #[test]
 fn div_min_by_neg_one_errors() {
-    // Ruling 2026-07-29: MIN/-1 raises 22003 like int8div, not panic/wrap.
+    // Ruling 2026-07-29, RATIFIED 2026-07-31 (Michael, option 1): MIN/-1
+    // raises a clean 22003 ERROR like int8div — not panic/wrap. Message is
+    // cash.c's established money-overflow wording ("money out of range",
+    // the cash_pl/cash_mi/cash_mul_* text), not an invented string.
     let e = cash_div_int64(super::Cash::MIN, -1).unwrap_err();
     assert_eq!(e.sqlstate, types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+    assert_eq!(e.message(), "money out of range");
     // neighbours still work
     assert_eq!(cash_div_int64(super::Cash::MIN, 1).unwrap(), super::Cash::MIN);
     assert_eq!(cash_div_int64(super::Cash::MIN + 1, -1).unwrap(), super::Cash::MAX);
+}
+
+#[test]
+fn div_min_by_neg_one_all_divisor_widths() {
+    // Ratified 2026-07-31: the 22003 fence must hold through the shipped
+    // fmgr wrappers for ALL THREE divisor widths (oids 867/865/3345), and
+    // the error is a plain PgError (session survives; no panic reaches the
+    // wrapper). /0 stays 22012 and MIN/±1 neighbours stay exact per width.
+    use super::builtins::{fc_cash_div_int2, fc_cash_div_int4, fc_cash_div_int8};
+    use ::datum::Datum;
+    use ::types_fmgr::LocalFcinfo;
+
+    type FcFn = fn(
+        Option<&mut ::types_fmgr::FmgrInfo>,
+        &mut ::types_fmgr::FunctionCallInfoBaseData,
+    ) -> ::types_error::PgResult<Datum>;
+
+    let call = |f: FcFn, divisor: Datum| {
+        let mut fci = LocalFcinfo::<2>::new(0);
+        fci.set_arg(0, Datum::from_i64(super::Cash::MIN));
+        fci.set_arg(1, divisor);
+        f(None, &mut fci)
+    };
+
+    let cases: [(FcFn, fn(i64) -> Datum); 3] = [
+        (fc_cash_div_int2, |v| Datum::from_i16(v as i16)),
+        (fc_cash_div_int4, |v| Datum::from_i32(v as i32)),
+        (fc_cash_div_int8, Datum::from_i64),
+    ];
+    for (f, mk) in cases {
+        // MIN / -1: clean 22003 error, established cash.c wording.
+        let e = call(f, mk(-1)).unwrap_err();
+        assert_eq!(e.sqlstate, types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(e.message(), "money out of range");
+        // MIN / 1 is fine; (MIN+1) / -1 is fine (== MAX).
+        assert_eq!(call(f, mk(1)).unwrap().as_i64(), super::Cash::MIN);
+        let mut fci = LocalFcinfo::<2>::new(0);
+        fci.set_arg(0, Datum::from_i64(super::Cash::MIN + 1));
+        fci.set_arg(1, mk(-1));
+        assert_eq!(f(None, &mut fci).unwrap().as_i64(), super::Cash::MAX);
+        // /0 is still 22012.
+        let e = call(f, mk(0)).unwrap_err();
+        assert_eq!(e.sqlstate, ERRCODE_DIVISION_BY_ZERO);
+        assert_eq!(e.message(), "division by zero");
+    }
 }
