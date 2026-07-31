@@ -1,0 +1,11 @@
+{
+ "rule": "v2+no-const-tables",
+ "note": "every const-table span excluded from the denominator; reason 'const-array-heuristic' rows are the ones to review \u2014 a span swallowing real logic is a defect",
+ "total_spans": 0,
+ "total_lines": 0,
+ "by_reason": {
+  "generated-file": 0,
+  "const-array-heuristic": 0
+ },
+ "spans": []
+}
