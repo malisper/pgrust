@@ -3109,7 +3109,7 @@ jsonb-probe	proofs::control_cast_weight_skew	-Z c-ffi -Z stubbing --c-lib c/pg_j
 jsonb-probe	proofs::eq_build_array_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb_build.c --exact --solver kissat	unmeasured	unmeasured	?	FLEET-BOUND (local timeout-450s): w2 3272 constant empty-array image (queued)
 jsonb-probe	proofs::eq_build_object_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb_build.c --exact --solver kissat	unmeasured	unmeasured	?	w2 3274 constant empty-object image (queued)
 base64	eq_b64_encode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	4	src[u8;6]+len<=6+dstlen<=12 sym; whole-dst-image parity incl error zeroing; unwind(14)
-base64	eq_b64_decode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	7	src[u8;8]+len<=8+dstlen<=8 sym; end-flag machine + signedness fence in-domain; unwind(11)
+base64	eq_b64_decode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	release-gate	7	src[u8;8]+len<=8+dstlen<=8 sym; end-flag machine + signedness fence in-domain; unwind(11)
 base64	eq_b64_enc_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced to overflow-free domain 0..=3*(MAX/4)-2
 base64	eq_b64_dec_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced 0..=MAX/3
 base64	control_encode_vs_decode_must_fail	-Z c-ffi --c-lib c/pg_base64.c	must-fail	defect-witness	2	DEFAULT solver (suite convention); fails on intended assert
