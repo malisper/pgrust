@@ -161,3 +161,36 @@ another.
 input is malformed" are different claims, and the second does not follow from the
 first. Read what the reader actually does with the bytes before rewriting the
 writer — and check whether an already-committed fence covers the reproducer.
+
+## H7 — leaked fn_expr carrier killed the first 10M campaign (my defect, my bad evidence)
+
+`ops_flinfo` minted its `fn_expr` rettype carrier with
+`Box::leak(Box::new(AggFnArgTypes { .. }))`, i.e. 24 bytes per call, never freed.
+The CI cluster's LeakSanitizer killed campaign
+`pgrust-fuzz-campaign-1785516178-4344-37961` at 8 execs: 360 bytes in 15 objects.
+
+Fixed by making the carriers statics — `PINS` is const and there are exactly
+three instantiations, so nothing needs allocating. Named `RNG_RETTYPE` to match
+the sibling multirange target's spelling so the two reconcile at merge. Two gates
+added: one pinning `RNG_RETTYPE[t].rettype == PINS[t].rngtypid` (a silent
+reordering would hand every constructor the wrong result type, which no value
+plane could catch), and one asserting successive `ops_flinfo()` calls hand back
+the SAME carrier pointer, so a return to per-call allocation fails a test rather
+than a campaign.
+
+Sweep for the same shape across the driver: no remaining `Box::leak`,
+`into_raw`, `mem::forget`, `ManuallyDrop` or `.leak()`. Everything else is either
+owned and dropped per iteration (`Vec` buffers, `CString`, the per-exec
+`MemoryContext` backing `StringInfo`/minted numerics) or reclaimed by `Drop`
+(`FmgrInfo`'s `FnExtra` frees its box). Oracle-side allocations sit in the
+`pg_diff_arena` static array, which LSan sees as a live global root — that is
+precisely why the scaffold routes `palloc` through it instead of bare `malloc`.
+
+**The evidence failure is the durable part.** I had claimed this class clean from
+a filtered grep whose tail showed only libFuzzer frames, plus a `quote_diff`
+control showing the same trace. Neither supports the conclusion: the report was
+never enumerated, and a control sharing a libFuzzer-side allocation cannot speak
+to this target's own. LSan on this laptop names `ops_flinfo` directly once the
+full report is read, so nothing about the platform prevented finding it.
+Enumerate the whole report; never generalize from a control that cannot exhibit
+your defect.

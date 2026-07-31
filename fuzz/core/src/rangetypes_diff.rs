@@ -299,6 +299,20 @@ fn hash_ext_finfo(t: usize) -> FmgrInfo {
 
 const F_CANONICAL: [Oid; 3] = [3914, 3928, 0 /* numrange: continuous */];
 
+/// fn_expr rettype carriers for the constructor arms. STATICS, not a per-call
+/// `Box::leak`: the leaked form cost 24 bytes per ops_flinfo() call and the
+/// CI cluster's LeakSanitizer killed the first 10M campaign at 8 execs
+/// (pgrust-fuzz-campaign-1785516178-4344-37961, 360 bytes in 15 objects).
+/// PINS is const and there are exactly three instantiations, so nothing needs
+/// allocating at all. Name matches the sibling multirange target's
+/// `RNG_RETTYPE` so the two can be reconciled at merge.
+static RNG_RETTYPE: [AggFnArgTypes; 3] = [
+    AggFnArgTypes { rettype: INT4RANGEOID, argtypes: &[] },
+    AggFnArgTypes { rettype: INT8RANGEOID, argtypes: &[] },
+    AggFnArgTypes { rettype: NUMRANGEOID, argtypes: &[] },
+];
+
+
 fn range_info(t: usize) -> rt::RangeInfo {
     let p = PINS[t];
     rt::RangeInfo {
@@ -327,10 +341,8 @@ fn range_info(t: usize) -> rt::RangeInfo {
 fn ops_flinfo(t: usize) -> FmgrInfo {
     let mut fl = FmgrInfo::new(rb::fc_range_eq, 0, 2, true, false);
     fl.set_fn_extra(range_info(t));
-    let carrier: &'static AggFnArgTypes =
-        Box::leak(Box::new(AggFnArgTypes { rettype: PINS[t].rngtypid, argtypes: &[] }));
-    // SAFETY: leaked 'static carrier outlives every read.
-    fl.fn_expr = Some(unsafe { FnExprErased::from_node_ref(carrier) });
+    // SAFETY: &'static statics outlive every read of the carrier.
+    fl.fn_expr = Some(unsafe { FnExprErased::from_node_ref(&RNG_RETTYPE[t]) });
     fl
 }
 
@@ -1741,5 +1753,42 @@ mod packed_short {
         }
         // and the text/binary io arms over a literal that stores short bounds
         rangetypes_diff(&[0u8, 2].iter().copied().chain(b"[1.5,2.5)".iter().copied()).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod carriers {
+    use super::*;
+
+    /// RNG_RETTYPE is indexed by the SAME `t` as PINS, so a reordering of either
+    /// array would silently hand fc_range_constructor2/3 the wrong result type —
+    /// the constructor would then build (and both sides would agree on) images of
+    /// the wrong range type, which no value/verdict/sqlstate plane can detect.
+    /// Pin the correspondence.
+    #[test]
+    fn rettype_carriers_match_pins() {
+        for t in 0..3 {
+            assert_eq!(
+                RNG_RETTYPE[t].rettype, PINS[t].rngtypid,
+                "RNG_RETTYPE[{t}] carries {:#x} but PINS[{t}] is {:#x}",
+                RNG_RETTYPE[t].rettype, PINS[t].rngtypid
+            );
+            assert!(RNG_RETTYPE[t].argtypes.is_empty());
+        }
+    }
+
+    /// No allocation escapes per call: the rettype carriers are statics, so
+    /// ops_flinfo must not allocate for fn_expr at all. Guards the regression
+    /// the CI cluster caught (24 bytes leaked per ops_flinfo call).
+    #[test]
+    fn ops_flinfo_carrier_is_static() {
+        let a = ops_flinfo(0);
+        let b = ops_flinfo(0);
+        let pa = a.fn_expr.as_ref().unwrap().downcast_ref::<AggFnArgTypes>().unwrap()
+            as *const AggFnArgTypes;
+        let pb = b.fn_expr.as_ref().unwrap().downcast_ref::<AggFnArgTypes>().unwrap()
+            as *const AggFnArgTypes;
+        assert_eq!(pa, pb, "each ops_flinfo() minted a FRESH carrier: still allocating");
+        assert_eq!(pa, &RNG_RETTYPE[0] as *const AggFnArgTypes);
     }
 }
