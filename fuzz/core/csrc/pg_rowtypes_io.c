@@ -1604,10 +1604,13 @@ typedef struct FunctionCallInfoBaseData
 #define PG_GETARG_OID(n)	 DatumGetObjectId(PG_GETARG_DATUM(n))
 #define PG_GETARG_INT32(n)	 DatumGetInt32(PG_GETARG_DATUM(n))
 #define PG_GETARG_INT64(n)	 DatumGetInt64(PG_GETARG_DATUM(n))
+#define PG_GETARG_BOOL(n)	 DatumGetBool(PG_GETARG_DATUM(n))
+#define PG_GETARG_INT16(n)	 DatumGetInt16(PG_GETARG_DATUM(n))
 #define PG_GETARG_POINTER(n) ((void *) DatumGetPointer(PG_GETARG_DATUM(n)))
 #define PG_RETURN_DATUM(x)	 return (x)
 #define PG_RETURN_CSTRING(x) return CStringGetDatum(x)
 #define PG_RETURN_BOOL(x)	 return BoolGetDatum(x)
+#define PG_RETURN_INT32(x)	 return Int32GetDatum(x)
 #define PG_RETURN_UINT32(x)	 return UInt32GetDatum(x)
 #define PG_RETURN_UINT64(x)	 return UInt64GetDatum(x)
 #define PG_RETURN_NULL() \
@@ -1652,10 +1655,12 @@ typedef struct TypeCacheEntry
 {
 	Oid			type_id;
 	FmgrInfo	cmp_proc_finfo;
+	FmgrInfo	eq_opr_finfo;
 	FmgrInfo	hash_proc_finfo;
 	FmgrInfo	hash_extended_proc_finfo;
 } TypeCacheEntry;
 
+#define TYPECACHE_EQ_OPR_FINFO 0x0008
 #define TYPECACHE_CMP_PROC_FINFO 0x0080
 #define TYPECACHE_HASH_PROC_FINFO 0x0100
 #define TYPECACHE_HASH_EXTENDED_PROC_FINFO 0x8000
@@ -2559,9 +2564,24 @@ datum_image_eq(Datum value1, Datum value2, bool typByVal, int typLen)
  *   mytexthash(t):      pg_hash_bytes(payload, len)        [hashtext shape]
  *   mytexthashext(t,s): pg_hash_bytes_extended(payload, len, s)
  *
- * Column type menu:  INT4OID(23) / TEXTOID(25) / FAKETYPE(7777).
- * FAKETYPE has text I/O but NO cmp/hash support: it drives the
- * could-not-identify-function error arms.
+ *   myint4eq/mytexteq:  == of the cmp codecs' 0 verdict (record_eq arms).
+ *   myboolin(s):    exactly "t"/"f" (class 1 otherwise, soft-aware);
+ *   myboolout: "t"/"f"; myboolrecv: 1 byte !=0 (short = class 4);
+ *   myboolsend: 1 byte 0/1.
+ *   myint2in/out/recv/send: myint4 shapes bounded to int16 / 2-byte BE.
+ *   myint8in: '-' + 1..18 digits (the 18-digit cap IS the contract);
+ *   myint8out: %lld; myint8recv/send: 8-byte BE.
+ *   myfix8in(s):    first <=8 cstring bytes zero-padded into an 8-byte
+ *   BY-REF buffer (never errors); myfix8out: 16 lowercase hex chars;
+ *   myfix8recv: exactly 8 buffer bytes (short = class 4); myfix8send:
+ *   the 8 raw bytes.
+ *
+ * Column type menu:  INT4OID(23) / TEXTOID(25) / FAKETYPE(7777) /
+ * BOOLOID(16) / INT2OID(21) / INT8OID(20) / FIX8TYPE(7778).
+ * FAKETYPE has text I/O but NO cmp/hash/eq support: it drives the
+ * could-not-identify-function error arms. bool/int2/int8/fix8 also have
+ * NO cmp/hash/eq support (they exist for the datum_image byval-width and
+ * fixed-byref arms; support lookups on them witness error arms).
  *
  * Descriptor menu (typmod = index; MUST match the Rust driver's
  * registration order):
@@ -2570,10 +2590,16 @@ datum_image_eq(Datum value1, Datum value2, bool typByVal, int typLen)
  *   2: (text, [dropped], text)
  *   3: (int4, faketype)
  *   4: (text)
+ *   5: (bool, int2, int8)
+ *   6: (fix8, bool)
  */
 #define INT4OID 23
 #define TEXTOID 25
 #define PG_DIFF_FAKETYPE 7777
+#define BOOLOID 16
+#define INT2OID 21
+#define INT8OID 20
+#define PG_DIFF_FIX8TYPE 7778
 
 #define MYTEXTIN 91001
 #define MYTEXTOUT 91002
@@ -2589,6 +2615,24 @@ datum_image_eq(Datum value1, Datum value2, bool typByVal, int typLen)
 #define MYINT4HASHEXT 91032
 #define MYTEXTHASH 91033
 #define MYTEXTHASHEXT 91034
+#define MYINT4EQ 91023
+#define MYTEXTEQ 91024
+#define MYBOOLIN 91041
+#define MYBOOLOUT 91042
+#define MYBOOLRECV 91043
+#define MYBOOLSEND 91044
+#define MYINT2IN 91051
+#define MYINT2OUT 91052
+#define MYINT2RECV 91053
+#define MYINT2SEND 91054
+#define MYINT8IN 91061
+#define MYINT8OUT 91062
+#define MYINT8RECV 91063
+#define MYINT8SEND 91064
+#define MYFIX8IN 91071
+#define MYFIX8OUT 91072
+#define MYFIX8RECV 91073
+#define MYFIX8SEND 91074
 
 /* soft-error flag for the codec input path (InputFunctionCallSafe shim) */
 static _Thread_local bool pg_diff_codec_failed;
@@ -2774,6 +2818,287 @@ pg_diff_mytexthashext(FunctionCallInfo fcinfo)
 												 (uint64) PG_GETARG_INT64(1)));
 }
 
+/* eq codecs (contract: same value semantics as the cmp codecs' ==0) */
+static Datum
+pg_diff_myint4eq(FunctionCallInfo fcinfo)
+{
+	return BoolGetDatum(PG_GETARG_INT32(0) == PG_GETARG_INT32(1));
+}
+
+static Datum
+pg_diff_mytexteq(FunctionCallInfo fcinfo)
+{
+	text	   *ta = (text *) PG_DETOAST_DATUM_PACKED(PG_GETARG_DATUM(0));
+	text	   *tb = (text *) PG_DETOAST_DATUM_PACKED(PG_GETARG_DATUM(1));
+	Size		la = VARSIZE_ANY_EXHDR(ta);
+	Size		lb = VARSIZE_ANY_EXHDR(tb);
+
+	return BoolGetDatum(la == lb &&
+						memcmp(VARDATA_ANY(ta), VARDATA_ANY(tb), la) == 0);
+}
+
+/* bool codec: in = "t"/"f" exactly (class-1 otherwise, soft-aware);
+ * out = "t"/"f"; recv = 1 byte (!=0 -> true), short = class 4;
+ * send = 1 byte 0/1. */
+static Datum
+pg_diff_myboolin(FunctionCallInfo fcinfo)
+{
+	char	   *s = PG_GETARG_CSTRING(0);
+	Node	   *escontext = fcinfo->context;
+
+	if (s[0] == 't' && s[1] == '\0')
+		return BoolGetDatum(true);
+	if (s[0] == 'f' && s[1] == '\0')
+		return BoolGetDatum(false);
+	pg_diff_errcode = PG_DIFF_ERR_INVALID_TEXT;
+	pg_diff_codec_failed = true;
+	if (escontext != NULL)
+		return (Datum) 0;
+	pg_diff_rowtypes_throw();
+	return (Datum) 0;			/* unreachable */
+}
+
+static Datum
+pg_diff_myboolout(FunctionCallInfo fcinfo)
+{
+	char	   *out = (char *) palloc(2);
+
+	out[0] = PG_GETARG_BOOL(0) ? 't' : 'f';
+	out[1] = '\0';
+	return CStringGetDatum(out);
+}
+
+static Datum
+pg_diff_myboolrecv(FunctionCallInfo fcinfo)
+{
+	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
+
+	if (buf->len - buf->cursor < 1)
+	{
+		pg_diff_errcode = PG_DIFF_ERR_INVALID_BINARY;
+		pg_diff_rowtypes_throw();
+	}
+	return BoolGetDatum(buf->data[buf->cursor++] != 0);
+}
+
+static Datum
+pg_diff_myboolsend(FunctionCallInfo fcinfo)
+{
+	bytea	   *b = (bytea *) palloc(VARHDRSZ + 1);
+
+	SET_VARSIZE(b, VARHDRSZ + 1);
+	VARDATA(b)[0] = PG_GETARG_BOOL(0) ? 1 : 0;
+	return PointerGetDatum(b);
+}
+
+/* int2 codec: myint4in shape bounded to int16; recv/send 2-byte BE */
+static Datum
+pg_diff_myint2in(FunctionCallInfo fcinfo)
+{
+	char	   *s = PG_GETARG_CSTRING(0);
+	Node	   *escontext = fcinfo->context;
+	const char *p = s;
+	bool		neg = false;
+	int64		acc = 0;
+	int			ndigits = 0;
+
+	if (*p == '-')
+	{
+		neg = true;
+		p++;
+	}
+	for (; *p; p++)
+	{
+		if (*p < '0' || *p > '9')
+			break;
+		acc = acc * 10 + (*p - '0');
+		ndigits++;
+		if (acc > ((int64) 1 << 31))
+			break;
+	}
+	if (ndigits == 0 || *p != '\0' ||
+		(!neg && acc > 32767LL) || (neg && acc > 32768LL))
+	{
+		pg_diff_errcode = PG_DIFF_ERR_INVALID_TEXT;
+		pg_diff_codec_failed = true;
+		if (escontext != NULL)
+			return (Datum) 0;
+		pg_diff_rowtypes_throw();
+	}
+	return Int16GetDatum((int16) (neg ? -acc : acc));
+}
+
+static Datum
+pg_diff_myint2out(FunctionCallInfo fcinfo)
+{
+	char	   *out = (char *) palloc(8);
+
+	snprintf(out, 8, "%d", (int) PG_GETARG_INT16(0));
+	return CStringGetDatum(out);
+}
+
+static Datum
+pg_diff_myint2recv(FunctionCallInfo fcinfo)
+{
+	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
+	unsigned char b0, b1;
+
+	if (buf->len - buf->cursor < 2)
+	{
+		pg_diff_errcode = PG_DIFF_ERR_INVALID_BINARY;
+		pg_diff_rowtypes_throw();
+	}
+	b0 = (unsigned char) buf->data[buf->cursor++];
+	b1 = (unsigned char) buf->data[buf->cursor++];
+	return Int16GetDatum((int16) (((uint16) b0 << 8) | b1));
+}
+
+static Datum
+pg_diff_myint2send(FunctionCallInfo fcinfo)
+{
+	uint16		v = (uint16) PG_GETARG_INT16(0);
+	bytea	   *b = (bytea *) palloc(VARHDRSZ + 2);
+
+	SET_VARSIZE(b, VARHDRSZ + 2);
+	VARDATA(b)[0] = (char) (v >> 8);
+	VARDATA(b)[1] = (char) (v & 0xff);
+	return PointerGetDatum(b);
+}
+
+/* int8 codec: optional '-', 1..18 digits (18-digit cap is the CONTRACT,
+ * not int8in semantics); recv/send 8-byte BE */
+static Datum
+pg_diff_myint8in(FunctionCallInfo fcinfo)
+{
+	char	   *s = PG_GETARG_CSTRING(0);
+	Node	   *escontext = fcinfo->context;
+	const char *p = s;
+	bool		neg = false;
+	int64		acc = 0;
+	int			ndigits = 0;
+
+	if (*p == '-')
+	{
+		neg = true;
+		p++;
+	}
+	for (; *p; p++)
+	{
+		if (*p < '0' || *p > '9' || ndigits >= 18)
+			break;
+		acc = acc * 10 + (*p - '0');
+		ndigits++;
+	}
+	if (ndigits == 0 || *p != '\0')
+	{
+		pg_diff_errcode = PG_DIFF_ERR_INVALID_TEXT;
+		pg_diff_codec_failed = true;
+		if (escontext != NULL)
+			return (Datum) 0;
+		pg_diff_rowtypes_throw();
+	}
+	return Int64GetDatum(neg ? -acc : acc);
+}
+
+static Datum
+pg_diff_myint8out(FunctionCallInfo fcinfo)
+{
+	char	   *out = (char *) palloc(24);
+
+	snprintf(out, 24, "%lld", (long long) PG_GETARG_INT64(0));
+	return CStringGetDatum(out);
+}
+
+static Datum
+pg_diff_myint8recv(FunctionCallInfo fcinfo)
+{
+	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
+	uint64		v = 0;
+	int			i;
+
+	if (buf->len - buf->cursor < 8)
+	{
+		pg_diff_errcode = PG_DIFF_ERR_INVALID_BINARY;
+		pg_diff_rowtypes_throw();
+	}
+	for (i = 0; i < 8; i++)
+		v = (v << 8) | (unsigned char) buf->data[buf->cursor++];
+	return Int64GetDatum((int64) v);
+}
+
+static Datum
+pg_diff_myint8send(FunctionCallInfo fcinfo)
+{
+	uint64		v = (uint64) PG_GETARG_INT64(0);
+	bytea	   *b = (bytea *) palloc(VARHDRSZ + 8);
+	int			i;
+
+	SET_VARSIZE(b, VARHDRSZ + 8);
+	for (i = 0; i < 8; i++)
+		VARDATA(b)[i] = (char) (v >> (56 - 8 * i));
+	return PointerGetDatum(b);
+}
+
+/* fix8 codec (fixed-length BY-REF, attlen 8): in = first <=8 cstring bytes
+ * zero-padded into an 8-byte buffer (never errors); out = 16 lowercase hex
+ * chars; recv = exactly 8 buffer bytes (short = class 4); send = the 8 raw
+ * bytes. */
+static Datum
+pg_diff_myfix8in(FunctionCallInfo fcinfo)
+{
+	char	   *s = PG_GETARG_CSTRING(0);
+	unsigned char *buf = (unsigned char *) palloc(8);
+	int			i;
+
+	memset(buf, 0, 8);
+	for (i = 0; i < 8 && s[i]; i++)
+		buf[i] = (unsigned char) s[i];
+	return PointerGetDatum(buf);
+}
+
+static Datum
+pg_diff_myfix8out(FunctionCallInfo fcinfo)
+{
+	const unsigned char *v = (const unsigned char *) PG_GETARG_POINTER(0);
+	char	   *out = (char *) palloc(17);
+	static const char hx[] = "0123456789abcdef";
+	int			i;
+
+	for (i = 0; i < 8; i++)
+	{
+		out[2 * i] = hx[v[i] >> 4];
+		out[2 * i + 1] = hx[v[i] & 0xf];
+	}
+	out[16] = '\0';
+	return CStringGetDatum(out);
+}
+
+static Datum
+pg_diff_myfix8recv(FunctionCallInfo fcinfo)
+{
+	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
+	unsigned char *v = (unsigned char *) palloc(8);
+
+	if (buf->len - buf->cursor < 8)
+	{
+		pg_diff_errcode = PG_DIFF_ERR_INVALID_BINARY;
+		pg_diff_rowtypes_throw();
+	}
+	memcpy(v, &buf->data[buf->cursor], 8);
+	buf->cursor += 8;
+	return PointerGetDatum(v);
+}
+
+static Datum
+pg_diff_myfix8send(FunctionCallInfo fcinfo)
+{
+	bytea	   *b = (bytea *) palloc(VARHDRSZ + 8);
+
+	SET_VARSIZE(b, VARHDRSZ + 8);
+	memcpy(VARDATA(b), (const void *) PG_GETARG_POINTER(0), 8);
+	return PointerGetDatum(b);
+}
+
 static PGFunction
 pg_diff_resolve_codec(Oid functionId)
 {
@@ -2793,6 +3118,24 @@ pg_diff_resolve_codec(Oid functionId)
 		case MYINT4HASHEXT: return pg_diff_myint4hashext;
 		case MYTEXTHASH: return pg_diff_mytexthash;
 		case MYTEXTHASHEXT: return pg_diff_mytexthashext;
+		case MYINT4EQ: return pg_diff_myint4eq;
+		case MYTEXTEQ: return pg_diff_mytexteq;
+		case MYBOOLIN: return pg_diff_myboolin;
+		case MYBOOLOUT: return pg_diff_myboolout;
+		case MYBOOLRECV: return pg_diff_myboolrecv;
+		case MYBOOLSEND: return pg_diff_myboolsend;
+		case MYINT2IN: return pg_diff_myint2in;
+		case MYINT2OUT: return pg_diff_myint2out;
+		case MYINT2RECV: return pg_diff_myint2recv;
+		case MYINT2SEND: return pg_diff_myint2send;
+		case MYINT8IN: return pg_diff_myint8in;
+		case MYINT8OUT: return pg_diff_myint8out;
+		case MYINT8RECV: return pg_diff_myint8recv;
+		case MYINT8SEND: return pg_diff_myint8send;
+		case MYFIX8IN: return pg_diff_myfix8in;
+		case MYFIX8OUT: return pg_diff_myfix8out;
+		case MYFIX8RECV: return pg_diff_myfix8recv;
+		case MYFIX8SEND: return pg_diff_myfix8send;
 		default:
 			abort();			/* harness bug: unknown codec oid */
 	}
@@ -2816,6 +3159,10 @@ getTypeInputInfo(Oid type, Oid *typInput, Oid *typIOParam)
 	{
 		case TEXTOID: case PG_DIFF_FAKETYPE: *typInput = MYTEXTIN; break;
 		case INT4OID: *typInput = MYINT4IN; break;
+		case BOOLOID: *typInput = MYBOOLIN; break;
+		case INT2OID: *typInput = MYINT2IN; break;
+		case INT8OID: *typInput = MYINT8IN; break;
+		case PG_DIFF_FIX8TYPE: *typInput = MYFIX8IN; break;
 		default: abort();
 	}
 }
@@ -2827,6 +3174,10 @@ getTypeOutputInfo(Oid type, Oid *typOutput, bool *typIsVarlena)
 	{
 		case TEXTOID: case PG_DIFF_FAKETYPE: *typOutput = MYTEXTOUT; *typIsVarlena = true; break;
 		case INT4OID: *typOutput = MYINT4OUT; *typIsVarlena = false; break;
+		case BOOLOID: *typOutput = MYBOOLOUT; *typIsVarlena = false; break;
+		case INT2OID: *typOutput = MYINT2OUT; *typIsVarlena = false; break;
+		case INT8OID: *typOutput = MYINT8OUT; *typIsVarlena = false; break;
+		case PG_DIFF_FIX8TYPE: *typOutput = MYFIX8OUT; *typIsVarlena = false; break;
 		default: abort();
 	}
 }
@@ -2839,6 +3190,10 @@ getTypeBinaryInputInfo(Oid type, Oid *typReceive, Oid *typIOParam)
 	{
 		case TEXTOID: case PG_DIFF_FAKETYPE: *typReceive = MYTEXTRECV; break;
 		case INT4OID: *typReceive = MYINT4RECV; break;
+		case BOOLOID: *typReceive = MYBOOLRECV; break;
+		case INT2OID: *typReceive = MYINT2RECV; break;
+		case INT8OID: *typReceive = MYINT8RECV; break;
+		case PG_DIFF_FIX8TYPE: *typReceive = MYFIX8RECV; break;
 		default: abort();
 	}
 }
@@ -2850,6 +3205,10 @@ getTypeBinaryOutputInfo(Oid type, Oid *typSend, bool *typIsVarlena)
 	{
 		case TEXTOID: case PG_DIFF_FAKETYPE: *typSend = MYTEXTSEND; *typIsVarlena = true; break;
 		case INT4OID: *typSend = MYINT4SEND; *typIsVarlena = false; break;
+		case BOOLOID: *typSend = MYBOOLSEND; *typIsVarlena = false; break;
+		case INT2OID: *typSend = MYINT2SEND; *typIsVarlena = false; break;
+		case INT8OID: *typSend = MYINT8SEND; *typIsVarlena = false; break;
+		case PG_DIFF_FIX8TYPE: *typSend = MYFIX8SEND; *typIsVarlena = false; break;
 		default: abort();
 	}
 }
@@ -2936,6 +3295,10 @@ FunctionCall2Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2)
 static TypeCacheEntry pg_diff_tce_int4;
 static TypeCacheEntry pg_diff_tce_text;
 static TypeCacheEntry pg_diff_tce_fake;
+static TypeCacheEntry pg_diff_tce_bool;
+static TypeCacheEntry pg_diff_tce_int2;
+static TypeCacheEntry pg_diff_tce_int8;
+static TypeCacheEntry pg_diff_tce_fix8;
 static bool pg_diff_tce_ready;
 
 static void
@@ -2951,8 +3314,17 @@ pg_diff_tce_init(void)
 	fmgr_info_cxt(MYTEXTCMP, &pg_diff_tce_text.cmp_proc_finfo, NULL);
 	fmgr_info_cxt(MYTEXTHASH, &pg_diff_tce_text.hash_proc_finfo, NULL);
 	fmgr_info_cxt(MYTEXTHASHEXT, &pg_diff_tce_text.hash_extended_proc_finfo, NULL);
+	fmgr_info_cxt(MYINT4EQ, &pg_diff_tce_int4.eq_opr_finfo, NULL);
+	fmgr_info_cxt(MYTEXTEQ, &pg_diff_tce_text.eq_opr_finfo, NULL);
 	pg_diff_tce_fake.type_id = PG_DIFF_FAKETYPE;
 	/* fn_oid stays InvalidOid: drives the no-support-function error arms */
+	/* bool/int2/int8/fix8: NO cmp/hash/eq support (menu types for the
+	 * datum_image byval-width + fixed-byref arms; support-fn lookups on
+	 * them witness the error arms on BOTH sides) */
+	pg_diff_tce_bool.type_id = BOOLOID;
+	pg_diff_tce_int2.type_id = INT2OID;
+	pg_diff_tce_int8.type_id = INT8OID;
+	pg_diff_tce_fix8.type_id = PG_DIFF_FIX8TYPE;
 	pg_diff_tce_ready = true;
 }
 
@@ -2966,12 +3338,16 @@ lookup_type_cache(Oid type_id, int flags)
 		case INT4OID: return &pg_diff_tce_int4;
 		case TEXTOID: return &pg_diff_tce_text;
 		case PG_DIFF_FAKETYPE: return &pg_diff_tce_fake;
+		case BOOLOID: return &pg_diff_tce_bool;
+		case INT2OID: return &pg_diff_tce_int2;
+		case INT8OID: return &pg_diff_tce_int8;
+		case PG_DIFF_FIX8TYPE: return &pg_diff_tce_fix8;
 		default: abort();
 	}
 }
 
 /* ---- descriptor menu (typmod = index; matches the Rust registration) ---- */
-#define PG_DIFF_NDESC 5
+#define PG_DIFF_NDESC 7
 
 static TupleDesc pg_diff_descs[PG_DIFF_NDESC];
 
@@ -3044,6 +3420,17 @@ pg_diff_descs_init(void)
 	td = pg_diff_make_desc(1, 4);
 	pg_diff_fill_att(td, 0, "c1", TEXTOID, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED, false);
 	pg_diff_descs[4] = td;
+	/* 5: (bool, int2, int8) — byval widths 1/2/8 for the datum_image arms */
+	td = pg_diff_make_desc(3, 5);
+	pg_diff_fill_att(td, 0, "c1", BOOLOID, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, false);
+	pg_diff_fill_att(td, 1, "c2", INT2OID, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN, false);
+	pg_diff_fill_att(td, 2, "c3", INT8OID, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN, false);
+	pg_diff_descs[5] = td;
+	/* 6: (fix8, bool) — fixed-length BY-REF column */
+	td = pg_diff_make_desc(2, 6);
+	pg_diff_fill_att(td, 0, "c1", PG_DIFF_FIX8TYPE, 8, false, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN, false);
+	pg_diff_fill_att(td, 1, "c2", BOOLOID, 1, true, TYPALIGN_CHAR, TYPSTORAGE_PLAIN, false);
+	pg_diff_descs[6] = td;
 }
 
 static TupleDesc
@@ -4736,6 +5123,291 @@ hash_record_extended(PG_FUNCTION_ARGS)
 	PG_RETURN_UINT64(result);
 }
 
+/* ---- VERBATIM backend/utils/adt/rowtypes.c: record_eq [static-prefixed] ---- */
+static Datum
+record_eq(PG_FUNCTION_ARGS)
+{
+	HeapTupleHeader record1 = PG_GETARG_HEAPTUPLEHEADER(0);
+	HeapTupleHeader record2 = PG_GETARG_HEAPTUPLEHEADER(1);
+	bool		result = true;
+	Oid			tupType1;
+	Oid			tupType2;
+	int32		tupTypmod1;
+	int32		tupTypmod2;
+	TupleDesc	tupdesc1;
+	TupleDesc	tupdesc2;
+	HeapTupleData tuple1;
+	HeapTupleData tuple2;
+	int			ncolumns1;
+	int			ncolumns2;
+	RecordCompareData *my_extra;
+	int			ncols;
+	Datum	   *values1;
+	Datum	   *values2;
+	bool	   *nulls1;
+	bool	   *nulls2;
+	int			i1;
+	int			i2;
+	int			j;
+
+	check_stack_depth();		/* recurses for record-type columns */
+
+	/* Extract type info from the tuples */
+	tupType1 = HeapTupleHeaderGetTypeId(record1);
+	tupTypmod1 = HeapTupleHeaderGetTypMod(record1);
+	tupdesc1 = lookup_rowtype_tupdesc(tupType1, tupTypmod1);
+	ncolumns1 = tupdesc1->natts;
+	tupType2 = HeapTupleHeaderGetTypeId(record2);
+	tupTypmod2 = HeapTupleHeaderGetTypMod(record2);
+	tupdesc2 = lookup_rowtype_tupdesc(tupType2, tupTypmod2);
+	ncolumns2 = tupdesc2->natts;
+
+	/* Build temporary HeapTuple control structures */
+	tuple1.t_len = HeapTupleHeaderGetDatumLength(record1);
+	ItemPointerSetInvalid(&(tuple1.t_self));
+	tuple1.t_tableOid = InvalidOid;
+	tuple1.t_data = record1;
+	tuple2.t_len = HeapTupleHeaderGetDatumLength(record2);
+	ItemPointerSetInvalid(&(tuple2.t_self));
+	tuple2.t_tableOid = InvalidOid;
+	tuple2.t_data = record2;
+
+	/*
+	 * We arrange to look up the needed comparison info just once per series
+	 * of calls, assuming the record types don't change underneath us.
+	 */
+	ncols = Max(ncolumns1, ncolumns2);
+	my_extra = (RecordCompareData *) fcinfo->flinfo->fn_extra;
+	if (my_extra == NULL ||
+		my_extra->ncolumns < ncols)
+	{
+		fcinfo->flinfo->fn_extra =
+			MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+							   offsetof(RecordCompareData, columns) +
+							   ncols * sizeof(ColumnCompareData));
+		my_extra = (RecordCompareData *) fcinfo->flinfo->fn_extra;
+		my_extra->ncolumns = ncols;
+		my_extra->record1_type = InvalidOid;
+		my_extra->record1_typmod = 0;
+		my_extra->record2_type = InvalidOid;
+		my_extra->record2_typmod = 0;
+	}
+
+	if (my_extra->record1_type != tupType1 ||
+		my_extra->record1_typmod != tupTypmod1 ||
+		my_extra->record2_type != tupType2 ||
+		my_extra->record2_typmod != tupTypmod2)
+	{
+		MemSet(my_extra->columns, 0, ncols * sizeof(ColumnCompareData));
+		my_extra->record1_type = tupType1;
+		my_extra->record1_typmod = tupTypmod1;
+		my_extra->record2_type = tupType2;
+		my_extra->record2_typmod = tupTypmod2;
+	}
+
+	/* Break down the tuples into fields */
+	values1 = (Datum *) palloc(ncolumns1 * sizeof(Datum));
+	nulls1 = (bool *) palloc(ncolumns1 * sizeof(bool));
+	heap_deform_tuple(&tuple1, tupdesc1, values1, nulls1);
+	values2 = (Datum *) palloc(ncolumns2 * sizeof(Datum));
+	nulls2 = (bool *) palloc(ncolumns2 * sizeof(bool));
+	heap_deform_tuple(&tuple2, tupdesc2, values2, nulls2);
+
+	/*
+	 * Scan corresponding columns, allowing for dropped columns in different
+	 * places in the two rows.  i1 and i2 are physical column indexes, j is
+	 * the logical column index.
+	 */
+	i1 = i2 = j = 0;
+	while (i1 < ncolumns1 || i2 < ncolumns2)
+	{
+		LOCAL_FCINFO(locfcinfo, 2);
+		Form_pg_attribute att1;
+		Form_pg_attribute att2;
+		TypeCacheEntry *typentry;
+		Oid			collation;
+		bool		oprresult;
+
+		/*
+		 * Skip dropped columns
+		 */
+		if (i1 < ncolumns1 && TupleDescAttr(tupdesc1, i1)->attisdropped)
+		{
+			i1++;
+			continue;
+		}
+		if (i2 < ncolumns2 && TupleDescAttr(tupdesc2, i2)->attisdropped)
+		{
+			i2++;
+			continue;
+		}
+		if (i1 >= ncolumns1 || i2 >= ncolumns2)
+			break;				/* we'll deal with mismatch below loop */
+
+		att1 = TupleDescAttr(tupdesc1, i1);
+		att2 = TupleDescAttr(tupdesc2, i2);
+
+		/*
+		 * Have two matching columns, they must be same type
+		 */
+		if (att1->atttypid != att2->atttypid)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("cannot compare dissimilar column types %s and %s at record column %d",
+							format_type_be(att1->atttypid),
+							format_type_be(att2->atttypid),
+							j + 1)));
+
+		/*
+		 * If they're not same collation, we don't complain here, but the
+		 * equality function might.
+		 */
+		collation = att1->attcollation;
+		if (collation != att2->attcollation)
+			collation = InvalidOid;
+
+		/*
+		 * Lookup the equality function if not done already
+		 */
+		typentry = my_extra->columns[j].typentry;
+		if (typentry == NULL ||
+			typentry->type_id != att1->atttypid)
+		{
+			typentry = lookup_type_cache(att1->atttypid,
+										 TYPECACHE_EQ_OPR_FINFO);
+			if (!OidIsValid(typentry->eq_opr_finfo.fn_oid))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_FUNCTION),
+						 errmsg("could not identify an equality operator for type %s",
+								format_type_be(typentry->type_id))));
+			my_extra->columns[j].typentry = typentry;
+		}
+
+		/*
+		 * We consider two NULLs equal; NULL > not-NULL.
+		 */
+		if (!nulls1[i1] || !nulls2[i2])
+		{
+			if (nulls1[i1] || nulls2[i2])
+			{
+				result = false;
+				break;
+			}
+
+			/* Compare the pair of elements */
+			InitFunctionCallInfoData(*locfcinfo, &typentry->eq_opr_finfo, 2,
+									 collation, NULL, NULL);
+			locfcinfo->args[0].value = values1[i1];
+			locfcinfo->args[0].isnull = false;
+			locfcinfo->args[1].value = values2[i2];
+			locfcinfo->args[1].isnull = false;
+			oprresult = DatumGetBool(FunctionCallInvoke(locfcinfo));
+			if (locfcinfo->isnull || !oprresult)
+			{
+				result = false;
+				break;
+			}
+		}
+
+		/* equal, so continue to next column */
+		i1++, i2++, j++;
+	}
+
+	/*
+	 * If we didn't break out of the loop early, check for column count
+	 * mismatch.  (We do not report such mismatch if we found unequal column
+	 * values; is that a feature or a bug?)
+	 */
+	if (result)
+	{
+		if (i1 != ncolumns1 || i2 != ncolumns2)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("cannot compare record types with different numbers of columns")));
+	}
+
+	pfree(values1);
+	pfree(nulls1);
+	pfree(values2);
+	pfree(nulls2);
+	ReleaseTupleDesc(tupdesc1);
+	ReleaseTupleDesc(tupdesc2);
+
+	/* Avoid leaking memory when handed toasted input. */
+	PG_FREE_IF_COPY(record1, 0);
+	PG_FREE_IF_COPY(record2, 1);
+
+	PG_RETURN_BOOL(result);
+}
+
+/* ---- VERBATIM backend/utils/adt/rowtypes.c: record_ne..btrecordcmp [static-prefixed] ---- */
+static Datum
+record_ne(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(!DatumGetBool(record_eq(fcinfo)));
+}
+
+static Datum
+record_lt(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_cmp(fcinfo) < 0);
+}
+
+static Datum
+record_gt(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_cmp(fcinfo) > 0);
+}
+
+static Datum
+record_le(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_cmp(fcinfo) <= 0);
+}
+
+static Datum
+record_ge(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_cmp(fcinfo) >= 0);
+}
+
+static Datum
+btrecordcmp(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(record_cmp(fcinfo));
+}
+
+/* ---- VERBATIM backend/utils/adt/rowtypes.c: record_image_ne..record_image_ge [static-prefixed] ---- */
+static Datum
+record_image_ne(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(!DatumGetBool(record_image_eq(fcinfo)));
+}
+
+static Datum
+record_image_lt(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_image_cmp(fcinfo) < 0);
+}
+
+static Datum
+record_image_gt(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_image_cmp(fcinfo) > 0);
+}
+
+static Datum
+record_image_le(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_image_cmp(fcinfo) <= 0);
+}
+
+static Datum
+record_image_ge(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(record_image_cmp(fcinfo) >= 0);
+}
+
 /* ========== SECTION E: fuzz-facing driver entries (NOT Postgres code) ===== */
 /*
  * Shape: pg_diff_arena_reset() then pg_diff_errcode = 0, arm the longjmp,
@@ -4798,12 +5470,16 @@ pg_diff_record_in(int desc, int soft, const char *literal,
 	fc.args[2].value = Int32GetDatum(desc);
 	fc.args[2].isnull = false;
 	r1 = record_in(&fc);
-	if (fc.isnull)
-		return 1;				/* soft-mode error (class already recorded) */
+	/* soft-mode error: malformed paths set fc.isnull (PG_RETURN_NULL after
+	 * errsave); the anonymous-record arm ereturns a 0 Datum WITHOUT setting
+	 * isnull, so also treat a recorded errcode as the soft-error verdict
+	 * (mirrors SOFT_ERROR_OCCURRED in real callers). */
+	if (fc.isnull || (soft && pg_diff_errcode != 0))
+		return 1;
 	/* second call, same flinfo: the fn_extra memo-hit path */
 	fc.isnull = false;
 	r2 = record_in(&fc);
-	if (fc.isnull)
+	if (fc.isnull || (soft && pg_diff_errcode != 0))
 		return -3;
 	len = HeapTupleHeaderGetDatumLength((HeapTupleHeaderData *) DatumGetPointer(r1));
 	if (len != HeapTupleHeaderGetDatumLength((HeapTupleHeaderData *) DatumGetPointer(r2)) ||
@@ -5019,10 +5695,44 @@ pg_diff_form_record(int desc, const unsigned char *const *fields,
 		nulls[i] = false;
 		if (att->attbyval)
 		{
-			int32		v = 0;
+			/* stage min(fieldlen, attlen) little-endian bytes into a
+			 * zeroed word of the column's width (contract: mirrored by
+			 * the Rust driver's build_record) */
+			int			w = att->attlen;
+			int64		v64 = 0;
+			int32		v32 = 0;
+			int16		v16 = 0;
+			char		v8 = 0;
 
-			memcpy(&v, fields[i], fieldlens[i] < 4 ? fieldlens[i] : 4);
-			values[i] = Int32GetDatum(v);
+			switch (w)
+			{
+				case 1:
+					memcpy(&v8, fields[i], fieldlens[i] < 1 ? fieldlens[i] : 1);
+					values[i] = BoolGetDatum(v8 & 1);
+					break;
+				case 2:
+					memcpy(&v16, fields[i], fieldlens[i] < 2 ? fieldlens[i] : 2);
+					values[i] = Int16GetDatum(v16);
+					break;
+				case 8:
+					memcpy(&v64, fields[i], fieldlens[i] < 8 ? fieldlens[i] : 8);
+					values[i] = Int64GetDatum(v64);
+					break;
+				default:
+					memcpy(&v32, fields[i], fieldlens[i] < 4 ? fieldlens[i] : 4);
+					values[i] = Int32GetDatum(v32);
+					break;
+			}
+		}
+		else if (att->attlen > 0)
+		{
+			/* fixed-length by-ref: attlen buffer, zero-padded */
+			unsigned char *buf = (unsigned char *) palloc((Size) att->attlen);
+			int			n = fieldlens[i] < att->attlen ? fieldlens[i] : att->attlen;
+
+			memset(buf, 0, (Size) att->attlen);
+			memcpy(buf, fields[i], (Size) n);
+			values[i] = PointerGetDatum(buf);
 		}
 		else
 		{
@@ -5037,4 +5747,65 @@ pg_diff_form_record(int desc, const unsigned char *const *fields,
 	HeapTupleHeaderSetTypeId(tuple->t_data, RECORDOID);
 	HeapTupleHeaderSetTypMod(tuple->t_data, desc);
 	return pg_diff_copy_out(tuple->t_data, tuple->t_len, out, outlen);
+}
+
+/* record_eq/ne/lt/gt/le/ge/btrecordcmp family: `which` selects the wrapper
+ * (0 eq / 1 ne / 2 lt / 3 gt / 4 le / 5 ge / 6 btrecordcmp); *val_out gets
+ * the bool as 0/1 (or the int32 cmp for btrecordcmp). Two calls through one
+ * flinfo (fn_extra memo-hit path), results must agree. */
+int
+pg_diff_record_cmpfam(int which,
+					  const unsigned char *img1, int len1,
+					  const unsigned char *img2, int len2,
+					  int *val_out)
+{
+	FmgrInfo	flinfo;
+	FunctionCallInfoBaseData fc;
+	Datum		r1,
+				r2;
+
+	PG_DIFF_ENTRY();
+	pg_diff_two_rec_setup(&fc, &flinfo, img1, len1, img2, len2);
+	switch (which)
+	{
+		case 0: r1 = record_eq(&fc); r2 = record_eq(&fc); break;
+		case 1: r1 = record_ne(&fc); r2 = record_ne(&fc); break;
+		case 2: r1 = record_lt(&fc); r2 = record_lt(&fc); break;
+		case 3: r1 = record_gt(&fc); r2 = record_gt(&fc); break;
+		case 4: r1 = record_le(&fc); r2 = record_le(&fc); break;
+		case 5: r1 = record_ge(&fc); r2 = record_ge(&fc); break;
+		case 6: r1 = btrecordcmp(&fc); r2 = btrecordcmp(&fc); break;
+		default: return -3;
+	}
+	if (r1 != r2)
+		return -3;
+	*val_out = (which == 6) ? DatumGetInt32(r1) : (DatumGetBool(r1) ? 1 : 0);
+	return 0;
+}
+
+/* record_image_ne/lt/gt/le/ge wrappers: `which` 0 ne / 1 lt / 2 gt /
+ * 3 le / 4 ge; *val_out gets the bool as 0/1. */
+int
+pg_diff_record_imagefam(int which,
+						const unsigned char *img1, int len1,
+						const unsigned char *img2, int len2,
+						int *val_out)
+{
+	FmgrInfo	flinfo;
+	FunctionCallInfoBaseData fc;
+	Datum		r;
+
+	PG_DIFF_ENTRY();
+	pg_diff_two_rec_setup(&fc, &flinfo, img1, len1, img2, len2);
+	switch (which)
+	{
+		case 0: r = record_image_ne(&fc); break;
+		case 1: r = record_image_lt(&fc); break;
+		case 2: r = record_image_gt(&fc); break;
+		case 3: r = record_image_le(&fc); break;
+		case 4: r = record_image_ge(&fc); break;
+		default: return -3;
+	}
+	*val_out = DatumGetBool(r) ? 1 : 0;
+	return 0;
 }

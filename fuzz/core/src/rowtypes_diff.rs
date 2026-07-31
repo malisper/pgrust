@@ -18,21 +18,26 @@
 //! are what the differential exercises.
 //!
 //! Descriptor menu (typmod = registration index, mirrored in the C oracle):
-//!   0: (text, text)             2: (text, [dropped], text)   4: (text)
-//!   1: (int4, text)             3: (int4, faketype)
-//! `faketype` (oid 7777) has text io but no cmp/hash support — it witnesses
-//! the could-not-identify-function error arms.
+//!   0: (text, text)             3: (int4, faketype)    5: (bool, int2, int8)
+//!   1: (int4, text)             4: (text)              6: (fix8, bool)
+//!   2: (text, [dropped], text)
+//! `faketype` (oid 7777) has text io but no cmp/hash/eq support — it
+//! witnesses the could-not-identify-function error arms; bool/int2/int8 and
+//! the fixed-len-8 BY-REF `fix8` (oid 7778, hex io codec) likewise carry no
+//! support fns and exist for the datum_image byval-width / fixed-byref arms.
 //!
 //! Input layout: [sel][flags][payload...]
-//!   sel % 10 = arm (see dispatch); flags: bits 0-2 descriptor (%5),
-//!   bit 3 = soft escontext mode (record_in only), bit 4 = details_wanted.
+//!   sel % 22 = arm (see dispatch); flags: bits 0-2 descriptor (%7),
+//!   bit 3 = soft escontext mode (record_in only), bit 4 = details_wanted,
+//!   bit 5 = anonymous-record typmod (-1) for record_in/record_recv (the
+//!   not-implemented error arms).
 //!
 //! SKIPPED rows / carves (documented, executable where applicable):
 //!   - TOASTed (external/compressed) record inputs: unreachable in-harness
 //!     (both sides' detoast seams are identity; C oracle aborts if reached).
-//!   - record_eq/ne/lt/gt/le/ge/btrecordcmp: proved in proofs/records
-//!     (per-descriptor Kani theorems); not re-fuzzed here. record_cmp IS
-//!     exercised through the record_larger/record_smaller arms.
+//!   - record_eq/ne/lt/gt/le/ge/btrecordcmp: ALSO proved in proofs/records
+//!     (per-descriptor Kani theorems); fuzzed here as arms 10-16 for line
+//!     coverage of the shipped wrappers + core loops over this menu.
 //!   - embedded-NUL literals: a cstring input cannot carry an interior NUL
 //!     on either side; the payload is truncated at the first NUL byte.
 
@@ -78,6 +83,12 @@ extern "C" {
     fn pg_diff_form_record(desc: c_int, fields: *const *const c_uchar,
                            fieldlens: *const c_int, isnull: *const c_int,
                            out: *mut c_uchar, outlen: *mut c_int) -> c_int;
+    fn pg_diff_record_cmpfam(which: c_int, img1: *const c_uchar, len1: c_int,
+                             img2: *const c_uchar, len2: c_int,
+                             val_out: *mut c_int) -> c_int;
+    fn pg_diff_record_imagefam(which: c_int, img1: *const c_uchar, len1: c_int,
+                               img2: *const c_uchar, len2: c_int,
+                               val_out: *mut c_int) -> c_int;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +99,10 @@ extern "C" {
 const INT4OID: Oid = 23;
 const TEXTOID: Oid = 25;
 const FAKETYPE: Oid = 7777;
+const BOOLOID: Oid = 16;
+const INT2OID: Oid = 21;
+const INT8OID: Oid = 20;
+const FIX8TYPE: Oid = 7778;
 
 const MYTEXTIN: Oid = 91001;
 const MYTEXTOUT: Oid = 91002;
@@ -103,11 +118,32 @@ const MYINT4HASH: Oid = 91031;
 const MYINT4HASHEXT: Oid = 91032;
 const MYTEXTHASH: Oid = 91033;
 const MYTEXTHASHEXT: Oid = 91034;
+const MYINT4EQ: Oid = 91023;
+const MYTEXTEQ: Oid = 91024;
+const MYBOOLIN: Oid = 91041;
+const MYBOOLOUT: Oid = 91042;
+const MYBOOLRECV: Oid = 91043;
+const MYBOOLSEND: Oid = 91044;
+const MYINT2IN: Oid = 91051;
+const MYINT2OUT: Oid = 91052;
+const MYINT2RECV: Oid = 91053;
+const MYINT2SEND: Oid = 91054;
+const MYINT8IN: Oid = 91061;
+const MYINT8OUT: Oid = 91062;
+const MYINT8RECV: Oid = 91063;
+const MYINT8SEND: Oid = 91064;
+const MYFIX8IN: Oid = 91071;
+const MYFIX8OUT: Oid = 91072;
+const MYFIX8RECV: Oid = 91073;
+const MYFIX8SEND: Oid = 91074;
+// eq-operator oids (typcache: amop strategy-3 member -> operator -> oprcode)
+const INT4EQ_OPR: Oid = 30001;
+const TEXTEQ_OPR: Oid = 30003;
 
 const BTREE_AM: Oid = 403;
 const HASH_AM: Oid = 405;
 
-const NDESC: usize = 5;
+const NDESC: usize = 7;
 
 type Fcinfo = types_fmgr::FunctionCallInfoBaseData;
 
@@ -293,10 +329,264 @@ fn fc_mytexthashext(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     )))
 }
 
+fn fc_myint4eq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_bool(fcinfo.arg(0).as_i32() == fcinfo.arg(1).as_i32()))
+}
+
+fn fc_mytexteq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = varlena_payload(fcinfo.arg(0));
+    let b = varlena_payload(fcinfo.arg(1));
+    Ok(Datum::from_bool(a == b))
+}
+
+#[cold]
+fn boolin_invalid() -> alloc::boxed::Box<types_error::PgError> {
+    alloc::boxed::Box::new(
+        types_error::PgError::error("myboolin: invalid input")
+            .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+    )
+}
+
+fn fc_myboolin(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of an input fn is a non-null cstring.
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    // SAFETY: fcinfo.context, if set, is a live ErrorSaveNode armed for this call.
+    let escontext = unsafe { fcinfo.error_save_node() };
+    match s {
+        b"t" => Ok(Datum::from_bool(true)),
+        b"f" => Ok(Datum::from_bool(false)),
+        _ => match escontext {
+            Some(node) => {
+                let err = *boolin_invalid();
+                if node.ctx.details_wanted() {
+                    node.ctx.save(err);
+                } else {
+                    node.ctx.mark_error_occurred();
+                }
+                Ok(Datum::null())
+            }
+            None => Err(boolin_invalid()),
+        },
+    }
+}
+
+fn fc_myboolout(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let c = if fcinfo.arg(0).as_bool() { b't' } else { b'f' };
+    let mcx = fcinfo.result_mcx();
+    let mut out = mcx::vec_with_capacity_in(mcx, 2)?;
+    mcx::vec_append_bytes(&mut out, &[c, 0])?;
+    let d = Datum::from_usize(out.as_ptr() as usize);
+    core::mem::forget(out);
+    Ok(d)
+}
+
+#[cold]
+fn recv_short(what: &'static str) -> alloc::boxed::Box<types_error::PgError> {
+    alloc::boxed::Box::new(
+        types_error::PgError::error(alloc::format!("{what}: insufficient data"))
+            .with_sqlstate(types_error::ERRCODE_INVALID_BINARY_REPRESENTATION),
+    )
+}
+
+fn fc_myboolrecv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of a recv fn is a live &mut StringInfo.
+    let buf = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut stringinfo::StringInfo<'_>) };
+    if buf.len() - buf.cursor < 1 {
+        return Err(recv_short("myboolrecv"));
+    }
+    let b = pqformat::pq_getmsgbytes(buf, 1)?[0];
+    Ok(Datum::from_bool(b != 0))
+}
+
+fn fc_myboolsend(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let b = [u8::from(fcinfo.arg(0).as_bool())];
+    text_datum(fcinfo.result_mcx(), &b)
+}
+
+fn fc_myint2in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of an input fn is a non-null cstring.
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    // SAFETY: fcinfo.context, if set, is a live ErrorSaveNode armed for this call.
+    let escontext = unsafe { fcinfo.error_save_node() };
+    let (neg, digits) = match s.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, s),
+    };
+    let mut acc: i64 = 0;
+    let mut ok = !digits.is_empty();
+    for &b in digits {
+        if !b.is_ascii_digit() || acc > (1i64 << 31) {
+            ok = false;
+            break;
+        }
+        acc = acc * 10 + i64::from(b - b'0');
+    }
+    if ok && ((!neg && acc > 32767) || (neg && acc > 32768)) {
+        ok = false;
+    }
+    if !ok {
+        return match escontext {
+            Some(node) => {
+                let err = *int4in_invalid();
+                if node.ctx.details_wanted() {
+                    node.ctx.save(err);
+                } else {
+                    node.ctx.mark_error_occurred();
+                }
+                Ok(Datum::null())
+            }
+            None => Err(int4in_invalid()),
+        };
+    }
+    Ok(Datum::from_i16((if neg { -acc } else { acc }) as i16))
+}
+
+fn fc_myint2out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let v = fcinfo.arg(0).as_i16();
+    let s = alloc::format!("{v}\0");
+    let mcx = fcinfo.result_mcx();
+    let mut out = mcx::vec_with_capacity_in(mcx, s.len())?;
+    mcx::vec_append_bytes(&mut out, s.as_bytes())?;
+    let d = Datum::from_usize(out.as_ptr() as usize);
+    core::mem::forget(out);
+    Ok(d)
+}
+
+fn fc_myint2recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of a recv fn is a live &mut StringInfo.
+    let buf = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut stringinfo::StringInfo<'_>) };
+    if buf.len() - buf.cursor < 2 {
+        return Err(recv_short("myint2recv"));
+    }
+    let bytes = pqformat::pq_getmsgbytes(buf, 2)?;
+    Ok(Datum::from_i16(i16::from_be_bytes([bytes[0], bytes[1]])))
+}
+
+fn fc_myint2send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let v = fcinfo.arg(0).as_i16();
+    text_datum(fcinfo.result_mcx(), &v.to_be_bytes())
+}
+
+fn fc_myint8in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // Contract: optional '-', 1..18 digits (the 18-digit cap IS the codec
+    // contract, not int8in semantics).
+    // SAFETY: arg 0 of an input fn is a non-null cstring.
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    // SAFETY: fcinfo.context, if set, is a live ErrorSaveNode armed for this call.
+    let escontext = unsafe { fcinfo.error_save_node() };
+    let (neg, digits) = match s.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, s),
+    };
+    let ok = !digits.is_empty()
+        && digits.len() <= 18
+        && digits.iter().all(u8::is_ascii_digit);
+    if !ok {
+        return match escontext {
+            Some(node) => {
+                let err = *int4in_invalid();
+                if node.ctx.details_wanted() {
+                    node.ctx.save(err);
+                } else {
+                    node.ctx.mark_error_occurred();
+                }
+                Ok(Datum::null())
+            }
+            None => Err(int4in_invalid()),
+        };
+    }
+    let mut acc: i64 = 0;
+    for &b in digits {
+        acc = acc * 10 + i64::from(b - b'0');
+    }
+    Ok(Datum::from_i64(if neg { -acc } else { acc }))
+}
+
+fn fc_myint8out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let v = fcinfo.arg(0).as_i64();
+    let s = alloc::format!("{v}\0");
+    let mcx = fcinfo.result_mcx();
+    let mut out = mcx::vec_with_capacity_in(mcx, s.len())?;
+    mcx::vec_append_bytes(&mut out, s.as_bytes())?;
+    let d = Datum::from_usize(out.as_ptr() as usize);
+    core::mem::forget(out);
+    Ok(d)
+}
+
+fn fc_myint8recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of a recv fn is a live &mut StringInfo.
+    let buf = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut stringinfo::StringInfo<'_>) };
+    if buf.len() - buf.cursor < 8 {
+        return Err(recv_short("myint8recv"));
+    }
+    let b = pqformat::pq_getmsgbytes(buf, 8)?;
+    Ok(Datum::from_i64(i64::from_be_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ])))
+}
+
+fn fc_myint8send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let v = fcinfo.arg(0).as_i64();
+    text_datum(fcinfo.result_mcx(), &v.to_be_bytes())
+}
+
+/// 8-byte fixed-length BY-REF buffer in mcx; datum = pointer.
+fn fix8_datum(mcx: mcx::Mcx<'_>, bytes: &[u8]) -> PgResult<Datum> {
+    let mut v = [0u8; 8];
+    let n = bytes.len().min(8);
+    v[..n].copy_from_slice(&bytes[..n]);
+    let mut out = mcx::vec_with_capacity_in(mcx, 8)?;
+    mcx::vec_append_bytes(&mut out, &v)?;
+    let d = Datum::from_usize(out.as_ptr() as usize);
+    core::mem::forget(out);
+    Ok(d)
+}
+
+fn fc_myfix8in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of an input fn is a non-null cstring.
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    fix8_datum(fcinfo.result_mcx(), s)
+}
+
+fn fc_myfix8out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let p = fcinfo.arg(0).as_usize() as *const u8;
+    // SAFETY: a live fix8 datum is an 8-byte by-ref buffer.
+    let v = unsafe { core::slice::from_raw_parts(p, 8) };
+    const HX: &[u8; 16] = b"0123456789abcdef";
+    let mut out16 = [0u8; 17];
+    for (i, &b) in v.iter().enumerate() {
+        out16[2 * i] = HX[(b >> 4) as usize];
+        out16[2 * i + 1] = HX[(b & 0xf) as usize];
+    }
+    let mcx = fcinfo.result_mcx();
+    let mut out = mcx::vec_with_capacity_in(mcx, 17)?;
+    mcx::vec_append_bytes(&mut out, &out16)?;
+    let d = Datum::from_usize(out.as_ptr() as usize);
+    core::mem::forget(out);
+    Ok(d)
+}
+
+fn fc_myfix8recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of a recv fn is a live &mut StringInfo.
+    let buf = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut stringinfo::StringInfo<'_>) };
+    if buf.len() - buf.cursor < 8 {
+        return Err(recv_short("myfix8recv"));
+    }
+    let b = pqformat::pq_getmsgbytes(buf, 8)?.to_vec();
+    fix8_datum(fcinfo.result_mcx(), &b)
+}
+
+fn fc_myfix8send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let p = fcinfo.arg(0).as_usize() as *const u8;
+    // SAFETY: a live fix8 datum is an 8-byte by-ref buffer.
+    let v = unsafe { core::slice::from_raw_parts(p, 8) };
+    text_datum(fcinfo.result_mcx(), v)
+}
+
 // Seam installation + descriptor registration --------------------------------
 
 fn io_shape(oid: Oid, input: Oid, output: Oid, recv: Oid, send: Oid,
-            typlen: i16, byval: bool) -> syscache_seams::PgTypeIoShape {
+            typlen: i16, byval: bool, align: u8) -> syscache_seams::PgTypeIoShape {
     syscache_seams::PgTypeIoShape {
         oid,
         typinput: input,
@@ -308,18 +598,18 @@ fn io_shape(oid: Oid, input: Oid, output: Oid, recv: Oid, send: Oid,
         typelem: types_core::primitive::InvalidOid,
         typlen,
         typbyval: byval,
-        typalign: b'i' as i8,
+        typalign: align as i8,
         typdelim: b',' as i8,
         typisdefined: true,
     }
 }
 
-fn tc_shape(typlen: i16, byval: bool, storage: i8) -> syscache_seams::PgTypeTypcacheShape {
+fn tc_shape(typlen: i16, byval: bool, storage: i8, align: u8) -> syscache_seams::PgTypeTypcacheShape {
     syscache_seams::PgTypeTypcacheShape {
         typname: Default::default(),
         typlen,
         typbyval: byval,
-        typalign: b'i' as i8,
+        typalign: align as i8,
         typstorage: storage,
         typtype: b'b' as i8,
         typisdefined: true,
@@ -333,13 +623,19 @@ fn tc_shape(typlen: i16, byval: bool, storage: i8) -> syscache_seams::PgTypeTypc
 
 fn att(name: &str, num: i16, typid: Oid, typlen: i16, byval: bool, storage: u8,
        dropped: bool) -> types_tuple::FormData_pg_attribute {
+    att_a(name, num, typid, typlen, byval, storage, dropped, b'i')
+}
+
+#[allow(clippy::too_many_arguments)]
+fn att_a(name: &str, num: i16, typid: Oid, typlen: i16, byval: bool, storage: u8,
+         dropped: bool, align: u8) -> types_tuple::FormData_pg_attribute {
     let mut a = types_tuple::FormData_pg_attribute::default();
     a.attname.namestrcpy(name);
     a.attnum = num;
     a.atttypid = typid;
     a.attlen = typlen;
     a.attbyval = byval;
-    a.attalign = b'i' as i8;
+    a.attalign = align as i8;
     a.attstorage = storage as i8;
     a.atttypmod = -1;
     a.attisdropped = dropped;
@@ -367,17 +663,25 @@ fn install() -> bool {
         OWNED.store(true, std::sync::atomic::Ordering::Relaxed);
         syscache_seams::pg_type_io_shape::set(|typid| {
             Ok(match typid {
-                TEXTOID => Some(io_shape(TEXTOID, MYTEXTIN, MYTEXTOUT, MYTEXTRECV, MYTEXTSEND, -1, false)),
-                INT4OID => Some(io_shape(INT4OID, MYINT4IN, MYINT4OUT, MYINT4RECV, MYINT4SEND, 4, true)),
-                FAKETYPE => Some(io_shape(FAKETYPE, MYTEXTIN, MYTEXTOUT, MYTEXTRECV, MYTEXTSEND, -1, false)),
+                TEXTOID => Some(io_shape(TEXTOID, MYTEXTIN, MYTEXTOUT, MYTEXTRECV, MYTEXTSEND, -1, false, b'i')),
+                INT4OID => Some(io_shape(INT4OID, MYINT4IN, MYINT4OUT, MYINT4RECV, MYINT4SEND, 4, true, b'i')),
+                FAKETYPE => Some(io_shape(FAKETYPE, MYTEXTIN, MYTEXTOUT, MYTEXTRECV, MYTEXTSEND, -1, false, b'i')),
+                BOOLOID => Some(io_shape(BOOLOID, MYBOOLIN, MYBOOLOUT, MYBOOLRECV, MYBOOLSEND, 1, true, b'c')),
+                INT2OID => Some(io_shape(INT2OID, MYINT2IN, MYINT2OUT, MYINT2RECV, MYINT2SEND, 2, true, b's')),
+                INT8OID => Some(io_shape(INT8OID, MYINT8IN, MYINT8OUT, MYINT8RECV, MYINT8SEND, 8, true, b'd')),
+                FIX8TYPE => Some(io_shape(FIX8TYPE, MYFIX8IN, MYFIX8OUT, MYFIX8RECV, MYFIX8SEND, 8, false, b'd')),
                 _ => None,
             })
         });
         syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
             Ok(match typid {
-                TEXTOID => Some(tc_shape(-1, false, b'x' as i8)),
-                INT4OID => Some(tc_shape(4, true, b'p' as i8)),
-                FAKETYPE => Some(tc_shape(-1, false, b'x' as i8)),
+                TEXTOID => Some(tc_shape(-1, false, b'x' as i8, b'i')),
+                INT4OID => Some(tc_shape(4, true, b'p' as i8, b'i')),
+                FAKETYPE => Some(tc_shape(-1, false, b'x' as i8, b'i')),
+                BOOLOID => Some(tc_shape(1, true, b'p' as i8, b'c')),
+                INT2OID => Some(tc_shape(2, true, b'p' as i8, b's')),
+                INT8OID => Some(tc_shape(8, true, b'p' as i8, b'd')),
+                FIX8TYPE => Some(tc_shape(8, false, b'p' as i8, b'd')),
                 _ => None,
             })
         });
@@ -416,6 +720,43 @@ fn install() -> bool {
                 _ => InvalidOid,
             })
         });
+        // eq-operator resolution (typcache TYPECACHE_EQ_OPR_FINFO):
+        // btree opfamily strategy-3 member -> operator -> oprcode codec.
+        syscache_seams::lookup_pg_amop_by_strategy::set(
+            |opfamily, lefttype, righttype, strategy| {
+                Ok(match (opfamily, lefttype, righttype, strategy) {
+                    // btree strategy-3 (=) members
+                    (20001, INT4OID, INT4OID, 3) => INT4EQ_OPR,
+                    (20003, TEXTOID, TEXTOID, 3) => TEXTEQ_OPR,
+                    // hash strategy-1 (=) members: the SAME operators (real
+                    // catalogs are self-consistent; resolve_hash_proc checks
+                    // a determined eq_opr against the hash family's member)
+                    (20002, INT4OID, INT4OID, 1) => INT4EQ_OPR,
+                    (20004, TEXTOID, TEXTOID, 1) => TEXTEQ_OPR,
+                    _ => InvalidOid,
+                })
+            },
+        );
+        syscache_seams::lookup_pg_operator_shape::set(|opno| {
+            let code = match opno {
+                INT4EQ_OPR => MYINT4EQ,
+                TEXTEQ_OPR => MYTEXTEQ,
+                _ => return Ok(None),
+            };
+            Ok(Some(syscache_seams::PgOperatorShape {
+                oprnamespace: InvalidOid,
+                oprleft: InvalidOid,
+                oprright: InvalidOid,
+                oprresult: InvalidOid,
+                oprcom: InvalidOid,
+                oprnegate: InvalidOid,
+                oprcode: code,
+                oprrest: InvalidOid,
+                oprjoin: InvalidOid,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }))
+        });
         fmgr_seams::fmgr_info::set(|oid| {
             let f: types_fmgr::PGFunction = match oid {
                 MYTEXTIN => fc_mytextin,
@@ -432,6 +773,24 @@ fn install() -> bool {
                 MYINT4HASHEXT => fc_myint4hashext,
                 MYTEXTHASH => fc_mytexthash,
                 MYTEXTHASHEXT => fc_mytexthashext,
+                MYINT4EQ => fc_myint4eq,
+                MYTEXTEQ => fc_mytexteq,
+                MYBOOLIN => fc_myboolin,
+                MYBOOLOUT => fc_myboolout,
+                MYBOOLRECV => fc_myboolrecv,
+                MYBOOLSEND => fc_myboolsend,
+                MYINT2IN => fc_myint2in,
+                MYINT2OUT => fc_myint2out,
+                MYINT2RECV => fc_myint2recv,
+                MYINT2SEND => fc_myint2send,
+                MYINT8IN => fc_myint8in,
+                MYINT8OUT => fc_myint8out,
+                MYINT8RECV => fc_myint8recv,
+                MYINT8SEND => fc_myint8send,
+                MYFIX8IN => fc_myfix8in,
+                MYFIX8OUT => fc_myfix8out,
+                MYFIX8RECV => fc_myfix8recv,
+                MYFIX8SEND => fc_myfix8send,
                 _ => std::panic!("fmgr_info: unexpected oid {oid}"),
             };
             Ok(FmgrInfo::new(f, oid, 3, true, false))
@@ -482,7 +841,13 @@ fn register_descs() {
     let d3 = [att("c1", 1, INT4OID, 4, true, b'p', false),
               att("c2", 2, FAKETYPE, -1, false, b'x', false)];
     let d4 = [att("c1", 1, TEXTOID, -1, false, b'x', false)];
-    let menus: [&[types_tuple::FormData_pg_attribute]; NDESC] = [&d0, &d1, &d2, &d3, &d4];
+    let d5 = [att_a("c1", 1, BOOLOID, 1, true, b'p', false, b'c'),
+              att_a("c2", 2, INT2OID, 2, true, b'p', false, b's'),
+              att_a("c3", 3, INT8OID, 8, true, b'p', false, b'd')];
+    let d6 = [att_a("c1", 1, FIX8TYPE, 8, false, b'p', false, b'd'),
+              att_a("c2", 2, BOOLOID, 1, true, b'p', false, b'c')];
+    let menus: [&[types_tuple::FormData_pg_attribute]; NDESC] =
+        [&d0, &d1, &d2, &d3, &d4, &d5, &d6];
     for (i, atts) in menus.iter().enumerate() {
         let mut td = tupdesc::CreateTupleDesc(mcx, atts).expect("CreateTupleDesc");
         td.tdtypeid = RECORDOID;
@@ -550,31 +915,54 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// One decoded field: None = SQL NULL, Some(bytes) = payload (int4 columns
-/// consume exactly 4 bytes little-endian; text columns a 1-byte length + data).
+/// One decoded field: None = SQL NULL, Some(bytes) = payload. Fixed-width
+/// columns consume exactly their width little-endian (bool 1 / int2 2 /
+/// int4 4 / int8+fix8 8); text-io columns a 1-byte length + data.
 type Fields = Vec<Option<Vec<u8>>>;
 
+#[derive(Clone, Copy)]
+enum ColKind {
+    Text,
+    Int4,
+    Bool,
+    Int2,
+    Int8,
+    Fix8,
+    Dropped,
+}
+
+fn desc_shapes(desc: usize) -> &'static [ColKind] {
+    use ColKind::*;
+    match desc {
+        0 => &[Text, Text],
+        1 => &[Int4, Text],
+        2 => &[Text, Dropped, Text],
+        3 => &[Int4, Text],
+        4 => &[Text],
+        5 => &[Bool, Int2, Int8],
+        _ => &[Fix8, Bool],
+    }
+}
+
 fn decode_fields(cur: &mut Cursor<'_>, desc: usize) -> Fields {
-    let shapes: &[Option<bool>] = match desc {
-        0 => &[Some(false), Some(false)],
-        1 => &[Some(true), Some(false)],
-        2 => &[Some(false), None, Some(false)],
-        3 => &[Some(true), Some(false)],
-        _ => &[Some(false)],
-    };
-    shapes
+    desc_shapes(desc)
         .iter()
-        .map(|s| match s {
-            None => None, // dropped column: always null
-            Some(byval) => {
-                if cur.u8() & 1 == 0 {
-                    None
-                } else if *byval {
-                    Some(cur.bytes(4).to_vec())
-                } else {
-                    let n = cur.u8() as usize;
-                    Some(cur.bytes(n).to_vec())
-                }
+        .map(|s| {
+            let w = match s {
+                ColKind::Dropped => return None, // dropped column: always null
+                ColKind::Bool => 1,
+                ColKind::Int2 => 2,
+                ColKind::Int4 => 4,
+                ColKind::Int8 | ColKind::Fix8 => 8,
+                ColKind::Text => 0,
+            };
+            if cur.u8() & 1 == 0 {
+                None
+            } else if w > 0 {
+                Some(cur.bytes(w).to_vec())
+            } else {
+                let n = cur.u8() as usize;
+                Some(cur.bytes(n).to_vec())
             }
         })
         .collect()
@@ -594,10 +982,21 @@ fn build_record(mcx: mcx::Mcx<'_>, desc: usize, fields: &Fields) -> Option<Vec<u
         match (&fields[i], attr.attisdropped) {
             (Some(bytes), false) => {
                 if attr.attbyval {
-                    let mut v = [0u8; 4];
-                    let m = bytes.len().min(4);
+                    // min(fieldlen, attlen) LE bytes into a zeroed word of
+                    // the column width (contract: mirrored by the C
+                    // oracle's pg_diff_form_record staging)
+                    let mut v = [0u8; 8];
+                    let w = attr.attlen as usize;
+                    let m = bytes.len().min(w);
                     v[..m].copy_from_slice(&bytes[..m]);
-                    values.push(Datum::from_i32(i32::from_le_bytes(v)));
+                    values.push(match attr.attlen {
+                        1 => Datum::from_bool(v[0] & 1 != 0),
+                        2 => Datum::from_i16(i16::from_le_bytes([v[0], v[1]])),
+                        8 => Datum::from_i64(i64::from_le_bytes(v)),
+                        _ => Datum::from_i32(i32::from_le_bytes([v[0], v[1], v[2], v[3]])),
+                    });
+                } else if attr.attlen > 0 {
+                    values.push(fix8_datum(mcx, bytes).ok()?);
                 } else {
                     values.push(text_datum(mcx, bytes).ok()?);
                 }
@@ -700,21 +1099,123 @@ pub fn rowtypes_diff(data: &[u8]) {
     let desc = (*flags & 0x07) as usize % NDESC;
     let soft = *flags & 0x08 != 0;
     let details = *flags & 0x10 != 0;
-    match sel % 10 {
-        0 => record_in_diff(desc, soft, details, payload),
+    let anon = *flags & 0x20 != 0;
+    match sel % 22 {
+        0 => record_in_diff(desc, anon, soft, details, payload),
         1 => record_out_diff(desc, payload),
-        2 => record_recv_diff(desc, payload),
+        2 => record_recv_diff(desc, anon, payload),
         3 => record_send_diff(desc, payload),
         4 => two_record_diff(desc, payload, TwoRecArm::ImageCmp),
         5 => two_record_diff(desc, payload, TwoRecArm::ImageEq),
         6 => hash_diff(desc, payload, false),
         7 => hash_diff(desc, payload, true),
         8 => two_record_diff(desc, payload, TwoRecArm::Larger),
-        _ => two_record_diff(desc, payload, TwoRecArm::Smaller),
+        9 => two_record_diff(desc, payload, TwoRecArm::Smaller),
+        n @ 10..=16 => cmpfam_diff(desc, payload, (n - 10) as i32),
+        n => imagefam_diff(desc, payload, (n - 17) as i32),
     }
 }
 
-fn record_in_diff(desc: usize, soft: bool, details: bool, payload: &[u8]) {
+/// record_eq/ne/lt/gt/le/ge/btrecordcmp (which = 0..=6), value plane =
+/// bool (or the int32 cmp for btrecordcmp).
+fn cmpfam_diff(desc1: usize, payload: &[u8], which: i32) {
+    let mut cur = Cursor { b: payload, i: 0 };
+    let desc2 = (cur.u8() & 0x07) as usize % NDESC;
+    let f1 = decode_fields(&mut cur, desc1);
+    let f2 = decode_fields(&mut cur, desc2);
+    let ctx = mcx::MemoryContext::new("rowtypes_diff");
+    let mcx = ctx.mcx();
+    let (Some(i1), Some(i2)) = (build_record(mcx, desc1, &f1), build_record(mcx, desc2, &f2))
+    else {
+        return;
+    };
+    let d1 = Datum::from_usize(i1.as_ptr() as usize);
+    let d2 = Datum::from_usize(i2.as_ptr() as usize);
+    let args = [d1, d2];
+    let (rf, name): (types_fmgr::PGFunction, &str) = match which {
+        0 => (adt_rowtypes::fc_record_eq, "record_eq"),
+        1 => (adt_rowtypes::fc_record_ne, "record_ne"),
+        2 => (adt_rowtypes::fc_record_lt, "record_lt"),
+        3 => (adt_rowtypes::fc_record_gt, "record_gt"),
+        4 => (adt_rowtypes::fc_record_le, "record_le"),
+        5 => (adt_rowtypes::fc_record_ge, "record_ge"),
+        _ => (adt_rowtypes::fc_btrecordcmp, "btrecordcmp"),
+    };
+    let r = run_fc::<2>(rf, mcx, &args, None, 2);
+    let (rst, rclass) = verdict(&r, None);
+
+    let mut cval: c_int = 0;
+    // SAFETY: image buffers live for the call.
+    let cst = unsafe {
+        pg_diff_record_cmpfam(which, i1.as_ptr(), i1.len() as c_int,
+                              i2.as_ptr(), i2.len() as c_int, &mut cval)
+    };
+    assert!(cst >= 0, "C harness internal failure {cst} ({name})");
+    assert_eq!(rst, cst,
+               "{name} verdict divergence: desc1={desc1} desc2={desc2} f1={f1:?} f2={f2:?}");
+    if rst == 1 {
+        if let Some(rc) = rclass {
+            assert_eq!(rc, c_errcode(), "{name} errcode divergence: desc1={desc1} desc2={desc2}");
+        }
+        return;
+    }
+    let rd = r.unwrap();
+    let rval: c_int = if which == 6 {
+        rd.as_i32()
+    } else {
+        c_int::from(rd.as_usize() != 0)
+    };
+    assert_eq!(rval, cval,
+               "{name} value divergence: desc1={desc1} desc2={desc2} f1={f1:?} f2={f2:?}");
+}
+
+/// record_image_ne/lt/gt/le/ge (which = 0..=4), value plane = bool.
+fn imagefam_diff(desc1: usize, payload: &[u8], which: i32) {
+    let mut cur = Cursor { b: payload, i: 0 };
+    let desc2 = (cur.u8() & 0x07) as usize % NDESC;
+    let f1 = decode_fields(&mut cur, desc1);
+    let f2 = decode_fields(&mut cur, desc2);
+    let ctx = mcx::MemoryContext::new("rowtypes_diff");
+    let mcx = ctx.mcx();
+    let (Some(i1), Some(i2)) = (build_record(mcx, desc1, &f1), build_record(mcx, desc2, &f2))
+    else {
+        return;
+    };
+    let d1 = Datum::from_usize(i1.as_ptr() as usize);
+    let d2 = Datum::from_usize(i2.as_ptr() as usize);
+    let args = [d1, d2];
+    let (rf, name): (types_fmgr::PGFunction, &str) = match which {
+        0 => (adt_rowtypes::fc_record_image_ne, "record_image_ne"),
+        1 => (adt_rowtypes::fc_record_image_lt, "record_image_lt"),
+        2 => (adt_rowtypes::fc_record_image_gt, "record_image_gt"),
+        3 => (adt_rowtypes::fc_record_image_le, "record_image_le"),
+        _ => (adt_rowtypes::fc_record_image_ge, "record_image_ge"),
+    };
+    let r = run_fc::<2>(rf, mcx, &args, None, 2);
+    let (rst, rclass) = verdict(&r, None);
+
+    let mut cval: c_int = 0;
+    // SAFETY: image buffers live for the call.
+    let cst = unsafe {
+        pg_diff_record_imagefam(which, i1.as_ptr(), i1.len() as c_int,
+                                i2.as_ptr(), i2.len() as c_int, &mut cval)
+    };
+    assert!(cst >= 0, "C harness internal failure {cst} ({name})");
+    assert_eq!(rst, cst,
+               "{name} verdict divergence: desc1={desc1} desc2={desc2} f1={f1:?} f2={f2:?}");
+    if rst == 1 {
+        if let Some(rc) = rclass {
+            assert_eq!(rc, c_errcode(), "{name} errcode divergence: desc1={desc1} desc2={desc2}");
+        }
+        return;
+    }
+    assert_eq!(c_int::from(r.unwrap().as_usize() != 0), cval,
+               "{name} value divergence: desc1={desc1} desc2={desc2} f1={f1:?} f2={f2:?}");
+}
+
+fn record_in_diff(desc: usize, anon: bool, soft: bool, details: bool, payload: &[u8]) {
+    // anonymous mode: typmod -1 witnesses the not-implemented arms
+    let tm: i32 = if anon { -1 } else { desc as i32 };
     // cstring truncation at the first NUL — identical view on both sides
     let end = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
     let mut lit = payload[..end].to_vec();
@@ -727,7 +1228,7 @@ fn record_in_diff(desc: usize, soft: bool, details: bool, payload: &[u8]) {
     let args = [
         Datum::from_usize(lit_c.as_ptr() as usize),
         Datum::from_oid(RECORDOID),
-        Datum::from_i32(desc as i32),
+        Datum::from_i32(tm),
     ];
     let (rst, rclass, rimg) = if soft {
         let mut node = ErrorSaveNode::new(details);
@@ -746,7 +1247,7 @@ fn record_in_diff(desc: usize, soft: bool, details: bool, payload: &[u8]) {
     let mut outlen: c_int = out.len() as c_int;
     // SAFETY: buffers live for the call.
     let cst = unsafe {
-        pg_diff_record_in(desc as c_int, c_int::from(soft), lit_c.as_ptr(),
+        pg_diff_record_in(tm, c_int::from(soft), lit_c.as_ptr(),
                           out.as_mut_ptr(), &mut outlen)
     };
     assert!(cst >= 0, "C harness internal failure {cst} (record_in)");
@@ -798,7 +1299,8 @@ fn record_out_diff(desc: usize, payload: &[u8]) {
     out_compare(mcx, &img);
 }
 
-fn record_recv_diff(desc: usize, payload: &[u8]) {
+fn record_recv_diff(desc: usize, anon: bool, payload: &[u8]) {
+    let tm: i32 = if anon { -1 } else { desc as i32 };
     let ctx = mcx::MemoryContext::new("rowtypes_diff");
     let mcx = ctx.mcx();
 
@@ -812,7 +1314,7 @@ fn record_recv_diff(desc: usize, payload: &[u8]) {
     let args = [
         Datum::from_usize(core::ptr::addr_of_mut!(si) as usize),
         Datum::from_oid(types_core::catalog::RECORDOID),
-        Datum::from_i32(desc as i32),
+        Datum::from_i32(tm),
     ];
     let r = run_fc::<3>(adt_rowtypes::fc_record_recv, mcx, &args, None, 1);
     let (rst, rclass) = verdict(&r, None);
@@ -821,7 +1323,7 @@ fn record_recv_diff(desc: usize, payload: &[u8]) {
     let mut outlen: c_int = out.len() as c_int;
     // SAFETY: buffers live for the call.
     let cst = unsafe {
-        pg_diff_record_recv(desc as c_int, payload.as_ptr(), payload.len() as c_int,
+        pg_diff_record_recv(tm, payload.as_ptr(), payload.len() as c_int,
                             out.as_mut_ptr(), &mut outlen)
     };
     assert!(cst >= 0, "C harness internal failure {cst} (record_recv)");
@@ -838,12 +1340,36 @@ fn record_recv_diff(desc: usize, payload: &[u8]) {
     assert_eq!(rimg.as_slice(), &out[..outlen as usize],
                "record_recv image divergence: desc={desc} wire={payload:?}");
     send_compare(mcx, &rimg);
+    // fn_extra memo-hit path: same flinfo, fresh buffer, image must repeat
+    let Ok(mut si2) = stringinfo::StringInfo::with_capacity_in(mcx, payload.len() + 1) else {
+        return;
+    };
+    if si2.append_bytes(payload).is_err() {
+        return;
+    }
+    let mut flinfo = FmgrInfo::new(adt_rowtypes::fc_record_recv, 0, 3, true, false);
+    let mut img2 = None;
+    for _ in 0..2 {
+        si2.cursor = 0;
+        let mut fci = types_fmgr::LocalFcinfo::<3>::new(0);
+        // SAFETY: the context owning `mcx` outlives this call.
+        unsafe { fci.set_result_mcx(mcx) };
+        fci.set_arg(0, Datum::from_usize(core::ptr::addr_of_mut!(si2) as usize));
+        fci.set_arg(1, Datum::from_oid(types_core::catalog::RECORDOID));
+        fci.set_arg(2, Datum::from_i32(tm));
+        let Ok(rr) = adt_rowtypes::fc_record_recv(Some(&mut flinfo), &mut fci) else { return };
+        let cur = image_of(rr).to_vec();
+        if let Some(prev) = &img2 {
+            assert_eq!(prev, &cur, "record_recv memo-hit image drift: desc={desc}");
+        }
+        img2 = Some(cur);
+    }
 }
 
 /// record_send both sides over one image; compares wire bytes.
 fn send_compare(mcx: mcx::Mcx<'_>, img: &[u8]) {
     let d = Datum::from_usize(img.as_ptr() as usize);
-    let r = run_fc::<1>(adt_rowtypes::fc_record_send, mcx, &[d], None, 1);
+    let r = run_fc::<1>(adt_rowtypes::fc_record_send, mcx, &[d], None, 2);
     let (rst, rclass) = verdict(&r, None);
 
     let mut out = vec![0u8; 1 << 16];
@@ -1022,6 +1548,9 @@ mod tests {
         for e in std::fs::read_dir(dir).expect("corpus/rowtypes_diff missing") {
             let p = e.unwrap().path();
             if p.is_file() {
+                if std::env::var_os("ROWTYPES_SEED_TRACE").is_some() {
+                    std::eprintln!("SEED {}", p.display());
+                }
                 rowtypes_diff(&std::fs::read(&p).unwrap());
                 n += 1;
             }
@@ -1099,6 +1628,69 @@ mod tests {
         run(&[6, 3, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 1, 2, 3, 4, 1, 1, b'z']);
         run(&[7, 0, 9, 9, 9, 9, 9, 9, 9, 9, 1, 1, b'a', 1, 1, b'b']);
         run(&[7, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, b'a', 1, 1, b'b']);
+    }
+
+    /// New-arm smoke: record cmp family (10-16), image wrappers (17-21),
+    /// byval-width descriptors 5/6, anonymous typmod, new-codec literals.
+    #[test]
+    fn arms_smoke_extended() {
+        // record_eq/ne/lt/gt/le/ge/btrecordcmp over (text,text) + (int4,text)
+        for arm in 10u8..=16 {
+            run(&[arm, 0, 0, 1, 1, b'a', 1, 1, b'b', 1, 1, b'a', 1, 1, b'c']);
+            run(&[arm, 1, 1, 1, 1, 2, 3, 4, 1, 1, b'x', 1, 4, 3, 2, 1, 1, 1, b'x']);
+            // dissimilar / count-mismatch / no-support (faketype) errors
+            run(&[arm, 0, 1, 1, 1, b'a', 1, 1, b'b', 1, 1, 2, 2, 2, 2, 1, 1, b'b']);
+            run(&[arm, 0, 4, 1, 1, b'a', 1, 1, b'b', 1, 1, b'a']);
+            run(&[arm, 3, 3, 1, 1, 2, 3, 4, 1, 1, b'x', 1, 4, 3, 2, 1, 1, 1, b'y']);
+        }
+        // image ne/lt/gt/le/ge over text + byval descs
+        for arm in 17u8..=21 {
+            run(&[arm, 0, 0, 1, 1, b'a', 1, 1, b'b', 1, 1, b'a', 1, 1, b'c']);
+            run(&[arm, 5, 5, 1, 1, 1, 2, 0, 1, 9, 9, 9, 9, 9, 9, 9, 9,
+                  1, 1, 1, 2, 0, 1, 9, 9, 9, 9, 9, 9, 9, 8]);
+        }
+        // desc 5 (bool,int2,int8): in/out/recv/send + image cmp equal/less
+        run(&[0, 5, b'(', b't', b',', b'7', b',', b'9', b')']);
+        run(&[0, 5, b'(', b'f', b',', b'-', b'3', b'2', b'7', b'6', b'8', b',', b')']);
+        run(&[0, 5, b'(', b'x', b',', b',', b')']); // boolin error
+        run(&[1, 5, 1, 1, 1, 2, 0, 1, 9, 9, 9, 9, 9, 9, 9, 9]);
+        run(&[3, 5, 1, 0, 1, 44, 1, 1, 7, 7, 7, 7, 7, 7, 7, 7]);
+        // desc 5 wire: 3 cols (bool,int2,int8)
+        let mut w = vec![2u8, 5];
+        w.extend_from_slice(&3u32.to_be_bytes());
+        w.extend_from_slice(&BOOLOID.to_be_bytes());
+        w.extend_from_slice(&1u32.to_be_bytes());
+        w.push(1);
+        w.extend_from_slice(&INT2OID.to_be_bytes());
+        w.extend_from_slice(&2u32.to_be_bytes());
+        w.extend_from_slice(&[0, 7]);
+        w.extend_from_slice(&INT8OID.to_be_bytes());
+        w.extend_from_slice(&8u32.to_be_bytes());
+        w.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 9]);
+        run(&w);
+        // desc 6 (fix8,bool): in/out + image pairs differing in one byte
+        run(&[0, 6, b'(', b'a', b'b', b'c', b',', b't', b')']);
+        run(&[1, 6, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 1]);
+        run(&[4, 6, 6, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 1,
+              1, 8, 1, 2, 3, 4, 5, 6, 7, 9, 1, 1]);
+        run(&[5, 6, 6, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 0,
+              1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 0]);
+        // byval image cmp: equal / less / greater over desc 5 pairs
+        run(&[4, 5, 5, 1, 1, 1, 2, 0, 1, 5, 5, 5, 5, 5, 5, 5, 5,
+              1, 1, 1, 2, 0, 1, 5, 5, 5, 5, 5, 5, 5, 5]);
+        run(&[4, 5, 5, 1, 0, 1, 2, 0, 1, 5, 5, 5, 5, 5, 5, 5, 5,
+              1, 1, 1, 2, 0, 1, 5, 5, 5, 5, 5, 5, 5, 5]);
+        // hash over desc 5/6: no-support error witnesses (bool has no hash)
+        run(&[6, 5, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 0, 1, 9, 9, 9, 9, 9, 9, 9, 9]);
+        run(&[7, 6, 1, 2, 3, 4, 5, 6, 7, 8, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 1]);
+        // record_larger over desc 5: no cmp support error witness
+        run(&[8, 5, 5, 1, 1, 1, 2, 0, 1, 9, 9, 9, 9, 9, 9, 9, 9,
+              1, 0, 1, 2, 0, 1, 9, 9, 9, 9, 9, 9, 9, 9]);
+        // anonymous typmod: hard + soft record_in, record_recv
+        run(&[0, 0x20, b'(', b'a', b',', b'b', b')']);
+        run(&[0, 0x28, b'(', b'a', b',', b'b', b')']);
+        run(&[0, 0x38, b'(', b'a', b',', b'b', b')']);
+        run(&[2, 0x20, 0, 0, 0, 2]);
     }
 
     /// Single-field-difference witness pairs (seeding obligation): records

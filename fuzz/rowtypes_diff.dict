@@ -50,3 +50,13 @@
 "\xff\xff\xff\xff"
 "\x00\x00\x00\x00"
 "\x00\x00\x00\x04"
+# new arms (10-21) + descriptors 5/6 + anon flag
+arm_record_eq="\x0a"
+arm_btrecordcmp="\x10"
+arm_image_ne="\x11"
+arm_image_ge="\x15"
+flag_anon="\x20"
+flag_anon_soft="\x28"
+lit_bool_t="t"
+lit_bool_f="f"
+lit_int8="-9223372036854775808"
