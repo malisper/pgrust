@@ -3372,6 +3372,63 @@ mod hlp {
         assert!(isoweek2j(year, week) == unsafe { pg_hlp_isoweek2j(year, week) });
     }
 
+    // ---- PANIC-FREEDOM ladders (salvage from the walled equality ladders) ----
+    //
+    // The five `_full`/`_band` equality ladders above wall in CBMC's
+    // per-property refinement phase (symex is trivial at ~0.03s; the SAT
+    // instance decides in ms, then per-property classification does not
+    // terminate inside 600s on the CI cluster under cadical). Bisecting those
+    // instances property-by-property showed every Kani-inserted
+    // arithmetic-overflow / division / subtraction check passing INDIVIDUALLY
+    // and only the cross-implementation equality assertion undecidable.
+    //
+    // These harnesses isolate exactly that decidable half: no C call and no
+    // equality claim, so the ONLY properties are Kani's panic checks. The
+    // resulting theorem is full-domain panic-freedom — precisely the property
+    // class this lane found SIX real -fwrapv defects in (j2date, dt2time,
+    // ValidateDate DOY, isoweek2j, date2j, display_year), each of which was a
+    // ported-in `panic!` where C wraps. Value parity for the bulk domain stays
+    // with the spot grids + the CGF targets; panic-freedom is now PROVED rather
+    // than deferred to a wall.
+    #[kani::proof]
+    fn panicfree_date2j_full() {
+        let (y, m, d): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        std::hint::black_box(date2j(y, m, d));
+    }
+
+    #[kani::proof]
+    fn panicfree_j2date_full() {
+        let jd: i32 = kani::any();
+        let (mut y, mut m, mut d) = (0i32, 0i32, 0i32);
+        j2date(jd, &mut y, &mut m, &mut d);
+        std::hint::black_box((y, m, d));
+    }
+
+    #[kani::proof]
+    fn panicfree_dt2time_full() {
+        let jd: i64 = kani::any();
+        let (mut h, mut mi, mut s, mut f) = (0i32, 0i32, 0i32, 0i32);
+        dt2time(jd, &mut h, &mut mi, &mut s, &mut f);
+        std::hint::black_box((h, mi, s, f));
+    }
+
+    #[kani::proof]
+    fn panicfree_isoweek2j_full() {
+        let (year, week): (i32, i32) = (kani::any(), kani::any());
+        std::hint::black_box(isoweek2j(year, week));
+    }
+
+    /// NEGATIVE CONTROL for the panic-freedom plane: a deliberately checked
+    /// `week - 1` reproduces the exact -fwrapv defect datetime_engine_diff
+    /// found in isoweek2j, so the plane demonstrably catches that defect class
+    /// rather than passing vacuously.
+    #[kani::proof]
+    fn control_panicfree_isoweek2j_checked_sub() {
+        let week: i32 = kani::any();
+        // The pre-fix shape: checked subtraction panics at week == i32::MIN.
+        std::hint::black_box((week - 1).wrapping_mul(7));
+    }
+
     const ISO_GRID: &[(i32, i32, i32)] = &[
         (2005, 1, 1),   // ISO week 53 of 2004
         (2005, 1, 2),
