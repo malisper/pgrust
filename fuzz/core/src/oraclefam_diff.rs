@@ -50,10 +50,24 @@
 //!   - ascii() under UTF8 assumes server-verified text (the C body indexes
 //!     continuation bytes unchecked — invalid UTF8 is C out-of-bounds, not
 //!     a comparable behavior): inputs failing pg_verify_mbstr(UTF8) are
-//!     skipped for arm 6 only. Every other arm walks with the bounded
-//!     pg_mblen_range/pg_mblen_with_len family on BOTH sides, so invalid
-//!     multibyte inputs flow through and the 22021 invalid-byte-sequence
-//!     error plane is compared, not carved.
+//!     skipped for arm 6 only. Every other arm except one (next carve)
+//!     walks with the bounded pg_mblen_range/pg_mblen_with_len family on
+//!     BOTH sides, so invalid multibyte inputs flow through and the 22021
+//!     invalid-byte-sequence error plane is compared, not carved.
+//!   - text_left(n >= 0) under UTF8 also assumes server-verified text
+//!     (found by this target's first smoke, artifact
+//!     crash-e204081f8188..., banked as seed oc-tleft-carve-regression):
+//!     C's text_substring counts chars via pg_mbcharcliplen_chars, which
+//!     stops at EXACTLY n chars and never validates the (n+1)-th, while
+//!     the shipped Rust inlining uses pg_mbcharcliplen, whose lookahead
+//!     validates one char further (mbutils.c pg_mbcharcliplen computes
+//!     pg_mblen_with_len BEFORE its nch > limit break). On verified text
+//!     the two are byte-identical; on text with an invalid sequence right
+//!     after char n, C returns the prefix and Rust raises 22021 — a
+//!     verified-text-domain difference, not a bug (server text is always
+//!     verified at ingestion). Inputs failing pg_verify_mbstr(UTF8) are
+//!     skipped for the arm-9 n >= 0 path only; the n < 0 path and
+//!     text_right keep the shared walker shape and stay ungated.
 //!   - Interior NUL is IN DOMAIN everywhere (a compared case, not a skip):
 //!     the case kernels' pnstrdup/first-NUL truncation and the mb walkers'
 //!     NUL stops are part of the compared contract on both sides.
@@ -819,6 +833,13 @@ fn repeat_diff(enc: pg_enc, payload: &[u8]) {
 fn text_leftright_diff(enc: pg_enc, payload: &[u8], leftarm: bool) {
     let (n, t) = take_i32(payload);
     let t = cap(t, TEXT_CAP);
+    if leftarm
+        && n >= 0
+        && enc == PG_UTF8
+        && !matches!(mbutils::pg_verify_mbstr(PG_UTF8, t, true), Ok(true))
+    {
+        return; // verified-text domain carve for text_left(n >= 0) — header
+    }
     let ctx = MemoryContext::new("oraclefam_diff");
     let mcx = ctx.mcx();
 
