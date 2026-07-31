@@ -74,6 +74,8 @@ unicode_category = { path = "../../crates/common/unicode_category" }
 # enc_tables_diff (p1-laneg encoding+tables batch):
 adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+adt_jsonpath = { path = "../../crates/backend/utils/adt/jsonpath" }  # jsonpath_diff (p1-laneaa)
+pg_locale = { path = "../../crates/backend/utils/adt/pg_locale" }  # jsonpath_diff: pinned C-ctype default collation (both sides)
 
 [build-dependencies]
 cc = "1"

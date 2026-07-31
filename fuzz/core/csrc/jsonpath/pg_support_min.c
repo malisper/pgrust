@@ -44,6 +44,7 @@
 #include "nodes/pg_list.h"
 #include "nodes/value.h"
 #include "port/simd.h"
+#include "utils/ascii.h"
 #include "utils/builtins.h"
 #include "utils/json.h"
 
@@ -178,18 +179,9 @@ pg_ascii_tolower(unsigned char ch)
 
 /* ================= 2. src/backend/libpq/pqformat.c ================= */
 
-/* shim: client encoding == server encoding UTF-8 (see header) */
-static char *
-pg_client_to_server(const char *s, int len)
-{
-	return (char *) s;
-}
-
-char *
-pg_server_to_client(const char *s, int len)
-{
-	return (char *) s;
-}
+/* forward decls; definitions at the end of this file (they depend on the
+ * pinned encoding table + the verbatim verifier chain in section 7) */
+static char *pg_client_to_server(const char *s, int len);
 
 /* ---- pqformat.c:161-185 VERBATIM (pq_sendtext) ---- */
 /* --------------------------------
@@ -992,10 +984,14 @@ typedef struct
 {
 	int			(*mb2wchar_with_len) (const unsigned char *from, pg_wchar *to, int len);
 	int			(*mblen) (const unsigned char *mbstr);
+	int			(*mbverifystr) (const unsigned char *mbstr, int len);
 } pg_wchar_tbl_shim;
 
+static int	pg_utf8_verifychar(const unsigned char *s, int len);
+static int	pg_utf8_verifystr(const unsigned char *s, int len);
+
 static const pg_wchar_tbl_shim pg_wchar_table_shim_rows[] = {
-	[PG_UTF8] = {pg_utf2wchar_with_len, pg_utf_mblen},
+	[PG_UTF8] = {pg_utf2wchar_with_len, pg_utf_mblen, pg_utf8_verifystr},
 };
 #define pg_wchar_table pg_wchar_table_shim_rows
 
@@ -1614,3 +1610,286 @@ pg_mblen_with_len(const char *mbstr, int limit)
 
 	return length;
 }
+
+/* ---- UTF-8 verifier chain VERBATIM (wchar.c DFA + verifychar/verifystr,
+ * mbutils.c pg_verify_mbstr). report_invalid_encoding is the shim leaf
+ * (real errcode 22021; the byte-dump message is out of comparison
+ * scope) — reuses report_invalid_encoding_db above. ---- */
+#define report_invalid_encoding(enc, mbstr, len) \
+	report_invalid_encoding_db((mbstr), (len), (len))
+#define PG_VALID_ENCODING(enc) ((enc) == PG_UTF8)
+
+/* ---- wchar.c:1801-1911 VERBATIM ---- */
+#define	ERR  0
+/* Begin */
+#define	BGN 11
+/* Continuation states, expect 1/2/3 continuation bytes */
+#define	CS1 16
+#define	CS2  1
+#define	CS3  5
+/* Partial states, where the first continuation byte has a restricted range */
+#define	P3A  6					/* Lead was E0, check for 3-byte overlong */
+#define	P3B 20					/* Lead was ED, check for surrogate */
+#define	P4A 25					/* Lead was F0, check for 4-byte overlong */
+#define	P4B 30					/* Lead was F4, check for too-large */
+/* Begin and End are the same state */
+#define	END BGN
+
+/* the encoded state transitions for the lookup table */
+
+/* ASCII */
+#define ASC (END << BGN)
+/* 2-byte lead */
+#define L2A (CS1 << BGN)
+/* 3-byte lead */
+#define L3A (P3A << BGN)
+#define L3B (CS2 << BGN)
+#define L3C (P3B << BGN)
+/* 4-byte lead */
+#define L4A (P4A << BGN)
+#define L4B (CS3 << BGN)
+#define L4C (P4B << BGN)
+/* continuation byte */
+#define CR1 (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3B) | (CS2 << P4B)
+#define CR2 (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3B) | (CS2 << P4A)
+#define CR3 (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3A) | (CS2 << P4A)
+/* invalid byte */
+#define ILL ERR
+
+static const uint32 Utf8Transition[256] =
+{
+	/* ASCII */
+
+	ILL, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+	ASC, ASC, ASC, ASC, ASC, ASC, ASC, ASC,
+
+	/* continuation bytes */
+
+	/* 80..8F */
+	CR1, CR1, CR1, CR1, CR1, CR1, CR1, CR1,
+	CR1, CR1, CR1, CR1, CR1, CR1, CR1, CR1,
+
+	/* 90..9F */
+	CR2, CR2, CR2, CR2, CR2, CR2, CR2, CR2,
+	CR2, CR2, CR2, CR2, CR2, CR2, CR2, CR2,
+
+	/* A0..BF */
+	CR3, CR3, CR3, CR3, CR3, CR3, CR3, CR3,
+	CR3, CR3, CR3, CR3, CR3, CR3, CR3, CR3,
+	CR3, CR3, CR3, CR3, CR3, CR3, CR3, CR3,
+	CR3, CR3, CR3, CR3, CR3, CR3, CR3, CR3,
+
+	/* leading bytes */
+
+	/* C0..DF */
+	ILL, ILL, L2A, L2A, L2A, L2A, L2A, L2A,
+	L2A, L2A, L2A, L2A, L2A, L2A, L2A, L2A,
+	L2A, L2A, L2A, L2A, L2A, L2A, L2A, L2A,
+	L2A, L2A, L2A, L2A, L2A, L2A, L2A, L2A,
+
+	/* E0..EF */
+	L3A, L3B, L3B, L3B, L3B, L3B, L3B, L3B,
+	L3B, L3B, L3B, L3B, L3B, L3C, L3B, L3B,
+
+	/* F0..FF */
+	L4A, L4B, L4B, L4B, L4C, ILL, ILL, ILL,
+	ILL, ILL, ILL, ILL, ILL, ILL, ILL, ILL
+};
+
+static void
+utf8_advance(const unsigned char *s, uint32 *state, int len)
+{
+	/* Note: We deliberately don't check the state's value here. */
+	while (len > 0)
+	{
+		/*
+		 * It's important that the mask value is 31: In most instruction sets,
+		 * a shift by a 32-bit operand is understood to be a shift by its mod
+		 * 32, so the compiler should elide the mask operation.
+		 */
+		*state = Utf8Transition[*s++] >> (*state & 31);
+		len--;
+	}
+
+	*state &= 31;
+}
+
+/* ---- wchar.c:1722-1749 VERBATIM (pg_utf8_verifychar) ---- */
+static int
+pg_utf8_verifychar(const unsigned char *s, int len)
+{
+	int			l;
+
+	if ((*s & 0x80) == 0)
+	{
+		if (*s == '\0')
+			return -1;
+		return 1;
+	}
+	else if ((*s & 0xe0) == 0xc0)
+		l = 2;
+	else if ((*s & 0xf0) == 0xe0)
+		l = 3;
+	else if ((*s & 0xf8) == 0xf0)
+		l = 4;
+	else
+		l = 1;
+
+	if (l > len)
+		return -1;
+
+	if (!pg_utf8_islegal(s, l))
+		return -1;
+
+	return l;
+}
+
+/* ---- wchar.c:1912-1994 VERBATIM (pg_utf8_verifystr) ---- */
+static int
+pg_utf8_verifystr(const unsigned char *s, int len)
+{
+	const unsigned char *start = s;
+	const int	orig_len = len;
+	uint32		state = BGN;
+
+/*
+ * With a stride of two vector widths, gcc will unroll the loop. Even if
+ * the compiler can unroll a longer loop, it's not worth it because we
+ * must fall back to the byte-wise algorithm if we find any non-ASCII.
+ */
+#define STRIDE_LENGTH (2 * sizeof(Vector8))
+
+	if (len >= STRIDE_LENGTH)
+	{
+		while (len >= STRIDE_LENGTH)
+		{
+			/*
+			 * If the chunk is all ASCII, we can skip the full UTF-8 check,
+			 * but we must first check for a non-END state, which means the
+			 * previous chunk ended in the middle of a multibyte sequence.
+			 */
+			if (state != END || !is_valid_ascii(s, STRIDE_LENGTH))
+				utf8_advance(s, &state, STRIDE_LENGTH);
+
+			s += STRIDE_LENGTH;
+			len -= STRIDE_LENGTH;
+		}
+
+		/* The error state persists, so we only need to check for it here. */
+		if (state == ERR)
+		{
+			/*
+			 * Start over from the beginning with the slow path so we can
+			 * count the valid bytes.
+			 */
+			len = orig_len;
+			s = start;
+		}
+		else if (state != END)
+		{
+			/*
+			 * The fast path exited in the middle of a multibyte sequence.
+			 * Walk backwards to find the leading byte so that the slow path
+			 * can resume checking from there. We must always backtrack at
+			 * least one byte, since the current byte could be e.g. an ASCII
+			 * byte after a 2-byte lead, which is invalid.
+			 */
+			do
+			{
+				Assert(s > start);
+				s--;
+				len++;
+				Assert(IS_HIGHBIT_SET(*s));
+			} while (pg_utf_mblen(s) <= 1);
+		}
+	}
+
+	/* check remaining bytes */
+	while (len > 0)
+	{
+		int			l;
+
+		/* fast path for ASCII-subset characters */
+		if (!IS_HIGHBIT_SET(*s))
+		{
+			if (*s == '\0')
+				break;
+			l = 1;
+		}
+		else
+		{
+			l = pg_utf8_verifychar(s, len);
+			if (l == -1)
+				break;
+		}
+		s += l;
+		len -= l;
+	}
+
+	return s - start;
+}
+/* ---- mbutils.c:1687-1706 VERBATIM (pg_verify_mbstr) ---- */
+/*
+ * Verify mbstr to make sure that it is validly encoded in the specified
+ * encoding.
+ */
+bool
+pg_verify_mbstr(int encoding, const char *mbstr, int len, bool noError)
+{
+	int			oklen;
+
+	Assert(PG_VALID_ENCODING(encoding));
+
+	oklen = pg_wchar_table[encoding].mbverifystr((const unsigned char *) mbstr, len);
+	if (oklen != len)
+	{
+		if (noError)
+			return false;
+		report_invalid_encoding(encoding, mbstr + oklen, len - oklen);
+	}
+	return true;
+}
+
+/*
+ * shim: client encoding == server encoding == UTF-8, so both directions take
+ * pg_any_to_server's / pg_server_to_client's same-encoding arm. That arm is
+ * NOT the identity: pg_any_to_server still VALIDATES the bytes via
+ * pg_verify_mbstr (found by the differential itself, 2026-07-31 — the naive
+ * identity shim let invalid UTF-8 through recv and reported 42601 where real
+ * PG reports 22021). The verifier chain below is VERBATIM.
+ */
+static char *
+pg_client_to_server(const char *s, int len)
+{
+	if (len <= 0)
+		return (char *) s;
+	/* pg_any_to_server, same-encoding arm (mbutils.c) VERBATIM */
+	(void) pg_verify_mbstr(DatabaseEncoding->encoding, s, len, false);
+	return (char *) s;
+}
+
+char *
+pg_server_to_client(const char *s, int len)
+{
+	/* pg_server_to_client -> pg_server_to_any, same-encoding arm: returns the
+	 * input unchanged (no validation on the way out, matching mbutils.c) */
+	return (char *) s;
+}
+

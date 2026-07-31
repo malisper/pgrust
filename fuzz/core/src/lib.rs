@@ -344,3 +344,7 @@ pub use quote_diff::quote_diff;
 // geo_io_diff: geo text-I/O family (p1-laner) — see core/src/geo_io_diff.rs.
 pub mod geo_io_diff;
 pub use geo_io_diff::geo_io_diff;
+
+// jsonpath_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-jsonpath_diff.md.
+pub mod jsonpath_diff;
+pub use jsonpath_diff::jsonpath_diff;
