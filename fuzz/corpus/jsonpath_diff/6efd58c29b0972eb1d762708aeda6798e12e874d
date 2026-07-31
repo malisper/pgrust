@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patt@UUUUUUV\\\\\\\\\\\\\\\\\\Z\\\\\\\\\\\\\\\\\n" flag "isim")

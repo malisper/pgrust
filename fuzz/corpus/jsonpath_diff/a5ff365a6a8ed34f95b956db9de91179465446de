@@ -1,0 +1,1 @@
+$ ? (@ like_regex "patt@rHH\nHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH.HAHHHHHHHHHHHHHHHHHHHHHLHHHHHH\\\\\\\\@\\\\\\\\^^^^^^^^^^^^^^^^^^z^exists ^^^^^^^^^^\\\\\\\\\\\\\\\\\\\\\n" flag "i"im")
