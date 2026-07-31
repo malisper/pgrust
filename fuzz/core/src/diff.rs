@@ -48,6 +48,9 @@ extern "C" {
     fn pg_diff_float8recv(data: *const c_char, len: i32, out: *mut f64) -> i32;
     fn pg_diff_float4send(num: f32, out4: *mut c_char);
     fn pg_diff_float8send(num: f64, out8: *mut c_char);
+    // Vendored check_float8_array (csrc/pg_float_agg_check.c); image must be
+    // >= 24 + 8n bytes (the PG varlena guarantee).
+    fn pg_diff_check_float8_array(image: *const c_char, n: i32, out: *mut f64) -> i32;
 }
 
 /// Oracle error classes (see the errcode shims in csrc/pg_float_io.c and
@@ -108,9 +111,15 @@ pub fn float_in_diff(data: &[u8]) {
     // matches glibc/PG (pinned by tests::float8in_nan_ncharseq_matches_
     // glibc_pg); skip every nan( form so the fuzzer hunts real
     // divergences instead of rediscovering the libc delta.
-    let lower = s.to_ascii_lowercase();
-    if lower.contains("nan(") {
-        return;
+    // p1-lanead: the carve is HOST-CONDITIONAL — on glibc (the CI cluster, the
+    // platform real PG runs on) the oracle agrees with PG, so nan( forms
+    // are fuzzed there instead of being globally dark.
+    #[cfg(target_os = "macos")]
+    {
+        let lower = s.to_ascii_lowercase();
+        if lower.contains("nan(") {
+            return;
+        }
     }
     let cs = CString::new(text).unwrap();
 
@@ -490,7 +499,15 @@ pub fn float_math2_diff(data: &[u8]) {
 //       efd = 3 - (byte % 19) spans the GUC range [-15, 3].
 //   11: float8out efd arm: payload = [efd byte][8 bytes le f64].
 //   12: float4send + float8send images (payload = 8 bytes le f64; the f32
-//       leg casts). Extra bytes ignored so libFuzzer can grow/shrink freely.
+//       leg casts).
+//   13: check_float8_array (t3/t6 by payload bit0) over a raw image vs the
+//       vendored C body — verdict + extracted values. Images shorter than
+//       24+8n are asserted Rust-side only (in PG the varlena is always at
+//       least VARSIZE bytes; see csrc/pg_float_agg_check.c header).
+//   14: write_float8_transarray roundtrip: the written image must be
+//       ACCEPTED by the vendored C check and yield the same value bits —
+//       witnesses the writer emits exactly a C-valid transarray.
+//   Extra bytes ignored so libFuzzer can grow/shrink freely.
 
 fn dsign_ok(x: f64) -> types_error::PgResult<f64> {
     Ok(adt_float::dsign(x)) /* infallible in both C and Rust */
@@ -525,7 +542,7 @@ pub fn float_misc_diff(data: &[u8]) {
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
-    match sel % 13 {
+    match sel % 15 {
         arm @ 0..=7 => {
             if rest.len() < 8 {
                 return;
@@ -612,6 +629,86 @@ pub fn float_misc_diff(data: &[u8]) {
                 v.to_bits(),
                 std::str::from_utf8(&cbuf[..clen]),
                 std::str::from_utf8(&rbuf[..rlen])
+            );
+        }
+        13 => {
+            let Some((&nsel, image)) = rest.split_first() else {
+                return;
+            };
+            let n: usize = if nsel & 1 == 0 { 3 } else { 6 };
+            let image = &image[..image.len().min(96)];
+            let need = 24 + 8 * n;
+            let r3;
+            let r6;
+            let rres: Result<&[f64], _> = if n == 3 {
+                r3 = adt_float::aggregates::check_float8_array::<3>(image, "fuzz");
+                r3.as_ref().map(|a| &a[..]).map_err(|e| e)
+            } else {
+                r6 = adt_float::aggregates::check_float8_array::<6>(image, "fuzz");
+                r6.as_ref().map(|a| &a[..]).map_err(|e| e)
+            };
+            if image.len() < need {
+                /* C varlena guarantee: never feed the oracle a short image */
+                assert!(
+                    rres.is_err(),
+                    "check_float8_array accepted a short image (len {} < {need})",
+                    image.len()
+                );
+                return;
+            }
+            let mut cvals = [0.0f64; 6];
+            let cerr = unsafe {
+                pg_diff_check_float8_array(image.as_ptr().cast(), n as i32, cvals.as_mut_ptr())
+            };
+            match rres {
+                Ok(vals) => {
+                    let same = cerr == 0
+                        && vals
+                            .iter()
+                            .zip(&cvals[..n])
+                            .all(|(a, b)| a.to_bits() == b.to_bits());
+                    assert!(
+                        same,
+                        "check_float8_array(t{n}) DIVERGENCE image={:02x?}: C=(err {cerr}, {:?}) Rust=Ok({vals:?})",
+                        &image[..need],
+                        &cvals[..n]
+                    );
+                }
+                Err(_) => assert!(
+                    cerr == 7,
+                    "check_float8_array(t{n}) DIVERGENCE image={:02x?}: C accepted, Rust rejected",
+                    &image[..need]
+                ),
+            }
+        }
+        14 => {
+            let Some((&nsel, vbytes)) = rest.split_first() else {
+                return;
+            };
+            let n: usize = if nsel & 1 == 0 { 3 } else { 6 };
+            if vbytes.len() < 8 * n {
+                return;
+            }
+            let mut vals = [0.0f64; 6];
+            for (i, v) in vals[..n].iter_mut().enumerate() {
+                *v = f64::from_le_bytes(vbytes[8 * i..8 * i + 8].try_into().unwrap());
+            }
+            let mut img = [0u8; 72];
+            let size = adt_float::aggregates::write_float8_transarray(&vals[..n], &mut img);
+            assert_eq!(size, adt_float::aggregates::float8_transarray_size(n));
+            let mut cvals = [0.0f64; 6];
+            let cerr = unsafe {
+                pg_diff_check_float8_array(img.as_ptr().cast(), n as i32, cvals.as_mut_ptr())
+            };
+            assert!(
+                cerr == 0
+                    && vals[..n]
+                        .iter()
+                        .zip(&cvals[..n])
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "write_float8_transarray(t{n}) NOT C-VALID: err {cerr} vals={:?} cvals={:?}",
+                &vals[..n],
+                &cvals[..n]
             );
         }
         _ => {
@@ -1009,6 +1106,37 @@ mod tests {
                 let mut d4 = vec![10u8, efd_byte];
                 d4.extend_from_slice(&((bits >> 32) as u32).to_le_bytes());
                 float_misc_diff(&d4);
+            }
+        }
+        // transarray arms: writer roundtrip + check over crafted images
+        // (valid headers, each single-field corruption, short images).
+        for &nsel in &[0u8, 1u8] {
+            let n = if nsel & 1 == 0 { 3usize } else { 6 };
+            let mut d = vec![14u8, nsel];
+            for i in 0..n {
+                d.extend_from_slice(&(i as f64 + 0.5).to_le_bytes());
+            }
+            float_misc_diff(&d);
+            // valid image via the writer, then corrupt each header word
+            let mut vals = [1.5f64; 6];
+            vals[0] = f64::NAN;
+            let mut img = [0u8; 72];
+            let size = adt_float::aggregates::write_float8_transarray(&vals[..n], &mut img);
+            let base = &img[..size];
+            let mut ok = vec![13u8, nsel];
+            ok.extend_from_slice(base);
+            float_misc_diff(&ok);
+            for off in [4usize, 8, 12, 16, 20] {
+                let mut bad = base.to_vec();
+                bad[off] ^= 0xff;
+                let mut d = vec![13u8, nsel];
+                d.extend_from_slice(&bad);
+                float_misc_diff(&d);
+            }
+            for cut in [0usize, 10, 23, 24, size - 1] {
+                let mut d = vec![13u8, nsel];
+                d.extend_from_slice(&base[..cut]);
+                float_misc_diff(&d);
             }
         }
     }
