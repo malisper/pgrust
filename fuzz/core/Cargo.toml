@@ -67,6 +67,10 @@ adt_cash = { path = "../../crates/backend/utils/adt/cash" }
 ryu = { path = "../../crates/common/ryu" }
 # fc-wrapper plane (builtins.rs coverage through LocalFcinfo, the proofs
 # wrapper-level pattern run natively):
+# cryptofam_diff (p1-lanef crypto/hash family batch):
+# tablesfam_diff (p1-lanef tables batch):
+keywords = { path = "../../crates/common/keywords" }
+unicode_category = { path = "../../crates/common/unicode_category" }
 
 [build-dependencies]
 cc = "1"

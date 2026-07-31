@@ -3219,3 +3219,5 @@ hashenc	eq_b64_decode_len8	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	
 hashenc	eq_bytes_to_hex	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	full symbolic 16 bytes + NUL terminator
 hashenc	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kissat	green	per-commit	2	symbolic src<=6 + symbolic destsiz<=8, full-buffer compare
 hashenc	control_bytes_to_hex_uppercase_must_fail	-Z c-ffi --c-lib c/pg_hashenc_kani.c	must-fail	per-commit	1	negative control: fails on intended assert (lowercase hex)
+md5-hex	proofs::eq_bytes_to_hex	-Z c-ffi --c-lib c/pg_md5_hex.c	green	per-commit	0.3	full 2^128 domain (bitvector-parallel); DEFAULT solver; unwind(33); p1-lanef 2026-07-30
+md5-hex	proofs::control_bytes_to_hex_detects_corruption	-Z c-ffi --c-lib c/pg_md5_hex.c	must-fail	defect-witness	0.25	fails on exactly r[0]==cs[0] (corrupted nibble); DEFAULT solver; p1-lanef 2026-07-30

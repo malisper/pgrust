@@ -268,6 +268,16 @@ pub use uuid_diff::uuid_diff;
 pub mod hashenc;
 pub use hashenc::hashenc_diff;
 
+// cryptofam_diff (p1-lanef crypto/hash family batch): md5/sha1/hmac/scram +
+// adt/cryptohashfuncs fmgr wrappers vs vendored 18.3 C. See cryptofam.rs.
+pub mod cryptofam;
+pub use cryptofam::cryptofam_diff;
+
+// tablesfam_diff (p1-lanef tables batch): keywords + unicode_category vs
+// vendored 18.3 C. See tablesfam.rs.
+pub mod tablesfam;
+pub use tablesfam::tablesfam_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
