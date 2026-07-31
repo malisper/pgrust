@@ -371,7 +371,11 @@ pub struct PrivMapEntry {
 pub fn convert_any_priv_string(priv_type: &str, privileges: &[PrivMapEntry]) -> PgResult<u64> {
     let mut result = 0u64;
     for chunk in priv_type.split(',') {
-        let chunk = chunk.trim_matches(|c: char| c.is_ascii_whitespace());
+        // acl.c convert_any_priv_string: "Drop leading/trailing whitespace"
+        // via C-locale isspace(), which includes VT (0x0b) -- not the
+        // is_ascii_whitespace set.
+        let chunk = chunk
+            .trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
         match privileges.iter().find(|p| p.name.eq_ignore_ascii_case(chunk)) {
             Some(p) => result |= p.value,
             None => {

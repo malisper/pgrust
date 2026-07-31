@@ -224,6 +224,27 @@ fn convert_priv_string_case_and_spaces() {
     assert!(convert_any_priv_string("bogus", &map).is_err());
 }
 
+/// acl.c convert_any_priv_string trims C-locale isspace(), which includes
+/// VT (0x0b) and FF (0x0c) -- bytes `is_ascii_whitespace` omits.  Ground
+/// truth (PostgreSQL 18.3, C locale):
+///   SELECT has_table_privilege('postgres','pg_class', E'\x0bSELECT\x0b')  -> t
+///   SELECT has_table_privilege('postgres','pg_class', E'\x0cSELECT')      -> t
+#[test]
+fn convert_priv_string_trims_vt_ff_like_c_isspace() {
+    let map = [
+        PrivMapEntry { name: "SELECT", value: ACL_SELECT },
+        PrivMapEntry { name: "INSERT", value: ACL_INSERT },
+    ];
+    assert_eq!(convert_any_priv_string("\x0bSELECT\x0b", &map).unwrap(), ACL_SELECT);
+    assert_eq!(convert_any_priv_string("\x0cselect", &map).unwrap(), ACL_SELECT);
+    assert_eq!(
+        convert_any_priv_string("\x0b select ,\x0c\tinsert\r\n", &map).unwrap(),
+        ACL_SELECT | ACL_INSERT
+    );
+    // Non-ASCII Unicode whitespace is NOT trimmed by C isspace (U+00A0).
+    assert!(convert_any_priv_string("\u{a0}SELECT", &map).is_err());
+}
+
 #[test]
 fn aclmask_direct_owner_goptions_only_on_exact_match() {
     let acl = [item(11, 10, ACL_SELECT, 0)];
