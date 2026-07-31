@@ -787,9 +787,14 @@ pub fn timetz_scale(time: &TimeTzADT, typmod: i32) -> TimeTzADT {
 }
 
 pub fn timetz_cmp_internal(time1: &TimeTzADT, time2: &TimeTzADT) -> i32 {
-    // primary sort is by true (GMT-equivalent) time
-    let t1 = time1.time + time1.zone as i64 * USECS_PER_SEC;
-    let t2 = time2.time + time2.zone as i64 * USECS_PER_SEC;
+    // primary sort is by true (GMT-equivalent) time. C date.c sums in plain
+    // int64 under -fwrapv, and fc_in_range_timetz_interval can hand this a
+    // time within ~16h-of-usecs of the i64 boundary (huge interval offset in
+    // a window RANGE frame — SQL-reachable, found by datetime_closeout_diff):
+    // wrap exactly as C does; a checked add here is a ported-in debug panic
+    // (debug-assert masking law). zone*USECS_PER_SEC itself fits in 53 bits.
+    let t1 = time1.time.wrapping_add(time1.zone as i64 * USECS_PER_SEC);
+    let t2 = time2.time.wrapping_add(time2.zone as i64 * USECS_PER_SEC);
     if t1 > t2 {
         return 1;
     }

@@ -274,3 +274,15 @@ path = "fuzz_targets/timestamp_diff.rs"
 test = false
 doc = false
 bench = false
+
+# datetime_closeout_diff: p1-lanel2 closeout — adt_date extract_date /
+# time_part_common(retnumeric) / timetz_part_common vs vendored 18.3 C
+# (csrc/pg_datetime_closeout.c, laney's numeric arg-capture plane) + the
+# owed adt_date builtins.rs fc-wrapper plane (recv/in-soft/out/conversions/
+# cmp families/typmod/in_range) wrapper-vs-core.
+[[bin]]
+name = "datetime_closeout_diff"
+path = "fuzz_targets/datetime_closeout_diff.rs"
+test = false
+doc = false
+bench = false

@@ -540,7 +540,8 @@ fn rd_f64(b: &[u8], off: usize) -> f64 {
 
 /// Exact decimal string determined by the C numeric-constructor record
 /// (int64_div_fast_to_numeric semantics: val1 / 10^log10, dscale=log10).
-fn expected_numeric_text(val: i64, log10: i32) -> String {
+/// pub(crate): shared with datetime_closeout_diff's extract planes.
+pub(crate) fn expected_numeric_text(val: i64, log10: i32) -> String {
     let neg = val < 0;
     let abs = (val as i128).unsigned_abs();
     let pow = 10u128.pow(log10 as u32);
@@ -560,7 +561,8 @@ fn expected_numeric_text(val: i64, log10: i32) -> String {
 
 /// Render pgrust's NumericImage as PG text (numeric encoding is
 /// adt/numeric's verified surface; here it is the comparison channel).
-fn numeric_image_text(img: &adt_numeric::NumericImage) -> String {
+/// pub(crate): shared with datetime_closeout_diff's extract planes.
+pub(crate) fn numeric_image_text(img: &adt_numeric::NumericImage) -> String {
     let mut out = Vec::new();
     adt_numeric::io::numeric_out_into(adt_numeric::Num::from_payload(img.payload()), &mut out);
     String::from_utf8(out).unwrap()

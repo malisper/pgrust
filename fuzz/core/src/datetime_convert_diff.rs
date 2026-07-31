@@ -146,7 +146,7 @@ fn i64_at(b: &[u8], o: usize) -> i64 {
 /// Timestamp datum fence (see header): the two not-finite sentinels stay in the
 /// domain (they select the early-return arms), everything else is folded into
 /// `IS_VALID_TIMESTAMP`.
-fn fold_ts(raw: i64) -> i64 {
+pub(crate) fn fold_ts(raw: i64) -> i64 {
     const MIN_TIMESTAMP: i64 = -211_813_488_000_000_000;
     const END_TIMESTAMP: i64 = 9_223_371_331_200_000_000;
     match raw {
@@ -162,7 +162,7 @@ fn fold_ts(raw: i64) -> i64 {
 }
 
 /// Date datum fence (see header), matching `datetime_io_diff` arm 1.
-fn fold_date(raw: i32) -> DateADT {
+pub(crate) fn fold_date(raw: i32) -> DateADT {
     const MIN_DATE: i32 = -2_451_545; // DATETIME_MIN_JULIAN - POSTGRES_EPOCH_JDATE
     const END_DATE: i32 = 2_147_483_494 - 2_451_545 + 1; // DATE_END_JULIAN - epoch
     match raw {
@@ -176,12 +176,12 @@ fn fold_date(raw: i32) -> DateADT {
 }
 
 /// TimeADT on-disk invariant: 0 <= time <= USECS_PER_DAY.
-fn fold_time(raw: i64) -> TimeADT {
+pub(crate) fn fold_time(raw: i64) -> TimeADT {
     (raw as u64 % (USECS_PER_DAY as u64 + 1)) as i64
 }
 
 /// TimeTzADT on-disk invariant: |zone| < 16 hours (in seconds, west-positive).
-fn fold_zone(raw: i32) -> i32 {
+pub(crate) fn fold_zone(raw: i32) -> i32 {
     const LIM: i32 = 16 * 60 * 60;
     raw.rem_euclid(2 * LIM) - LIM
 }

@@ -254,4 +254,26 @@ fn main() {
         .flag_if_supported("-ffp-contract=off")
         .compile("pg_difffuzz_tsdiff");
 
+    // datetime_closeout_diff oracle (p1-lanel2): extract_date /
+    // time_part_common(retnumeric) / timetz_part_common / date skip-support
+    // over the SAME vendored datetime.c/date.c core (pg_datetime_verbatim.inc)
+    // as the lanel and laney oracles. Own TU, dtclo_impl_ prefix rename of
+    // the same shared-global list (plus extract_date, which only this TU
+    // vendors — renamed anyway so a future lane vendoring it cannot silently
+    // cross-bind).
+    let mut dtclo = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        dtclo.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in TSDIFF_SHARED_SYMS.iter().chain(&["extract_date"]) {
+        dtclo.define(s, format!("dtclo_impl_{s}").as_str());
+    }
+    dtclo
+        .file("csrc/pg_datetime_closeout.c")
+        .include("csrc/shim")
+        .include("csrc/pgdt")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .compile("pg_difffuzz_dtclo");
 }

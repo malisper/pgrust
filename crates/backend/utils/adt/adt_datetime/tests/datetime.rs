@@ -648,3 +648,54 @@ fn decode_iso8601_interval() {
     assert_eq!(decode_iso_interval("P1X"), Err(DTERR_BAD_FORMAT));
     assert_eq!(decode_iso_interval("P9999999999999999Y"), Err(DTERR_FIELD_OVERFLOW));
 }
+
+/// Long exact-subnormal strtod tokens must NOT flag ERANGE (glibc flags
+/// ERANGE only on INEXACT underflow, with no token-length cap). The prior
+/// inline model rejected any hex token past 256 digits and EVERY decimal
+/// subnormal as inexact — both SQL-reachable divergences, ground-truthed on
+/// docker postgres:18.3 2026-07-31: both literals below parse to 00:00:00
+/// there (p1-lanel2 closeout fix; the model now delegates to
+/// adt_float::io::strtod_c, whose exactness comparisons are uncapped).
+#[test]
+fn iso_interval_long_exact_subnormals_accepted() {
+    // 0x0.<268 zeros>4 = 4 * 16^-269 = 2^-1072, exact subnormal (275 chars).
+    let hex = format!("P0x0.{}4Y", "0".repeat(268));
+    let (dtype, v) = decode_iso_interval(&hex).unwrap();
+    assert_eq!((dtype, v), (adt_datetime::DTK_DELTA, itm(0, 0, 0, 0)));
+
+    // 0.<323 zeros><5^1074 digits> = 5^1074 * 10^-1074 = 2^-1074, the exact
+    // shortest decimal expansion of the smallest subnormal (1076 chars).
+    let mut p5 = num_5_pow_1074();
+    p5.insert_str(0, &"0".repeat(323));
+    let dec = format!("P0.{p5}Y");
+    let (dtype, v) = decode_iso_interval(&dec).unwrap();
+    assert_eq!((dtype, v), (adt_datetime::DTK_DELTA, itm(0, 0, 0, 0)));
+
+    // Control (glibc tininess-before-rounding, kept from p1-laney): the
+    // true value is below DBL_MIN even though it rounds UP to DBL_MIN —
+    // real 18.3 errors 22007 (DTERR_BAD_FORMAT here).
+    assert_eq!(decode_iso_interval("P0x1.fffffffffffffp-1023Y"), Err(-1));
+
+    // Control: an INEXACT long subnormal still flags ERANGE — appending a
+    // trailing '1' digit adds 2^-1080, below the 2^-1074 subnormal grain.
+    let deep = format!("P0x0.{}41Y", "0".repeat(268));
+    assert_eq!(decode_iso_interval(&deep), Err(-1));
+}
+
+/// 5^1074 as a decimal digit string (no bigint dep: repeated by-digit x5).
+fn num_5_pow_1074() -> String {
+    let mut d = vec![1u8];
+    for _ in 0..1074 {
+        let mut carry = 0;
+        for x in d.iter_mut() {
+            let v = *x * 5 + carry;
+            *x = v % 10;
+            carry = v / 10;
+        }
+        while carry > 0 {
+            d.push(carry % 10);
+            carry /= 10;
+        }
+    }
+    d.iter().rev().map(|&x| (b'0' + x) as char).collect()
+}
