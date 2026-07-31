@@ -23,6 +23,32 @@ use std::io::{BufRead, BufWriter, Write};
 
 fn pgrust_cash_numeric_text(t: i64) -> String {
     let img = adt_cash::cash_numeric(t).expect("cash_numeric is infallible under C locale");
+    // fc-wrapper plane (same convention as the *_diff drivers): route the
+    // same input through fc_cash_numeric / fc_numeric_cash on a native
+    // LocalFcinfo frame and assert wrapper ≡ core.
+    {
+        use datum::Datum;
+        let ctx = mcx::MemoryContext::new("cashnum-fc");
+        let mut f = types_fmgr::LocalFcinfo::<1>::new(0);
+        unsafe { f.set_result_mcx(ctx.mcx()) };
+        f.args[0] = datum::NullableDatum::value(Datum::from_i64(t));
+        let d = adt_cash::builtins::fc_cash_numeric(None, &mut f)
+            .expect("fc_cash_numeric is infallible under C locale");
+        let wbytes = unsafe {
+            let p = d.as_usize() as *const u8;
+            std::slice::from_raw_parts(p, img.as_bytes().len())
+        };
+        assert!(wbytes == img.as_bytes(), "fc_cash_numeric vs core t={t}");
+        // fc_numeric_cash: numeric image arg (by-ref datum) -> cents.
+        let mut f2 = types_fmgr::LocalFcinfo::<1>::new(0);
+        unsafe { f2.set_result_mcx(ctx.mcx()) };
+        f2.args[0] =
+            datum::NullableDatum::value(Datum::from_usize(img.as_bytes().as_ptr() as usize));
+        match adt_cash::builtins::fc_numeric_cash(None, &mut f2) {
+            Ok(d2) => assert!(d2.as_i64() == t, "fc_numeric_cash roundtrip t={t}"),
+            Err(e) => panic!("fc_numeric_cash errored on roundtrip t={t}: {}", e.message),
+        }
+    }
     let mut out = Vec::new();
     adt_numeric::numeric_out_into(img.num(), &mut out);
     String::from_utf8(out).unwrap()
