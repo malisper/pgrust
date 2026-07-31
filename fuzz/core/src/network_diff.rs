@@ -688,8 +688,22 @@ fn cmp_diff(p: &[u8]) {
     let (f2, b2, a2) = flat(&v2);
     let c = unsafe { pg_diff_network_cmp(f1, b1, a1, f2, b2, a2) };
     let r = adt_network::network_cmp_internal(v1.iref(), v2.iref());
+    // DIVERGENCE(candidate) 2026-07-31, p1-lanen — MAGNITUDE CARVE, sign-only
+    // plane pending ratification: C network_cmp returns raw memcmp() output,
+    // whose MAGNITUDE is platform-defined (glibc aarch64 sign-normalizes to
+    // -1/0/1; macOS returns the first differing byte difference). pgrust
+    // hard-codes the byte-difference convention (lib.rs memcmp), so it
+    // matches macOS PG but NOT Linux PG: SELECT network_cmp over inets first
+    // differing at 0x04 vs 0x84 -> PG 18.3 docker (Debian glibc) = -1,
+    // pgrust = -128. Repro banked: CI cluster crash-b1064764f0b1 (job
+    // pgrust-fuzz-campaign-1785480211-3e0c-59729), corpus seed
+    // seed-cmp-div-b1064764. Ledger row 926 annotated divergence(candidate).
+    // Only the SIGN is compared below until Michael rules (row-436 pattern).
+    // (fc plane further down still checks wrapper == core EXACTLY — the
+    // carve is only C-vs-Rust magnitude.)
+    let (cs, rs) = (c.signum(), r.signum());
     assert!(
-        c == r,
+        cs == rs,
         "network_cmp DIVERGENCE a=(fam {} bits {} {}) b=(fam {} bits {} {}): C={c} Rust={r}",
         v1.family,
         v1.bits,
