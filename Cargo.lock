@@ -1499,6 +1499,7 @@ dependencies = [
  "pglz",
  "pqformat",
  "stringinfo",
+ "syscache_seams",
  "toast_internals_seams",
  "typcache",
  "types_core",
