@@ -245,3 +245,11 @@ path = "fuzz_targets/jsonbio_diff.rs"
 test = false
 doc = false
 bench = false
+
+# jsonbops_diff: two-doc ops/mutate/getfield sibling of jsonbio_diff (p1-lanev).
+[[bin]]
+name = "jsonbops_diff"
+path = "fuzz_targets/jsonbops_diff.rs"
+test = false
+doc = false
+bench = false

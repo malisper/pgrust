@@ -88,6 +88,7 @@ extern struct varlena *pg_detoast_datum_packed(struct varlena *datum);
 #define PG_GETARG_UINT32(n) DatumGetUInt32(PG_GETARG_DATUM(n))
 #define PG_GETARG_INT16(n) DatumGetInt16(PG_GETARG_DATUM(n))
 #define PG_GETARG_INT64(n) DatumGetInt64(PG_GETARG_DATUM(n))
+#define PG_GETARG_CHAR(n) DatumGetChar(PG_GETARG_DATUM(n))
 #define PG_GETARG_OID(n) DatumGetObjectId(PG_GETARG_DATUM(n))
 #define PG_GETARG_BOOL(n) DatumGetBool(PG_GETARG_DATUM(n))
 #define PG_GETARG_POINTER(n) DatumGetPointer(PG_GETARG_DATUM(n))
@@ -113,6 +114,10 @@ extern struct varlena *pg_detoast_datum_packed(struct varlena *datum);
 #define PG_RETURN_FLOAT8(x) return Float8GetDatum(x)
 #define PG_RETURN_TEXT_P(x) PG_RETURN_POINTER(x)
 #define PG_RETURN_BYTEA_P(x) PG_RETURN_POINTER(x)
+#define PG_RETURN_UINT32(x) return UInt32GetDatum(x)
+#define PG_RETURN_UINT64(x) return UInt64GetDatum(x)
+/* fmgr.h DatumGetTextPP (verbatim) */
+#define DatumGetTextPP(X) ((text *) PG_DETOAST_DATUM_PACKED(X))
 
 /* DirectFunctionCallN: real fmgr.c semantics (elog on NULL result) */
 extern Datum DirectFunctionCall1Coll(PGFunction func, Oid collation, Datum arg1);

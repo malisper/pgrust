@@ -73,6 +73,7 @@
 #include "utils/json.h"
 #include "utils/fmgrprotos.h"
 #include "libpq/pqformat.h"
+#include "common/hashfn.h"
 
 /* ---------------- error channel + non-local exit ---------------- */
 
@@ -90,8 +91,8 @@ static _Thread_local void **pg_jsonbfam_arena;
 static _Thread_local size_t pg_jsonbfam_arena_n;
 static _Thread_local size_t pg_jsonbfam_arena_cap;
 
-static void
-pg_jsonbfam_arena_reset(void)
+void
+pg_jsonbfam_arena_reset(void)		/* extern: pg_jsonbops.c entries reset too */
 {
 	size_t		i;
 
@@ -421,34 +422,12 @@ pg_strncasecmp(const char *s1, const char *s2, size_t n)
 
 /* ---------------- abort-loud stubs (unreachable arms) ---------------- */
 
-/* compare/hash arms: the ops-target's charter; loud if ever reached here */
-int
-varstr_cmp(const char *arg1, int len1, const char *arg2, int len2, Oid collid)
-{
-	(void) arg1; (void) len1; (void) arg2; (void) len2; (void) collid;
-	abort();
-}
-
-Datum
-numeric_cmp(PG_FUNCTION_ARGS)
-{
-	(void) fcinfo;
-	abort();
-}
-
-uint64
-hash_any(const unsigned char *k, int keylen)
-{
-	(void) k; (void) keylen;
-	abort();
-}
-
-uint64
-hash_any_extended(const unsigned char *k, int keylen, uint64 seed)
-{
-	(void) k; (void) keylen; (void) seed;
-	abort();
-}
+/* compare/hash arms (varstr_cmp / numeric_cmp / numeric_eq / hash_numeric
+ * / hash_any) were abort-loud stubs while only jsonbio_diff existed; the
+ * jsonbops_diff extension vendors the real bodies: varlena_cmp_c.inc +
+ * numeric_cmp_c.inc below in this TU (the cmp_* helpers are static in
+ * numeric.c and numeric_c.inc carries their file-head decls), hashfn.c as
+ * its own family TU with the real common/hashfn.h header. */
 
 /* jbvDatetime is never built by this target's entry points */
 void
@@ -480,39 +459,20 @@ float4in(PG_FUNCTION_ARGS)
 									   fcinfo->context));
 }
 
-Datum
-numeric_eq(PG_FUNCTION_ARGS)
-{
-	(void) fcinfo;
-	abort();					/* ops-target charter */
-}
-
-Datum
-hash_numeric(PG_FUNCTION_ARGS)
-{
-	(void) fcinfo;
-	abort();
-}
-
-Datum
-hash_numeric_extended(PG_FUNCTION_ARGS)
-{
-	(void) fcinfo;
-	abort();
-}
-
+/* VERBATIM from src/backend/access/hash/hashfunc.c @ 62d6c7d3df (lines
+ * 47-57): the jbvBool hash arm (JsonbHashScalarValue[Extended]) calls these
+ * via DirectFunctionCall; hash_uint32[_extended] are the real
+ * common/hashfn.h inlines over jsonbfam/hashfn.c. */
 Datum
 hashchar(PG_FUNCTION_ARGS)
 {
-	(void) fcinfo;
-	abort();
+	return hash_uint32((int32) PG_GETARG_CHAR(0));
 }
 
 Datum
 hashcharextended(PG_FUNCTION_ARGS)
 {
-	(void) fcinfo;
-	abort();
+	return hash_uint32_extended((int32) PG_GETARG_CHAR(0), PG_GETARG_INT64(1));
 }
 
 
@@ -565,6 +525,9 @@ pg_mblen_range(const char *mbstr, const char *end)
 /* ==================== vendored PostgreSQL text ==================== */
 
 #include "jsonbfam/numeric_c.inc"
+#include "jsonbfam/numeric_cmp_c.inc"
+#include "utils/pg_locale.h"
+#include "jsonbfam/varlena_cmp_c.inc"
 
 /* numeric_c.inc forward-declares set_var_from_non_decimal_integer_str;
  * JSON number tokens are decimal by grammar, so the arm is unreachable. */

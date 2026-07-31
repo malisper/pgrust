@@ -75,6 +75,8 @@ fn main() {
         "pg_jsonbio_io.c", "jsonbfam/jsonapi.c", "jsonbfam/wchar.c",
         "jsonbfam/stringinfo.c", "jsonbfam/jsonb_util.c",
         "jsonbfam/qsort_arg.c",
+        // jsonbops_diff extension (p1-lanev): ops/mutate/getfield oracle
+        "pg_jsonbops.c", "jsonbfam/jsonb_op.c", "jsonbfam/hashfn.c",
     ] {
         jsonbfam.file(format!("csrc/{f}"));
     }

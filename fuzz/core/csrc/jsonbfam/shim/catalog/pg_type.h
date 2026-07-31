@@ -20,3 +20,22 @@
 #define TIMESTAMPOID 1114
 #define TIMESTAMPTZOID 1184
 #endif
+#ifndef PG_JSONBFAM_SHIM_PG_TYPE_H3
+#define PG_JSONBFAM_SHIM_PG_TYPE_H3
+/* jsonbops_diff additions: oids named by the verbatim
+ * deconstruct_array_builtin switch (only TEXTOID is ever passed here). */
+#define CHAROID 18
+#define CSTRINGOID 2275
+#define OIDOID 26
+#define TIDOID 27
+/* c.h: float8 pass-by-value on 64-bit Datum */
+#define FLOAT8PASSBYVAL true
+/* storage/itemptr.h ItemPointerData: 3 uint16 fields, 6 bytes (only
+ * sizeof() is taken, in the TIDOID arm) */
+typedef struct ItemPointerData
+{
+	uint16		ip_blkid_hi;
+	uint16		ip_blkid_lo;
+	uint16		ip_posid;
+} ItemPointerData;
+#endif

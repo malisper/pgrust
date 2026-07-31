@@ -75,6 +75,10 @@ unicode_category = { path = "../../crates/common/unicode_category" }
 adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
 adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }  # jsonbio_diff (scaffold.py)
+# jsonbops_diff (p1-lanev): text[]-arg detoast + C-collation string cmp seam
+detoast = { path = "../../crates/backend/access/common/detoast" }
+detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
+pg_locale_seams = { path = "../../crates/backend/utils/adt/pg_locale_seams" }
 
 [build-dependencies]
 cc = "1"

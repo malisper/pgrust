@@ -94,7 +94,7 @@ const MAX_DEPTH: usize = 64;
 const CBUF: usize = 1 << 16;
 
 /// Rust-side sqlstate -> the C oracle's class constants (see module header).
-fn err_class(e: &PgError) -> i32 {
+pub(crate) fn err_class(e: &PgError) -> i32 {
     let ss = e.sqlstate;
     if ss == ERRCODE_INVALID_TEXT_REPRESENTATION {
         1
@@ -108,6 +108,10 @@ fn err_class(e: &PgError) -> i32 {
         5
     } else if ss == ERRCODE_PROTOCOL_VIOLATION {
         7
+    } else if ss == types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR {
+        10
+    } else if ss == types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED {
+        11
     } else {
         6
     }
@@ -115,7 +119,7 @@ fn err_class(e: &PgError) -> i32 {
 
 /// Text-payload gate: both sides only ever see inputs passing this screen
 /// (INPUT CARVES in the module header).
-fn take_json(payload: &[u8]) -> Option<CString> {
+pub(crate) fn take_json(payload: &[u8]) -> Option<CString> {
     if payload.len() > MAX_TEXT || payload.contains(&0) {
         return None;
     }
@@ -139,7 +143,7 @@ fn take_json(payload: &[u8]) -> Option<CString> {
 }
 
 /// Invoke an fc_* wrapper over non-null args; returns (result, isnull flag).
-fn fc_call<const N: usize>(
+pub(crate) fn fc_call<const N: usize>(
     f: PGFunction,
     m: mcx::Mcx<'_>,
     args: [Datum; N],
@@ -155,14 +159,14 @@ fn fc_call<const N: usize>(
 }
 
 /// Read a varlena result datum's payload bytes (4-byte or short header).
-fn varlena_data<'a>(d: Datum) -> &'a [u8] {
+pub(crate) fn varlena_data<'a>(d: Datum) -> &'a [u8] {
     // SAFETY: fc varlena results are live images in the armed arena, read
     // before the arena drops.
     unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data()
 }
 
 /// Read a cstring result datum.
-fn cstring_data<'a>(d: Datum) -> &'a [u8] {
+pub(crate) fn cstring_data<'a>(d: Datum) -> &'a [u8] {
     // SAFETY: fc cstring results are NUL-terminated palloc'd strings.
     unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const c_char) }.to_bytes()
 }
@@ -170,23 +174,27 @@ fn cstring_data<'a>(d: Datum) -> &'a [u8] {
 
 /// Grow a C out-buffer for the -2 retry protocol (see the errcode contract).
 /// Renders from a <=2KB doc are bounded well under this hard cap.
-fn grow(buf: &mut Vec<u8>, needed: i32) {
+pub(crate) fn grow(buf: &mut Vec<u8>, needed: i32) {
     let target = (needed.max(0) as usize + 4096).max(buf.len() * 2);
     assert!(target <= (1 << 28), "oracle render exceeded 256MB hard cap");
     buf.resize(target, 0);
 }
 
-pub fn jsonbio_diff(data: &[u8]) {
-    // Session environment pin, mirrored by the C oracle's shims: UTF8
-    // database encoding, mbutils seams installed (set-once is process-global
-    // and panics on double-install; encoding is thread-local so set per
-    // exec — enc_tables_diff shares the test process).
+/// Session environment pin, mirrored by the C oracle's shims: UTF8 database
+/// encoding, mbutils seams installed (set-once is process-global and panics
+/// on double-install; encoding is thread-local so set per exec — sibling
+/// targets share the test process). Shared with jsonbops_diff.
+pub(crate) fn init_session_env() {
     {
         use std::sync::Once;
         static SEAMS: Once = Once::new();
         SEAMS.call_once(mbutils::init_seams);
     }
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).expect("PG_UTF8 is valid");
+}
+
+pub fn jsonbio_diff(data: &[u8]) {
+    init_session_env();
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };

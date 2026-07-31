@@ -348,3 +348,6 @@ pub use geo_io_diff::geo_io_diff;
 // jsonbio_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-jsonbio_diff.md.
 pub mod jsonbio_diff;
 pub use jsonbio_diff::jsonbio_diff;
+// jsonbops_diff: two-doc ops/mutate/getfield sibling (p1-lanev).
+pub mod jsonbops_diff;
+pub use jsonbops_diff::jsonbops_diff;

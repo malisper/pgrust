@@ -172,6 +172,50 @@
 #define text_to_cstring jbfam_text_to_cstring
 #define varstr_cmp jbfam_varstr_cmp
 
+/* jsonbops_diff additions (p1-lanev): every extern the ops extension
+ * defines, same isolation rule as above. */
+#define ArrayGetNItems jbfam_ArrayGetNItems
+#define ArrayGetNItemsSafe jbfam_ArrayGetNItemsSafe
+#define array_contains_nulls jbfam_array_contains_nulls
+#define check_collation_set jbfam_check_collation_set
+#define deconstruct_array jbfam_deconstruct_array
+#define deconstruct_array_builtin jbfam_deconstruct_array_builtin
+#define hash_bytes jbfam_hash_bytes
+#define hash_bytes_extended jbfam_hash_bytes_extended
+#define hash_bytes_uint32 jbfam_hash_bytes_uint32
+#define hash_bytes_uint32_extended jbfam_hash_bytes_uint32_extended
+#define jsonb_array_element jbfam_jsonb_array_element
+#define jsonb_array_element_text jbfam_jsonb_array_element_text
+#define jsonb_cmp jbfam_jsonb_cmp
+#define jsonb_concat jbfam_jsonb_concat
+#define jsonb_contained jbfam_jsonb_contained
+#define jsonb_contains jbfam_jsonb_contains
+#define jsonb_delete jbfam_jsonb_delete
+#define jsonb_delete_array jbfam_jsonb_delete_array
+#define jsonb_delete_idx jbfam_jsonb_delete_idx
+#define jsonb_delete_path jbfam_jsonb_delete_path
+#define jsonb_eq jbfam_jsonb_eq
+#define jsonb_exists jbfam_jsonb_exists
+#define jsonb_exists_all jbfam_jsonb_exists_all
+#define jsonb_exists_any jbfam_jsonb_exists_any
+#define jsonb_extract_path jbfam_jsonb_extract_path
+#define jsonb_extract_path_text jbfam_jsonb_extract_path_text
+#define jsonb_ge jbfam_jsonb_ge
+#define jsonb_get_element jbfam_jsonb_get_element
+#define jsonb_gt jbfam_jsonb_gt
+#define jsonb_hash jbfam_jsonb_hash
+#define jsonb_hash_extended jbfam_jsonb_hash_extended
+#define jsonb_insert jbfam_jsonb_insert
+#define jsonb_le jbfam_jsonb_le
+#define jsonb_lt jbfam_jsonb_lt
+#define jsonb_ne jbfam_jsonb_ne
+#define jsonb_object jbfam_jsonb_object
+#define jsonb_object_field jbfam_jsonb_object_field
+#define jsonb_object_field_text jbfam_jsonb_object_field_text
+#define jsonb_object_two_arg jbfam_jsonb_object_two_arg
+#define jsonb_set jbfam_jsonb_set
+#define strtoint jbfam_strtoint
+
 /* ---------------- c.h subset ---------------- */
 
 typedef int8_t int8;
@@ -187,6 +231,7 @@ typedef double float8;
 typedef size_t Size;
 typedef unsigned int Oid;
 #define InvalidOid ((Oid) 0)
+#define OidIsValid(objectId)  ((bool) ((objectId) != InvalidOid))
 typedef uintptr_t Datum;
 typedef int32 fixed_part;		/* unused placeholder */
 
@@ -387,9 +432,14 @@ typedef struct Node Node;
 #define ERRCODE_UNIQUE_VIOLATION 6		/* unreachable: unique_keys=false */
 #define ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE 6	/* as above */
 #define ERRCODE_DATATYPE_MISMATCH 6
-#define ERRCODE_NULL_VALUE_NOT_ALLOWED 6
 #define ERRCODE_DATA_CORRUPTED 6
 #define ERRCODE_SYNTAX_ERROR 6
+/* jsonbops_diff additions (p1-lanev): REACHABLE via the text[]-driven ops
+ * (jsonb_object null key / setPath null path element / dim errors), so they
+ * carry their own classes; Rust map in jsonbio_diff.rs err_class. */
+#define ERRCODE_ARRAY_SUBSCRIPT_ERROR 10	/* 2202E */
+#define ERRCODE_NULL_VALUE_NOT_ALLOWED 11	/* 22004 */
+#define ERRCODE_INDETERMINATE_COLLATION 6	/* unreachable: collid pinned valid */
 
 extern _Thread_local int pg_diff_errcode;	/* defined in pg_float_io.c */
 extern _Thread_local jmp_buf pg_jsonbfam_jmp;	/* defined in driver */
