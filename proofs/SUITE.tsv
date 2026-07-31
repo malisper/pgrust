@@ -1424,29 +1424,29 @@ typcache-inst	proofs::eq_range_adjacent_int4range	-Z c-ffi -Z stubbing --c-lib c
 typcache-inst	proofs::control_array_lt_vs_c_le	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	DEFAULT solver
 typcache-inst	proofs::control_array_seam_skew	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	seam-skew control
 typcache-inst	proofs::control_range_lt_vs_c_le	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	DEFAULT solver
-unicode-cat	eq_unicode_category	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	107	INFERRED recipe; ~107s category-table binary search
-unicode-cat	eq_prop_alphabetic	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_lowercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_uppercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_cased	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_case_ignorable	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_white_space	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_hex_digit	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_join_control	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isdigit_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe; posix arm fast
-unicode-cat	eq_isdigit_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe; category-search cost
-unicode-cat	eq_isalpha	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isalnum_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isalnum_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isupper	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_islower	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isblank	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isgraph	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isprint	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_ispunct_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_ispunct_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isspace	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	control_lower_vs_upper_must_fail	-Z c-ffi --c-lib c/pg_unicode_category.c	must-fail	defect-witness	?	DEFAULT solver (suite convention)
+unicode-cat	eq_unicode_category	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	128	~107s category-table binary search; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_alphabetic	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	21	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_lowercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	9	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_uppercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	8	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_cased	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	146	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_case_ignorable	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	9	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_white_space	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_hex_digit	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_join_control	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isdigit_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	1	posix arm fast; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isdigit_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	113	category-search cost; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalpha	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	19	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalnum_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	26	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalnum_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	251	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isupper	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	20	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_islower	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	20	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isblank	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	171	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isgraph	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	201	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isprint	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	550	recipe confirmed; CI cluster 600s-timeout (packed conc), local kissat green 549.6s 2026-07-30
+unicode-cat	eq_ispunct_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	230	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_ispunct_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	170	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isspace	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	10	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	control_lower_vs_upper_must_fail	-Z c-ffi --c-lib c/pg_unicode_category.c	must-fail	defect-witness	10	DEFAULT solver (suite convention); CI cluster expected-fail-ok 2026-07-30
 utf8	islegal_len1	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	INFERRED recipe; 0.3-0.6s
 utf8	islegal_len2	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	0.3-0.6s
 utf8	islegal_len3	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	0.3-0.6s
@@ -3221,3 +3221,10 @@ hashenc	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_hashenc_kani.c --solver kiss
 hashenc	control_bytes_to_hex_uppercase_must_fail	-Z c-ffi --c-lib c/pg_hashenc_kani.c	must-fail	per-commit	1	negative control: fails on intended assert (lowercase hex)
 md5-hex	proofs::eq_bytes_to_hex	-Z c-ffi --c-lib c/pg_md5_hex.c	green	per-commit	0.3	full 2^128 domain (bitvector-parallel); DEFAULT solver; unwind(33); p1-lanef 2026-07-30
 md5-hex	proofs::control_bytes_to_hex_detects_corruption	-Z c-ffi --c-lib c/pg_md5_hex.c	must-fail	defect-witness	0.25	fails on exactly r[0]==cs[0] (corrupted nibble); DEFAULT solver; p1-lanef 2026-07-30
+base64	eq_b64_encode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	4	src[u8;6]+len<=6+dstlen<=12 sym; whole-dst-image parity incl error zeroing; unwind(14)
+base64	eq_b64_decode	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	release-gate	7	src[u8;8]+len<=8+dstlen<=8 sym; end-flag machine + signedness fence in-domain; unwind(11)
+base64	eq_b64_enc_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced to overflow-free domain 0..=3*(MAX/4)-2
+base64	eq_b64_dec_len	-Z c-ffi --c-lib c/pg_base64.c --solver kissat	green	per-commit	1	i32 fenced 0..=MAX/3
+base64	control_encode_vs_decode_must_fail	-Z c-ffi --c-lib c/pg_base64.c	must-fail	defect-witness	2	DEFAULT solver (suite convention); fails on intended assert
+name-ascii	eq_ascii_safe_strlcpy	-Z c-ffi --c-lib c/pg_name_ascii.c --solver kissat	green	per-commit	2	src[u8;8] full sym (incl interior NULs) + destsiz<=8; whole-dest-image parity; unwind(10)
+name-ascii	control_safe_strlcpy_shorter_src_must_fail	-Z c-ffi --c-lib c/pg_name_ascii.c	must-fail	defect-witness	2	DEFAULT solver; fails on intended assert (first cut src[..7] was unobservable at destsiz 8 — rewritten to src[..3])

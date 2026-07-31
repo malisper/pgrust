@@ -278,6 +278,11 @@ pub use cryptofam::cryptofam_diff;
 pub mod tablesfam;
 pub use tablesfam::tablesfam_diff;
 
+// enc_tables_diff (p1-laneg batch): base64 / to_ascii / keywords vs
+// vendored 18.3 C. See enc_tables.rs.
+pub mod enc_tables;
+pub use enc_tables::enc_tables_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
