@@ -63,7 +63,10 @@
  *   - DOMAIN CARVE, mechanical: inputs whose parse consults pg_tzset with
  *     any name but GMT (tzdata names, POSIX "UTC+10" strings) are OUTSIDE
  *     the compared domain — pg_tzset flags the exec and the driver skips
- *     every plane comparison for it (Rust still executes for panic-safety).
+ *     every plane comparison for it (Rust still executes for panic-safety,
+ *     bounded by the driver's distinct-zone-name admission budget — pgrust's
+ *     pg_tzset cache is process-lifetime, matching pgtz.c's never-evicted
+ *     timezone_cache, so unbounded invented names would grow RSS forever).
  *     Those code paths are the tz-database state carve in the routes rows.
  *
  * Shims (plumbing only, never logic):
@@ -385,10 +388,23 @@ pg_interpret_timezone_abbrev(const char *abbrev,
  * fails for every name while pg_tzset's GMT special case still works. */
 _Thread_local int pg_dt_tzset_nongmt;
 
+/* The non-GMT name this exec asked for, NUL-terminated (empty when none).
+ * The driver keys its zone-name admission budget on this: the Rust engine's
+ * pg_tzset cache is process-lifetime by design (C parity: pgtz.c's
+ * timezone_cache HTAB is never evicted either), so an unbounded stream of
+ * distinct fuzzer-invented names would grow RSS without bound. */
+_Thread_local char pg_dt_tzset_name[TZ_STRLEN_MAX + 1];
+
 int
 pg_diff_datetime_tzset_nongmt(void)
 {
 	return pg_dt_tzset_nongmt;
+}
+
+const char *
+pg_diff_datetime_tzset_name(void)
+{
+	return pg_dt_tzset_name;
 }
 
 pg_tz *
@@ -404,8 +420,17 @@ pg_tzset(const char *name)
 	 * names and POSIX zone strings ("UTC+10") via tzparse, an engine this
 	 * oracle does not vendor. Any input that reaches this point leaves the
 	 * compared domain: flag it so the driver SKIPS all plane comparisons
-	 * for this exec (the Rust side still runs for panic-safety). */
+	 * for this exec (the Rust side still runs for panic-safety, subject to
+	 * the driver's distinct-name admission budget). */
 	pg_dt_tzset_nongmt = 1;
+	{
+		/* plain copy: the vendored strlcpy is defined further down */
+		size_t		i;
+
+		for (i = 0; i + 1 < sizeof(pg_dt_tzset_name) && name[i] != '\0'; i++)
+			pg_dt_tzset_name[i] = name[i];
+		pg_dt_tzset_name[i] = '\0';
+	}
 	return NULL;
 }
 
@@ -574,6 +599,7 @@ pg_dt_reset(int style, int order)
 	pg_diff_errcode = 0;
 	pg_dt_pending = 0;
 	pg_dt_tzset_nongmt = 0;
+	pg_dt_tzset_name[0] = '\0';
 	pg_dt_arena_off = 0;		/* per-exec memory-context reset */
 	DateStyle = style;
 	DateOrder = order;
@@ -778,6 +804,7 @@ pg_diff_decode_interval(const char *str, int32 range, int istyle,
 	pg_diff_errcode = 0;
 	pg_dt_pending = 0;
 	pg_dt_tzset_nongmt = 0;
+	pg_dt_tzset_name[0] = '\0';
 	IntervalStyle = istyle;
 	if (setjmp(pg_dt_jmp))
 		return 1000 + pg_diff_errcode;	/* ereport escape (deltatktbl abbrev

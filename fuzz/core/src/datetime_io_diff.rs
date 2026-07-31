@@ -95,6 +95,48 @@ extern "C" {
     /// input left the compared domain (tz-database carve) — skip all plane
     /// comparisons (see the C oracle header).
     fn pg_diff_datetime_tzset_nongmt() -> i32;
+    /// The non-GMT zone name this exec asked for (NUL-terminated, empty when
+    /// none) — keys the zone-name admission budget below.
+    fn pg_diff_datetime_tzset_name() -> *const std::ffi::c_char;
+}
+
+/// Should the Rust engine run for a tz-carved exec?
+///
+/// Carved execs compare NOTHING (the oracle does not vendor tzparse/tzload),
+/// so their only value is Rust-side panic-safety. But pgrust's `pg_tzset`
+/// cache is process-lifetime BY DESIGN — exact parity with 18.3 pgtz.c, whose
+/// `timezone_cache` HTAB is likewise never evicted — and each admitted name
+/// leaks a ~21KB `PgTz` (`TzState` carries `ats[2000]`) for the life of the
+/// process. An unbounded stream of fuzzer-invented POSIX zone names therefore
+/// grows RSS without bound: a 7.5M-exec CI cluster campaign died at
+/// `libFuzzer: out-of-memory (used: 2060Mb)` on exactly this.
+///
+/// So admit a bounded set of DISTINCT names: every name already admitted keeps
+/// running forever (it can no longer grow the cache — it is already in it), and
+/// genuinely-new names are admitted only while the budget lasts. Memory is
+/// bounded at BUDGET entries; panic-safety coverage is retained for every
+/// admitted name and for all non-carved execs (the entire compared domain).
+fn admit_tz_carved_exec() -> bool {
+    /// 2048 x ~21KB ~= 43MB steady-state ceiling.
+    const BUDGET: usize = 2048;
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    std::thread_local! {
+        static SEEN: RefCell<HashSet<Vec<u8>>> = RefCell::new(HashSet::new());
+    }
+    // SAFETY: the oracle keeps this NUL-terminated static for the exec.
+    let name = unsafe { std::ffi::CStr::from_ptr(pg_diff_datetime_tzset_name()) }.to_bytes();
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.contains(name) {
+            return true; /* already cached: running it cannot grow RSS */
+        }
+        if s.len() >= BUDGET {
+            return false;
+        }
+        s.insert(name.to_vec());
+        true
+    })
 }
 
 /// Pinned "current" instant: 2026-06-15 12:30:45.123456 GMT as a PG
@@ -315,10 +357,15 @@ fn date_in_diff(payload: &[u8]) {
 
     let mut cval: i32 = 0;
     let cerr = unsafe { pg_diff_date_in(cs.as_ptr(), style, order, &mut cval) };
-    let r = adt_date::date_in(s, None);
     if unsafe { pg_diff_datetime_tzset_nongmt() } != 0 {
-        return; /* tz-database domain carve (see module header) */
+        /* tz-database domain carve (see module header): nothing is compared;
+         * run Rust for panic-safety only while the name budget allows. */
+        if admit_tz_carved_exec() {
+            let _ = adt_date::date_in(s, None);
+        }
+        return;
     }
+    let r = adt_date::date_in(s, None);
     match &r {
         Ok(v) => assert!(
             cerr == 0 && *v == cval,
@@ -395,10 +442,13 @@ fn time_in_diff(payload: &[u8]) {
 
     let mut cval: i64 = 0;
     let cerr = unsafe { pg_diff_time_in(cs.as_ptr(), typmod, style, order, &mut cval) };
-    let r = adt_date::time_in(s, typmod, None);
     if unsafe { pg_diff_datetime_tzset_nongmt() } != 0 {
+        if admit_tz_carved_exec() {
+            let _ = adt_date::time_in(s, typmod, None);
+        }
         return; /* tz-database domain carve (see module header) */
     }
+    let r = adt_date::time_in(s, typmod, None);
     match &r {
         Ok(v) => assert!(
             cerr == 0 && *v == cval,
@@ -469,10 +519,13 @@ fn timetz_in_diff(payload: &[u8]) {
     let mut ct: i64 = 0;
     let mut cz: i32 = 0;
     let cerr = unsafe { pg_diff_timetz_in(cs.as_ptr(), typmod, style, order, &mut ct, &mut cz) };
-    let r = adt_date::timetz_in(s, typmod, None);
     if unsafe { pg_diff_datetime_tzset_nongmt() } != 0 {
+        if admit_tz_carved_exec() {
+            let _ = adt_date::timetz_in(s, typmod, None);
+        }
         return; /* tz-database domain carve (see module header) */
     }
+    let r = adt_date::timetz_in(s, typmod, None);
     match &r {
         Ok(v) => assert!(
             cerr == 0 && v.time == ct && v.zone == cz,
@@ -732,4 +785,47 @@ mod tests {
             datetime_io_diff(&p);
         }
     }
+
+    fn rss_kb() -> usize {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    }
+
+    /// Leak regression probe for the zone-name admission budget: feeds an
+    /// endless stream of DISTINCT invented POSIX zone names and reports the
+    /// RSS slope per window. The budget makes the slope decay toward zero;
+    /// without it this sustains ~100 B/exec (pgrust's pg_tzset cache is
+    /// process-lifetime by C parity, ~21KB per entry) and a CI cluster campaign
+    /// OOMs. `#[ignore]`d: it is an instrument, minutes long, and reads RSS
+    /// via `ps`. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn probe_tzname_leak() {
+        // Warm.
+        for i in 0..1000u32 {
+            let mut p = vec![4];
+            p.extend_from_slice(format!("12:30:45 W{i}5").as_bytes());
+            datetime_io_diff(&p);
+        }
+        let n = 50_000u32;
+        let mut base = 1000u32;
+        for w in 0..4 {
+            let before = rss_kb();
+            for i in base..base + n {
+                let mut p = vec![4];
+                p.extend_from_slice(format!("12:30:45 W{i}5").as_bytes());
+                datetime_io_diff(&p);
+            }
+            let after = rss_kb();
+            base += n;
+            eprintln!(
+                "window {w}: RSS {before}KB -> {after}KB ({:.2} B/exec over {n} distinct-name execs)",
+                (after as f64 - before as f64) * 1024.0 / n as f64
+            );
+        }
+    }
+
 }
