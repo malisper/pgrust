@@ -1424,19 +1424,19 @@ typcache-inst	proofs::eq_range_adjacent_int4range	-Z c-ffi -Z stubbing --c-lib c
 typcache-inst	proofs::control_array_lt_vs_c_le	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	DEFAULT solver
 typcache-inst	proofs::control_array_seam_skew	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	seam-skew control
 typcache-inst	proofs::control_range_lt_vs_c_le	-Z c-ffi -Z stubbing --c-lib c/pg_typcache_inst.c --exact	must-fail	defect-witness	?	DEFAULT solver
-unicode-cat	eq_unicode_category	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	107	INFERRED recipe; ~107s category-table binary search
-unicode-cat	eq_prop_alphabetic	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_lowercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_uppercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_cased	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_case_ignorable	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_white_space	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_hex_digit	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_prop_join_control	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isdigit_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe; posix arm fast
-unicode-cat	eq_isdigit_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe; category-search cost
-unicode-cat	eq_isalpha	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isalnum_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
+unicode-cat	eq_unicode_category	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	128	~107s category-table binary search; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_alphabetic	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	21	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_lowercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	9	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_uppercase	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	8	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_cased	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	146	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_case_ignorable	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	9	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_white_space	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_hex_digit	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_prop_join_control	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	2	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isdigit_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	1	posix arm fast; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isdigit_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	113	category-search cost; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalpha	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	19	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
+unicode-cat	eq_isalnum_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	26	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
 unicode-cat	eq_isalnum_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
 unicode-cat	eq_isupper	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
 unicode-cat	eq_islower	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
