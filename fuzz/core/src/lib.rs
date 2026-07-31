@@ -344,3 +344,9 @@ pub use quote_diff::quote_diff;
 // geo_io_diff: geo text-I/O family (p1-laner) — see core/src/geo_io_diff.rs.
 pub mod geo_io_diff;
 pub use geo_io_diff::geo_io_diff;
+
+// numutils_diff (p1-laneaj adt/numutils batch): strtoint/uint*in_subr parse
+// family + the itoa/ultostr emit family vs vendored 18.3 C. See
+// core/src/numutils_diff.rs.
+pub mod numutils_diff;
+pub use numutils_diff::numutils_diff;

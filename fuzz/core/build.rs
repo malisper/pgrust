@@ -28,6 +28,8 @@ fn main() {
         .file("csrc/pg_float_math.c")
         .file("csrc/pg_geo_io.c")
         .file("csrc/pg_strfam.c")
+        // numutils_diff oracle (p1-laneaj): verbatim 18.3 numutils.c
+        .file("csrc/pg_numutils.c")
         .file("csrc/pg_uuid_io.c")
         .file("csrc/pg_mac_io.c")
         .file("csrc/pg_name_io.c")
