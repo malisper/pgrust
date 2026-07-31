@@ -60,6 +60,19 @@
 //!     the cap and ARE compared.
 //!   - message/detail text: out of scope by the standing harness contract
 //!     (sqlstate is the error-identity plane).
+//!   - INVALID-UTF-8 SOURCE TEXT in arms 0 and 2 (added 2026-07-31 after the
+//!     first local smoke, see fuzz/README-TODO-jsonpath_diff.md "divergence
+//!     1"): a real server never calls jsonpath_in on unvalidated bytes —
+//!     pg_any_to_server (mbutils.c) validates with pg_verify_mbstr at the
+//!     client/server boundary before any input function runs, so an invalid
+//!     sequence cannot reach jsonpath_in, nor be stored in a jsonpath value,
+//!     nor reach jspIsMutable's datetime-template inspection. The encoding
+//!     plane is therefore tested exactly where PostgreSQL itself tests it:
+//!     arm 1 (jsonpath_recv), which runs that validation in-band and IS
+//!     compared on all planes (that comparison already caught one oracle
+//!     shim bug). Arms 0/2 require `core::str::from_utf8(text).is_ok()`,
+//!     matching the invariant the pipeline guarantees; all multibyte-valid
+//!     text stays in domain.
 //!
 //! SKIPPED rows: none — the crate's four catalog functions (4001-4004) are all
 //! driven through both their cores and their fc wrappers, plus the
@@ -138,6 +151,19 @@ fn setup() {
     if !pg_locale::default_locale_installed() {
         pg_locale::set_default_locale_c_for_tests();
     }
+}
+
+/// Shared domain for a jsonpath SOURCE TEXT (arms 0 and 2). See the
+/// module-header carve-outs:
+///   - length cap (recursion bound, so the 54001 plane stays out of domain);
+///   - NUL-free: the C entry point is a cstring and PG text never carries an
+///     interior NUL;
+///   - valid UTF-8: pg_any_to_server validates at the client/server boundary
+///     before any input function runs, so unvalidated bytes cannot reach
+///     jsonpath_in in a real server. Arm 1 (recv) runs that validation
+///     in-band and keeps the encoding plane under comparison.
+fn in_domain(text: &[u8]) -> bool {
+    text.len() <= MAX_TEXT && !text.contains(&0) && core::str::from_utf8(text).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +434,7 @@ fn in_out_diff(payload: &[u8]) {
     let Some((&mode, text)) = payload.split_first() else {
         return;
     };
-    // The C entry is a cstring, so an interior NUL is out of the shared
-    // domain (a real client can never deliver one either); MAX_TEXT is the
-    // documented recursion-bound cap.
-    if text.len() > MAX_TEXT || text.contains(&0) {
+    if !in_domain(text) {
         return;
     }
     let soft = (mode & 1) != 0;
@@ -639,7 +662,7 @@ fn mutability_diff(payload: &[u8]) {
     let Some((&varsel, text)) = payload.split_first() else {
         return;
     };
-    if text.len() > MAX_TEXT || text.contains(&0) {
+    if !in_domain(text) {
         return;
     }
 

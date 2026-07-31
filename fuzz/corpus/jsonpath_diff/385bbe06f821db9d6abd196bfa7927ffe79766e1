@@ -1,0 +1,1 @@
+$ ? (@ ? (@ like_regex "`ךייייייףpattern" flag "is" like_regex "pattern" flag "is")
