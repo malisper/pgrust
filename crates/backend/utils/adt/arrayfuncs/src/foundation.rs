@@ -195,13 +195,21 @@ fn cstr_len(p: *const u8) -> usize {
 #[inline(always)]
 pub fn fetch_att(p: *const u8, byval: bool, len: i32) -> Datum {
     if byval {
+        // C fetch_att (access/tupmacs.h) goes through CharGetDatum /
+        // Int16GetDatum / Int32GetDatum, which SIGN-EXTEND into the full
+        // Datum word. types_tuple::tupmacs::fetch_att (the executor's
+        // deform path) and Datum::from_i32 already match that convention;
+        // zero-extending here made array-fetched byval datums bit-unequal
+        // to the same values fetched from heap tuples, breaking full-word
+        // comparisons like datum_is_equal (found by arrayfuncs_diff,
+        // p1-lanex 2026-07-31).
         // SAFETY: len in {1,2,4,8}; p points at len live bytes in the image.
         unsafe {
             match len {
-                1 => Datum::from_u64(*p as u64),
-                2 => Datum::from_u64((p as *const u16).read_unaligned() as u64),
-                4 => Datum::from_u64((p as *const u32).read_unaligned() as u64),
-                8 => Datum::from_u64((p as *const u64).read_unaligned()),
+                1 => Datum::from_i8((p as *const i8).read()),
+                2 => Datum::from_i16((p as *const i16).read_unaligned()),
+                4 => Datum::from_i32((p as *const i32).read_unaligned()),
+                8 => Datum::from_i64((p as *const i64).read_unaligned()),
                 _ => bad_fetch_att_len(),
             }
         }

@@ -252,6 +252,10 @@ bench = false
 [[bin]]
 name = "json_diff"
 path = "fuzz_targets/json_diff.rs"
+# arrayfuncs_diff: scaffolded by fuzz/scaffold.py — see README-TODO-arrayfuncs_diff.md.
+[[bin]]
+name = "arrayfuncs_diff"
+path = "fuzz_targets/arrayfuncs_diff.rs"
 test = false
 doc = false
 bench = false

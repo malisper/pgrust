@@ -6,7 +6,10 @@ use ::types_core::{
     Oid, CHAROID, CSTRINGOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, NAMEOID, OIDOID,
     REGTYPEOID, TEXTOID, TIDOID, XIDOID,
 };
-use ::types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+};
 
 use crate::foundation::*;
 use ::arrayutils::{array_check_bounds, array_get_n_items};
@@ -15,8 +18,27 @@ const NAMEDATALEN: i32 = 64;
 const SIZEOF_ITEMPOINTER: i32 = 6;
 
 // (elmlen, elmbyval, elmalign) for the built-in element types.
-pub fn builtin_meta(elmtype: Oid) -> (i32, bool, u8) {
-    match elmtype {
+//
+// C keeps TWO asymmetric tables in arrayfuncs.c: construct_array_builtin
+// accepts {char, cstring, float4, float8, int2, int4, int8, name, oid,
+// regtype, text, tid, xid} while deconstruct_array_builtin accepts only
+// {char, cstring, float8, int2, int4, oid, text, tid}; both default arms
+// elog(ERROR) — a catchable XX000 statement error, NOT a crash. A shared
+// table with a trailing panic! deviated twice: pgrust succeeded on the 5
+// construct-only types via deconstruct (KNOWN-DIV-4), and an unlisted oid
+// aborted the backend where C errors the statement (KNOWN-DIV-5). Split +
+// error RATIFIED Michael 2026-07-31 (arrayfuncs_diff, lane p1-lanex).
+
+fn builtin_meta_error(fname: &str, elmtype: Oid) -> Box<PgError> {
+    // C: elog(ERROR, "type %u not supported by %s()") -> XX000.
+    Box::new(PgError::error(alloc::format!(
+        "type {elmtype} not supported by {fname}()"
+    )))
+}
+
+/// C construct_array_builtin's element-type table.
+pub fn builtin_meta(elmtype: Oid) -> PgResult<(i32, bool, u8)> {
+    Ok(match elmtype {
         CHAROID => (1, true, TYPALIGN_CHAR),
         CSTRINGOID => (-2, false, TYPALIGN_CHAR),
         FLOAT4OID => (4, true, TYPALIGN_INT),
@@ -29,7 +51,18 @@ pub fn builtin_meta(elmtype: Oid) -> (i32, bool, u8) {
         TEXTOID => (-1, false, TYPALIGN_INT),
         TIDOID => (SIZEOF_ITEMPOINTER, false, TYPALIGN_SHORT),
         XIDOID => (4, true, TYPALIGN_INT),
-        other => panic!("type {other} not supported by construct/deconstruct_array_builtin()"),
+        other => return Err(builtin_meta_error("construct_array_builtin", other)),
+    })
+}
+
+/// C deconstruct_array_builtin's element-type table — a strict SUBSET of
+/// construct_array_builtin's (C's asymmetry, kept exactly).
+pub fn deconstruct_builtin_meta(elmtype: Oid) -> PgResult<(i32, bool, u8)> {
+    match elmtype {
+        CHAROID | CSTRINGOID | FLOAT8OID | INT2OID | INT4OID | OIDOID | TEXTOID | TIDOID => {
+            builtin_meta(elmtype)
+        }
+        other => Err(builtin_meta_error("deconstruct_array_builtin", other)),
     }
 }
 
@@ -120,7 +153,7 @@ pub fn deconstruct_array_builtin<'mcx>(
     elmtype: Oid,
     allow_nulls: bool,
 ) -> PgResult<(PgVec<'mcx, Datum>, PgVec<'mcx, bool>)> {
-    let (elmlen, elmbyval, elmalign) = builtin_meta(elmtype);
+    let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(elmtype)?;
     deconstruct_array(mcx, array, elmlen, elmbyval, elmalign, allow_nulls)
 }
 
@@ -187,9 +220,11 @@ pub fn construct_md_array<'mcx>(
     elmalign: u8,
 ) -> PgResult<PgVec<'mcx, u8>> {
     if ndims < 0 {
-        return Err(Box::new(PgError::error(alloc::format!(
-            "invalid number of dimensions: {ndims}"
-        ))));
+        // C: ereport(ERRCODE_INVALID_PARAMETER_VALUE) — arrayfuncs.c 3508..3511.
+        return Err(Box::new(
+            PgError::error(alloc::format!("invalid number of dimensions: {ndims}"))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
     }
     if ndims as usize > MAXDIM {
         return Err(Box::new(

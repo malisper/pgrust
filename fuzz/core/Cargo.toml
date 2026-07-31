@@ -76,6 +76,13 @@ unicode_category = { path = "../../crates/common/unicode_category" }
 adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (scaffold.py)
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
 adt_json = { path = "../../crates/backend/utils/adt/json" }  # json_diff (scaffold.py)
+arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }  # arrayfuncs_diff (scaffold.py)
+adt_int = { path = "../../crates/backend/utils/adt/int" }    # arrayfuncs_diff element io
+detoast = { path = "../../crates/backend/access/common/detoast" }  # arrayfuncs_diff width_bucket arg seam
+fmgr_core = { path = "../../crates/backend/utils/fmgr/fmgr_core" }        # arrayfuncs_diff width_bucket cmp finfo
+syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }  # arrayfuncs_diff pinned typcache fixture
+indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }   # arrayfuncs_diff pinned opclass fixture
+types_tuple = { path = "../../crates/_support/types/types_tuple" }        # NameData for the fixture
 
 [build-dependencies]
 cc = "1"

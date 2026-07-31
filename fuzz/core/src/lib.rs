@@ -350,3 +350,6 @@ pub use geo_io_diff::geo_io_diff;
 // json_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-json_diff.md.
 pub mod json_diff;
 pub use json_diff::json_diff;
+// arrayfuncs_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-arrayfuncs_diff.md.
+pub mod arrayfuncs_diff;
+pub use arrayfuncs_diff::arrayfuncs_diff;

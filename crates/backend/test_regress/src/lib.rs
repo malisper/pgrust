@@ -488,7 +488,8 @@ fn fc_get_environ(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     for s in &env {
         datums.push(varlena_result(varlena::cstring_to_text(mcx, s.as_bytes())?));
     }
-    let (elmlen, elmbyval, elmalign) = arrayfuncs::construct::builtin_meta(::types_core::TEXTOID);
+    let (elmlen, elmbyval, elmalign) =
+        arrayfuncs::construct::builtin_meta(::types_core::TEXTOID).expect("text is a builtin");
     let arr = arrayfuncs::construct::construct_array(
         mcx,
         &datums,
@@ -1016,7 +1017,8 @@ fn fc_test_text_to_wchars(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     } else {
         Vec::new()
     };
-    let (elmlen, elmbyval, elmalign) = arrayfuncs::construct::builtin_meta(::types_core::INT4OID);
+    let (elmlen, elmbyval, elmalign) =
+        arrayfuncs::construct::builtin_meta(::types_core::INT4OID).expect("int4 is a builtin");
     let arr = arrayfuncs::construct::construct_array(
         mcx,
         &datums,
