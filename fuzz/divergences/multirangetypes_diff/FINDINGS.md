@@ -3,7 +3,7 @@
 Oracle: verbatim PostgreSQL 18.3 (upstream sha 62d6c7d3df) in
 `fuzz/core/csrc/pg_multirangetypes_io.c` (one TU with the range oracle).
 
-## Result: one conformance divergence (D1, ruling requested); no correctness divergence
+## Result: no correctness divergence; one ratified non-surface (D1, CARVE ruling 2026-07-31)
 
 2.5M-exec release smoke (arm64, macOS, `PGRUST_FUZZ_CSANCOV=1`, 537 committed
 seeds + dictionary, 111 s): **zero crashes, zero value/verdict/sqlstate
@@ -13,7 +13,7 @@ campaign is the remaining gate; nothing blocks it.
 Everything below is a HARNESS defect or a documented carve, not a pgrust bug.
 Decoded in that order per the FAILED-is-not-a-verdict law.
 
-## D1 (pgrust-bug, conformance/cosmetic — RULING REQUESTED) — nummultirange canonicalization keeps a different value-equal numeric representative than C
+## D1 (RATIFIED NON-SURFACE — Michael 2026-07-31) — nummultirange canonicalization keeps a different value-equal numeric representative than C
 
 **CI-found** (job pgrust-fuzz-campaign-1785514852-46a9-13019, sha 5217706fa2,
 2,103,447 execs, cov_lines 5204). Reproducer:
@@ -64,19 +64,15 @@ BUILDS, but NOT for `multirange_in` / `multirange_recv`, whose bounds are user
 bytes — and the driver's own text seed corpus mints `2.0000`-style literals.
 Corrected in the module header.
 
-**RULING REQUESTED (match or carve).** Whether pgrust must reproduce C's
-`qsort_arg` tie-break bit-for-bit is a ruling, not the harness's call:
-  * MATCH — change `multirange_canonicalize` to break value ties the way C's
-    unstable qsort + fixed-side union does. This is a real behavior change to
-    shipped sort semantics and I did NOT make it on my own judgement. Note C's
-    own output is order-of-input-dependent, so "match C" means "match C's exact
-    unstable qsort pivot sequence", which is a strong and brittle requirement.
-  * CARVE — declare the surviving representative of a value tie a
-    ratified non-surface (GL-PARMERGE-1 within-tie precedent), on the ground
-    that it is value-preserving and only the cosmetic dscale of the printed
-    representative differs. This is what the harness currently assumes.
+**RULING (Michael, 2026-07-31): CARVE — RATIFIED.** "Numeric
+tie-representative choice in multirange canonicalization = non-surface
+(value-preserving)." pgrust keeps its stable sort; no shipped-code change.
+Rationale of record: C's own tie choice is input-order and qsort-implementation
+dependent — unspecified behavior, not a contract — consistent with the
+cmp-magnitude sign-only ruling and the GL-PARMERGE-1 within-tie precedent. The
+harness handling below is therefore the PERMANENT handling, not an interim one.
 
-**Harness handling until the ruling (committed).** `compare_mr_image` keeps
+**Harness handling (ratified).** `compare_mr_image` keeps
 byte-exact comparison as the default and mandatory check. It relaxes to a
 value-level comparison ONLY when: (a) the images differ in bytes, AND (b)
 t == 2 (a byte difference on int4/int8 multirange has no numeric representation
@@ -85,9 +81,8 @@ to differ and is always a hard divergence), AND (c) the shipped
 FLAGS, and every bound VALUE. Any structural difference (dropped/added/reordered
 range, wrong flag, wrong value) still hard-fails. Each relaxation is counted and
 the tally is printed on a cadence (2.5M-exec local smoke: **238 fallbacks /
-2,097,152 execs ≈ 0.011%**, never on a byval instantiation). If the ruling is
-MATCH, delete the fallback and this becomes a banked bug; if CARVE, the fallback
-is the ratified handling. An in-crate test (`numeric_representation_tie_D1`)
+2,097,152 execs ≈ 0.011%**, never on a byval instantiation). The fallback IS the
+ratified handling per the 2026-07-31 ruling above. An in-crate test (`numeric_representation_tie_D1`)
 asserts the fallback path is live and never fires for byval.
 
 ## H1 (BLOCKS THE SIBLING TARGET) — `rangetypes_diff` builds malformed numrange images

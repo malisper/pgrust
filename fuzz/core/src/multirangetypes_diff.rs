@@ -785,7 +785,9 @@ fn compare_image(name: &str, cret: i32, cbytes: &[u8], r: &FcOut, dbg: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// numeric-representative tie fallback (FINDINGS D1)
+// numeric-representative tie fallback (FINDINGS D1 — RATIFIED Michael
+// 2026-07-31: numeric tie-representative choice in multirange canonicalization
+// = non-surface, value-preserving; pgrust keeps its stable sort)
 // ---------------------------------------------------------------------------
 //
 // Byte-exact image comparison is the DEFAULT and stays mandatory. It is
