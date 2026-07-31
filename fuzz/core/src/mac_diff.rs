@@ -170,12 +170,14 @@ fn is_c_space(b: u8) -> bool {
 /// One unlimited-width %x directive, mirroring adt_mac's Scanner::scan_hex
 /// consumption exactly (whitespace, sign, glibc 0x pushback), but reporting
 /// the hex-digit count of the field instead of its value.
-fn scan_hex_digits(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+fn scan_hex_digits(bytes: &[u8], pos: &mut usize) -> Option<(u32, bool)> {
     let peek = |p: usize| bytes.get(p).copied();
     while peek(*pos).is_some_and(is_c_space) {
         *pos += 1;
     }
+    let mut minus = false;
     if matches!(peek(*pos), Some(b'+') | Some(b'-')) {
+        minus = peek(*pos) == Some(b'-');
         *pos += 1;
     }
     if peek(*pos) == Some(b'0') {
@@ -185,14 +187,14 @@ fn scan_hex_digits(bytes: &[u8], pos: &mut usize) -> Option<u32> {
             *pos += 1;
             if !peek(*pos).is_some_and(|b| b.is_ascii_hexdigit()) {
                 *pos -= 1; // glibc: '0' is the result, 'x' unread
-                return Some(1);
+                return Some((1, minus));
             }
             let mut n = 0u32;
             while peek(*pos).is_some_and(|b| b.is_ascii_hexdigit()) {
                 *pos += 1;
                 n += 1;
             }
-            return Some(n);
+            return Some((n, minus));
         }
         *pos = save;
     }
@@ -204,21 +206,27 @@ fn scan_hex_digits(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     if n == 0 {
         None
     } else {
-        Some(n)
+        Some((n, minus))
     }
 }
 
 /// If "%x<sep>%x<sep>%x<sep>%x<sep>%x<sep>%x%1s" terminal-matches (six
-/// fields, no trailing junk), return the max field digit count.
-fn style0_terminal_match(bytes: &[u8], sep: u8) -> Option<u32> {
+/// fields, no trailing junk), return whether any field is in the sscanf
+/// wrap class: >8 hex digits (unsigned mod-2^32 wrap), or a '-'-signed
+/// field of >=8 digits (negation wrap can land the stored int back inside
+/// 0..=255 — confirmed vs docker postgres:18.3: '-fffffff1:2:3:4:5:6' is
+/// ACCEPTED as 0f:02:03:04:05:06 while pgrust's ratified behavior rejects;
+/// same row-436 upstream sscanf bug, sign-negation flavor).
+fn style0_terminal_match(bytes: &[u8], sep: u8) -> Option<bool> {
+    let wrapclass = |(n, minus): (u32, bool)| n > 8 || (minus && n >= 8);
     let mut pos = 0usize;
-    let mut max = scan_hex_digits(bytes, &mut pos)?;
+    let mut any = wrapclass(scan_hex_digits(bytes, &mut pos)?);
     for _ in 1..6 {
         if bytes.get(pos).copied() != Some(sep) {
             return None;
         }
         pos += 1;
-        max = max.max(scan_hex_digits(bytes, &mut pos)?);
+        any |= wrapclass(scan_hex_digits(bytes, &mut pos)?);
     }
     while bytes.get(pos).copied().is_some_and(is_c_space) {
         pos += 1;
@@ -226,18 +234,18 @@ fn style0_terminal_match(bytes: &[u8], sep: u8) -> Option<u32> {
     if pos < bytes.len() {
         return None; // %1s assigns: trailing junk, count == 7 on both sides
     }
-    Some(max)
+    Some(any)
 }
 
 /// True iff the input lands in the ledger-row-436 carve class (see above).
 fn carve_row436(bytes: &[u8]) -> bool {
     // Cascade order is mac.c's: ':' style 0, then '-' style 0. The first
     // terminal match wins on both sides.
-    if let Some(max) = style0_terminal_match(bytes, b':') {
-        return max > 8;
+    if let Some(w) = style0_terminal_match(bytes, b':') {
+        return w;
     }
-    if let Some(max) = style0_terminal_match(bytes, b'-') {
-        return max > 8;
+    if let Some(w) = style0_terminal_match(bytes, b'-') {
+        return w;
     }
     false
 }
