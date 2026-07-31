@@ -242,6 +242,11 @@ pub fn wire_pqformat(data: &[u8]) {
 pub mod diff;
 pub use diff::{float_in_diff, float_math2_diff, float_math_diff, float_out_diff, geo_diff};
 
+// p1-lanec string-family batch (common/{string,archive,percentrepl,relpath,
+// wait_error}) vs vendored 18.3 C. See strfam.rs.
+pub mod strfam;
+pub use strfam::strfam_diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;

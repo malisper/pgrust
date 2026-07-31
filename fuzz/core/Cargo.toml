@@ -26,6 +26,14 @@ wchar = { path = "../../crates/common/wchar" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }
+# strfam_diff (p1-lanec string-family batch):
+pg_string = { path = "../../crates/common/string" }
+archive = { path = "../../crates/common/archive" }
+percentrepl = { path = "../../crates/common/percentrepl" }
+relpath = { path = "../../crates/common/relpath" }
+wait_error = { path = "../../crates/common/wait_error" }
+types_storage = { path = "../../crates/_support/types/types_storage" }
+libc = "0.2"
 
 [build-dependencies]
 cc = "1"

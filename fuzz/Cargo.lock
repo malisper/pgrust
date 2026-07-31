@@ -232,6 +232,7 @@ dependencies = [
  "adt_float",
  "datum",
  "mcx",
+ "pg_string",
  "postgres_seams",
  "pqformat",
  "stack_depth",
@@ -292,6 +293,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -324,6 +326,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "pg_string",
  "pqformat",
  "stack_depth",
  "stringinfo",
@@ -930,6 +933,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "archive"
+version = "0.0.0"
+dependencies = [
+ "percentrepl",
+ "types_error",
+]
+
+[[package]]
 name = "array_userfuncs"
 version = "0.1.0"
 dependencies = [
@@ -967,6 +978,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "numutils",
+ "pg_string",
  "pqformat",
  "stringinfo",
  "typcache",
@@ -1590,14 +1602,21 @@ version = "0.0.0"
 dependencies = [
  "adt_float",
  "adt_geo",
+ "archive",
  "cc",
  "crc32c",
+ "libc",
  "mbutils",
  "mcx",
+ "percentrepl",
+ "pg_string",
  "pqformat",
+ "relpath",
  "stringinfo",
  "types_core",
  "types_error",
+ "types_storage",
+ "wait_error",
  "wchar",
  "xlogreader",
  "xlogreader_seams",
@@ -3200,6 +3219,14 @@ dependencies = [
  "types_rel",
  "types_tuple",
  "wchar",
+]
+
+[[package]]
+name = "percentrepl"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "types_error",
 ]
 
 [[package]]
@@ -5756,6 +5783,13 @@ dependencies = [
  "types_storage",
  "xloginsert_seams",
  "xlogutils_seams",
+]
+
+[[package]]
+name = "wait_error"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
