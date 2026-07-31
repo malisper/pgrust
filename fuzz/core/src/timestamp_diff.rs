@@ -342,50 +342,14 @@ extern "C" {
 const PINNED_NOW_USECS: i64 = 9662 * 86_400_000_000 + 45_045_000_000 + 123_456;
 
 fn init_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: single-threaded libFuzzer init / first-test init, before
-        // any getenv (adt_date tests.rs gmt_session precedent).
-        unsafe { std::env::set_var("PGRUST_TZDIR", "/nonexistent-pgrust-tzdir-timestamp-diff") };
-        pgtz::init_seams();
-        guc_tables::init_seams();
-        elog::init_seams();
-        fd::init_seams();
-        xact_seams::get_current_sub_transaction_id::set(|| 1);
-        xact_seams::get_current_transaction_start_timestamp::set(|| PINNED_NOW_USECS);
-        fn pinned_now() -> types_error::PgResult<timestamp_seams::CurrentTimeUsec> {
-            let jd = adt_datetime::calendar::date2j(2026, 6, 15);
-            Ok(timestamp_seams::CurrentTimeUsec {
-                tm_sec: 45,
-                tm_min: 30,
-                tm_hour: 12,
-                tm_mday: 15,
-                tm_mon: 6,
-                tm_year: 2026,
-                tm_wday: adt_datetime::calendar::j2day(jd),
-                tm_yday: jd - adt_datetime::calendar::date2j(2026, 1, 1),
-                tm_isdst: 0,
-                tm_gmtoff: 0,
-                tm_zone: Some("GMT"),
-                fsec: 123_456,
-                tz: 0,
-            })
-        }
-        timestamp_seams::get_current_timestamp::set(|| PINNED_NOW_USECS);
-        timestamp_seams::get_current_datetime::set(pinned_now);
-        timestamp_seams::get_current_time_usec::set(pinned_now);
-        timestamp_seams::timestamptz_to_str::set(|_| String::from("(pinned)"));
-    });
-    // Session-timezone cells are per-thread: (re)pin on every thread.
-    std::thread_local! {
-        static TZ_PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-    TZ_PINNED.with(|c| {
-        if !c.get() {
-            pgtz::pg_timezone_initialize();
-            c.set(true);
-        }
-    });
+    // ONE definition of the pinned environment (lane merge, 2026-07-31):
+    // this used to be a byte-identical copy of datetime_io_diff's init_env
+    // (same GMT/clock/tz-database pins mirroring the same C shims), and with
+    // both lanes' modules linked into one test binary the duplicate
+    // `pgtz::init_seams()` panicked ("seam installed twice"). Delegate to
+    // the shared sibling init instead — the PGRUST_TZDIR value differs only
+    // in the (nonexistent) directory name, which is semantics-free.
+    super::datetime_io_diff::init_env_for_siblings();
 }
 
 /// Rust-side run admission for tz-carved execs (RSS bound; see
