@@ -32,33 +32,41 @@ pub const fn date2j(mut year: i32, mut month: i32, day: i32) -> i32 {
     let century = year / 100;
     let mut julian = year.wrapping_mul(365).wrapping_sub(32167);
     julian = julian.wrapping_add(year / 4 - century + century / 4);
-    // `+ day` must wrap too: to_char(interval) reaches here with raw
-    // tm_mday up to INT_MAX/INT_MIN (DCH_J over interval day counts; found
-    // by fmt_dch_diff witness seed gr-iv-imaxdy-f19, p1-lanek remediation).
+    // `+ day` must also wrap: interval tm_mday is caller-unbounded (e.g.
+    // to_char(interval '2147483647 days', 'I') reaches here with
+    // day = INT_MAX; real PG 18.3 wraps and prints -1, docker-confirmed;
+    // found by fmt_dch_diff fuzz 2026-07-30).
     julian = julian.wrapping_add((7834 * month / 256).wrapping_add(day));
 
     julian
 }
 
 pub fn j2date(jd: i32, year: &mut i32, month: &mut i32, day: &mut i32) {
+    // C j2date does this in `unsigned int`, where wraparound is DEFINED and
+    // exercised: out-of-Julian-range inputs reach here via the to_char /
+    // to_date format engine (e.g. to_date('2-45887','2J'); real 18.3 wraps,
+    // found by fmt_dch_diff 2026-07-31). Every op wraps to match.
     let mut julian = jd as u32;
     julian = julian.wrapping_add(32044);
     let mut quad = julian / 146097;
-    let extra = (julian - quad * 146097) * 4 + 3;
-    // C's julian is unsigned int: this add legitimately wraps for the
-    // huge u32 values a negative jd casts to (BC-year DOY inputs, e.g.
-    // '4955-120@BC'::timestamp — real 18.3 rejects downstream with 22008;
-    // fuzz witness p1-laney). Unsigned wrap is defined in C; match it.
-    julian = julian.wrapping_add(60 + quad * 3 + extra / 146097);
+    let extra = (julian.wrapping_sub(quad.wrapping_mul(146097)))
+        .wrapping_mul(4)
+        .wrapping_add(3);
+    julian = julian.wrapping_add(60u32.wrapping_add(quad.wrapping_mul(3)).wrapping_add(extra / 146097));
     quad = julian / 1461;
-    julian -= quad * 1461;
-    let mut y = (julian * 4 / 1461) as i32;
-    julian = if y != 0 { (julian + 305) % 365 } else { (julian + 306) % 366 } + 123;
-    y += (quad * 4) as i32;
-    *year = y - 4800;
-    quad = julian * 2141 / 65536;
-    *day = (julian - 7834 * quad / 256) as i32;
-    *month = ((quad + 10) % 12) as i32 + 1;
+    julian = julian.wrapping_sub(quad.wrapping_mul(1461));
+    let mut y = (julian.wrapping_mul(4) / 1461) as i32;
+    julian = if y != 0 {
+        julian.wrapping_add(305) % 365
+    } else {
+        julian.wrapping_add(306) % 366
+    }
+    .wrapping_add(123);
+    y = y.wrapping_add(quad.wrapping_mul(4) as i32);
+    *year = y.wrapping_sub(4800);
+    quad = julian.wrapping_mul(2141) / 65536;
+    *day = julian.wrapping_sub(7834u32.wrapping_mul(quad) / 256) as i32;
+    *month = ((quad.wrapping_add(10)) % 12) as i32 + 1;
 }
 
 pub const fn j2day(mut date: i32) -> i32 {
