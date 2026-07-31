@@ -100,6 +100,7 @@ extern "C" {
         npath: i32,
         elems: *const *const u8,
         elemlens: *const usize,
+        elemnulls: *const u8,
         as_text: i32,
         out: *mut *const u8,
         outlen: *mut usize,
@@ -562,8 +563,23 @@ fn json_strip_nulls_diff(payload: &[u8]) {
         ),
     }
 
-    // fc plane (2-arg form).
+    // fc plane: 2-arg form, plus the 1-arg dispatch (strip=false) when
+    // flag bit1 is set and the modes agree.
     let img = text_image(json);
+    if flag & 2 != 0 && !strip_in_arrays {
+        let d0 = NullableDatum::value(Datum::from_usize(img.as_ptr() as usize));
+        let (fr1, _) = fc_call::<1>(adt_json::builtins::fc_json_strip_nulls, m, [d0]);
+        match (crc, &fr1) {
+            (0, Ok(d)) => {
+                let cv = unsafe { core::slice::from_raw_parts(out, outlen) };
+                assert!(read_varlena_data(*d) == cv, "fc_json_strip_nulls(1) vs C");
+            }
+            (ce, Err(e)) if ce != 0 => {
+                assert!(sqlstate_i32(e) == ce, "fc_json_strip_nulls(1) sqlstate")
+            }
+            _ => panic!("fc_json_strip_nulls(1) verdict DIVERGENCE"),
+        }
+    }
     let d0 = NullableDatum::value(Datum::from_usize(img.as_ptr() as usize));
     let d1 = NullableDatum::value(Datum::from_bool(strip_in_arrays));
     let (fr, _) = fc_call::<2>(adt_json::builtins::fc_json_strip_nulls, m, [d0, d1]);
@@ -741,11 +757,18 @@ fn json_get_path_diff(payload: &[u8], as_text: bool) {
         return;
     };
     let npath = (np % 5) as usize;
-    let mut elems: Vec<&[u8]> = Vec::with_capacity(npath);
+    // Option = SQL NULL path element (raw length byte >= 200); exercises
+    // get_path_all's array_contains_nulls early-NULL arm.
+    let mut elems: Vec<Option<&[u8]>> = Vec::with_capacity(npath);
     for _ in 0..npath {
         let Some((&el, r2)) = rest.split_first() else {
             return;
         };
+        if el >= 200 {
+            elems.push(None);
+            rest = r2;
+            continue;
+        }
         let el = (el % 33) as usize;
         if r2.len() < el {
             return;
@@ -754,7 +777,7 @@ fn json_get_path_diff(payload: &[u8], as_text: bool) {
         if !text_ok(e) {
             return;
         }
-        elems.push(e);
+        elems.push(Some(e));
         rest = r3;
     }
     let json = rest;
@@ -762,8 +785,12 @@ fn json_get_path_diff(payload: &[u8], as_text: bool) {
         return;
     }
 
-    let ptrs: Vec<*const u8> = elems.iter().map(|e| e.as_ptr()).collect();
-    let lens: Vec<usize> = elems.iter().map(|e| e.len()).collect();
+    let ptrs: Vec<*const u8> = elems
+        .iter()
+        .map(|e| e.map_or(core::ptr::null(), |b| b.as_ptr()))
+        .collect();
+    let lens: Vec<usize> = elems.iter().map(|e| e.map_or(0, |b| b.len())).collect();
+    let nullflags: Vec<u8> = elems.iter().map(|e| u8::from(e.is_none())).collect();
     let mut out: *const u8 = core::ptr::null();
     let mut outlen: usize = 0;
     let mut isnull: i32 = 0;
@@ -774,6 +801,7 @@ fn json_get_path_diff(payload: &[u8], as_text: bool) {
             npath as i32,
             ptrs.as_ptr(),
             lens.as_ptr(),
+            nullflags.as_ptr(),
             as_text as i32,
             &mut out,
             &mut outlen,
@@ -788,26 +816,29 @@ fn json_get_path_diff(payload: &[u8], as_text: bool) {
         COut::Val(unsafe { core::slice::from_raw_parts(out, outlen) })
     };
 
-    // Rust core: get_worker with names + path_index-derived indexes (the
-    // shipped get_path_all decomposition).
     let cx = mcx::MemoryContext::new("json_fuzz");
     let m = cx.mcx();
-    let mut indexes: Vec<i32> = elems
-        .iter()
-        .map(|e| adt_json::getpath::path_index(e))
-        .collect();
-    let r = adt_json::getpath::get_worker(
-        m,
-        json,
-        Some(&elems),
-        Some(&mut indexes),
-        npath,
-        as_text,
-    );
-    check_getter("json_extract_path", as_text, json, &c, &r);
+    if !elems.iter().any(|e| e.is_none()) {
+        // Rust core: get_worker with names + path_index-derived indexes (the
+        // shipped get_path_all decomposition past the null check).
+        let flat: Vec<&[u8]> = elems.iter().map(|e| e.unwrap()).collect();
+        let mut indexes: Vec<i32> = flat
+            .iter()
+            .map(|e| adt_json::getpath::path_index(e))
+            .collect();
+        let r = adt_json::getpath::get_worker(
+            m,
+            json,
+            Some(&flat),
+            Some(&mut indexes),
+            npath,
+            as_text,
+        );
+        check_getter("json_extract_path", as_text, json, &c, &r);
+    }
 
-    // fc plane: real text[] path array image.
-    let opt_elems: Vec<Option<&[u8]>> = elems.iter().map(|e| Some(*e)).collect();
+    // fc plane: real text[] path array image (incl. the null-element arm).
+    let opt_elems: Vec<Option<&[u8]>> = elems.clone();
     let dims = [npath as i32, 0];
     let ndim = usize::from(npath > 0);
     let pimg = text_array_image(ndim, &dims, &opt_elems);

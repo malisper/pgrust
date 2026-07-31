@@ -2171,6 +2171,7 @@ pg_diff_json_get_element(const char *s, size_t len, int32_t idx, int as_text,
 int
 pg_diff_json_get_path(const char *s, size_t len, int npath,
 					  const char *const *elems, const size_t *elemlens,
+					  const uint8_t *elemnulls,
 					  int as_text,
 					  const char **out, size_t *outlen, int *isnull)
 {
@@ -2187,7 +2188,15 @@ pg_diff_json_get_path(const char *s, size_t len, int npath,
 	pd = (Datum *) pg_jsonfam_palloc(sizeof(Datum) * (npath > 0 ? npath : 1));
 	pn = (bool *) pg_jsonfam_palloc0(sizeof(bool) * (npath > 0 ? npath : 1));
 	for (int i = 0; i < npath; i++)
-		pd[i] = PointerGetDatum(pg_jsonfam_mk_text(elems[i], elemlens[i]));
+	{
+		if (elemnulls && elemnulls[i])
+		{
+			pn[i] = true;
+			pd[i] = (Datum) 0;
+		}
+		else
+			pd[i] = PointerGetDatum(pg_jsonfam_mk_text(elems[i], elemlens[i]));
+	}
 	path.ndim = npath > 0 ? 1 : 0;
 	path.dims[0] = npath;
 	path.dims[1] = 0;
