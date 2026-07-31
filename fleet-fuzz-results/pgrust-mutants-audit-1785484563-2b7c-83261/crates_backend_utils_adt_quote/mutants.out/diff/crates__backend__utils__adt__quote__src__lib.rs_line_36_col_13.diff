@@ -1,0 +1,21 @@
+--- crates/backend/utils/adt/quote/src/lib.rs
++++ delete match arm b'a'..= b'z' | b'0'..= b'9' | b'_' in quote_identifier
+@@ -28,17 +28,17 @@
+ pub fn quote_identifier<'a, 'mcx>(
+     mcx: Mcx<'mcx>,
+     ident: &'a [u8],
+ ) -> PgResult<QuotedIdent<'a, 'mcx>> {
+     let mut nquotes = 0usize;
+     let mut safe = matches!(ident.first(), Some(b'a'..=b'z' | b'_'));
+     for &ch in ident {
+         match ch {
+-            b'a'..=b'z' | b'0'..=b'9' | b'_' => {}
++             /* ~ changed by cargo-mutants ~ */
+             b'"' => {
+                 safe = false;
+                 nquotes += 1;
+             }
+             _ => safe = false,
+         }
+     }
+ 

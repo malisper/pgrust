@@ -1,0 +1,21 @@
+--- crates/backend/utils/adt/quote/src/lib.rs
++++ replace == with != in quote_literal
+@@ -84,17 +84,17 @@
+ pub fn quote_literal<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<Varlena<'mcx>> {
+     let mut out = varlena::image_with_header(mcx, 2 * src.len() + 3)?;
+     if src.contains(&b'\\') {
+         out.push(b'E');
+     }
+     out.push(b'\'');
+     let mut start = 0;
+     for (i, &ch) in src.iter().enumerate() {
+-        if ch == b'\'' || ch == b'\\' {
++        if ch == b'\'' || ch != /* ~ changed by cargo-mutants ~ */ b'\\' {
+             mcx::vec_append_bytes(&mut out, &src[start..=i])?;
+             out.push(ch);
+             start = i + 1;
+         }
+     }
+     mcx::vec_append_bytes(&mut out, &src[start..])?;
+     out.push(b'\'');
+     Ok(Varlena::from_image(out))

@@ -1,0 +1,27 @@
+--- crates/backend/utils/adt/quote/src/builtins.rs
++++ replace fc_quote_nullable -> PgResult<Datum> with PgResult::from(Default::default())
+@@ -15,23 +15,17 @@
+ pub fn fc_quote_literal(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+     // SAFETY: catalog arg 0 is non-null text (strict fn).
+     let t = unsafe { fcinfo.arg_varlena_packed(0)? };
+     let mcx = fcinfo.result_mcx();
+     Ok(varlena_result(crate::quote_literal(mcx, t.data())?))
+ }
+ 
+ pub fn fc_quote_nullable(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+-    let mcx = fcinfo.result_mcx();
+-    if fcinfo.argisnull(0) {
+-        return Ok(varlena_result(varlena::cstring_to_text(mcx, b"NULL")?));
+-    }
+-    // SAFETY: nullness checked above; catalog arg 0 is text.
+-    let t = unsafe { fcinfo.arg_varlena_packed(0)? };
+-    Ok(varlena_result(crate::quote_literal(mcx, t.data())?))
++    PgResult::from(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ const fn b(foid: Oid, name: &'static str, strict: bool, func: PGFunction) -> FmgrBuiltin {
+     FmgrBuiltin { foid, name, nargs: 1, strict, retset: false, func }
+ }
+ 
+ // pg_proc.dat rows; 1285/1290 are the SQL-language anyelement variants.
+ pub const QUOTE_BUILTINS: &[FmgrBuiltin] = &[

@@ -1,0 +1,16 @@
+crates/backend/utils/adt/quote/src/lib.rs:36:13: delete match arm b'a'..= b'z' | b'0'..= b'9' | b'_' in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:39:25: replace += with -= in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:51:23: replace && with || in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:51:18: replace >= with < in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:51:64: replace != with == in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:60:72: replace + with - in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:67:23: replace + with - in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:64:15: replace == with != in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:67:23: replace + with * in quote_identifier
+crates/backend/utils/adt/quote/src/lib.rs:85:65: replace + with - in quote_literal
+crates/backend/utils/adt/quote/src/lib.rs:85:53: replace * with / in quote_literal
+crates/backend/utils/adt/quote/src/lib.rs:92:15: replace == with != in quote_literal
+crates/backend/utils/adt/quote/src/lib.rs:92:24: replace || with && in quote_literal
+crates/backend/utils/adt/quote/src/lib.rs:95:23: replace + with - in quote_literal
+crates/backend/utils/adt/quote/src/lib.rs:92:30: replace == with != in quote_literal
+crates/backend/utils/adt/quote/src/lib.rs:95:23: replace + with * in quote_literal
