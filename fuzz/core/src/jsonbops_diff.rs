@@ -326,8 +326,15 @@ fn cmp_arm(inp: &Input<'_>) {
     let b = adt_jsonb::builtins::fc_jsonb_cmp;
     let (r, _) = fc_call(b, m, [jb1, jb2]);
     let r_cmp = r.expect("jsonb_cmp cannot fail post-parse").as_i32();
+    // RATIFIED PLATFORM NON-SURFACE (uuid_diff precedent): string elements
+    // compare via varstr_cmp's C-collation memcmp, whose MAGNITUDE is
+    // implementation-defined — witnessed three values for one input pair on
+    // 2026-07-31: CI cluster sancov glibc C=1, docker postgres:18.3 glibc=22,
+    // pgrust varstrfastcmp_c=49 (jsonb_cmp('"ab"','"a1e0000bc"')). The
+    // defined surface is the SIGN; the six bool wrappers below assert the
+    // exact verdict plane on top of it.
     assert!(
-        r_cmp == c_cmp,
+        r_cmp.signum() == c_cmp.signum(),
         "jsonb_cmp DIVERGENCE {:?} vs {:?}: C={c_cmp} Rust={r_cmp}",
         inp.doc1, doc2
     );
