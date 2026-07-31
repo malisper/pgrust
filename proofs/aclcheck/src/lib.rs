@@ -1989,12 +1989,14 @@ mod proofs {
                 pgq_rname_found[i] = f as c_int;
                 pgq_rname_oid[i] = o;
                 R_RNAME_NAME[i] = [0; 64];
+                // memset (no unwind-bearing loop): the old per-byte
+                // zero-fill loop ran 64-len iterations and forced every
+                // caller to unwind >= 65 (CI cluster FAILED artifacts were this
+                // loop's unwinding assertion, not an equivalence defect).
+                core::ptr::write_bytes(pgq_rname_name[i].as_mut_ptr(), 0, 64);
                 for (j, &b) in names[i].iter().enumerate() {
                     R_RNAME_NAME[i][j] = b;
                     pgq_rname_name[i][j] = b as c_char;
-                }
-                for j in names[i].len()..64 {
-                    pgq_rname_name[i][j] = 0;
                 }
             }
             R_RNAME_LATCH = 0;
@@ -2008,7 +2010,14 @@ mod proofs {
         /// Numeric-fallback arms are fenced to found roles here (the
         /// sprintf model is exercised in the spot below).  Data-dependent
         /// output length: expect the CNF-width cost law; see runqueue.
-        eq_aclitemout_named, 20, {
+        // unwind 50 (was 20): the CI cluster dark-harness sweep FAILED (70s at
+        // 33d7d09d31) was proofs::arm_rname.unwind.1 — the pgq-side
+        // 64-len zero-fill loop (same defect class fixed earlier in
+        // spot_aclitemout_numeric); that loop is now a memset in
+        // arm_rname. The remaining bound is the output-image compare
+        // loop: clen <= 2 + 6(quoted grantee) + 15 privs + 15 stars + 1 +
+        // 6(quoted grantor) ~= 45, so 20 was insufficient for it too.
+        eq_aclitemout_named, 50, {
             arm_catalog();
             arm_role_seams(kani::any());
             arm_rname([b"r1", b"a\"b"]);

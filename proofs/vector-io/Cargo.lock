@@ -179,6 +179,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "numutils",
+ "pg_string",
  "pqformat",
  "stringinfo",
  "typcache",
@@ -965,6 +966,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_string"
+version = "0.0.0"
+dependencies = [
+ "string_seams",
+]
+
+[[package]]
 name = "pg_strong_random"
 version = "0.1.0"
 dependencies = [
@@ -1101,6 +1109,8 @@ version = "0.1.0"
 dependencies = [
  "adt_int",
  "adt_scalar",
+ "allocator-api2",
+ "cc",
  "datum",
  "mcx",
  "proof_support",
@@ -1388,6 +1398,13 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "string_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
 ]
 
 [[package]]
