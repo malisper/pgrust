@@ -376,3 +376,9 @@ pub use rowtypes_diff::rowtypes_diff;
 // array_userfuncs_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-array_userfuncs_diff.md.
 pub mod array_userfuncs_diff;
 pub use array_userfuncs_diff::array_userfuncs_diff;
+// jsonbio_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-jsonbio_diff.md.
+pub mod jsonbio_diff;
+pub use jsonbio_diff::jsonbio_diff;
+// jsonbops_diff: two-doc ops/mutate/getfield sibling (p1-lanev).
+pub mod jsonbops_diff;
+pub use jsonbops_diff::jsonbops_diff;

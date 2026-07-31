@@ -105,6 +105,11 @@ typcache = { path = "../../crates/backend/utils/cache/typcache" }
 tupdesc = { path = "../../crates/backend/access/common/tupdesc" }
 heaptuple = { path = "../../crates/backend/access/common/heaptuple" }
 namespace_seams = { path = "../../crates/backend/catalog/namespace_seams" }
+adt_jsonb = { path = "../../crates/backend/utils/adt/jsonb" }  # jsonbio_diff (scaffold.py)
+# jsonbops_diff (p1-lanev): text[]-arg detoast + C-collation string cmp seam
+detoast = { path = "../../crates/backend/access/common/detoast" }
+detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
+pg_locale_seams = { path = "../../crates/backend/utils/adt/pg_locale_seams" }
 
 [build-dependencies]
 cc = "1"

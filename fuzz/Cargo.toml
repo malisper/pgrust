@@ -280,6 +280,10 @@ path = "fuzz_targets/wcharfam_diff.rs"
 [[bin]]
 name = "rowtypes_diff"
 path = "fuzz_targets/rowtypes_diff.rs"
+# jsonbio_diff: scaffolded by fuzz/scaffold.py — see README-TODO-jsonbio_diff.md.
+[[bin]]
+name = "jsonbio_diff"
+path = "fuzz_targets/jsonbio_diff.rs"
 test = false
 doc = false
 bench = false
@@ -288,6 +292,10 @@ bench = false
 [[bin]]
 name = "array_userfuncs_diff"
 path = "fuzz_targets/array_userfuncs_diff.rs"
+# jsonbops_diff: two-doc ops/mutate/getfield sibling of jsonbio_diff (p1-lanev).
+[[bin]]
+name = "jsonbops_diff"
+path = "fuzz_targets/jsonbops_diff.rs"
 test = false
 doc = false
 bench = false

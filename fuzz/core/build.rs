@@ -100,6 +100,34 @@ fn main() {
         .compile("pg_difffuzz_wcharfam");
     println!("cargo:rerun-if-changed=csrc/pg_wcharfam.c");
     println!("cargo:rerun-if-changed=csrc/wcharfam");
+    // jsonbfam oracle (p1-lanev, jsonbio_diff): verbatim 18.3 jsonapi.c /
+    // wchar.c / stringinfo.c / jsonb_util.c / qsort_arg.c whole-file TUs plus
+    // extracted jsonb.c / jsonfuncs.c / numeric.c / json.c / pqformat.c /
+    // mbutils.c segments (csrc/jsonbfam/*.inc), against the jsonbfam shim
+    // header set — a SEPARATE build because its shim postgres.h would
+    // collide with the ryu/float shims of the main oracle lib.
+    // float4in/8in_internal are extern'd from pg_float_io.c (main lib).
+    let mut jsonbfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        jsonbfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for f in [
+        "pg_jsonbio_io.c", "jsonbfam/jsonapi.c", "jsonbfam/wchar.c",
+        "jsonbfam/stringinfo.c", "jsonbfam/jsonb_util.c",
+        "jsonbfam/qsort_arg.c",
+        // jsonbops_diff extension (p1-lanev): ops/mutate/getfield oracle
+        "pg_jsonbops.c", "jsonbfam/jsonb_op.c", "jsonbfam/hashfn.c",
+    ] {
+        jsonbfam.file(format!("csrc/{f}"));
+    }
+    jsonbfam
+        .include("csrc/jsonbfam/shim")
+        .include("csrc/jsonbfam/include")
+        .include("csrc")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .compile("pg_difffuzz_jsonbfam");
 
     // SYMBOL ISOLATION (landing fix, merge/p1-wave1 2026-07-30): three lane
     // oracles (hashenc/p1-lanee, cryptofam/p1-lanef, enc_tables/p1-laneg in
