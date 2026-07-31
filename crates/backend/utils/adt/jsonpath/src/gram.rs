@@ -312,6 +312,66 @@ struct Parser<'a, 'e, 's, 'mcx> {
 type PK<'mcx> = (Item<'mcx>, Kind);
 
 impl<'a, 'e, 's, 'mcx> Parser<'a, 'e, 's, 'mcx> {
+    /// RECURSION GUARD (no C-line counterpart in jsonpath_gram.y — see below).
+    ///
+    /// C 18.3's parser is BISON-generated: its parse/value stacks live on the
+    /// HEAP, bounded by YYMAXDEPTH, and exhaustion is a clean soft-errorable
+    /// 42601 "memory exhausted" (jsonpath_yyerror). This hand-written
+    /// recursive-descent port recurses on the NATIVE stack instead, so without
+    /// a guard a deep-enough nesting aborts the whole (thread-per-backend,
+    /// single-process) server: measured pre-fix on the release build with the
+    /// 8 MiB backend stack, `('('*N || '1' || ')'*N)::jsonpath` was OK at
+    /// N=8000 and `fatal runtime error: stack overflow` at N=12000, while real
+    /// PG 18.3 (docker, verbose) parses up to N=9995 and errors 42601 from
+    /// N=9996 (= YYMAXDEPTH).
+    ///
+    /// PARITY DECISION (option (a) of the lane charter): guard with the
+    /// crate-standard check_stack_depth (ERRCODE_STATEMENT_TOO_COMPLEX 54001,
+    /// threshold = max_stack_depth), exactly like the FLATTEN and PRINT walks
+    /// in jsonpath.c:249/529 / path.rs:188/835. We do NOT fabricate C's 42601
+    /// "memory exhausted": mirroring bison's bound exactly would require
+    /// emulating per-production LALR stack growth (the entry count per nesting
+    /// level differs by shape), and an inexact mirror would misclassify inputs
+    /// in the region PG still accepts. Residual (documented in
+    /// fuzz/README-TODO-jsonpath_diff.md, divergence 2): in the deep region
+    /// both sides raise a clean, soft-errorable error, but the errcode (54001
+    /// vs 42601) and the threshold (max_stack_depth bytes vs YYMAXDEPTH
+    /// entries) differ. The region lies far outside the differential's
+    /// MAX_TEXT=512 domain on server-shaped thresholds.
+    ///
+    /// PLACEMENT — one check in parse_unary + one in
+    /// parse_delimited_predicate makes the bound TOTAL, and no single check
+    /// can. The recursive (back-edge) calls of this parser are exactly:
+    /// parse_paren_primary->parse_or, parse_delimited_predicate->{parse_or,
+    /// parse_additive}, parse_accessor_op->parse_or (filter),
+    /// parse_index_elem->parse_additive, parse_comparison->parse_additive
+    /// (rhs), parse_expr_primary->parse_delimited_predicate,
+    /// parse_not->parse_delimited_predicate, and parse_unary->parse_unary.
+    /// Deleting {parse_unary, parse_delimited_predicate} from the call graph
+    /// leaves it acyclic: descending from parse_or or parse_additive, every
+    /// path to any back-edge goes through parse_multiplicative->parse_unary
+    /// or through parse_not->parse_delimited_predicate, and the two leftover
+    /// self-contained cycles (the unary +/- chain and the !(...) chain) each
+    /// contain one of the two directly. Neither check alone suffices: the
+    /// !(!(...)) cycle {not, delimited_predicate, or, and, comparison} and
+    /// the unary-chain cycle {unary} are vertex-disjoint.
+    ///
+    /// ERROR PLUMBING: matches the crate's other in-parser reports (see
+    /// parse_decimal_args) — with an armed escontext the error is recorded
+    /// softly and `aborted` stops parsejsonpath from overwriting it with a
+    /// generic syntax error; without one it raises as a hard PgError. It never
+    /// surfaces as a bare Ok(None) backtrack: `aborted` is checked before any
+    /// alternative could be reported as success.
+    fn check_depth(&mut self) -> POut<()> {
+        match ::stack_depth::check_stack_depth() {
+            Ok(()) => Ok(Some(())),
+            Err(e) => {
+                self.aborted = true;
+                ereturn(self.escontext.as_deref_mut(), None, *e)
+            }
+        }
+    }
+
     fn fill(&mut self) -> PgResult<()> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.lexer.next_token(self.escontext)?);
@@ -612,6 +672,10 @@ impl<'a, 'e, 's, 'mcx> Parser<'a, 'e, 's, 'mcx> {
     }
 
     fn parse_unary(&mut self) -> POut<PK<'mcx>> {
+        // Recursion guard leg 1 of 2 — see check_depth for the totality proof.
+        if self.check_depth()?.is_none() {
+            return Ok(None);
+        }
         if self.at_char(b'+')? {
             self.advance();
             let (e, k) = match self.parse_unary()? {
@@ -707,6 +771,10 @@ impl<'a, 'e, 's, 'mcx> Parser<'a, 'e, 's, 'mcx> {
     }
 
     fn parse_delimited_predicate(&mut self) -> POut<Item<'mcx>> {
+        // Recursion guard leg 2 of 2 — see check_depth for the totality proof.
+        if self.check_depth()?.is_none() {
+            return Ok(None);
+        }
         // EXISTS_P '(' expr ')' — expr only.
         if self.peek_tok()? == Some(Token::ExistsP) {
             self.advance();
