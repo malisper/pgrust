@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  p1-laneah trailing mutants audit: common/wchar + mb/mbutils (DONE gate closed; survivors = findings) [LONG-JOB: CI-notifier auto-resubmit after DeadlineExceeded at the default cap]
+
+job_name: pgrust-mutants-audit-1785511537-5f96-94647
+job_type: mutants-audit
+git_ref: 34df12d7e3825ea3272c14b1a8d513cecd248ddc
+repo_url: https://github.com/malisper/pgrust.git
+build_kind: fast
+sha: 34df12d7e382
+started_utc: 2026-07-31T16:26:31Z
+hostname: pgrust-mutants-audit-1785511537-5f96-94647-r2-fc5p4

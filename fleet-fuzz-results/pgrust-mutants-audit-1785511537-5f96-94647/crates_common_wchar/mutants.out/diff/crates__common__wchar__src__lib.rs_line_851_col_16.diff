@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace < with == in pg_eucjp_verifychar
+@@ -843,17 +843,17 @@
+ fn pg_ascii_verifystr(s: &[u8]) -> i32 {
+     nul_pos(s)
+ }
+ 
+ fn pg_eucjp_verifychar(s: &[u8]) -> i32 {
+     let len = s.len();
+     let c1 = s[0];
+     if c1 == SS2 {
+-        if len < 2 {
++        if len == /* ~ changed by cargo-mutants ~ */ 2 {
+             return -1;
+         }
+         if !(0xa1..=0xdf).contains(&s[1]) {
+             return -1;
+         }
+         2
+     } else if c1 == SS3 {
+         if len < 3 {

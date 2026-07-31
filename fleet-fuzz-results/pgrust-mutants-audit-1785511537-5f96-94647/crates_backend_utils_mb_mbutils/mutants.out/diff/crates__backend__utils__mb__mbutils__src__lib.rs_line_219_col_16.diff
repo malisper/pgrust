@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ delete - in pg_valid_server_encoding
+@@ -211,17 +211,17 @@
+         return -1;
+     }
+     enc
+ }
+ 
+ pub fn pg_valid_server_encoding(name: &str) -> pg_enc {
+     let enc = pg_char_to_encoding(name);
+     if enc < 0 || !pg_valid_be_encoding(enc) {
+-        return -1;
++        return  /* ~ changed by cargo-mutants ~ */1;
+     }
+     enc
+ }
+ 
+ pub fn pg_encoding_to_char(encoding: pg_enc) -> &'static str {
+     if pg_valid_encoding(encoding) {
+         enc_name(encoding)
+     } else {

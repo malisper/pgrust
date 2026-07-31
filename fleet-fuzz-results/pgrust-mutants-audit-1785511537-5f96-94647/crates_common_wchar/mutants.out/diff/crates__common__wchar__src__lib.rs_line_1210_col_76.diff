@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace | with &
+@@ -1202,17 +1202,17 @@
+ const L2A: u32 = CS1 << BGN;
+ const L3A: u32 = P3A << BGN;
+ const L3B: u32 = CS2 << BGN;
+ const L3C: u32 = P3B << BGN;
+ const L4A: u32 = P4A << BGN;
+ const L4B: u32 = CS3 << BGN;
+ const L4C: u32 = P4B << BGN;
+ const CR1: u32 = (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3B) | (CS2 << P4B);
+-const CR2: u32 = (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3B) | (CS2 << P4A);
++const CR2: u32 = (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3B) & /* ~ changed by cargo-mutants ~ */ (CS2 << P4A);
+ const CR3: u32 = (END << CS1) | (CS1 << CS2) | (CS2 << CS3) | (CS1 << P3A) | (CS2 << P4A);
+ const ILL: u32 = ERR;
+ 
+ // Extracting bytes from u64 words keeps the byte feed scalar; a plain byte
+ // loop is auto-vectorized into ld1 + per-byte umov, which stalls the state
+ // chain (dense-multibyte ns 1.04x C, see docs/optimizations/wchar-parity.md).
+ #[inline]
+ fn utf8_advance(chunk: &[u8; STRIDE_LENGTH], state: &mut u32) {

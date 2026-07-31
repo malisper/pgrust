@@ -1,0 +1,58 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_do_encoding_conversion -> PgResult<Option<PgVec<'mcx, u8>>> with PgResult::from_iter([Some(PgVec::new(1))])
+@@ -433,54 +433,17 @@
+ }
+ 
+ pub fn pg_do_encoding_conversion<'mcx>(
+     mcx: Mcx<'mcx>,
+     src: &[u8],
+     src_encoding: pg_enc,
+     dest_encoding: pg_enc,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+-    if src.is_empty() {
+-        return Ok(None);
+-    }
+-    if src_encoding == dest_encoding {
+-        return Ok(None);
+-    }
+-    if dest_encoding == PG_SQL_ASCII {
+-        return Ok(None);
+-    }
+-    if src_encoding == PG_SQL_ASCII {
+-        pg_verify_mbstr(dest_encoding, src, false)?;
+-        return Ok(None);
+-    }
+-
+-    if !xact_seams::is_transaction_state::call() {
+-        return Err(internal_error(
+-            "cannot perform encoding conversion outside a transaction",
+-        ));
+-    }
+-
+-    let proc = namespace_seams::find_default_conversion_proc::call(src_encoding, dest_encoding)?;
+-    if proc == InvalidOid {
+-        return Err(no_default_conversion_error(src_encoding, dest_encoding));
+-    }
+-
+-    if src.len() >= MAX_ALLOC_HUGE_SIZE / MAX_CONVERSION_GROWTH {
+-        return Err(too_long_error(src.len()));
+-    }
+-
+-    // General case: C's OidFunctionCall6 re-resolves per call (only the
+-    // client<->server default pair is cached); mirrored here.
+-    let resolved = resolve_conv_proc(proc)?;
+-    let (_, result) = convert_with_proc(mcx, resolved, src_encoding, dest_encoding, src, false)?;
+-
+-    if src.len() > 1_000_000 && result.len() >= MAX_ALLOC_SIZE {
+-        return Err(too_long_error(src.len()));
+-    }
+-    Ok(Some(result))
++    PgResult::from_iter([Some(PgVec::new(1))]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// C `pg_do_encoding_conversion_buf`: `proc` was already looked up; the input
+ /// is clipped so the worst-case output fits a `dst_capacity`-byte buffer.
+ /// Returns (source bytes converted, output bytes without the trailing NUL).
+ pub fn pg_do_encoding_conversion_buf<'mcx>(
+     mcx: Mcx<'mcx>,
+     proc: Oid,

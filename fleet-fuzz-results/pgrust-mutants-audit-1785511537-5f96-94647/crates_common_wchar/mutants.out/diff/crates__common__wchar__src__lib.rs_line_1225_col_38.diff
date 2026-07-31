@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace >> with << in utf8_advance
+@@ -1217,17 +1217,17 @@
+ #[inline]
+ fn utf8_advance(chunk: &[u8; STRIDE_LENGTH], state: &mut u32) {
+     let mut st = *state;
+     let mut i = 0;
+     while i < STRIDE_LENGTH {
+         let w = u64::from_le_bytes(chunk[i..i + 8].try_into().unwrap());
+         let mut k = 0;
+         while k < 64 {
+-            st = UTF8_TRANSITION[((w >> k) & 0xff) as usize] >> (st & 31);
++            st = UTF8_TRANSITION[((w << /* ~ changed by cargo-mutants ~ */ k) & 0xff) as usize] >> (st & 31);
+             k += 8;
+         }
+         i += 8;
+     }
+     *state = st & 31;
+ }
+ 
+ fn pg_utf8_verifystr(s: &[u8]) -> i32 {

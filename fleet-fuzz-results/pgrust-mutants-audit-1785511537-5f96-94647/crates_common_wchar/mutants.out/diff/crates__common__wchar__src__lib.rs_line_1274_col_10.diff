@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace - with + in pg_utf8_verifystr
+@@ -1266,17 +1266,17 @@
+             continue;
+         }
+         let l = pg_utf8_verifychar(rest);
+         if l == -1 {
+             break;
+         }
+         rest = &rest[l as usize..];
+     }
+-    (len - rest.len()) as i32
++    (len + /* ~ changed by cargo-mutants ~ */ rest.len()) as i32
+ }
+ 
+ pub fn pg_utf8_islegal(source: &[u8], length: i32) -> bool {
+     match length {
+         4 => {
+             if !(0x80..=0xbf).contains(&source[3]) {
+                 return false;
+             }

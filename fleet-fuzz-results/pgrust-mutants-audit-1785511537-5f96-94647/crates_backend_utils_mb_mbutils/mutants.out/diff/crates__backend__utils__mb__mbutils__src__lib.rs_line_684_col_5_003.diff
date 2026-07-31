@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_mb2wchar_with_len -> PgResult<PgVec<'mcx, pg_wchar>> with PgResult::from(PgVec::new())
+@@ -676,17 +676,17 @@
+     unicode_to_utf8(c, &mut c_as_utf8);
+     let n = pg_utf_mblen(&c_as_utf8) as usize;
+     let (consumed, out) =
+         convert_with_proc(mcx, proc, PG_UTF8, server_encoding, &c_as_utf8[..n], true)?;
+     Ok((consumed == n as i32).then_some(out))
+ }
+ 
+ pub fn pg_mb2wchar_with_len<'mcx>(mcx: Mcx<'mcx>, from: &[u8]) -> PgResult<PgVec<'mcx, pg_wchar>> {
+-    pg_encoding_mb2wchar_with_len(mcx, database_encoding(), from)
++    PgResult::from(PgVec::new()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_encoding_mb2wchar_with_len<'mcx>(
+     mcx: Mcx<'mcx>,
+     encoding: pg_enc,
+     from: &[u8],
+ ) -> PgResult<PgVec<'mcx, pg_wchar>> {
+     let conv = pg_wchar_table[encoding as usize]

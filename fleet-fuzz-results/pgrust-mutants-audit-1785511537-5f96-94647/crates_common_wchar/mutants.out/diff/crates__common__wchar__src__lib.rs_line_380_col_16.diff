@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace += with -= in pg_wchar2euc_with_len
+@@ -372,17 +372,17 @@
+     let mut cnt = 0i32;
+     while len > 0 && from[fi] != 0 {
+         let w = from[fi];
+         if (w >> 24) as u8 != 0 {
+             to[ti] = (w >> 24) as u8;
+             to[ti + 1] = (w >> 16) as u8;
+             to[ti + 2] = (w >> 8) as u8;
+             to[ti + 3] = w as u8;
+-            ti += 4;
++            ti -= /* ~ changed by cargo-mutants ~ */ 4;
+             cnt += 4;
+         } else if (w >> 16) as u8 != 0 {
+             to[ti] = (w >> 16) as u8;
+             to[ti + 1] = (w >> 8) as u8;
+             to[ti + 2] = w as u8;
+             ti += 3;
+             cnt += 3;
+         } else if (w >> 8) as u8 != 0 {

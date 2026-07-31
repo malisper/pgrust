@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace != with == in pg_verify_mbstr
+@@ -1074,17 +1074,17 @@
+ 
+ pub fn pg_verifymbstr(mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+     pg_verify_mbstr(database_encoding(), mbstr, no_error)
+ }
+ 
+ pub fn pg_verify_mbstr(encoding: pg_enc, mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+     debug_assert!(pg_valid_encoding(encoding));
+     let oklen = pg_encoding_verifymbstr(encoding, mbstr) as usize;
+-    if oklen != mbstr.len() {
++    if oklen == /* ~ changed by cargo-mutants ~ */ mbstr.len() {
+         if no_error {
+             return Ok(false);
+         }
+         return Err(report_invalid_encoding(encoding, &mbstr[oklen..]));
+     }
+     Ok(true)
+ }
+ 

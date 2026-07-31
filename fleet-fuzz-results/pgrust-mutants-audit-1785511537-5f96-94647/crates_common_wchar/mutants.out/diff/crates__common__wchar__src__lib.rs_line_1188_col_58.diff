@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace == with != in is_valid_ascii
+@@ -1180,17 +1180,17 @@
+     let mut zero_cum: u64 = 0x8080_8080_8080_8080;
+     let mut i = 0;
+     while i < STRIDE_LENGTH {
+         let w = u64::from_ne_bytes(chunk[i..i + 8].try_into().unwrap());
+         zero_cum &= w.wrapping_add(0x7f7f_7f7f_7f7f_7f7f);
+         highbit_cum |= w;
+         i += 8;
+     }
+-    highbit_cum & 0x8080_8080_8080_8080 == 0 && zero_cum == 0x8080_8080_8080_8080
++    highbit_cum & 0x8080_8080_8080_8080 == 0 && zero_cum != /* ~ changed by cargo-mutants ~ */ 0x8080_8080_8080_8080
+ }
+ 
+ const ERR: u32 = 0;
+ const BGN: u32 = 11;
+ const CS1: u32 = 16;
+ const CS2: u32 = 1;
+ const CS3: u32 = 5;
+ const P3A: u32 = 6;

@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in pg_verify_mbstr_len
+@@ -1088,17 +1088,17 @@
+     Ok(true)
+ }
+ 
+ /// Verify and count characters: `Ok(count)`, or `Ok(-1)` with `no_error`.
+ pub fn pg_verify_mbstr_len(encoding: pg_enc, mbstr: &[u8], no_error: bool) -> PgResult<i32> {
+     debug_assert!(pg_valid_encoding(encoding));
+ 
+     if pg_encoding_max_length(encoding) <= 1 {
+-        return match mbstr.iter().position(|&b| b == 0) {
++        return match mbstr.iter().position(|&b| b != /* ~ changed by cargo-mutants ~ */ 0) {
+             None => Ok(mbstr.len() as i32),
+             Some(_) if no_error => Ok(-1),
+             Some(nullpos) => Err(report_invalid_encoding(encoding, &mbstr[nullpos..])),
+         };
+     }
+ 
+     let mut mb_len = 0;
+     let mut pos = 0usize;

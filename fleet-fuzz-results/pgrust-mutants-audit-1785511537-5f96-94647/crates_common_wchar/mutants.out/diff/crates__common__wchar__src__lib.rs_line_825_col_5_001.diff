@@ -1,0 +1,25 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_gb18030_dsplen -> i32 with 1
+@@ -817,21 +817,17 @@
+     } else if (0x30..=0x39).contains(&s[1]) {
+         4
+     } else {
+         2
+     }
+ }
+ 
+ fn pg_gb18030_dsplen(s: &[u8]) -> i32 {
+-    if is_highbit_set(s[0]) {
+-        2
+-    } else {
+-        pg_ascii_dsplen(s)
+-    }
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn nul_pos(s: &[u8]) -> i32 {
+     match s.iter().position(|&b| b == 0) {
+         Some(p) => p as i32,
+         None => s.len() as i32,
+     }
+ }

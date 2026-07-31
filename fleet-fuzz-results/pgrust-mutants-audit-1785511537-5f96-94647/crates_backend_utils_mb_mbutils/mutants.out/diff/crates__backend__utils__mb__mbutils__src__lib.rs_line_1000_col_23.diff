@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in pg_utf8_increment
+@@ -992,17 +992,17 @@
+             _ => 0xBF,
+         };
+         if charptr[1] < limit {
+             charptr[1] += 1;
+             return true;
+         }
+     }
+     let a = charptr[0];
+-    if a == 0x7F || a == 0xDF || a == 0xEF || a == 0xF4 {
++    if a == 0x7F || a != /* ~ changed by cargo-mutants ~ */ 0xDF || a == 0xEF || a == 0xF4 {
+         return false;
+     }
+     // C `charptr[0]++` is defined unsigned wraparound: 0xFF -> 0x00 (an
+     // out-of-contract input C happily "increments"). wrapping_add keeps the
+     // exact C image; a plain += panics under fuzz/debug overflow checks
+     // (found by wcharfam_diff).
+     charptr[0] = charptr[0].wrapping_add(1);
+     true

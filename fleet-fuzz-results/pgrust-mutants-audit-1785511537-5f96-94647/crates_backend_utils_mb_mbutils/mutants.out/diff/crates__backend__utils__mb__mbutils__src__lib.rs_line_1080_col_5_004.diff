@@ -1,0 +1,29 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_verify_mbstr -> PgResult<bool> with PgResult::from_iter([false])
+@@ -1072,25 +1072,17 @@
+     }
+ }
+ 
+ pub fn pg_verifymbstr(mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+     pg_verify_mbstr(database_encoding(), mbstr, no_error)
+ }
+ 
+ pub fn pg_verify_mbstr(encoding: pg_enc, mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+-    debug_assert!(pg_valid_encoding(encoding));
+-    let oklen = pg_encoding_verifymbstr(encoding, mbstr) as usize;
+-    if oklen != mbstr.len() {
+-        if no_error {
+-            return Ok(false);
+-        }
+-        return Err(report_invalid_encoding(encoding, &mbstr[oklen..]));
+-    }
+-    Ok(true)
++    PgResult::from_iter([false]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Verify and count characters: `Ok(count)`, or `Ok(-1)` with `no_error`.
+ pub fn pg_verify_mbstr_len(encoding: pg_enc, mbstr: &[u8], no_error: bool) -> PgResult<i32> {
+     debug_assert!(pg_valid_encoding(encoding));
+ 
+     if pg_encoding_max_length(encoding) <= 1 {
+         return match mbstr.iter().position(|&b| b == 0) {

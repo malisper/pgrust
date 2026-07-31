@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete ! in pg_gb18030_mblen
+@@ -807,17 +807,17 @@
+     } else {
+         pg_ascii_dsplen(s)
+     }
+ }
+ 
+ /// Like the C, reads `s[1]` when the high bit is set — callers must supply the
+ /// lookahead byte or use [`pg_encoding_mblen_or_incomplete`].
+ fn pg_gb18030_mblen(s: &[u8]) -> i32 {
+-    if !is_highbit_set(s[0]) {
++    if  /* ~ changed by cargo-mutants ~ */is_highbit_set(s[0]) {
+         1
+     } else if (0x30..=0x39).contains(&s[1]) {
+         4
+     } else {
+         2
+     }
+ }
+ 

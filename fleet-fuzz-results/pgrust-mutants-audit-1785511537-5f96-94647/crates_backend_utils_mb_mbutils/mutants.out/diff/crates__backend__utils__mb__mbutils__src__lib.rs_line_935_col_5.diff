@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace GetDatabaseEncoding -> pg_enc with Default::default()
+@@ -927,17 +927,17 @@
+ }
+ 
+ pub fn SetMessageEncoding(encoding: pg_enc) {
+     debug_assert!(pg_valid_encoding(encoding));
+     MESSAGE_ENCODING.with(|e| e.set(encoding));
+ }
+ 
+ pub fn GetDatabaseEncoding() -> pg_enc {
+-    database_encoding()
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn GetDatabaseEncodingName() -> &'static str {
+     enc_name(database_encoding())
+ }
+ 
+ pub fn GetMessageEncoding() -> pg_enc {
+     MESSAGE_ENCODING.with(|e| e.get())

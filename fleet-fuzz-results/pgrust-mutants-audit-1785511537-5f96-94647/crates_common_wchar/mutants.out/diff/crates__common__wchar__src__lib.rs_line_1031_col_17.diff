@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace && with || in pg_gbk_verifychar
+@@ -1023,17 +1023,17 @@
+     verify_str(s, pg_big5_verifychar)
+ }
+ 
+ fn pg_gbk_verifychar(s: &[u8]) -> i32 {
+     let mbl = pg_gbk_mblen(s);
+     if (s.len() as i32) < mbl {
+         return -1;
+     }
+-    if mbl == 2 && nonutf8_invalid_pair(s) {
++    if mbl == 2 || /* ~ changed by cargo-mutants ~ */ nonutf8_invalid_pair(s) {
+         return -1;
+     }
+     for i in 1..mbl as usize {
+         if s[i] == 0 {
+             return -1;
+         }
+     }
+     mbl

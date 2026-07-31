@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/builtins.rs
++++ replace < with == in fc_pg_convert_to
+@@ -75,17 +75,17 @@
+     }
+     convert_common(fcinfo, 0, src_encoding, crate::GetDatabaseEncoding())
+ }
+ 
+ // BYTEA convert_to(TEXT string, NAME dest_encoding_name); src = DB encoding.
+ pub fn fc_pg_convert_to(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+     let dest_name = name_str(unsafe { fcinfo.arg_name(1) });
+     let dest_encoding = crate::pg_char_to_encoding(dest_name);
+-    if dest_encoding < 0 {
++    if dest_encoding == /* ~ changed by cargo-mutants ~ */ 0 {
+         return Err(invalid_encoding_name("destination", dest_name));
+     }
+     convert_common(fcinfo, 0, crate::GetDatabaseEncoding(), dest_encoding)
+ }
+ 
+ // pg_encoding_max_length_sql (mbutils.c): NULL for an invalid encoding number.
+ pub fn fc_pg_encoding_max_length(
+     _flinfo: Option<&mut FmgrInfo>,

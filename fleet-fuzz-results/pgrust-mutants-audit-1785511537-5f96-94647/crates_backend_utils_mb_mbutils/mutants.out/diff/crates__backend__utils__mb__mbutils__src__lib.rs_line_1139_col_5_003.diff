@@ -1,0 +1,50 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace check_encoding_conversion_args -> PgResult<()> with PgResult::from(())
+@@ -1131,46 +1131,17 @@
+ /// C `CHECK_ENCODING_CONVERSION_ARGS`; `-1` expected-encoding means "any".
+ pub fn check_encoding_conversion_args(
+     src_encoding: pg_enc,
+     dest_encoding: pg_enc,
+     len: i32,
+     expected_src_encoding: pg_enc,
+     expected_dest_encoding: pg_enc,
+ ) -> PgResult<()> {
+-    if !pg_valid_encoding(src_encoding) {
+-        return Err(internal_error(&format!(
+-            "invalid source encoding ID: {src_encoding}"
+-        )));
+-    }
+-    if src_encoding != expected_src_encoding && expected_src_encoding >= 0 {
+-        return Err(internal_error(&format!(
+-            "expected source encoding \"{}\", but got \"{}\"",
+-            enc_name(expected_src_encoding),
+-            enc_name(src_encoding)
+-        )));
+-    }
+-    if !pg_valid_encoding(dest_encoding) {
+-        return Err(internal_error(&format!(
+-            "invalid destination encoding ID: {dest_encoding}"
+-        )));
+-    }
+-    if dest_encoding != expected_dest_encoding && expected_dest_encoding >= 0 {
+-        return Err(internal_error(&format!(
+-            "expected destination encoding \"{}\", but got \"{}\"",
+-            enc_name(expected_dest_encoding),
+-            enc_name(dest_encoding)
+-        )));
+-    }
+-    if len < 0 {
+-        return Err(internal_error(
+-            "encoding conversion length must not be negative",
+-        ));
+-    }
+-    Ok(())
++    PgResult::from(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cold]
+ pub fn report_invalid_encoding(encoding: pg_enc, mbstr: &[u8]) -> Box<PgError> {
+     let l = pg_encoding_mblen_or_incomplete(encoding, mbstr);
+     report_invalid_encoding_int(encoding, mbstr, l, mbstr.len() as i32)
+ }
+ 

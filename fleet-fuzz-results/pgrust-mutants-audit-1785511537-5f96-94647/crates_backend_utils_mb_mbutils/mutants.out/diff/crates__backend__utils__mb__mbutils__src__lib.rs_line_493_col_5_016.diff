@@ -1,0 +1,31 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_do_encoding_conversion_buf -> PgResult<(i32, PgVec<'mcx, u8>)> with PgResult::from_iter([(0, PgVec::new(1))])
+@@ -485,27 +485,17 @@
+     mcx: Mcx<'mcx>,
+     proc: Oid,
+     src_encoding: pg_enc,
+     dest_encoding: pg_enc,
+     src: &[u8],
+     dst_capacity: i32,
+     no_error: bool,
+ ) -> PgResult<(i32, PgVec<'mcx, u8>)> {
+-    let cap = (dst_capacity.max(1) as usize - 1) / MAX_CONVERSION_GROWTH;
+-    let srclen = src.len().min(cap);
+-    let resolved = resolve_conv_proc(proc)?;
+-    convert_with_proc(
+-        mcx,
+-        resolved,
+-        src_encoding,
+-        dest_encoding,
+-        &src[..srclen],
+-        no_error,
+-    )
++    PgResult::from_iter([(0, PgVec::new(1))]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ // C returns the source pointer in a register; the Option<PgVec> analog is
+ // >16B (sret through memory) unless the identity arm inlines into the caller.
+ #[inline]
+ pub fn pg_client_to_server<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+     pg_any_to_server(mcx, s, client_encoding())
+ }

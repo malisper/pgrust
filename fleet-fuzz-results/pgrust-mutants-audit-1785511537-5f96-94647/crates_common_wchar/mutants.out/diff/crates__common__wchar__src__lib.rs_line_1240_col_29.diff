@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace || with && in pg_utf8_verifystr
+@@ -1232,17 +1232,17 @@
+ 
+ fn pg_utf8_verifystr(s: &[u8]) -> i32 {
+     let len = s.len();
+     let mut state: u32 = BGN;
+     let mut pos = 0usize;
+     if len >= STRIDE_LENGTH {
+         let (chunks, _) = s.as_chunks::<STRIDE_LENGTH>();
+         for chunk in chunks {
+-            if state != END || !is_valid_ascii(chunk) {
++            if state != END && /* ~ changed by cargo-mutants ~ */ !is_valid_ascii(chunk) {
+                 utf8_advance(chunk, &mut state);
+             }
+         }
+         pos = chunks.len() * STRIDE_LENGTH;
+         // The error state persists, so it only needs one check, here.
+         if state == ERR {
+             // Restart from the beginning so the slow path counts valid bytes.
+             pos = 0;

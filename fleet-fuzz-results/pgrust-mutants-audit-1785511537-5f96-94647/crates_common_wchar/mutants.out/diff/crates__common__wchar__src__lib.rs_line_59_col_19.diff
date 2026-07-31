@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace && with || in pg_valid_be_encoding
+@@ -51,17 +51,17 @@
+ pub const PG_ENCODING_BE_LAST: pg_enc = PG_KOI8U;
+ pub const MAX_MULTIBYTE_CHAR_LEN: i32 = 4;
+ 
+ pub const fn pg_valid_encoding(encoding: pg_enc) -> bool {
+     encoding >= 0 && encoding < _PG_LAST_ENCODING_
+ }
+ 
+ pub const fn pg_valid_be_encoding(encoding: pg_enc) -> bool {
+-    encoding >= 0 && encoding <= PG_ENCODING_BE_LAST
++    encoding >= 0 || /* ~ changed by cargo-mutants ~ */ encoding <= PG_ENCODING_BE_LAST
+ }
+ 
+ pub const fn pg_valid_fe_encoding(encoding: pg_enc) -> bool {
+     pg_valid_encoding(encoding)
+ }
+ 
+ pub const fn pg_encoding_is_client_only(encoding: pg_enc) -> bool {
+     encoding > PG_ENCODING_BE_LAST && encoding < _PG_LAST_ENCODING_

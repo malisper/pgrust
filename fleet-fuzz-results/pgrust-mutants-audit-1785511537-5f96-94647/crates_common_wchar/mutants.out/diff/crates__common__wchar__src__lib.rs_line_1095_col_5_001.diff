@@ -1,0 +1,43 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_utf8_verifychar -> i32 with 1
+@@ -1087,39 +1087,17 @@
+     }
+ }
+ 
+ fn pg_gb18030_verifystr(s: &[u8]) -> i32 {
+     verify_str(s, pg_gb18030_verifychar)
+ }
+ 
+ fn pg_utf8_verifychar(s: &[u8]) -> i32 {
+-    let b = s[0];
+-    let l;
+-    if b & 0x80 == 0 {
+-        if b == 0 {
+-            return -1;
+-        }
+-        return 1;
+-    } else if b & 0xe0 == 0xc0 {
+-        l = 2;
+-    } else if b & 0xf0 == 0xe0 {
+-        l = 3;
+-    } else if b & 0xf8 == 0xf0 {
+-        l = 4;
+-    } else {
+-        l = 1;
+-    }
+-    if l as usize > s.len() {
+-        return -1;
+-    }
+-    if !pg_utf8_islegal(s, l) {
+-        return -1;
+-    }
+-    l
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Shared body of every non-UTF8 `*_verifystr` in wchar.c, monomorphized per
+ /// character verifier.
+ #[inline]
+ fn verify_str(s: &[u8], verifychar: impl Fn(&[u8]) -> i32) -> i32 {
+     let mut rest = s;
+     while let Some((&b, tail)) = rest.split_first() {

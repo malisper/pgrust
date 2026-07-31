@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace & with | in utf8_advance
+@@ -1222,17 +1222,17 @@
+         let w = u64::from_le_bytes(chunk[i..i + 8].try_into().unwrap());
+         let mut k = 0;
+         while k < 64 {
+             st = UTF8_TRANSITION[((w >> k) & 0xff) as usize] >> (st & 31);
+             k += 8;
+         }
+         i += 8;
+     }
+-    *state = st & 31;
++    *state = st | /* ~ changed by cargo-mutants ~ */ 31;
+ }
+ 
+ fn pg_utf8_verifystr(s: &[u8]) -> i32 {
+     let len = s.len();
+     let mut state: u32 = BGN;
+     let mut pos = 0usize;
+     if len >= STRIDE_LENGTH {
+         let (chunks, _) = s.as_chunks::<STRIDE_LENGTH>();

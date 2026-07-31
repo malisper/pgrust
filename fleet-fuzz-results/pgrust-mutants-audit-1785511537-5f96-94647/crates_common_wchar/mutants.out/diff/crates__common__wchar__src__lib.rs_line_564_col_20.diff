@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace |= with &= in pg_mule2wchar_with_len
+@@ -556,17 +556,17 @@
+             len -= 2;
+         } else if is_lcprv1(b) {
+             if len < 3 {
+                 break;
+             }
+             fi += 1;
+             to[ti] = (from[fi] as u32) << 16;
+             fi += 1;
+-            to[ti] |= from[fi] as u32;
++            to[ti] &= /* ~ changed by cargo-mutants ~ */ from[fi] as u32;
+             fi += 1;
+             len -= 3;
+         } else if is_lc2(b) {
+             if len < 3 {
+                 break;
+             }
+             to[ti] = (from[fi] as u32) << 16;
+             fi += 1;

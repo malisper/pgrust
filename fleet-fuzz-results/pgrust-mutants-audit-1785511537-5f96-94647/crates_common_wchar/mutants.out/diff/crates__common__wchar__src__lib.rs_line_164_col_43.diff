@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace | with & in pg_euc2wchar_with_len
+@@ -156,17 +156,17 @@
+             to[ti] = ((SS2 as u32) << 8) | from[fi] as u32;
+             fi += 1;
+             len -= 2;
+         } else if from[fi] == SS3 {
+             if len < 3 {
+                 break;
+             }
+             fi += 1;
+-            to[ti] = ((SS3 as u32) << 16) | ((from[fi] as u32) << 8);
++            to[ti] = ((SS3 as u32) << 16) & /* ~ changed by cargo-mutants ~ */ ((from[fi] as u32) << 8);
+             fi += 1;
+             to[ti] |= from[fi] as u32;
+             fi += 1;
+             len -= 3;
+         } else if is_highbit_set(from[fi]) {
+             if len < 2 {
+                 break;
+             }

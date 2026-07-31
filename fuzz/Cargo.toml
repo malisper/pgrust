@@ -272,6 +272,10 @@ path = "fuzz_targets/numutils_diff.rs"
 [[bin]]
 name = "oraclefam_diff"
 path = "fuzz_targets/oraclefam_diff.rs"
+# wcharfam_diff: common/wchar + mb/mbutils differential (p1-laneah).
+[[bin]]
+name = "wcharfam_diff"
+path = "fuzz_targets/wcharfam_diff.rs"
 test = false
 doc = false
 bench = false

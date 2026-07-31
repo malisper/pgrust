@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_dsplen -> i32 with 0
+@@ -750,17 +750,17 @@
+ }
+ 
+ /// No bounds check; only safe on already-verified strings (C `pg_mblen`).
+ pub fn pg_mblen(mbstr: &[u8]) -> i32 {
+     pg_encoding_mblen(database_encoding(), mbstr)
+ }
+ 
+ pub fn pg_dsplen(mbstr: &[u8]) -> i32 {
+-    pg_encoding_dsplen(database_encoding(), mbstr)
++    0 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Character count of a NUL- or slice-terminated string (C `pg_mbstrlen`).
+ /// The slice end stands in for C's NUL terminator: like C's `pg_mblen_cstr`,
+ /// a multibyte character that would contain the terminator (a NUL byte, or
+ /// the slice end) raises the invalid-byte-sequence error.
+ /// Divergence (p1-laneah wcharfam_diff): the previous range-bounded walk
+ /// silently stepped OVER a NUL embedded inside an invalid multibyte

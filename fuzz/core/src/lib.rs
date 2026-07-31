@@ -365,3 +365,7 @@ pub use numutils_diff::numutils_diff;
 // oraclefam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-oraclefam_diff.md.
 pub mod oraclefam_diff;
 pub use oraclefam_diff::oraclefam_diff;
+// p1-laneah: common/wchar + mb/mbutils dual-exec differential target
+// (oracle csrc/pg_wcharfam.c + csrc/wcharfam/, verbatim 18.3)
+pub mod wcharfam;
+pub use wcharfam::wcharfam_diff;

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace is_utf16_surrogate_second -> bool with false
+@@ -1389,17 +1389,17 @@
+     c > 0 && c <= 0x10ffff
+ }
+ 
+ pub const fn is_utf16_surrogate_first(c: pg_wchar) -> bool {
+     c >= 0xd800 && c <= 0xdbff
+ }
+ 
+ pub const fn is_utf16_surrogate_second(c: pg_wchar) -> bool {
+-    c >= 0xdc00 && c <= 0xdfff
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub const fn surrogate_pair_to_codepoint(first: pg_wchar, second: pg_wchar) -> pg_wchar {
+     ((first & 0x3ff) << 10) + 0x10000 + (second & 0x3ff)
+ }
+ 
+ /// `c` must hold a complete sequence (C reads the trailing bytes unchecked).
+ #[inline]

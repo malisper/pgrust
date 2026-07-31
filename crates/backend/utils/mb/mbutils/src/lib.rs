@@ -759,6 +759,12 @@ pub fn pg_dsplen(mbstr: &[u8]) -> i32 {
 }
 
 /// Character count of a NUL- or slice-terminated string (C `pg_mbstrlen`).
+/// The slice end stands in for C's NUL terminator: like C's `pg_mblen_cstr`,
+/// a multibyte character that would contain the terminator (a NUL byte, or
+/// the slice end) raises the invalid-byte-sequence error.
+/// Divergence (p1-laneah wcharfam_diff): the previous range-bounded walk
+/// silently stepped OVER a NUL embedded inside an invalid multibyte
+/// character where C's pg_mblen_cstr NUL-scan errors.
 pub fn pg_mbstrlen(mbstr: &[u8]) -> PgResult<i32> {
     if pg_database_encoding_max_length() == 1 {
         return Ok(c_string_len(mbstr) as i32);
@@ -766,7 +772,14 @@ pub fn pg_mbstrlen(mbstr: &[u8]) -> PgResult<i32> {
     let mut len = 0;
     let mut pos = 0usize;
     while pos < mbstr.len() && mbstr[pos] != 0 {
-        pos += pg_mblen_range(&mbstr[pos..])? as usize;
+        // C pg_mblen_cstr: scan bytes 1..length for the terminator.
+        let length = pg_mblen(&mbstr[pos..]);
+        for i in 1..length as usize {
+            if mbstr.get(pos + i).copied().unwrap_or(0) == 0 {
+                return Err(report_invalid_encoding_db(&mbstr[pos..], length, i as i32));
+            }
+        }
+        pos += length as usize;
         len += 1;
     }
     Ok(len)
@@ -987,7 +1000,11 @@ pub fn pg_utf8_increment(charptr: &mut [u8]) -> bool {
     if a == 0x7F || a == 0xDF || a == 0xEF || a == 0xF4 {
         return false;
     }
-    charptr[0] += 1;
+    // C `charptr[0]++` is defined unsigned wraparound: 0xFF -> 0x00 (an
+    // out-of-contract input C happily "increments"). wrapping_add keeps the
+    // exact C image; a plain += panics under fuzz/debug overflow checks
+    // (found by wcharfam_diff).
+    charptr[0] = charptr[0].wrapping_add(1);
     true
 }
 

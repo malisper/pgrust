@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_valid_encoding -> bool with true
+@@ -47,17 +47,17 @@
+ pub const PG_JOHAB: pg_enc = 40;
+ pub const PG_SHIFT_JIS_2004: pg_enc = 41;
+ pub const _PG_LAST_ENCODING_: pg_enc = 42;
+ 
+ pub const PG_ENCODING_BE_LAST: pg_enc = PG_KOI8U;
+ pub const MAX_MULTIBYTE_CHAR_LEN: i32 = 4;
+ 
+ pub const fn pg_valid_encoding(encoding: pg_enc) -> bool {
+-    encoding >= 0 && encoding < _PG_LAST_ENCODING_
++    true /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub const fn pg_valid_be_encoding(encoding: pg_enc) -> bool {
+     encoding >= 0 && encoding <= PG_ENCODING_BE_LAST
+ }
+ 
+ pub const fn pg_valid_fe_encoding(encoding: pg_enc) -> bool {
+     pg_valid_encoding(encoding)

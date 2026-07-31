@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace + with - in convert_with_proc
+@@ -399,17 +399,17 @@
+ fn convert_with_proc<'mcx>(
+     mcx: Mcx<'mcx>,
+     proc: ResolvedConvProc,
+     src_encoding: pg_enc,
+     dest_encoding: pg_enc,
+     src: &[u8],
+     no_error: bool,
+ ) -> PgResult<(i32, PgVec<'mcx, u8>)> {
+-    let cap = src.len() * MAX_CONVERSION_GROWTH + 1;
++    let cap = src.len() * MAX_CONVERSION_GROWTH - /* ~ changed by cargo-mutants ~ */ 1;
+     let mut dest: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, cap)?;
+     let consumed = direct_function_call6_coll(
+         proc.fn_addr,
+         InvalidOid,
+         Datum::from_i32(src_encoding),
+         Datum::from_i32(dest_encoding),
+         Datum::from_usize(src.as_ptr() as usize),
+         Datum::from_usize(dest.as_mut_ptr() as usize),

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace += with -= in pg_euc2wchar_with_len
+@@ -172,17 +172,17 @@
+             }
+             to[ti] = (from[fi] as u32) << 8;
+             fi += 1;
+             to[ti] |= from[fi] as u32;
+             fi += 1;
+             len -= 2;
+         } else {
+             to[ti] = from[fi] as pg_wchar;
+-            fi += 1;
++            fi -= /* ~ changed by cargo-mutants ~ */ 1;
+             len -= 1;
+         }
+         ti += 1;
+     }
+     to[ti] = 0;
+     ti as i32
+ }
+ 

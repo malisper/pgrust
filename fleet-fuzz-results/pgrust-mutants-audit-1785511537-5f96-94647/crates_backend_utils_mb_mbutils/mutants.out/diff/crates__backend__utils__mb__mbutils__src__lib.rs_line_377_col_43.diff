@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace && with || in InitializeClientEncoding
+@@ -369,17 +369,17 @@
+     BACKEND_STARTUP_COMPLETE.with(|c| c.set(true));
+ 
+     let pending = PENDING_CLIENT_ENCODING.with(|c| c.get());
+     if PrepareClientEncoding(pending)? < 0 || SetClientEncoding(pending)? < 0 {
+         return Err(conversion_not_supported_fatal(pending));
+     }
+ 
+     let current_server_encoding = database_encoding();
+-    if current_server_encoding != PG_UTF8 && current_server_encoding != PG_SQL_ASCII {
++    if current_server_encoding != PG_UTF8 || /* ~ changed by cargo-mutants ~ */ current_server_encoding != PG_SQL_ASCII {
+         let utf8_to_server_proc =
+             namespace_seams::find_default_conversion_proc::call(PG_UTF8, current_server_encoding)?;
+         if utf8_to_server_proc != InvalidOid {
+             let resolved = resolve_conv_proc(utf8_to_server_proc)?;
+             UTF8_TO_SERVER_CONV_PROC.with(|p| p.set(Some(resolved)));
+         }
+     }
+     Ok(())

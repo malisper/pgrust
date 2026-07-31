@@ -1,0 +1,87 @@
+
+*** crates/common/wchar/src/lib.rs:392:17: replace += with *= in pg_wchar2euc_with_len
+
+*** mutation diff:
+--- crates/common/wchar/src/lib.rs
++++ replace += with *= in pg_wchar2euc_with_len
+@@ -384,17 +384,17 @@
+             to[ti + 1] = (w >> 8) as u8;
+             to[ti + 2] = w as u8;
+             ti += 3;
+             cnt += 3;
+         } else if (w >> 8) as u8 != 0 {
+             to[ti] = (w >> 8) as u8;
+             to[ti + 1] = w as u8;
+             ti += 2;
+-            cnt += 2;
++            cnt *= /* ~ changed by cargo-mutants ~ */ 2;
+         } else {
+             to[ti] = w as u8;
+             ti += 1;
+             cnt += 1;
+         }
+         fi += 1;
+         len -= 1;
+     }
+
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=wchar@0.1.0
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+       Dirty wchar v0.1.0 (/tmp/cargo-mutants-src-Y5OD1s.tmp/crates/common/wchar): the file `crates/common/wchar/src/lib.rs` has changed (1785515847.001469545s, 8s after last build at 1785515839.941649592s)
+   Compiling wchar v0.1.0 (/tmp/cargo-mutants-src-Y5OD1s.tmp/crates/common/wchar)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=5294be34661295e2 -C extra-filename=-c691244d690e1ac7 --out-dir /tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4141646ee6216aa6 -C extra-filename=-da99c5603b4b462e --out-dir /tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name c_parity --edition=2021 crates/common/wchar/tests/c_parity.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=71d3f6dfc674836d -C extra-filename=-b3177abeab3580a9 --out-dir /tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps --extern wchar=/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/libwchar-da99c5603b4b462e.rlib`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.27s
+  Executable `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/wchar-c691244d690e1ac7`
+  Executable `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/c_parity-b3177abeab3580a9`
+
+*** result: Success
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --verbose --package=wchar@0.1.0
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on shared package cache
+       Fresh wchar v0.1.0 (/tmp/cargo-mutants-src-Y5OD1s.tmp/crates/common/wchar)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.06s
+     Running `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/wchar-c691244d690e1ac7`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/tmp/cargo-mutants-src-Y5OD1s.tmp/target/debug/deps/c_parity-b3177abeab3580a9`
+
+running 13 tests
+test max_length_matches_c ... ok
+test dsplen_tables_match_c ... ok
+test mblen_tables_match_c ... ok
+test set_invalid_matches_c ... ok
+test or_incomplete_edge_cases ... ok
+test verifystr_corpora_match_c ... ok
+test wchar2mb_matches_c ... FAILED
+test mb2wchar_matches_c ... ok
+test verifychar_pairs_match_c ... ok
+test utf8_codepoint_walk_matches_c ... ok
+test utf8_verify_3byte_exhaustive_matches_c ... ok
+test verify_quads_match_c ... ok
+test verify_triples_match_c ... ok
+
+failures:
+
+---- wchar2mb_matches_c stdout ----
+
+thread 'wchar2mb_matches_c' (15773) panicked at crates/common/wchar/src/lib.rs:392:13:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    wchar2mb_matches_c
+
+test result: FAILED. 12 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.57s
+
+error: test failed, to rerun pass `-p wchar --test c_parity`
+
+*** result: Failure(101)

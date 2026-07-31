@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_encoding_verifymbstr -> i32 with -1
+@@ -1372,17 +1372,17 @@
+     (pg_wchar_table[table_index(encoding)].dsplen)(mbstr)
+ }
+ 
+ pub fn pg_encoding_verifymbchar(encoding: i32, mbstr: &[u8]) -> i32 {
+     (pg_wchar_table[table_index(encoding)].mbverifychar)(mbstr)
+ }
+ 
+ pub fn pg_encoding_verifymbstr(encoding: i32, mbstr: &[u8]) -> i32 {
+-    (pg_wchar_table[table_index(encoding)].mbverifystr)(mbstr)
++    -1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_encoding_max_length(encoding: i32) -> i32 {
+     debug_assert!(pg_valid_encoding(encoding));
+     pg_wchar_table[table_index(encoding)].maxmblen
+ }
+ 
+ pub const fn is_valid_unicode_codepoint(c: pg_wchar) -> bool {

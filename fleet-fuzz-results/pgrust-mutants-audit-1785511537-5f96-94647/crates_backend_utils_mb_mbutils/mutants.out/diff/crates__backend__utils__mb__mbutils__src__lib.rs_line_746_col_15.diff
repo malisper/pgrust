@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace > with == in pg_encoding_mblen_with_len
+@@ -738,17 +738,17 @@
+ }
+ 
+ /// [`pg_mblen_with_len`] parameterized by encoding (mbutils.c
+ /// `pg_mblen_with_len`, generalized the way `pg_encoding_mbstrlen_with_len`
+ /// generalizes `pg_mbstrlen_with_len`).
+ pub fn pg_encoding_mblen_with_len(encoding: pg_enc, mbstr: &[u8], limit: i32) -> PgResult<i32> {
+     debug_assert!(limit >= 1);
+     let length = pg_encoding_mblen(encoding, mbstr);
+-    if length > limit {
++    if length == /* ~ changed by cargo-mutants ~ */ limit {
+         return Err(report_invalid_encoding_int(encoding, mbstr, length, limit));
+     }
+     Ok(length)
+ }
+ 
+ /// No bounds check; only safe on already-verified strings (C `pg_mblen`).
+ pub fn pg_mblen(mbstr: &[u8]) -> i32 {
+     pg_encoding_mblen(database_encoding(), mbstr)

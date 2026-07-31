@@ -1,0 +1,492 @@
+
+*** baseline
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=mbutils@0.1.0
+   Compiling zerocopy v0.8.53
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling allocator-api2 v0.2.21
+   Compiling types_error v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_error)
+   Compiling rustc-hash v2.1.3
+   Compiling types_core v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_core)
+   Compiling seam_core v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/seam_core)
+   Compiling libc v0.2.186
+   Compiling rel_vocab v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/rel_vocab)
+   Compiling wchar v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/common/wchar)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name build_script_build --edition=2021 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerocopy-0.8.53/build.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no --cfg 'feature="simd"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("__internal_use_only_features_that_work_on_stable", "alloc", "derive", "float-nightly", "simd", "simd-nightly", "std", "zerocopy-derive"))' -C metadata=dcdee316dc5453bc -C extra-filename=-61be821679811320 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/build/zerocopy-61be821679811320 -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name version_check --edition=2015 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/version_check-0.9.5/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=e304f16660f6e01c -C extra-filename=-b90a8a67f4858aa7 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name cfg_if --edition=2018 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cfg-if-1.0.4/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("core", "rustc-dep-of-std"))' -C metadata=0912ff8422a51473 -C extra-filename=-5850cd878237d45b --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name once_cell --edition=2021 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/once_cell-1.21.4/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --cfg 'feature="alloc"' --cfg 'feature="race"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("alloc", "atomic-polyfill", "critical-section", "default", "parking_lot", "portable-atomic", "race", "std", "unstable"))' -C metadata=e272d10b65d95593 -C extra-filename=-3d9995975f8e5ecf --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name allocator_api2 --edition=2018 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/allocator-api2-0.2.21/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --warn=unexpected_cfgs --check-cfg 'cfg(no_global_oom_handling)' --cfg 'feature="alloc"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("alloc", "default", "fresh-rust", "nightly", "serde", "std"))' -C metadata=73b0b540f3b8437a -C extra-filename=-553efcaa65a6528d --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_error --edition=2021 crates/_support/types/types_error/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=91cd164ac39a6fd6 -C extra-filename=-c16bdb10ad7f34c8 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name rustc_hash --edition=2021 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rustc-hash-2.1.3/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "nightly", "rand", "std"))' -C metadata=d1a9283ee6cca9a9 -C extra-filename=-89828af7812af6e5 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_core --edition=2021 crates/_support/types/types_core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=feb8557225aa4625 -C extra-filename=-0d9118de0dbccbea --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name seam_core --edition=2021 crates/_support/seam_core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=7372ed07c7dc9ba6 -C extra-filename=-922382ec553c8555 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name build_script_build --edition=2021 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/build.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no '--allow=clippy::used_underscore_binding' --allow=unused_qualifications '--warn=clippy::unnecessary_semicolon' '--allow=clippy::unnecessary_cast' '--allow=clippy::uninlined_format_args' '--warn=clippy::ptr_as_ptr' '--allow=clippy::non_minimal_cfg' '--allow=clippy::missing_safety_doc' '--warn=clippy::map_unwrap_or' '--warn=clippy::manual_assert' '--allow=clippy::identity_op' '--warn=clippy::explicit_iter_loop' '--allow=clippy::expl_impl_clone_on_copy' --cfg 'feature="default"' --cfg 'feature="std"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("align", "const-extern-fn", "default", "extra_traits", "rustc-dep-of-std", "rustc-std-workspace-core", "std", "use_std"))' -C metadata=7460a136b68225ba -C extra-filename=-108b29d7104a8d01 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/build/libc-108b29d7104a8d01 -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4141646ee6216aa6 -C extra-filename=-da99c5603b4b462e --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name rel_vocab --edition=2021 crates/_support/types/rel_vocab/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=10f4a67e505746f4 -C extra-filename=-cee0c40e2581ff58 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps`
+   Compiling xact_seams v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/access/transam/xact_seams)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name xact_seams --edition=2021 crates/backend/access/transam/xact_seams/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=f5f94d5e19ebefcc -C extra-filename=-061af81be05bb434 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern seam_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libseam_core-922382ec553c8555.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta`
+   Compiling ahash v0.8.12
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name build_script_build --edition=2018 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ahash-0.8.12/build.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("atomic-polyfill", "compile-time-rng", "const-random", "default", "getrandom", "nightly-arm-aes", "no-rng", "runtime-rng", "serde", "std"))' -C metadata=49dcb605c79319da -C extra-filename=-2325eff38ff4199e --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/build/ahash-2325eff38ff4199e -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern version_check=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libversion_check-b90a8a67f4858aa7.rlib --cap-lints allow`
+     Running `/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/build/zerocopy-61be821679811320/build-script-build`
+     Running `/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/build/libc-108b29d7104a8d01/build-script-build`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name zerocopy --edition=2021 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerocopy-0.8.53/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --cfg 'feature="simd"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("__internal_use_only_features_that_work_on_stable", "alloc", "derive", "float-nightly", "simd", "simd-nightly", "std", "zerocopy-derive"))' -C metadata=f5a4e81ead9df33a -C extra-filename=-b82f396ce73d9203 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow --check-cfg 'cfg(no_zerocopy_simd_x86_avx12_1_89_0)' --check-cfg 'cfg(rust, values("1.89.0"))' --check-cfg 'cfg(no_zerocopy_core_error_1_81_0)' --check-cfg 'cfg(rust, values("1.81.0"))' --check-cfg 'cfg(no_zerocopy_diagnostic_on_unimplemented_1_78_0)' --check-cfg 'cfg(rust, values("1.78.0"))' --check-cfg 'cfg(no_zerocopy_generic_bounds_in_const_fn_1_61_0)' --check-cfg 'cfg(rust, values("1.61.0"))' --check-cfg 'cfg(no_zerocopy_target_has_atomics_1_60_0)' --check-cfg 'cfg(rust, values("1.60.0"))' --check-cfg 'cfg(no_zerocopy_aarch64_simd_1_59_0)' --check-cfg 'cfg(rust, values("1.59.0"))' --check-cfg 'cfg(no_zerocopy_aarch64_simd_be_1_87_0)' --check-cfg 'cfg(rust, values("1.87.0"))' --check-cfg 'cfg(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0)' --check-cfg 'cfg(rust, values("1.57.0"))' --check-cfg 'cfg(doc_cfg)' --check-cfg 'cfg(kani)' --check-cfg 'cfg(__ZEROCOPY_INTERNAL_USE_ONLY_NIGHTLY_FEATURES_IN_TESTS)' --check-cfg 'cfg(__ZEROCOPY_INTERNAL_USE_ONLY_DEV_MODE)' --check-cfg 'cfg(coverage_nightly)' --check-cfg 'cfg(zerocopy_inline_always)' --check-cfg 'cfg(zerocopy_unstable_ptr)' --check-cfg 'cfg(zerocopy_unstable_linux)' --check-cfg 'cfg(no_fp_fmt_parse)'`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name libc --edition=2021 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.186/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked '--allow=clippy::used_underscore_binding' --allow=unused_qualifications '--warn=clippy::unnecessary_semicolon' '--allow=clippy::unnecessary_cast' '--allow=clippy::uninlined_format_args' '--warn=clippy::ptr_as_ptr' '--allow=clippy::non_minimal_cfg' '--allow=clippy::missing_safety_doc' '--warn=clippy::map_unwrap_or' '--warn=clippy::manual_assert' '--allow=clippy::identity_op' '--warn=clippy::explicit_iter_loop' '--allow=clippy::expl_impl_clone_on_copy' --cfg 'feature="default"' --cfg 'feature="std"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("align", "const-extern-fn", "default", "extra_traits", "rustc-dep-of-std", "rustc-std-workspace-core", "std", "use_std"))' -C metadata=58946b5b6b3af2fe -C extra-filename=-48f06ccd9be8c4ac --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --cap-lints allow --cfg freebsd12 --check-cfg 'cfg(emscripten_old_stat_abi)' --check-cfg 'cfg(espidf_picolibc)' --check-cfg 'cfg(espidf_time32)' --check-cfg 'cfg(freebsd10)' --check-cfg 'cfg(freebsd11)' --check-cfg 'cfg(freebsd12)' --check-cfg 'cfg(freebsd13)' --check-cfg 'cfg(freebsd14)' --check-cfg 'cfg(freebsd15)' --check-cfg 'cfg(gnu_file_offset_bits64)' --check-cfg 'cfg(gnu_time_bits64)' --check-cfg 'cfg(libc_deny_warnings)' --check-cfg 'cfg(linux_time_bits64)' --check-cfg 'cfg(musl_v1_2_3)' --check-cfg 'cfg(musl32_time64)' --check-cfg 'cfg(musl_redir_time64)' --check-cfg 'cfg(vxworks_lt_25_09)' --check-cfg 'cfg(target_os,values("switch","aix","ohos","hurd","rtems","visionos","nuttx","cygwin","qurt"))' --check-cfg 'cfg(target_env,values("illumos","wasi","aix","ohos","nto71_iosock","nto80"))' --check-cfg 'cfg(target_arch,values("loongarch64","mips32r6","mips64r6","csky"))'`
+     Running `/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/build/ahash-2325eff38ff4199e/build-script-build`
+   Compiling pg_strong_random v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/port/pg_strong_random)
+   Compiling pg_clock v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/port/pg_clock)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name pg_strong_random --edition=2021 crates/port/pg_strong_random/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --warn=unexpected_cfgs --check-cfg 'cfg(pgrust_sim)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=f432b3b063a05c55 -C extra-filename=-e04b3fcacebde51e --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern libc=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/liblibc-48f06ccd9be8c4ac.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name pg_clock --edition=2021 crates/port/pg_clock/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --warn=unexpected_cfgs --check-cfg 'cfg(pgrust_sim)' --check-cfg 'cfg(loom)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=3e91868a358f72d7 -C extra-filename=-38e34889854596c7 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern libc=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/liblibc-48f06ccd9be8c4ac.rmeta`
+   Compiling pgsync v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/pgsync)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name pgsync --edition=2021 crates/_support/pgsync/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --warn=unexpected_cfgs --check-cfg 'cfg(loom)' --check-cfg 'cfg(pgrust_sim)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=474f7c925864b412 -C extra-filename=-a0f9f0b078dee507 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern pg_clock=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libpg_clock-38e34889854596c7.rmeta --extern pg_strong_random=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libpg_strong_random-e04b3fcacebde51e.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name ahash --edition=2018 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ahash-0.8.12/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("atomic-polyfill", "compile-time-rng", "const-random", "default", "getrandom", "nightly-arm-aes", "no-rng", "runtime-rng", "serde", "std"))' -C metadata=e88042a9278fb14b -C extra-filename=-146148b5bda3fc59 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern cfg_if=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libcfg_if-5850cd878237d45b.rmeta --extern once_cell=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libonce_cell-3d9995975f8e5ecf.rmeta --extern zerocopy=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libzerocopy-b82f396ce73d9203.rmeta --cap-lints allow --cfg folded_multiply --check-cfg 'cfg(specialize)' --check-cfg 'cfg(folded_multiply)'`
+   Compiling hashbrown v0.14.5
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name hashbrown --edition=2021 /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hashbrown-0.14.5/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --cfg 'feature="ahash"' --cfg 'feature="allocator-api2"' --cfg 'feature="inline-more"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("ahash", "alloc", "allocator-api2", "compiler_builtins", "core", "default", "equivalent", "inline-more", "nightly", "raw", "rayon", "rkyv", "rustc-dep-of-std", "rustc-internal-api", "serde"))' -C metadata=031b0eb0281f47c2 -C extra-filename=-01402b2d7281d128 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern ahash=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libahash-146148b5bda3fc59.rmeta --extern allocator_api2=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/liballocator_api2-553efcaa65a6528d.rmeta --cap-lints allow`
+   Compiling mcx v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/mcx)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name mcx --edition=2021 crates/_support/mcx/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("aset-guard", "aset-stats", "std"))' -C metadata=7fd37f2f62b979f3 -C extra-filename=-279b2aa6087b29c0 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern allocator_api2=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/liballocator_api2-553efcaa65a6528d.rmeta --extern hashbrown=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libhashbrown-01402b2d7281d128.rmeta --extern rustc_hash=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/librustc_hash-89828af7812af6e5.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta`
+warning: variant `Malloc` is never constructed
+  --> crates/_support/mcx/src/lib.rs:64:5
+   |
+61 | enum Backend {
+   |      ------- variant in this enum
+...
+64 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> crates/_support/mcx/src/aset.rs:284:4
+    |
+284 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> crates/_support/mcx/src/aset.rs:340:19
+    |
+306 | impl AllocSet {
+    | ------------- method in this implementation
+...
+340 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+   Compiling datum v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/datum)
+   Compiling stringinfo v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/stringinfo)
+   Compiling types_storage v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_storage)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name datum --edition=2021 crates/_support/types/datum/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=b5827536ceff73a1 -C extra-filename=-03e730a59f80c1e6 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name stringinfo --edition=2021 crates/_support/types/stringinfo/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=cb145ba6ed3f920c -C extra-filename=-87215ae75aedd4ee --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta`
+   Compiling types_trigger v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_trigger)
+   Compiling mbutils_seams v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/utils/mb/mbutils_seams)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_storage --edition=2021 crates/_support/types/types_storage/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --warn=unexpected_cfgs --check-cfg 'cfg(loom)' --check-cfg 'cfg(pgrust_sim)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=2e02591b76fb950c -C extra-filename=-bb1c50253aaafa65 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern libc=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/liblibc-48f06ccd9be8c4ac.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern pgsync=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libpgsync-a0f9f0b078dee507.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_trigger --edition=2021 crates/_support/types/types_trigger/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=612aae235e62fe76 -C extra-filename=-ac08c6bbf8206159 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name mbutils_seams --edition=2021 crates/backend/utils/mb/mbutils_seams/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=6810be5f59ec8dd4 -C extra-filename=-4db06d91ff66387e --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern seam_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libseam_core-922382ec553c8555.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta`
+warning: `mcx` (lib) generated 3 warnings
+   Compiling types_tuple v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_tuple)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_tuple --edition=2021 crates/_support/types/types_tuple/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=0c5a6028e17a4bde -C extra-filename=-a3b293c4e5de4349 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta`
+   Compiling detoast_seams v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/access/common/detoast_seams)
+   Compiling types_hash v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/hash)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name detoast_seams --edition=2021 crates/backend/access/common/detoast_seams/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=cc09ae0eeab294f1 -C extra-filename=-81c17a22cacdd6f8 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern seam_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libseam_core-922382ec553c8555.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_tuple=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_tuple-a3b293c4e5de4349.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_hash --edition=2021 crates/_support/types/hash/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=23bd776bd87df35e -C extra-filename=-22cf18ba22b96183 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_tuple=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_tuple-a3b293c4e5de4349.rmeta`
+   Compiling types_fmgr v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/fmgr)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_fmgr --edition=2021 crates/_support/types/fmgr/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=464d121ce7ec8757 -C extra-filename=-ff08b237599455ce --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern detoast_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdetoast_seams-81c17a22cacdd6f8.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern stringinfo=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libstringinfo-87215ae75aedd4ee.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_tuple=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_tuple-a3b293c4e5de4349.rmeta`
+   Compiling types_scan v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_scan)
+   Compiling types_gist v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/gist)
+   Compiling types_bloom v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_bloom)
+   Compiling fmgr_seams v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/utils/fmgr/fmgr_seams)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_scan --edition=2021 crates/_support/types/types_scan/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=adbbafb5e3a31514 -C extra-filename=-38e93a9b6df7c633 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_gist --edition=2021 crates/_support/types/gist/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=6c454e0daa9abea6 -C extra-filename=-04a5a780d6bff9cf --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta --extern types_storage=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_storage-bb1c50253aaafa65.rmeta --extern types_tuple=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_tuple-a3b293c4e5de4349.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_bloom --edition=2021 crates/_support/types/types_bloom/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=59b41a59067b1573 -C extra-filename=-4bf91a1439d42224 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name fmgr_seams --edition=2021 crates/backend/utils/fmgr/fmgr_seams/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=1deb5a79cdb43f5b -C extra-filename=-b7735fc4587ac3e2 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern seam_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libseam_core-922382ec553c8555.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta`
+   Compiling types_nbtree v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_nbtree)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_nbtree --edition=2021 crates/_support/types/types_nbtree/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=12be3be3626070bc -C extra-filename=-1335b28ae24bc95c --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta --extern types_scan=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_scan-38e93a9b6df7c633.rmeta --extern types_storage=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_storage-bb1c50253aaafa65.rmeta --extern types_tuple=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_tuple-a3b293c4e5de4349.rmeta`
+   Compiling types_spgist v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_spgist)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_spgist --edition=2021 crates/_support/types/types_spgist/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=cc5a8d618d278dbb -C extra-filename=-06c8b83e492a55c5 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta --extern types_gist=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_gist-04a5a780d6bff9cf.rmeta --extern types_scan=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_scan-38e93a9b6df7c633.rmeta --extern types_storage=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_storage-bb1c50253aaafa65.rmeta --extern types_tuple=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_tuple-a3b293c4e5de4349.rmeta`
+warning: type `spgChooseIn` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+   Compiling types_rel v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/rel)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name types_rel --edition=2021 crates/_support/types/rel/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=0bc6093537f8eb03 -C extra-filename=-25c246ec2400e5bb --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern types_bloom=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_bloom-4bf91a1439d42224.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta --extern types_hash=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_hash-22cf18ba22b96183.rmeta --extern types_nbtree=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_nbtree-1335b28ae24bc95c.rmeta --extern types_spgist=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_spgist-06c8b83e492a55c5.rmeta --extern types_storage=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_storage-bb1c50253aaafa65.rmeta --extern types_trigger=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_trigger-ac08c6bbf8206159.rmeta --extern types_tuple=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_tuple-a3b293c4e5de4349.rmeta`
+warning: `types_spgist` (lib) generated 19 warnings
+   Compiling namespace_seams v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/catalog/namespace_seams)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name namespace_seams --edition=2021 crates/backend/catalog/namespace_seams/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=39ff2129aa99387b -C extra-filename=-8f25e5986ab6bec9 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern rel_vocab=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/librel_vocab-cee0c40e2581ff58.rmeta --extern seam_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libseam_core-922382ec553c8555.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_rel=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_rel-25c246ec2400e5bb.rmeta`
+   Compiling mbutils v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/utils/mb/mbutils)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name mbutils --edition=2021 crates/backend/utils/mb/mbutils/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=41be7aa174e9bf93 -C extra-filename=-26fe966b52a9688e --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rmeta --extern fmgr_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libfmgr_seams-b7735fc4587ac3e2.rmeta --extern mbutils_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmbutils_seams-4db06d91ff66387e.rmeta --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rmeta --extern namespace_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libnamespace_seams-8f25e5986ab6bec9.rmeta --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rmeta --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rmeta --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rmeta --extern wchar=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libwchar-da99c5603b4b462e.rmeta --extern xact_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libxact_seams-061af81be05bb434.rmeta`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name mbutils --edition=2021 crates/backend/utils/mb/mbutils/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=af65520103c04c57 -C extra-filename=-b45b698b4fa5b919 --out-dir /tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rlib --extern fmgr_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libfmgr_seams-b7735fc4587ac3e2.rlib --extern mbutils_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmbutils_seams-4db06d91ff66387e.rlib --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rlib --extern namespace_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libnamespace_seams-8f25e5986ab6bec9.rlib --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rlib --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rlib --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rlib --extern wchar=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libwchar-da99c5603b4b462e.rlib --extern xact_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libxact_seams-061af81be05bb434.rlib`
+warning: direct cast of function item into an integer
+   --> crates/backend/utils/mb/mbutils/src/tests.rs:413:27
+    |
+413 |         pg_utf8_increment as usize
+    |                           ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+413 |         pg_utf8_increment as *const () as usize
+    |                           ++++++++++++
+
+warning: `mbutils` (lib test) generated 1 warning (run `cargo fix --lib -p mbutils --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.43s
+  Executable `/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/mbutils-b45b698b4fa5b919`
+
+*** result: Success
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --verbose --package=mbutils@0.1.0
+       Fresh version_check v0.9.5
+       Fresh cfg-if v1.0.4
+       Fresh once_cell v1.21.4
+       Fresh types_error v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_error)
+       Fresh allocator-api2 v0.2.21
+       Fresh rustc-hash v2.1.3
+       Fresh types_core v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_core)
+       Fresh seam_core v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/seam_core)
+       Fresh rel_vocab v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/rel_vocab)
+       Fresh wchar v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/common/wchar)
+       Fresh zerocopy v0.8.53
+       Fresh xact_seams v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/access/transam/xact_seams)
+       Fresh ahash v0.8.12
+       Fresh libc v0.2.186
+       Fresh hashbrown v0.14.5
+       Fresh pg_strong_random v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/port/pg_strong_random)
+       Fresh pg_clock v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/port/pg_clock)
+       Fresh mcx v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/mcx)
+warning: variant `Malloc` is never constructed
+  --> crates/_support/mcx/src/lib.rs:64:5
+   |
+61 | enum Backend {
+   |      ------- variant in this enum
+...
+64 |     Malloc,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `chunk_size` is never used
+   --> crates/_support/mcx/src/aset.rs:284:4
+    |
+284 | fn chunk_size(idx: usize) -> usize {
+    |    ^^^^^^^^^^
+
+warning: method `mem_allocated` is never used
+   --> crates/_support/mcx/src/aset.rs:340:19
+    |
+306 | impl AllocSet {
+    | ------------- method in this implementation
+...
+340 |     pub(crate) fn mem_allocated(&self) -> usize {
+    |                   ^^^^^^^^^^^^^
+
+       Fresh pgsync v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/pgsync)
+warning: `mcx` (lib) generated 3 warnings
+       Fresh datum v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/datum)
+       Fresh stringinfo v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/stringinfo)
+       Fresh types_storage v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_storage)
+       Fresh types_trigger v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_trigger)
+       Fresh mbutils_seams v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/utils/mb/mbutils_seams)
+       Fresh types_tuple v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_tuple)
+       Fresh detoast_seams v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/access/common/detoast_seams)
+       Fresh types_hash v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/hash)
+       Fresh types_fmgr v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/fmgr)
+       Fresh types_scan v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_scan)
+       Fresh types_gist v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/gist)
+       Fresh types_bloom v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_bloom)
+       Fresh fmgr_seams v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/utils/fmgr/fmgr_seams)
+       Fresh types_spgist v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_spgist)
+warning: type `spgChooseIn` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/state.rs:92:12
+   |
+92 | pub struct spgChooseIn {
+   |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseIn`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `spgChooseOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:104:10
+    |
+104 | pub enum spgChooseOut {
+    |          ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgChooseOut`
+
+warning: type `spgPickSplitIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:127:12
+    |
+127 | pub struct spgPickSplitIn {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitIn`
+
+warning: type `spgPickSplitOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:134:12
+    |
+134 | pub struct spgPickSplitOut {
+    |            ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgPickSplitOut`
+
+warning: type `spgInnerConsistentIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:157:12
+    |
+157 | pub struct spgInnerConsistentIn<'a> {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentIn`
+
+warning: type `spgInnerConsistentOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:175:12
+    |
+175 | pub struct spgInnerConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgInnerConsistentOut`
+
+warning: type `spgLeafConsistentIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:199:12
+    |
+199 | pub struct spgLeafConsistentIn {
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentIn`
+
+warning: type `spgLeafConsistentOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/state.rs:212:12
+    |
+212 | pub struct spgLeafConsistentOut {
+    |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgLeafConsistentOut`
+
+warning: type `spgxlogState` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/xlog.rs:15:12
+   |
+15 | pub struct spgxlogState {
+   |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogState`
+
+warning: type `spgxlogAddLeaf` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/xlog.rs:40:12
+   |
+40 | pub struct spgxlogAddLeaf {
+   |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddLeaf`
+
+warning: type `spgxlogMoveLeafs` should have an upper camel case name
+  --> crates/_support/types/types_spgist/src/xlog.rs:76:12
+   |
+76 | pub struct spgxlogMoveLeafs {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogMoveLeafs`
+
+warning: type `spgxlogAddNode` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:115:12
+    |
+115 | pub struct spgxlogAddNode {
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogAddNode`
+
+warning: type `spgxlogSplitTuple` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:154:12
+    |
+154 | pub struct spgxlogSplitTuple {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogSplitTuple`
+
+warning: type `spgxlogPickSplit` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:184:12
+    |
+184 | pub struct spgxlogPickSplit {
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogPickSplit`
+
+warning: type `spgxlogVacuumLeaf` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:238:12
+    |
+238 | pub struct spgxlogVacuumLeaf {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumLeaf`
+
+warning: type `spgxlogVacuumRoot` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:271:12
+    |
+271 | pub struct spgxlogVacuumRoot {
+    |            ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRoot`
+
+warning: type `spgxlogVacuumRedirect` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/xlog.rs:295:12
+    |
+295 | pub struct spgxlogVacuumRedirect {
+    |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgxlogVacuumRedirect`
+
+warning: type `spgConfigIn` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/lib.rs:237:12
+    |
+237 | pub struct spgConfigIn {
+    |            ^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigIn`
+
+warning: type `spgConfigOut` should have an upper camel case name
+   --> crates/_support/types/types_spgist/src/lib.rs:242:12
+    |
+242 | pub struct spgConfigOut {
+    |            ^^^^^^^^^^^^ help: convert the identifier to upper camel case (notice the capitalization): `SpgConfigOut`
+
+       Fresh types_nbtree v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/types_nbtree)
+warning: `types_spgist` (lib) generated 19 warnings
+       Fresh types_rel v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/_support/types/rel)
+       Fresh namespace_seams v0.0.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/catalog/namespace_seams)
+warning: direct cast of function item into an integer
+   --> crates/backend/utils/mb/mbutils/src/tests.rs:413:27
+    |
+413 |         pg_utf8_increment as usize
+    |                           ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+413 |         pg_utf8_increment as *const () as usize
+    |                           ++++++++++++
+
+warning: `mbutils` (lib test) generated 1 warning (run `cargo fix --lib -p mbutils --tests` to apply 1 suggestion)
+       Fresh mbutils v0.1.0 (/tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/utils/mb/mbutils)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running `/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/mbutils-b45b698b4fa5b919`
+
+running 34 tests
+test divergence10_regression::non_utf8_name_cleans_byte_wise ... ok
+test tests::ascii_server_rejects_highbit_from_client_only_encoding ... ok
+test tests::any_to_server_validates_even_without_conversion ... ok
+test tests::charinc_dispatch_and_generic ... ok
+test tests::check_conversion_args ... ok
+test tests::conversion_needed_truth_table ... ok
+test tests::database_encoding_accessors ... ok
+test tests::do_encoding_conversion_identity_and_validation ... ok
+test tests::enc2name_matches_wchar_ids ... ok
+test tests::encname_lookup_matches_encnames_c ... ok
+test tests::eucjp_increment_cases ... ok
+test tests::mbcharcliplen_counts_characters ... ok
+test tests::ascii_run_boundaries ... ok
+test tests::mb2wchar_roundtrip_utf8 ... ok
+test tests::mbcliplen_single_byte_stops_at_nul ... ok
+test tests::mbcliplen_utf8_boundaries ... ok
+test tests::mblen_family ... ok
+test tests::mbstrlen_variants ... ok
+test tests::mbstrlen_with_len_errors_on_truncated_trailing_char ... ok
+test tests::mule_internal_lc1_lc2_roundtrip ... ok
+test tests::no_conversion_returns_none_without_allocating ... ok
+test tests::pending_client_encoding_applied_at_startup ... ok
+test tests::prepare_outside_transaction_needs_cache ... ok
+test tests::reporters_match_c_shapes ... ok
+test tests::seams_installed ... ok
+test tests::server_to_any_identity_cases ... ok
+test tests::set_client_encoding_rejects_invalid ... ok
+test tests::sql_ascii_client_is_identity ... ok
+test tests::unicode_to_server_utf8_paths ... ok
+test tests::unicode_to_server_without_proc_fails ... ok
+test tests::utf8_increment_cases ... ok
+test tests::verify_mbstr_len_counts_and_rejects ... ok
+test tests::verify_mbstr_reports_c_message ... ok
+test tests::mbstrlen_ascii_run_differential ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests mbutils
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name mbutils --test crates/backend/utils/mb/mbutils/src/lib.rs --test-run-directory /tmp/cargo-mutants-src-uak1bs.tmp/crates/backend/utils/mb/mbutils --extern datum=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libdatum-03e730a59f80c1e6.rlib --extern fmgr_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libfmgr_seams-b7735fc4587ac3e2.rlib --extern mbutils=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmbutils-26fe966b52a9688e.rlib --extern mbutils_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmbutils_seams-4db06d91ff66387e.rlib --extern mcx=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libmcx-279b2aa6087b29c0.rlib --extern namespace_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libnamespace_seams-8f25e5986ab6bec9.rlib --extern types_core=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_core-0d9118de0dbccbea.rlib --extern types_error=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_error-c16bdb10ad7f34c8.rlib --extern types_fmgr=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libtypes_fmgr-ff08b237599455ce.rlib --extern wchar=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libwchar-da99c5603b4b462e.rlib --extern xact_seams=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps/libxact_seams-061af81be05bb434.rlib -L dependency=/tmp/cargo-mutants-src-uak1bs.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+*** result: Success

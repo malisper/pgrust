@@ -1,0 +1,35 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_sjis_verifychar -> i32 with 1
+@@ -973,31 +973,17 @@
+     1
+ }
+ 
+ fn pg_latin1_verifystr(s: &[u8]) -> i32 {
+     nul_pos(s)
+ }
+ 
+ fn pg_sjis_verifychar(s: &[u8]) -> i32 {
+-    let mbl = pg_sjis_mblen(s);
+-    if (s.len() as i32) < mbl {
+-        return -1;
+-    }
+-    if mbl == 1 {
+-        return mbl;
+-    }
+-    let c1 = s[0];
+-    let c2 = s[1];
+-    let head = (0x81..=0x9f).contains(&c1) || (0xe0..=0xfc).contains(&c1);
+-    let tail = (0x40..=0x7e).contains(&c2) || (0x80..=0xfc).contains(&c2);
+-    if !head || !tail {
+-        return -1;
+-    }
+-    mbl
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_sjis_verifystr(s: &[u8]) -> i32 {
+     verify_str(s, pg_sjis_verifychar)
+ }
+ 
+ fn nonutf8_invalid_pair(s: &[u8]) -> bool {
+     s[0] == NONUTF8_INVALID_BYTE0 && s[1] == NONUTF8_INVALID_BYTE1

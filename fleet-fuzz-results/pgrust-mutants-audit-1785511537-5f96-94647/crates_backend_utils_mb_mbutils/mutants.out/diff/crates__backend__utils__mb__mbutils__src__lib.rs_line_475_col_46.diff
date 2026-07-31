@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace >= with < in pg_do_encoding_conversion
+@@ -467,17 +467,17 @@
+         return Err(too_long_error(src.len()));
+     }
+ 
+     // General case: C's OidFunctionCall6 re-resolves per call (only the
+     // client<->server default pair is cached); mirrored here.
+     let resolved = resolve_conv_proc(proc)?;
+     let (_, result) = convert_with_proc(mcx, resolved, src_encoding, dest_encoding, src, false)?;
+ 
+-    if src.len() > 1_000_000 && result.len() >= MAX_ALLOC_SIZE {
++    if src.len() > 1_000_000 && result.len() < /* ~ changed by cargo-mutants ~ */ MAX_ALLOC_SIZE {
+         return Err(too_long_error(src.len()));
+     }
+     Ok(Some(result))
+ }
+ 
+ /// C `pg_do_encoding_conversion_buf`: `proc` was already looked up; the input
+ /// is clipped so the worst-case output fits a `dst_capacity`-byte buffer.
+ /// Returns (source bytes converted, output bytes without the trailing NUL).

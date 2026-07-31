@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace += with *= in pg_wchar2utf_with_len
+@@ -465,17 +465,17 @@
+     let mut len = from.len();
+     let mut fi = 0;
+     let mut ti = 0;
+     let mut cnt = 0i32;
+     while len > 0 && from[fi] != 0 {
+         unicode_to_utf8(from[fi], &mut to[ti..]);
+         let char_len = pg_utf_mblen_byte(to[ti]);
+         cnt += char_len;
+-        ti += char_len as usize;
++        ti *= /* ~ changed by cargo-mutants ~ */ char_len as usize;
+         fi += 1;
+         len -= 1;
+     }
+     to[ti] = 0;
+     cnt
+ }
+ 
+ #[inline(always)]

@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace <= with > in pg_encoding_mbstrlen_with_len
+@@ -808,17 +808,17 @@
+         // so a fully-multibyte string pays no fast-path tax. NUL is excluded
+         // by the while guard. Every input scores identically to the plain
+         // per-char loop; the run is pure acceleration.
+         if encoding == PG_UTF8 && mbstr[pos] < 0x80 {
+             let run = ascii_run(&mbstr[pos..]);
+             pos += run;
+             limit -= run as i32;
+             len += run as i32;
+-            if limit <= 0 || mbstr[pos] == 0 {
++            if limit > /* ~ changed by cargo-mutants ~ */ 0 || mbstr[pos] == 0 {
+                 break;
+             }
+         }
+         let l = pg_encoding_mblen_with_len(encoding, &mbstr[pos..], limit)?;
+         limit -= l;
+         pos += l as usize;
+         len += 1;
+     }

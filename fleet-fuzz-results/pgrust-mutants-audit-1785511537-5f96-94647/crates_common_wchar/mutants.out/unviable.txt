@@ -1,0 +1,2 @@
+crates/common/wchar/src/lib.rs:1111:19: replace > with < in pg_utf8_verifychar
+crates/common/wchar/src/lib.rs:1401:5: replace surrogate_pair_to_codepoint -> pg_wchar with Default::default()

@@ -1,0 +1,28 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_encoding_mb2wchar_with_len -> PgResult<PgVec<'mcx, pg_wchar>> with PgResult::new()
+@@ -684,24 +684,17 @@
+     pg_encoding_mb2wchar_with_len(mcx, database_encoding(), from)
+ }
+ 
+ pub fn pg_encoding_mb2wchar_with_len<'mcx>(
+     mcx: Mcx<'mcx>,
+     encoding: pg_enc,
+     from: &[u8],
+ ) -> PgResult<PgVec<'mcx, pg_wchar>> {
+-    let conv = pg_wchar_table[encoding as usize]
+-        .mb2wchar_with_len
+-        .unwrap_or_else(|| panic!("mb2wchar: client-only encoding {encoding} has no converter"));
+-    let mut to: PgVec<'mcx, pg_wchar> = vec_with_capacity_in(mcx, from.len() + 1)?;
+-    to.resize(from.len() + 1, 0);
+-    let n = conv(from, &mut to);
+-    to.truncate(n as usize);
+-    Ok(to)
++    PgResult::new() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_wchar2mb_with_len<'mcx>(
+     mcx: Mcx<'mcx>,
+     from: &[pg_wchar],
+ ) -> PgResult<PgVec<'mcx, u8>> {
+     pg_encoding_wchar2mb_with_len(mcx, database_encoding(), from)
+ }

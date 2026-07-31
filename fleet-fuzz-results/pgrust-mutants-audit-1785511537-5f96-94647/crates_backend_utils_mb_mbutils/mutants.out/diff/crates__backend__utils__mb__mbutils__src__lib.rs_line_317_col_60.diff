@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace && with || in PrepareClientEncoding
+@@ -309,17 +309,17 @@
+         };
+         // Newest entry at the head; SetClientEncoding prunes older duplicates.
+         CONV_PROC_LIST.with(|l| l.borrow_mut().insert(0, convinfo));
+         Ok(0)
+     } else {
+         // Not in a live transaction: only a previously cached pair can be restored.
+         let found = CONV_PROC_LIST.with(|l| {
+             l.borrow().iter().any(|info| {
+-                info.s_encoding == current_server_encoding && info.c_encoding == encoding
++                info.s_encoding == current_server_encoding || /* ~ changed by cargo-mutants ~ */ info.c_encoding == encoding
+             })
+         });
+         Ok(if found { 0 } else { -1 })
+     }
+ }
+ 
+ pub fn SetClientEncoding(encoding: pg_enc) -> PgResult<i32> {
+     if !pg_valid_fe_encoding(encoding) {

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_encoding_mblen -> i32 with 1
+@@ -1344,17 +1344,17 @@
+     if pg_valid_encoding(encoding) {
+         encoding as usize
+     } else {
+         PG_SQL_ASCII as usize
+     }
+ }
+ 
+ pub fn pg_encoding_mblen(encoding: i32, mbstr: &[u8]) -> i32 {
+-    (pg_wchar_table[table_index(encoding)].mblen)(mbstr)
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_encoding_mblen_or_incomplete(encoding: i32, mbstr: &[u8]) -> i32 {
+     if mbstr.is_empty() || (encoding == PG_GB18030 && is_highbit_set(mbstr[0]) && mbstr.len() < 2)
+     {
+         return i32::MAX;
+     }
+     pg_encoding_mblen(encoding, mbstr)

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace > with < in pg_utf8_verifychar
+@@ -1103,17 +1103,17 @@
+         l = 2;
+     } else if b & 0xf0 == 0xe0 {
+         l = 3;
+     } else if b & 0xf8 == 0xf0 {
+         l = 4;
+     } else {
+         l = 1;
+     }
+-    if l as usize > s.len() {
++    if l as usize < /* ~ changed by cargo-mutants ~ */ s.len() {
+         return -1;
+     }
+     if !pg_utf8_islegal(s, l) {
+         return -1;
+     }
+     l
+ }
+ 

@@ -1,0 +1,29 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_eucjp_dsplen -> i32 with -1
+@@ -212,25 +212,17 @@
+     pg_euc2wchar_with_len(from, to)
+ }
+ 
+ fn pg_eucjp_mblen(s: &[u8]) -> i32 {
+     pg_euc_mblen(s)
+ }
+ 
+ fn pg_eucjp_dsplen(s: &[u8]) -> i32 {
+-    if s[0] == SS2 {
+-        1
+-    } else if s[0] == SS3 {
+-        2
+-    } else if is_highbit_set(s[0]) {
+-        2
+-    } else {
+-        pg_ascii_dsplen(s)
+-    }
++    -1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_euckr2wchar_with_len(from: &[u8], to: &mut [pg_wchar]) -> i32 {
+     pg_euc2wchar_with_len(from, to)
+ }
+ 
+ fn pg_euckr_mblen(s: &[u8]) -> i32 {
+     pg_euc_mblen(s)

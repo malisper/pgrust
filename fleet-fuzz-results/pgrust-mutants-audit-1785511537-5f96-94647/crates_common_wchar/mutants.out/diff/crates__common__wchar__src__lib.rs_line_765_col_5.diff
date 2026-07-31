@@ -1,0 +1,25 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_big5_mblen -> i32 with 0
+@@ -757,21 +757,17 @@
+     } else if is_highbit_set(s[0]) {
+         2
+     } else {
+         pg_ascii_dsplen(s)
+     }
+ }
+ 
+ fn pg_big5_mblen(s: &[u8]) -> i32 {
+-    if is_highbit_set(s[0]) {
+-        2
+-    } else {
+-        1
+-    }
++    0 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_big5_dsplen(s: &[u8]) -> i32 {
+     if is_highbit_set(s[0]) {
+         2
+     } else {
+         pg_ascii_dsplen(s)
+     }

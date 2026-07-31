@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace & with ^ in pg_any_to_server
+@@ -533,17 +533,17 @@
+ 
+     if db_encoding == PG_SQL_ASCII {
+         // No conversion possible; validate under the client encoding if it is
+         // server-legal, else reject NULs and high-bit bytes outright.
+         if pg_valid_be_encoding(encoding) {
+             pg_verify_mbstr(encoding, s, false)?;
+         } else {
+             for &b in s {
+-                if b == 0 || (b & 0x80) != 0 {
++                if b == 0 || (b ^ /* ~ changed by cargo-mutants ~ */ 0x80) != 0 {
+                     return Err(invalid_byte_value_error(b));
+                 }
+             }
+         }
+         return Ok(None);
+     }
+ 
+     if encoding == client_encoding() {

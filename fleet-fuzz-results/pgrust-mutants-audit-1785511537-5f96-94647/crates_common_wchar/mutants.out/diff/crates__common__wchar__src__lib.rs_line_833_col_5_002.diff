@@ -1,0 +1,24 @@
+--- crates/common/wchar/src/lib.rs
++++ replace nul_pos -> i32 with -1
+@@ -825,20 +825,17 @@
+     if is_highbit_set(s[0]) {
+         2
+     } else {
+         pg_ascii_dsplen(s)
+     }
+ }
+ 
+ fn nul_pos(s: &[u8]) -> i32 {
+-    match s.iter().position(|&b| b == 0) {
+-        Some(p) => p as i32,
+-        None => s.len() as i32,
+-    }
++    -1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_ascii_verifychar(_s: &[u8]) -> i32 {
+     1
+ }
+ 
+ fn pg_ascii_verifystr(s: &[u8]) -> i32 {
+     nul_pos(s)

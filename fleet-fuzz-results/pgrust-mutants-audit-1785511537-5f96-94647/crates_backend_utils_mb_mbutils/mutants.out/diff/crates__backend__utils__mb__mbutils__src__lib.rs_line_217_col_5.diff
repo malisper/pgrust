@@ -1,0 +1,25 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_valid_server_encoding -> pg_enc with Default::default()
+@@ -209,21 +209,17 @@
+     let enc = pg_char_to_encoding(name);
+     if enc < 0 || !pg_valid_fe_encoding(enc) {
+         return -1;
+     }
+     enc
+ }
+ 
+ pub fn pg_valid_server_encoding(name: &str) -> pg_enc {
+-    let enc = pg_char_to_encoding(name);
+-    if enc < 0 || !pg_valid_be_encoding(enc) {
+-        return -1;
+-    }
+-    enc
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_encoding_to_char(encoding: pg_enc) -> &'static str {
+     if pg_valid_encoding(encoding) {
+         enc_name(encoding)
+     } else {
+         ""
+     }

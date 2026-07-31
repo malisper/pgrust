@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in PrepareClientEncoding
+@@ -278,17 +278,17 @@
+ pub fn PrepareClientEncoding(encoding: pg_enc) -> PgResult<i32> {
+     if !pg_valid_fe_encoding(encoding) {
+         return Ok(-1);
+     }
+     if !BACKEND_STARTUP_COMPLETE.with(|c| c.get()) {
+         return Ok(0);
+     }
+     let current_server_encoding = database_encoding();
+-    if current_server_encoding == encoding
++    if current_server_encoding != /* ~ changed by cargo-mutants ~ */ encoding
+         || current_server_encoding == PG_SQL_ASCII
+         || encoding == PG_SQL_ASCII
+     {
+         return Ok(0);
+     }
+ 
+     if xact_seams::is_transaction_state::call() {
+         let to_server_proc =

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace > with < in pg_wchar2utf_with_len
+@@ -461,17 +461,17 @@
+     ti as i32
+ }
+ 
+ fn pg_wchar2utf_with_len(from: &[pg_wchar], to: &mut [u8]) -> i32 {
+     let mut len = from.len();
+     let mut fi = 0;
+     let mut ti = 0;
+     let mut cnt = 0i32;
+-    while len > 0 && from[fi] != 0 {
++    while len < /* ~ changed by cargo-mutants ~ */ 0 && from[fi] != 0 {
+         unicode_to_utf8(from[fi], &mut to[ti..]);
+         let char_len = pg_utf_mblen_byte(to[ti]);
+         cnt += char_len;
+         ti += char_len as usize;
+         fi += 1;
+         len -= 1;
+     }
+     to[ti] = 0;

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace == with != in pg_utf8_verifystr
+@@ -1261,17 +1261,17 @@
+         if !is_highbit_set(b) {
+             if b == 0 {
+                 break;
+             }
+             rest = tail;
+             continue;
+         }
+         let l = pg_utf8_verifychar(rest);
+-        if l == -1 {
++        if l != /* ~ changed by cargo-mutants ~ */ -1 {
+             break;
+         }
+         rest = &rest[l as usize..];
+     }
+     (len - rest.len()) as i32
+ }
+ 
+ pub fn pg_utf8_islegal(source: &[u8], length: i32) -> bool {

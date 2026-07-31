@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace + with - in ascii_run
+@@ -834,17 +834,17 @@
+     let mut i = 0usize;
+     while i + 16 <= s.len() {
+         let sa = stop(u64::from_le_bytes(s[i..i + 8].try_into().unwrap()));
+         let sb = stop(u64::from_le_bytes(s[i + 8..i + 16].try_into().unwrap()));
+         if sa | sb != 0 {
+             return if sa != 0 {
+                 i + (sa.trailing_zeros() / 8) as usize
+             } else {
+-                i + 8 + (sb.trailing_zeros() / 8) as usize
++                i - /* ~ changed by cargo-mutants ~ */ 8 + (sb.trailing_zeros() / 8) as usize
+             };
+         }
+         i += 16;
+     }
+     while i + 8 <= s.len() {
+         let sa = stop(u64::from_le_bytes(s[i..i + 8].try_into().unwrap()));
+         if sa != 0 {
+             return i + (sa.trailing_zeros() / 8) as usize;

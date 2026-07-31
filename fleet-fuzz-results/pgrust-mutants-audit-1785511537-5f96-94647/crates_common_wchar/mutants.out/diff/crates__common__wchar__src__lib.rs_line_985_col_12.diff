@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace == with != in pg_sjis_verifychar
+@@ -977,17 +977,17 @@
+     nul_pos(s)
+ }
+ 
+ fn pg_sjis_verifychar(s: &[u8]) -> i32 {
+     let mbl = pg_sjis_mblen(s);
+     if (s.len() as i32) < mbl {
+         return -1;
+     }
+-    if mbl == 1 {
++    if mbl != /* ~ changed by cargo-mutants ~ */ 1 {
+         return mbl;
+     }
+     let c1 = s[0];
+     let c2 = s[1];
+     let head = (0x81..=0x9f).contains(&c1) || (0xe0..=0xfc).contains(&c1);
+     let tail = (0x40..=0x7e).contains(&c2) || (0x80..=0xfc).contains(&c2);
+     if !head || !tail {
+         return -1;

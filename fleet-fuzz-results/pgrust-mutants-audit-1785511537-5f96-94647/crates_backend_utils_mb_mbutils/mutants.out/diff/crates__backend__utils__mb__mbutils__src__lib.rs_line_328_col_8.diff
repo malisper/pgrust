@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ delete ! in SetClientEncoding
+@@ -320,17 +320,17 @@
+         Ok(if found { 0 } else { -1 })
+     }
+ }
+ 
+ pub fn SetClientEncoding(encoding: pg_enc) -> PgResult<i32> {
+     if !pg_valid_fe_encoding(encoding) {
+         return Ok(-1);
+     }
+-    if !BACKEND_STARTUP_COMPLETE.with(|c| c.get()) {
++    if  /* ~ changed by cargo-mutants ~ */BACKEND_STARTUP_COMPLETE.with(|c| c.get()) {
+         PENDING_CLIENT_ENCODING.with(|c| c.set(encoding));
+         return Ok(0);
+     }
+     let current_server_encoding = database_encoding();
+     if current_server_encoding == encoding
+         || current_server_encoding == PG_SQL_ASCII
+         || encoding == PG_SQL_ASCII
+     {

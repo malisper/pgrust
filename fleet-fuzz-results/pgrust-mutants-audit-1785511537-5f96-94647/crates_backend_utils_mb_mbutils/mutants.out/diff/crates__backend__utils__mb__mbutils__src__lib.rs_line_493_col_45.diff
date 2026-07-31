@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace - with + in pg_do_encoding_conversion_buf
+@@ -485,17 +485,17 @@
+     mcx: Mcx<'mcx>,
+     proc: Oid,
+     src_encoding: pg_enc,
+     dest_encoding: pg_enc,
+     src: &[u8],
+     dst_capacity: i32,
+     no_error: bool,
+ ) -> PgResult<(i32, PgVec<'mcx, u8>)> {
+-    let cap = (dst_capacity.max(1) as usize - 1) / MAX_CONVERSION_GROWTH;
++    let cap = (dst_capacity.max(1) as usize + /* ~ changed by cargo-mutants ~ */ 1) / MAX_CONVERSION_GROWTH;
+     let srclen = src.len().min(cap);
+     let resolved = resolve_conv_proc(proc)?;
+     convert_with_proc(
+         mcx,
+         resolved,
+         src_encoding,
+         dest_encoding,
+         &src[..srclen],

@@ -1,0 +1,43 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_unicode_to_server_noerror -> PgResult<Option<PgVec<'mcx, u8>>> with PgResult::new()
+@@ -650,39 +650,17 @@
+     Ok(out)
+ }
+ 
+ /// Like [`pg_unicode_to_server`], but conversion failure is `Ok(None)`.
+ pub fn pg_unicode_to_server_noerror<'mcx>(
+     mcx: Mcx<'mcx>,
+     c: pg_wchar,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+-    if !is_valid_unicode_codepoint(c) {
+-        return Ok(None);
+-    }
+-    if c <= 0x7F {
+-        return Ok(Some(slice_in(mcx, &[c as u8])?));
+-    }
+-    let server_encoding = database_encoding();
+-    if server_encoding == PG_UTF8 {
+-        let mut buf = [0u8; MAX_MULTIBYTE_CHAR_LEN];
+-        unicode_to_utf8(c, &mut buf);
+-        let n = pg_utf_mblen(&buf) as usize;
+-        return Ok(Some(slice_in(mcx, &buf[..n])?));
+-    }
+-
+-    let Some(proc) = UTF8_TO_SERVER_CONV_PROC.with(|p| p.get()) else {
+-        return Ok(None);
+-    };
+-    let mut c_as_utf8 = [0u8; MAX_MULTIBYTE_CHAR_LEN];
+-    unicode_to_utf8(c, &mut c_as_utf8);
+-    let n = pg_utf_mblen(&c_as_utf8) as usize;
+-    let (consumed, out) =
+-        convert_with_proc(mcx, proc, PG_UTF8, server_encoding, &c_as_utf8[..n], true)?;
+-    Ok((consumed == n as i32).then_some(out))
++    PgResult::new() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_mb2wchar_with_len<'mcx>(mcx: Mcx<'mcx>, from: &[u8]) -> PgResult<PgVec<'mcx, pg_wchar>> {
+     pg_encoding_mb2wchar_with_len(mcx, database_encoding(), from)
+ }
+ 
+ pub fn pg_encoding_mb2wchar_with_len<'mcx>(
+     mcx: Mcx<'mcx>,

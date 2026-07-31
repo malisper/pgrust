@@ -1,0 +1,54 @@
+
+*** crates/common/wchar/src/lib.rs:1111:19: replace > with < in pg_utf8_verifychar
+
+*** mutation diff:
+--- crates/common/wchar/src/lib.rs
++++ replace > with < in pg_utf8_verifychar
+@@ -1103,17 +1103,17 @@
+         l = 2;
+     } else if b & 0xf0 == 0xe0 {
+         l = 3;
+     } else if b & 0xf8 == 0xf0 {
+         l = 4;
+     } else {
+         l = 1;
+     }
+-    if l as usize > s.len() {
++    if l as usize < /* ~ changed by cargo-mutants ~ */ s.len() {
+         return -1;
+     }
+     if !pg_utf8_islegal(s, l) {
+         return -1;
+     }
+     l
+ }
+ 
+
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=wchar@0.1.0
+       Dirty wchar v0.1.0 (/tmp/cargo-mutants-src-8jJkl8.tmp/crates/common/wchar): the file `crates/common/wchar/src/lib.rs` has changed (1785518454.215198430s, 2s after last build at 1785518452.125251789s)
+   Compiling wchar v0.1.0 (/tmp/cargo-mutants-src-8jJkl8.tmp/crates/common/wchar)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=5294be34661295e2 -C extra-filename=-c691244d690e1ac7 --out-dir /tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4141646ee6216aa6 -C extra-filename=-da99c5603b4b462e --out-dir /tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps`
+error: `<` is interpreted as a start of generic arguments for `usize`, not a comparison
+    --> crates/common/wchar/src/lib.rs:1111:19
+     |
+1111 |     if l as usize < /* ~ changed by cargo-mutants ~ */ s.len() {
+     |                   ^ not interpreted as comparison      -- interpreted as generic arguments
+     |
+help: try comparing the cast value
+     |
+1111 |     if (l as usize) < /* ~ changed by cargo-mutants ~ */ s.len() {
+     |        +          +
+
+error: could not compile `wchar` (lib) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4141646ee6216aa6 -C extra-filename=-da99c5603b4b462e --out-dir /tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `wchar` (lib test) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=5294be34661295e2 -C extra-filename=-c691244d690e1ac7 --out-dir /tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-8jJkl8.tmp/target/debug/deps` (exit status: 1)
+
+*** result: Failure(101)

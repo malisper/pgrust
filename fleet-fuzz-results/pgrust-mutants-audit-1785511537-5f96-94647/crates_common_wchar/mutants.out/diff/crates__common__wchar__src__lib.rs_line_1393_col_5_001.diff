@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace is_utf16_surrogate_first -> bool with false
+@@ -1385,17 +1385,17 @@
+     pg_wchar_table[table_index(encoding)].maxmblen
+ }
+ 
+ pub const fn is_valid_unicode_codepoint(c: pg_wchar) -> bool {
+     c > 0 && c <= 0x10ffff
+ }
+ 
+ pub const fn is_utf16_surrogate_first(c: pg_wchar) -> bool {
+-    c >= 0xd800 && c <= 0xdbff
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub const fn is_utf16_surrogate_second(c: pg_wchar) -> bool {
+     c >= 0xdc00 && c <= 0xdfff
+ }
+ 
+ pub const fn surrogate_pair_to_codepoint(first: pg_wchar, second: pg_wchar) -> pg_wchar {
+     ((first & 0x3ff) << 10) + 0x10000 + (second & 0x3ff)

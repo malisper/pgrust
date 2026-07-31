@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace == with != in pg_any_to_server
+@@ -521,17 +521,17 @@
+     s: &[u8],
+     encoding: pg_enc,
+ ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+     if s.is_empty() {
+         return Ok(None);
+     }
+     let db_encoding = database_encoding();
+ 
+-    if encoding == db_encoding || encoding == PG_SQL_ASCII {
++    if encoding == db_encoding || encoding != /* ~ changed by cargo-mutants ~ */ PG_SQL_ASCII {
+         pg_verify_mbstr(db_encoding, s, false)?;
+         return Ok(None);
+     }
+ 
+     if db_encoding == PG_SQL_ASCII {
+         // No conversion possible; validate under the client encoding if it is
+         // server-legal, else reject NULs and high-bit bytes outright.
+         if pg_valid_be_encoding(encoding) {

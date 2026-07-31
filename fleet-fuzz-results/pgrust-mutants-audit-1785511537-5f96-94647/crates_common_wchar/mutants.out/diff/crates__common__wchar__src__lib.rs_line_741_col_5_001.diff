@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_latin1_dsplen -> i32 with 1
+@@ -733,17 +733,17 @@
+     ti as i32
+ }
+ 
+ fn pg_latin1_mblen(_s: &[u8]) -> i32 {
+     1
+ }
+ 
+ fn pg_latin1_dsplen(s: &[u8]) -> i32 {
+-    pg_ascii_dsplen(s)
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_sjis_mblen(s: &[u8]) -> i32 {
+     if (0xa1..=0xdf).contains(&s[0]) {
+         1
+     } else if is_highbit_set(s[0]) {
+         2
+     } else {

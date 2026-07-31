@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete ! in pg_mule_verifychar
+@@ -953,17 +953,17 @@
+ }
+ 
+ fn pg_mule_verifychar(s: &[u8]) -> i32 {
+     let mbl = pg_mule_mblen(s);
+     if (s.len() as i32) < mbl {
+         return -1;
+     }
+     for i in 1..mbl as usize {
+-        if !is_highbit_set(s[i]) {
++        if  /* ~ changed by cargo-mutants ~ */is_highbit_set(s[i]) {
+             return -1;
+         }
+     }
+     mbl
+ }
+ 
+ fn pg_mule_verifystr(s: &[u8]) -> i32 {
+     verify_str(s, pg_mule_verifychar)

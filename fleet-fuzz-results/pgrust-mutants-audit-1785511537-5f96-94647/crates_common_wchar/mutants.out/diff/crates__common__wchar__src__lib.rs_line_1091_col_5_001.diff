@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_gb18030_verifystr -> i32 with 1
+@@ -1083,17 +1083,17 @@
+             -1
+         }
+     } else {
+         -1
+     }
+ }
+ 
+ fn pg_gb18030_verifystr(s: &[u8]) -> i32 {
+-    verify_str(s, pg_gb18030_verifychar)
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_utf8_verifychar(s: &[u8]) -> i32 {
+     let b = s[0];
+     let l;
+     if b & 0x80 == 0 {
+         if b == 0 {
+             return -1;

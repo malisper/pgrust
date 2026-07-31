@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_ascii_verifystr -> i32 with 0
+@@ -836,17 +836,17 @@
+     }
+ }
+ 
+ fn pg_ascii_verifychar(_s: &[u8]) -> i32 {
+     1
+ }
+ 
+ fn pg_ascii_verifystr(s: &[u8]) -> i32 {
+-    nul_pos(s)
++    0 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn pg_eucjp_verifychar(s: &[u8]) -> i32 {
+     let len = s.len();
+     let c1 = s[0];
+     if c1 == SS2 {
+         if len < 2 {
+             return -1;

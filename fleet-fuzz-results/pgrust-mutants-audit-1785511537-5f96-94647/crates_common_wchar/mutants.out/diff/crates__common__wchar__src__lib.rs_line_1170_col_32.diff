@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace == with != in is_valid_ascii
+@@ -1162,17 +1162,17 @@
+     use core::arch::x86_64::*;
+     // SAFETY: SSE2 is baseline on x86_64; both 16-byte loads are within `chunk`.
+     unsafe {
+         let zero = _mm_setzero_si128();
+         let v0 = _mm_loadu_si128(chunk.as_ptr().cast());
+         let v1 = _mm_loadu_si128(chunk.as_ptr().add(16).cast());
+         let mut cum = _mm_or_si128(v0, _mm_cmpeq_epi8(v0, zero));
+         cum = _mm_or_si128(cum, _mm_or_si128(v1, _mm_cmpeq_epi8(v1, zero)));
+-        _mm_movemask_epi8(cum) == 0
++        _mm_movemask_epi8(cum) != /* ~ changed by cargo-mutants ~ */ 0
+     }
+ }
+ 
+ #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+ #[inline(always)]
+ fn is_valid_ascii(chunk: &[u8; STRIDE_LENGTH]) -> bool {
+     // The 0x7f add flags zero bytes without carry only when no high bit is
+     // set; high-bit inputs are caught by highbit_cum (C's USE_NO_SIMD path).

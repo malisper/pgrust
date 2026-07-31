@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_mblen_with_len -> PgResult<i32> with PgResult::new(-1)
+@@ -729,17 +729,17 @@
+     let length = pg_encoding_mblen(database_encoding(), mbstr);
+     if length as usize > mbstr.len() {
+         return Err(report_invalid_encoding_db(mbstr, length, mbstr.len() as i32));
+     }
+     Ok(length)
+ }
+ 
+ pub fn pg_mblen_with_len(mbstr: &[u8], limit: i32) -> PgResult<i32> {
+-    pg_encoding_mblen_with_len(database_encoding(), mbstr, limit)
++    PgResult::new(-1) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// [`pg_mblen_with_len`] parameterized by encoding (mbutils.c
+ /// `pg_mblen_with_len`, generalized the way `pg_encoding_mbstrlen_with_len`
+ /// generalizes `pg_mbstrlen_with_len`).
+ pub fn pg_encoding_mblen_with_len(encoding: pg_enc, mbstr: &[u8], limit: i32) -> PgResult<i32> {
+     debug_assert!(limit >= 1);
+     let length = pg_encoding_mblen(encoding, mbstr);

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace != with == in pg_wchar2mule_with_len
+@@ -618,17 +618,17 @@
+     b == LCPRV2_A || b == LCPRV2_B
+ }
+ 
+ fn pg_wchar2mule_with_len(from: &[pg_wchar], to: &mut [u8]) -> i32 {
+     let mut len = from.len();
+     let mut fi = 0;
+     let mut ti = 0;
+     let mut cnt = 0i32;
+-    while len > 0 && from[fi] != 0 {
++    while len > 0 && from[fi] == /* ~ changed by cargo-mutants ~ */ 0 {
+         let w = from[fi];
+         let lb = (w >> 16) as u8;
+         if is_lc1(lb) {
+             to[ti] = lb;
+             to[ti + 1] = w as u8;
+             ti += 2;
+             cnt += 2;
+         } else if is_lc2(lb) {

@@ -1,0 +1,81 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace pg_eucjp_increment -> bool with false
+@@ -1004,77 +1004,17 @@
+     // out-of-contract input C happily "increments"). wrapping_add keeps the
+     // exact C image; a plain += panics under fuzz/debug overflow checks
+     // (found by wcharfam_diff).
+     charptr[0] = charptr[0].wrapping_add(1);
+     true
+ }
+ 
+ pub fn pg_eucjp_increment(charptr: &mut [u8]) -> bool {
+-    const SS2: u8 = 0x8e;
+-    const SS3: u8 = 0x8f;
+-    let length = charptr.len();
+-    let c1 = charptr[0];
+-    match c1 {
+-        SS2 => {
+-            if length != 2 {
+-                return false;
+-            }
+-            let c2 = charptr[1];
+-            if c2 >= 0xdf {
+-                charptr[0] = 0xa1;
+-                charptr[1] = 0xa1;
+-            } else if c2 < 0xa1 {
+-                charptr[1] = 0xa1;
+-            } else {
+-                charptr[1] += 1;
+-            }
+-            true
+-        }
+-        SS3 => {
+-            if length != 3 {
+-                return false;
+-            }
+-            for i in (1..=2).rev() {
+-                let c2 = charptr[i];
+-                if c2 < 0xa1 {
+-                    charptr[i] = 0xa1;
+-                    return true;
+-                } else if c2 < 0xfe {
+-                    charptr[i] += 1;
+-                    return true;
+-                }
+-            }
+-            false
+-        }
+-        _ => {
+-            if c1 & 0x80 != 0 {
+-                if length != 2 {
+-                    return false;
+-                }
+-                for i in (0..=1).rev() {
+-                    let c2 = charptr[i];
+-                    if c2 < 0xa1 {
+-                        charptr[i] = 0xa1;
+-                        return true;
+-                    } else if c2 < 0xfe {
+-                        charptr[i] += 1;
+-                        return true;
+-                    }
+-                }
+-                false
+-            } else {
+-                if c1 > 0x7e {
+-                    return false;
+-                }
+-                charptr[0] += 1;
+-                true
+-            }
+-        }
+-    }
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_verifymbstr(mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+     pg_verify_mbstr(database_encoding(), mbstr, no_error)
+ }
+ 
+ pub fn pg_verify_mbstr(encoding: pg_enc, mbstr: &[u8], no_error: bool) -> PgResult<bool> {
+     debug_assert!(pg_valid_encoding(encoding));

@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_valid_fe_encoding -> bool with true
+@@ -55,17 +55,17 @@
+     encoding >= 0 && encoding < _PG_LAST_ENCODING_
+ }
+ 
+ pub const fn pg_valid_be_encoding(encoding: pg_enc) -> bool {
+     encoding >= 0 && encoding <= PG_ENCODING_BE_LAST
+ }
+ 
+ pub const fn pg_valid_fe_encoding(encoding: pg_enc) -> bool {
+-    pg_valid_encoding(encoding)
++    true /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub const fn pg_encoding_is_client_only(encoding: pg_enc) -> bool {
+     encoding > PG_ENCODING_BE_LAST && encoding < _PG_LAST_ENCODING_
+ }
+ 
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub struct mbinterval {

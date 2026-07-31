@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ delete - in pg_utf8_verifychar
+@@ -1104,17 +1104,17 @@
+     } else if b & 0xf0 == 0xe0 {
+         l = 3;
+     } else if b & 0xf8 == 0xf0 {
+         l = 4;
+     } else {
+         l = 1;
+     }
+     if l as usize > s.len() {
+-        return -1;
++        return  /* ~ changed by cargo-mutants ~ */1;
+     }
+     if !pg_utf8_islegal(s, l) {
+         return -1;
+     }
+     l
+ }
+ 
+ /// Shared body of every non-UTF8 `*_verifystr` in wchar.c, monomorphized per

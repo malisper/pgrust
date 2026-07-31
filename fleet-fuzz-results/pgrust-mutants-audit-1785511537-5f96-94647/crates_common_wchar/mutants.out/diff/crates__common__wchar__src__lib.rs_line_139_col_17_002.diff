@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace < with <= in pg_ascii_dsplen
+@@ -131,17 +131,17 @@
+ fn pg_ascii_mblen(_s: &[u8]) -> i32 {
+     1
+ }
+ 
+ fn pg_ascii_dsplen(s: &[u8]) -> i32 {
+     let c = s[0];
+     if c == 0 {
+         0
+-    } else if c < 0x20 || c == 0x7f {
++    } else if c <= /* ~ changed by cargo-mutants ~ */ 0x20 || c == 0x7f {
+         -1
+     } else {
+         1
+     }
+ }
+ 
+ fn pg_euc2wchar_with_len(from: &[u8], to: &mut [pg_wchar]) -> i32 {
+     let mut len = from.len();

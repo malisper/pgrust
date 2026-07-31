@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace <= with > in unicode_utf8len
+@@ -1441,17 +1441,17 @@
+     }
+ }
+ 
+ pub const fn unicode_utf8len(c: pg_wchar) -> i32 {
+     if c <= 0x7f {
+         1
+     } else if c <= 0x7ff {
+         2
+-    } else if c <= 0xffff {
++    } else if c > /* ~ changed by cargo-mutants ~ */ 0xffff {
+         3
+     } else {
+         4
+     }
+ }
+ 
+ const SINGLE_BYTE_TBL: pg_wchar_tbl = pg_wchar_tbl {
+     mb2wchar_with_len: Some(pg_latin12wchar_with_len),

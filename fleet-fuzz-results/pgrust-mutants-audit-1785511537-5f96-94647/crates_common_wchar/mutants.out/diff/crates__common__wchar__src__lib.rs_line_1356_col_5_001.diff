@@ -1,0 +1,25 @@
+--- crates/common/wchar/src/lib.rs
++++ replace pg_encoding_mblen_or_incomplete -> i32 with 1
+@@ -1348,21 +1348,17 @@
+     }
+ }
+ 
+ pub fn pg_encoding_mblen(encoding: i32, mbstr: &[u8]) -> i32 {
+     (pg_wchar_table[table_index(encoding)].mblen)(mbstr)
+ }
+ 
+ pub fn pg_encoding_mblen_or_incomplete(encoding: i32, mbstr: &[u8]) -> i32 {
+-    if mbstr.is_empty() || (encoding == PG_GB18030 && is_highbit_set(mbstr[0]) && mbstr.len() < 2)
+-    {
+-        return i32::MAX;
+-    }
+-    pg_encoding_mblen(encoding, mbstr)
++    1 /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn pg_encoding_mblen_bounded(encoding: i32, mbstr: &[u8]) -> i32 {
+     let mblen = pg_encoding_mblen(encoding, mbstr) as usize;
+     match mbstr[..mblen.min(mbstr.len())].iter().position(|&b| b == 0) {
+         Some(p) => p as i32,
+         None => mblen as i32,
+     }

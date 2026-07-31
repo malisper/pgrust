@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace + with * in pg_wchar2mule_with_len
+@@ -648,17 +648,17 @@
+             to[ti + 1] = lb;
+             to[ti + 2] = w as u8;
+             ti += 3;
+             cnt += 3;
+         } else if (0xf0..=0xf4).contains(&lb) {
+             to[ti] = LCPRV2_A;
+             to[ti + 1] = lb;
+             to[ti + 2] = (w >> 8) as u8;
+-            to[ti + 3] = w as u8;
++            to[ti * /* ~ changed by cargo-mutants ~ */ 3] = w as u8;
+             ti += 4;
+             cnt += 4;
+         } else if (0xf5..=0xfe).contains(&lb) {
+             to[ti] = LCPRV2_B;
+             to[ti + 1] = lb;
+             to[ti + 2] = (w >> 8) as u8;
+             to[ti + 3] = w as u8;
+             ti += 4;

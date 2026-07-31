@@ -1,0 +1,61 @@
+
+*** crates/common/wchar/src/lib.rs:1401:5: replace surrogate_pair_to_codepoint -> pg_wchar with Default::default()
+
+*** mutation diff:
+--- crates/common/wchar/src/lib.rs
++++ replace surrogate_pair_to_codepoint -> pg_wchar with Default::default()
+@@ -1393,17 +1393,17 @@
+     c >= 0xd800 && c <= 0xdbff
+ }
+ 
+ pub const fn is_utf16_surrogate_second(c: pg_wchar) -> bool {
+     c >= 0xdc00 && c <= 0xdfff
+ }
+ 
+ pub const fn surrogate_pair_to_codepoint(first: pg_wchar, second: pg_wchar) -> pg_wchar {
+-    ((first & 0x3ff) << 10) + 0x10000 + (second & 0x3ff)
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// `c` must hold a complete sequence (C reads the trailing bytes unchecked).
+ #[inline]
+ pub fn utf8_to_unicode(c: &[u8]) -> pg_wchar {
+     let b0 = c[0];
+     if b0 & 0x80 == 0 {
+         b0 as pg_wchar
+
+
+*** /usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=wchar@0.1.0
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+       Dirty wchar v0.1.0 (/tmp/cargo-mutants-src-mMT9xR.tmp/crates/common/wchar): the file `crates/common/wchar/src/lib.rs` has changed (1785519080.259281154s, 7s after last build at 1785519073.529452056s)
+   Compiling wchar v0.1.0 (/tmp/cargo-mutants-src-mMT9xR.tmp/crates/common/wchar)
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=5294be34661295e2 -C extra-filename=-c691244d690e1ac7 --out-dir /tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps`
+     Running `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4141646ee6216aa6 -C extra-filename=-da99c5603b4b462e --out-dir /tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps`
+error[E0658]: cannot call conditionally-const associated function `<u32 as Default>::default` in constant functions
+    --> crates/common/wchar/src/lib.rs:1401:5
+     |
+1401 |     Default::default() /* ~ changed by cargo-mutants ~ */
+     |     ^^^^^^^^^^^^^^^^^^
+     |
+     = note: calls in constant functions are limited to constant functions, tuple structs and tuple variants
+     = note: see issue #143874 <https://github.com/rust-lang/rust/issues/143874> for more information
+
+error: `Default` is not yet stable as a const trait
+    --> crates/common/wchar/src/lib.rs:1401:5
+     |
+1401 |     Default::default() /* ~ changed by cargo-mutants ~ */
+     |     ^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0658`.
+error: could not compile `wchar` (lib) due to 2 previous errors
+
+Caused by:
+  process didn't exit successfully: `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4141646ee6216aa6 -C extra-filename=-da99c5603b4b462e --out-dir /tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `wchar` (lib test) due to 2 previous errors
+
+Caused by:
+  process didn't exit successfully: `/usr/local/rustup/toolchains/1.96.0-aarch64-unknown-linux-gnu/bin/rustc --crate-name wchar --edition=2021 crates/common/wchar/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=5294be34661295e2 -C extra-filename=-c691244d690e1ac7 --out-dir /tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps -L dependency=/tmp/cargo-mutants-src-mMT9xR.tmp/target/debug/deps` (exit status: 1)
+
+*** result: Failure(101)

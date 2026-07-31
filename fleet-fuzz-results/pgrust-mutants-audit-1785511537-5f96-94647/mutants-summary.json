@@ -1,0 +1,15 @@
+{
+  "job": "pgrust-mutants-audit-1785511537-5f96-94647",
+  "sha": "34df12d7e3825ea3272c14b1a8d513cecd248ddc",
+  "cargo_mutants": "27.1.0",
+  "timeout_s": 300,
+  "rail": "unavailable",
+  "rail_carved_tests": "",
+  "missed_in_crate_total": 296,
+  "genuinely_missed_total": 296,
+  "rc": 1,
+  "crates": [
+    {"crate": "crates/common/wchar", "outcome": "run", "total": 1244, "caught_in_crate": 1058, "missed_in_crate": 158, "caught_by_rail": 0, "genuinely_missed": 158, "rail_unviable": 0, "rail_timeout": 0, "rail_other": 0, "rail_unswept": 0, "unviable": 2, "timeout": 26, "wall_s": 4096},
+    {"crate": "crates/backend/utils/mb/mbutils", "outcome": "run", "total": 1021, "caught_in_crate": 313, "missed_in_crate": 138, "caught_by_rail": 0, "genuinely_missed": 138, "rail_unviable": 0, "rail_timeout": 0, "rail_other": 0, "rail_unswept": 0, "unviable": 566, "timeout": 4, "wall_s": 757}
+  ]
+}

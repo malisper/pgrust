@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace < with == in pg_valid_server_encoding
+@@ -210,17 +210,17 @@
+     if enc < 0 || !pg_valid_fe_encoding(enc) {
+         return -1;
+     }
+     enc
+ }
+ 
+ pub fn pg_valid_server_encoding(name: &str) -> pg_enc {
+     let enc = pg_char_to_encoding(name);
+-    if enc < 0 || !pg_valid_be_encoding(enc) {
++    if enc == /* ~ changed by cargo-mutants ~ */ 0 || !pg_valid_be_encoding(enc) {
+         return -1;
+     }
+     enc
+ }
+ 
+ pub fn pg_encoding_to_char(encoding: pg_enc) -> &'static str {
+     if pg_valid_encoding(encoding) {
+         enc_name(encoding)

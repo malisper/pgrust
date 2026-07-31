@@ -1,0 +1,21 @@
+--- crates/common/wchar/src/lib.rs
++++ replace | with ^ in pg_euctw2wchar_with_len
+@@ -299,17 +299,17 @@
+     let mut fi = 0;
+     let mut ti = 0;
+     while len > 0 && from[fi] != 0 {
+         if from[fi] == SS2 {
+             if len < 4 {
+                 break;
+             }
+             fi += 1;
+-            to[ti] = ((SS2 as u32) << 24) | ((from[fi] as u32) << 16);
++            to[ti] = ((SS2 as u32) << 24) ^ /* ~ changed by cargo-mutants ~ */ ((from[fi] as u32) << 16);
+             fi += 1;
+             to[ti] |= (from[fi] as u32) << 8;
+             fi += 1;
+             to[ti] |= from[fi] as u32;
+             fi += 1;
+             len -= 4;
+         } else if from[fi] == SS3 {
+             if len < 3 {

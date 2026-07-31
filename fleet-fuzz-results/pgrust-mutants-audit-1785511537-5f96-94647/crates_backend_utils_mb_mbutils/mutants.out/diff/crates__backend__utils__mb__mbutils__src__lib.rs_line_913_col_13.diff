@@ -1,0 +1,21 @@
+--- crates/backend/utils/mb/mbutils/src/lib.rs
++++ replace < with == in cliplen
+@@ -905,17 +905,17 @@
+         pos += l as usize;
+     }
+     Ok(clen)
+ }
+ 
+ fn cliplen(s: &[u8], len: i32, limit: i32) -> i32 {
+     let len = len.min(limit);
+     let mut l = 0;
+-    while l < len && s.get(l as usize).copied().unwrap_or(0) != 0 {
++    while l == /* ~ changed by cargo-mutants ~ */ len && s.get(l as usize).copied().unwrap_or(0) != 0 {
+         l += 1;
+     }
+     l
+ }
+ 
+ pub fn SetDatabaseEncoding(encoding: pg_enc) -> PgResult<()> {
+     if !pg_valid_be_encoding(encoding) {
+         return Err(internal_error(&format!(
