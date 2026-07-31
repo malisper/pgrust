@@ -3108,3 +3108,45 @@ jsonb-probe	proofs::eq_jsonb_int8_scalar_kinds	-Z c-ffi -Z stubbing --c-lib c/pg
 jsonb-probe	proofs::control_cast_weight_skew	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb.c --c-lib c/pg_jsonb_casts.c --exact	must-fail	defect-witness	40.82665	w2 cast rig negative control (DEFAULT solver); FAILED-as-required on out==v (verified check name)
 jsonb-probe	proofs::eq_build_array_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb_build.c --exact --solver kissat	unmeasured	unmeasured	?	FLEET-BOUND (local timeout-450s): w2 3272 constant empty-array image (queued)
 jsonb-probe	proofs::eq_build_object_noargs	-Z c-ffi -Z stubbing --c-lib c/pg_jsonb_build.c --exact --solver kissat	unmeasured	unmeasured	?	w2 3274 constant empty-object image (queued)
+pg-prng	eq_seed	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_seed_check	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_next_u64	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_next_i64	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_next_nonnegative_i64	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_next_u32	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_next_i32	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_next_nonnegative_i32	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_next_bool	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_nonnegative_signs	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_u64_range_empty	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_i64_range_empty	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_u64_range_span1	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_u64_range_span256	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_u64_range_span2p32	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_u64_range_full	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	eq_i64_range_pow2_cell	-Z c-ffi --c-lib c_pg_prng.c	green	per-commit	?	laneh 2026-07-31; local green 0-2s under multi-lane load (kissat); CI cluster confirm pgrust-kani-suite-1785484349-4ce2-21199
+pg-prng	control_next_u64_wrong_value	-Z c-ffi --c-lib c_pg_prng.c	must-fail	per-commit	?	non-vacuity control, DEFAULT solver; CI cluster -21199
+arrayutils	eq_array_get_n_items	-Z c-ffi --c-lib c_arrayutils.c	green	release-gate	?	laneh 2026-07-31; full-range i32 dims, ndim<=6 fence; WALLED locally 560s under load — CI cluster -21199 = verdict of record
+arrayutils	ndim_wider_than_slice_always_errors	-Z c-ffi --c-lib c_arrayutils.c	green	release-gate	?	laneh 2026-07-31; Rust-only corrupt-header arm; walled locally under load; CI cluster -21199
+arrayutils	eq_array_check_bounds	-Z c-ffi --c-lib c_arrayutils.c	green	release-gate	?	laneh 2026-07-31; full-range dims/lb; CI cluster -21199
+arrayutils	eq_array_get_offset	-Z c-ffi --c-lib c_arrayutils.c	green	release-gate	?	laneh 2026-07-31; dim 1..16, lb/indx -64..63 (C contract fence); walled locally under load; CI cluster -21199
+arrayutils	eq_mda_get_range	-Z c-ffi --c-lib c_arrayutils.c	green	per-commit	?	laneh 2026-07-31; i16 endpoints fence; CI cluster -21199
+arrayutils	eq_mda_get_prod	-Z c-ffi --c-lib c_arrayutils.c	green	per-commit	?	laneh 2026-07-31; range 1..16 fence; CI cluster -21199
+arrayutils	eq_mda_get_offset_values	-Z c-ffi --c-lib c_arrayutils.c	green	per-commit	?	laneh 2026-07-31; prod/span 1..16 fence; CI cluster -21199
+arrayutils	eq_mda_next_tuple	-Z c-ffi --c-lib c_arrayutils.c	green	per-commit	?	laneh 2026-07-31; span 1..16, curr in [0,span); CI cluster -21199
+arrayutils	control_get_offset_wrong_value	-Z c-ffi --c-lib c_arrayutils.c	must-fail	per-commit	?	non-vacuity control, DEFAULT solver; CI cluster -21199
+hashfn	eq_hash_bytes_len16	-Z c-ffi --c-lib c_hashfn.c	green	release-gate	?	laneh 2026-07-31; len<=16 symbolic content+len; local green 229s under load; CI cluster -21199
+hashfn	eq_hash_bytes_extended_len16	-Z c-ffi --c-lib c_hashfn.c	green	release-gate	?	laneh 2026-07-31; walled locally under load; CI cluster -21199
+hashfn	eq_hash_bytes_uint32	-Z c-ffi --c-lib c_hashfn.c	green	per-commit	?	laneh 2026-07-31; full-u32; local 6s
+hashfn	eq_hash_bytes_uint32_extended	-Z c-ffi --c-lib c_hashfn.c	green	per-commit	?	laneh 2026-07-31; full-u32 x full-u64 seed; local 5s
+hashfn	eq_string_hash_len8	-Z c-ffi --c-lib c_hashfn.c	green	release-gate	?	laneh 2026-07-31; len<=8 symbolic + NUL sentinel, keysize<=10 symbolic (class-complete with huge cell); walled locally under load; CI cluster -21199
+hashfn	eq_string_hash_len8_huge_keysize	-Z c-ffi --c-lib c_hashfn.c	green	release-gate	?	laneh 2026-07-31; literal usize::MAX + 2^40 cells; CI cluster -21199
+hashfn	eq_tag_hash_len12	-Z c-ffi --c-lib c_hashfn.c	green	release-gate	?	laneh 2026-07-31; len 12 symbolic, keysize<=12; local green 154s under load; CI cluster -21199
+hashfn	eq_uint32_hash	-Z c-ffi --c-lib c_hashfn.c	green	per-commit	?	laneh 2026-07-31; local 3s
+hashfn	eq_hash_combine	-Z c-ffi --c-lib c_hashfn.c	green	per-commit	?	laneh 2026-07-31; full-domain; local 1s
+hashfn	eq_hash_combine64	-Z c-ffi --c-lib c_hashfn.c	green	per-commit	?	laneh 2026-07-31; full-domain; local 1s
+hashfn	eq_murmurhash32	-Z c-ffi --c-lib c_hashfn.c	green	per-commit	?	laneh 2026-07-31; full-u32; local 2s kissat (DEFAULT/CaDiCaL wedged in prop-reduction >590s — solver law confirmed again)
+hashfn	eq_murmurhash64	-Z c-ffi --c-lib c_hashfn.c	green	release-gate	?	laneh 2026-07-31; full-u64, 2x 64-bit const mults; walled locally under load; CI cluster -21199
+hashfn	eq_rotate_high_and_low_32bits	-Z c-ffi --c-lib c_hashfn.c	green	per-commit	?	laneh 2026-07-31; full-u64; local <1s
+hashfn	murmur32_inverse_roundtrip	-Z c-ffi --c-lib c_hashfn.c	green	release-gate	?	laneh 2026-07-31; pgrust-only bijection, both directions full-u32; walled locally under load; CI cluster -21199
+hashfn	control_murmur32_wrong_value	-Z c-ffi --c-lib c_hashfn.c	must-fail	per-commit	?	non-vacuity control, DEFAULT solver; CI cluster -21199
