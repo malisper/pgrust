@@ -90,8 +90,16 @@ fn strtoint(s: &[u8]) -> Strto<i32> {
 }
 
 /// C `atoi` on an all-digit prefix (DecodeNumberField segments).
+///
+/// `atoi` is `(int) strtol(s, NULL, 10)`: the parse is 64-bit and SATURATES at
+/// LONG_MAX/LONG_MIN, then the result is TRUNCATED to int — it does not clamp
+/// to INT_MAX. Routing this through `strtoint` (which clamps) makes a long
+/// digit run decode as INT_MAX instead of the truncated value, which flips the
+/// downstream verdict: 62 '1' digits give tm_year = -1 in C (LONG_MAX
+/// truncated) and so ValidateDate reports 22008, where a clamp gives
+/// tm_year = INT_MAX and a 22007 instead.
 fn atoi(s: &[u8]) -> i32 {
-    strtoint(s).val
+    strtoi64(s).val as i32
 }
 
 /// C `strncmp(key, token, TOKMAXLEN)` where both are NUL-terminated.
@@ -2783,4 +2791,32 @@ pub fn CheckDateTokenTables() -> bool {
     debug_assert_eq!(UNIX_EPOCH_JDATE, date2j(1970, 1, 1));
     debug_assert_eq!(POSTGRES_EPOCH_JDATE, date2j(2000, 1, 1));
     CheckDateTokenTable(&DATETKTBL) && CheckDateTokenTable(&DELTATKTBL)
+}
+
+#[cfg(test)]
+mod atoi_tests {
+    use super::atoi;
+
+    /// Mirrors a glibc probe run inside the postgres:18.3 image (Debian 13,
+    /// gcc 14.2, aarch64): `atoi` is `(int) strtol(...)`, so an overflowing
+    /// digit run saturates to LONG_MAX and is then truncated, never clamped
+    /// to INT_MAX. Every expectation below is an observed glibc value.
+    #[test]
+    fn atoi_matches_glibc_truncating_cast() {
+        for (input, want) in [
+            ("11", 11i32),
+            ("111111", 111111),
+            ("2147483647", 2147483647),
+            ("2147483648", -2147483648),
+            ("4294967295", -1),
+            ("4294967296", 0),
+            ("9223372036854775807", -1),
+            ("9223372036854775808", -1),
+            ("99999999999999999999999999999999", -1),
+            // the CI cluster divergence input's year segment: 62 '1' digits
+            ("11111111111111111111111111111111111111111111111111111111111111", -1),
+        ] {
+            assert_eq!(atoi(input.as_bytes()), want, "atoi({input})");
+        }
+    }
 }
