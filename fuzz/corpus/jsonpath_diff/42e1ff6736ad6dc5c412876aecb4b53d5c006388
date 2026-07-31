@@ -1,0 +1,1 @@
+th$ ? (@ like_regex "[[:alp]+a:`"] flag "i")

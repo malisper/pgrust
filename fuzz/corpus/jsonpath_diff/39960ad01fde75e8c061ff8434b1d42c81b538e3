@@ -1,0 +1,1 @@
+$ ? (@ like_regex "||regex "||@ like_regex "||patt"||@ like_regex "||$mmmmt~t@r\x50\\\\\\m\\mm"||@ like_regex "||$mmmmt~t@r\x50\\\\\\m\\mmimmmmmat~t@r\ddd\0!!!iimmmmmat~t@r\ddd\0!!!isim"g

@@ -1,0 +1,1 @@
+A$.a.datetime("HH24:THMI") < $.b.datetime("MIHFM4:MI")
