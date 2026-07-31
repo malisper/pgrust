@@ -548,6 +548,44 @@ mod tests {
         }
     }
 
+    /// Sampled k3+k4 pass for COVERAGE CAPTURE runs (strided tails, prime
+    /// step): touches every per-char code path class the full sweeps prove
+    /// totally, at ~1/512 the volume, so an instrumented build can measure
+    /// the lines in minutes. NOT evidence — the full k3/k4 logs are.
+    #[test]
+    #[ignore = "coverage-capture helper; run under -Cinstrument-coverage"]
+    fn exhaustive_sampled_for_coverage() {
+        const STRIDE: u32 = 509; // prime
+        for pair in PAIRS {
+            let nsub = match pair.c {
+                COracle::Plain(_) => 1u8,
+                COracle::Enc(_, band, _) => band.len() as u8,
+            };
+            // strided 3-byte
+            let mut t = 0u32;
+            while t < 1 << 24 {
+                let buf = [(t & 0xff) as u8, ((t >> 8) & 0xff) as u8, ((t >> 16) & 0xff) as u8];
+                for sub in 0..nsub {
+                    diff_one(pair, sub, false, &buf);
+                    diff_one(pair, sub, true, &buf);
+                }
+                t += STRIDE;
+            }
+            // strided 4-byte over all leads
+            let mut t = 0u32;
+            while t < 1 << 24 {
+                for b0 in [0x8e, 0x9c, 0x9d, 0xf0, 0xf4, 0x81, 0xfe] {
+                    let buf = [b0, (t & 0xff) as u8, ((t >> 8) & 0xff) as u8, ((t >> 16) & 0xff) as u8];
+                    for sub in 0..nsub {
+                        diff_one(pair, sub, false, &buf);
+                        diff_one(pair, sub, true, &buf);
+                    }
+                }
+                t += STRIDE * 16;
+            }
+        }
+    }
+
     /// 4-byte single-character candidates, lead-constrained (see sweep_lead4
     /// doc): every 4-byte character of each 4-byte-capable SOURCE encoding.
     /// b1 outside these leads (or b2 outside the gb18030 digit range) makes
