@@ -237,3 +237,11 @@ path = "fuzz_targets/geo_io_diff.rs"
 test = false
 doc = false
 bench = false
+
+# wcharfam_diff: common/wchar + mb/mbutils differential (p1-laneah).
+[[bin]]
+name = "wcharfam_diff"
+path = "fuzz_targets/wcharfam_diff.rs"
+test = false
+doc = false
+bench = false

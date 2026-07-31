@@ -1000,7 +1000,11 @@ pub fn pg_utf8_increment(charptr: &mut [u8]) -> bool {
     if a == 0x7F || a == 0xDF || a == 0xEF || a == 0xF4 {
         return false;
     }
-    charptr[0] += 1;
+    // C `charptr[0]++` is defined unsigned wraparound: 0xFF -> 0x00 (an
+    // out-of-contract input C happily "increments"). wrapping_add keeps the
+    // exact C image; a plain += panics under fuzz/debug overflow checks
+    // (found by wcharfam_diff).
+    charptr[0] = charptr[0].wrapping_add(1);
     true
 }
 
