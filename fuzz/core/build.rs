@@ -205,6 +205,27 @@ fn main() {
     // oracle lib (laneg's enc_tables vendors its own base64 + strlcpy).
     const HASHENC_EXTRA_SYMS: &[&str] = &["ascii_safe_strlcpy"];
 
+    // numericfam oracle (p1-laneu): the whole vendored 18.3 numeric.c
+    // #include'd into pg_numeric_oracle.c (cref_numeric precedent) plus the
+    // vendored common/hashfn.c. OWN cc::Build with ONLY the numericfam
+    // vendor include dir: its postgres.h shim must never shadow (or be
+    // shadowed by) csrc/shim/postgres.h in the main oracle lib.
+    let mut numericfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        numericfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    numericfam
+        .file("csrc/numericfam/pg_numeric_oracle.c")
+        .file("csrc/numericfam/vendor/common/hashfn.c")
+        .include("csrc/numericfam/vendor")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-but-set-variable")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_numericfam");
+
     // hashenc_diff oracle (p1-lanee): verbatim src/common + ascii/crc TUs.
     // The src/common files build -DFRONTEND (identical logic; malloc
     // allocator, exactly a real frontend libpgcommon build).

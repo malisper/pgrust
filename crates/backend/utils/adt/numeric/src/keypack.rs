@@ -96,7 +96,12 @@ pub fn numeric_key_pack(num: Num<'_>, mant_abs_max: u64) -> Option<NumericKeyFor
     if num.dscale() != 0.max(-e) {
         return None;
     }
-    if m as u128 > mant_abs_max as u128
+    // `mantissa` is i64: fence the caller's budget at i64::MAX so an
+    // out-of-contract mant_abs_max (> i64::MAX) can never wrap the cast
+    // below into a garbage key (found by numeric_ops_diff fuzzing; every
+    // shipped caller passes <= 2^55-1, so this is behavior-identical for
+    // in-contract use).
+    if m as u128 > mant_abs_max.min(i64::MAX as u64) as u128
         || !(-NUMERIC_KEY_EXP_MAX..=NUMERIC_KEY_EXP_MAX).contains(&e)
     {
         return None;

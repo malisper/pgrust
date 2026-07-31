@@ -448,3 +448,7 @@ pub fn install_detoast_seam_once() {
         detoast_seams::detoast_attr::set(detoast::detoast_attr);
     });
 }
+// numericfam (p1-laneu adt/numeric campaign): whole-numeric.c oracle,
+// two targets (io + ops) over one pg_diff_num_call ABI.
+pub mod numericfam;
+pub use numericfam::{numeric_io_diff, numeric_ops_diff};
