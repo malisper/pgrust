@@ -439,87 +439,34 @@ pstrdup(const char *s)
 
 static inline void check_stack_depth(void) {}
 
-/* ---------------- common/int.h overflow helpers (builtin arm, verbatim) ---- */
-
-static inline bool
-pg_add_s32_overflow(int32 a, int32 b, int32 *result)
-{
-	return __builtin_add_overflow(a, b, result);
-}
-
-static inline bool
-pg_sub_s32_overflow(int32 a, int32 b, int32 *result)
-{
-	return __builtin_sub_overflow(a, b, result);
-}
-
-static inline bool
-pg_mul_s32_overflow(int32 a, int32 b, int32 *result)
-{
-	return __builtin_mul_overflow(a, b, result);
-}
-
-static inline bool
-pg_add_s64_overflow(int64 a, int64 b, int64 *result)
-{
-	return __builtin_add_overflow(a, b, result);
-}
-
-static inline bool
-pg_sub_s64_overflow(int64 a, int64 b, int64 *result)
-{
-	return __builtin_sub_overflow(a, b, result);
-}
-
-static inline bool
-pg_mul_s64_overflow(int64 a, int64 b, int64 *result)
-{
-	return __builtin_mul_overflow(a, b, result);
-}
-
-static inline bool
-pg_neg_u32_overflow(uint32 a, int32 *result)
-{
-	int64		res = -((int64) a);
-
-	*result = (int32) res;
-	return res < PG_INT32_MIN;
-}
-
-static inline bool
-pg_neg_u64_overflow(uint64 a, int64 *result)
-{
-	/* verbatim HAVE__BUILTIN_OP_OVERFLOW arm */
-	return __builtin_sub_overflow((int64) 0, (int64) a, result) ||
-		(a > (uint64) PG_INT64_MAX + 1);
-}
-
-static inline uint64
-pg_abs_s64(int64 a)
-{
-	if (unlikely(a == PG_INT64_MIN))
-		return (uint64) PG_INT64_MIN;
-	return (uint64) (a < 0 ? -a : a);
-}
-
-/* pg_bitutils.h */
-static inline int
-pg_leftmost_one_pos32(uint32 word)
-{
-	return 31 - __builtin_clz(word);
-}
-
-static inline int
-pg_leftmost_one_pos64(uint64 word)
-{
-	return 63 - __builtin_clzll(word);
-}
-
-static inline uint32
-pg_rotate_left32(uint32 word, int n)
-{
-	return (word << n) | (word >> (32 - n));
-}
+/* ---------------- common/int.h + port/pg_bitutils.h helpers ----------------
+ * NOT hand-written: extracted VERBATIM by the assembler (see the function
+ * list in assemble.py) with the production feature macros defined below, so
+ * the same #if arm every real build takes is the one compiled here.
+ *
+ * WHY THIS IS VERBATIM AND NOT HAND-ROLLED (harness defect, 2026-07-31): a
+ * hand-written pg_neg_u64_overflow cast its uint64 argument to int64 BEFORE
+ * the subtraction, so -(-2^63) wrapped and the shim reported overflow for the
+ * perfectly legal bigint -9223372036854775808. That produced a false
+ * divergence on `[...-9223372036854775808,...]` (oracle 22003 vs the shipped
+ * Rust's correct 22P02 on the other bound). Upstream's builtin arm is
+ * `__builtin_sub_overflow(0, a, result)` with `a` still unsigned, which the
+ * compiler evaluates in infinite precision. Never fabricate a C body.
+ */
+#define HAVE__BUILTIN_OP_OVERFLOW 1
+#define HAVE__BUILTIN_CLZ 1
+#define HAVE__BUILTIN_CTZ 1
+#define HAVE_INT128 1
+typedef __int128 int128;
+typedef unsigned __int128 uint128;
+#define i64abs(i) llabs(i)
+/* c.h/pg_config.h sizes for the LP64 hosts this oracle builds on (arm64
+ * macOS + aarch64/x86-64 Linux): selects the same #if arms as a real build. */
+#define SIZEOF_LONG 8
+#define SIZEOF_LONG_LONG 8
+#define SIZEOF_VOID_P 8
+#define SIZEOF_DATUM 8
+#define BITS_PER_BYTE 8
 
 /* ---------------- tupmacs.h static inlines (verbatim semantics) ------------ */
 
@@ -1872,6 +1819,19 @@ static const NumericVar const_ninf =
 #define init_var(v)		memset(v, 0, sizeof(NumericVar))
 
 /* ---- auto-generated static prototypes (paste-order shim) ---- */
+static inline bool pg_add_s32_overflow(int32 a, int32 b, int32 *result);
+static inline bool pg_sub_s32_overflow(int32 a, int32 b, int32 *result);
+static inline bool pg_mul_s32_overflow(int32 a, int32 b, int32 *result);
+static inline bool pg_add_s64_overflow(int64 a, int64 b, int64 *result);
+static inline bool pg_sub_s64_overflow(int64 a, int64 b, int64 *result);
+static inline bool pg_mul_s64_overflow(int64 a, int64 b, int64 *result);
+static inline bool pg_neg_u32_overflow(uint32 a, int32 *result);
+static inline bool pg_neg_u64_overflow(uint64 a, int64 *result);
+static inline uint64 pg_abs_s64(int64 a);
+static inline bool pg_add_u64_overflow(uint64 a, uint64 b, uint64 *result);
+static inline int pg_leftmost_one_pos32(uint32 word);
+static inline int pg_leftmost_one_pos64(uint64 word);
+static inline uint32 pg_rotate_left32(uint32 word, int n);
 static uint32 hash_bytes(const unsigned char *k, int keylen);
 static uint64 hash_bytes_extended(const unsigned char *k, int keylen, uint64 seed);
 static uint32 hash_bytes_uint32(uint32 k);
@@ -2050,6 +2010,301 @@ btint8cmp(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(A_LESS_THAN_B);
 }
 
+
+static inline bool
+pg_add_s32_overflow(int32 a, int32 b, int32 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_add_overflow(a, b, result);
+#else
+	int64		res = (int64) a + (int64) b;
+
+	if (res > PG_INT32_MAX || res < PG_INT32_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int32) res;
+	return false;
+#endif
+}
+
+static inline bool
+pg_sub_s32_overflow(int32 a, int32 b, int32 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_sub_overflow(a, b, result);
+#else
+	int64		res = (int64) a - (int64) b;
+
+	if (res > PG_INT32_MAX || res < PG_INT32_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int32) res;
+	return false;
+#endif
+}
+
+static inline bool
+pg_mul_s32_overflow(int32 a, int32 b, int32 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_mul_overflow(a, b, result);
+#else
+	int64		res = (int64) a * (int64) b;
+
+	if (res > PG_INT32_MAX || res < PG_INT32_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int32) res;
+	return false;
+#endif
+}
+
+static inline bool
+pg_add_s64_overflow(int64 a, int64 b, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_add_overflow(a, b, result);
+#elif defined(HAVE_INT128)
+	int128		res = (int128) a + (int128) b;
+
+	if (res > PG_INT64_MAX || res < PG_INT64_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int64) res;
+	return false;
+#else
+	if ((a > 0 && b > 0 && a > PG_INT64_MAX - b) ||
+		(a < 0 && b < 0 && a < PG_INT64_MIN - b))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = a + b;
+	return false;
+#endif
+}
+
+static inline bool
+pg_sub_s64_overflow(int64 a, int64 b, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_sub_overflow(a, b, result);
+#elif defined(HAVE_INT128)
+	int128		res = (int128) a - (int128) b;
+
+	if (res > PG_INT64_MAX || res < PG_INT64_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int64) res;
+	return false;
+#else
+	/*
+	 * Note: overflow is also possible when a == 0 and b < 0 (specifically,
+	 * when b == PG_INT64_MIN).
+	 */
+	if ((a < 0 && b > 0 && a < PG_INT64_MIN + b) ||
+		(a >= 0 && b < 0 && a > PG_INT64_MAX + b))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = a - b;
+	return false;
+#endif
+}
+
+static inline bool
+pg_mul_s64_overflow(int64 a, int64 b, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_mul_overflow(a, b, result);
+#elif defined(HAVE_INT128)
+	int128		res = (int128) a * (int128) b;
+
+	if (res > PG_INT64_MAX || res < PG_INT64_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int64) res;
+	return false;
+#else
+	/*
+	 * Overflow can only happen if at least one value is outside the range
+	 * sqrt(min)..sqrt(max) so check that first as the division can be quite a
+	 * bit more expensive than the multiplication.
+	 *
+	 * Multiplying by 0 or 1 can't overflow of course and checking for 0
+	 * separately avoids any risk of dividing by 0.  Be careful about dividing
+	 * INT_MIN by -1 also, note reversing the a and b to ensure we're always
+	 * dividing it by a positive value.
+	 *
+	 */
+	if ((a > PG_INT32_MAX || a < PG_INT32_MIN ||
+		 b > PG_INT32_MAX || b < PG_INT32_MIN) &&
+		a != 0 && a != 1 && b != 0 && b != 1 &&
+		((a > 0 && b > 0 && a > PG_INT64_MAX / b) ||
+		 (a > 0 && b < 0 && b < PG_INT64_MIN / a) ||
+		 (a < 0 && b > 0 && a < PG_INT64_MIN / b) ||
+		 (a < 0 && b < 0 && a < PG_INT64_MAX / b)))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = a * b;
+	return false;
+#endif
+}
+
+static inline bool
+pg_neg_u32_overflow(uint32 a, int32 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_sub_overflow(0, a, result);
+#else
+	int64		res = -((int64) a);
+
+	if (unlikely(res < PG_INT32_MIN))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
+	return false;
+#endif
+}
+
+static inline bool
+pg_neg_u64_overflow(uint64 a, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_sub_overflow(0, a, result);
+#elif defined(HAVE_INT128)
+	int128		res = -((int128) a);
+
+	if (unlikely(res < PG_INT64_MIN))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
+	return false;
+#else
+	if (unlikely(a > (uint64) PG_INT64_MAX + 1))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	if (unlikely(a == (uint64) PG_INT64_MAX + 1))
+		*result = PG_INT64_MIN;
+	else
+		*result = -((int64) a);
+	return false;
+#endif
+}
+
+static inline uint64
+pg_abs_s64(int64 a)
+{
+	if (unlikely(a == PG_INT64_MIN))
+		return (uint64) PG_INT64_MAX + 1;
+	return (uint64) i64abs(a);
+}
+
+static inline bool
+pg_add_u64_overflow(uint64 a, uint64 b, uint64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_add_overflow(a, b, result);
+#else
+	uint64		res = a + b;
+
+	if (res < a)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
+	return false;
+#endif
+}
+
+static inline int
+pg_leftmost_one_pos32(uint32 word)
+{
+#ifdef HAVE__BUILTIN_CLZ
+	Assert(word != 0);
+
+	return 31 - __builtin_clz(word);
+#elif defined(_MSC_VER)
+	unsigned long result;
+	bool		non_zero;
+
+	Assert(word != 0);
+
+	non_zero = _BitScanReverse(&result, word);
+	return (int) result;
+#else
+	int			shift = 32 - 8;
+
+	Assert(word != 0);
+
+	while ((word >> shift) == 0)
+		shift -= 8;
+
+	return shift + pg_leftmost_one_pos[(word >> shift) & 255];
+#endif							/* HAVE__BUILTIN_CLZ */
+}
+
+static inline int
+pg_leftmost_one_pos64(uint64 word)
+{
+#ifdef HAVE__BUILTIN_CLZ
+	Assert(word != 0);
+
+#if SIZEOF_LONG == 8
+	return 63 - __builtin_clzl(word);
+#elif SIZEOF_LONG_LONG == 8
+	return 63 - __builtin_clzll(word);
+#else
+#error "cannot find integer type of the same size as uint64_t"
+#endif
+
+#elif defined(_MSC_VER) && (defined(_M_AMD64) || defined(_M_ARM64))
+	unsigned long result;
+	bool		non_zero;
+
+	Assert(word != 0);
+
+	non_zero = _BitScanReverse64(&result, word);
+	return (int) result;
+#else
+	int			shift = 64 - 8;
+
+	Assert(word != 0);
+
+	while ((word >> shift) == 0)
+		shift -= 8;
+
+	return shift + pg_leftmost_one_pos[(word >> shift) & 255];
+#endif							/* HAVE__BUILTIN_CLZ */
+}
+
+static inline uint32
+pg_rotate_left32(uint32 word, int n)
+{
+	return (word << n) | (word >> (32 - n));
+}
 
 static uint32
 hash_bytes(const unsigned char *k, int keylen)
