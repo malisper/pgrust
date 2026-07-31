@@ -1,3 +1,573 @@
-//! uuid_diff: STUB — filled in by the lane's target-builder. Compiles empty
-//! so the pre-stamped workspace builds before the module lands.
-pub fn uuid_diff(_data: &[u8]) {}
+//! uuid_diff: differential fuzz driver — shipped Rust adt_uuid vs vendored
+//! PostgreSQL 18.3 C (csrc/pg_uuid_io.c, upstream sha 62d6c7d3df).
+//!
+//! Comparison planes (float_in_diff conventions): value bytes/bits,
+//! error-verdict, and errcode class. Message text is out of scope.
+//!
+//! Input layout: [selector][payload]; selector % 8 picks the arm:
+//!   0 uuid_in        payload = text bytes (interior-NUL-free; need not be
+//!                    UTF-8 — the shipped API takes &[u8]); hard-error AND
+//!                    soft-error (SoftErrorContext) shapes both compared.
+//!   1 uuid_out       payload = 16 raw bytes; exact 36-byte image + NUL.
+//!   2 cmp family     payload = 32 raw bytes; cmp signum + all six bool ops.
+//!   3 hash           payload = 16 raw bytes (+8 seed bytes); uuid_hash,
+//!                    uuid_hash_extended(0) and uuid_hash_extended(seed).
+//!   4 extract        payload = 16 raw bytes; uuid_extract_version +
+//!                    uuid_extract_timestamp (null-verdict + value).
+//!   5 recv/send      payload = wire bytes; uuid_recv over a StringInfo vs
+//!                    the C wire triple (verdict + 16 bytes + cursor), then
+//!                    uuid_send image parity (20-byte varlena image).
+//!   6 generate_uuidv7 payload = 8B ts_ms + 4B sub_ms; deterministic planes
+//!                    only (bytes 0..=6 exact; byte 7 masked 0xFC on macOS
+//!                    where C's SUBMS 10-bit arm xors in random bits — the C
+//!                    oracle gets a zero rand8, shipped Rust real entropy;
+//!                    byte 8 variant bits).
+//!   7 abbrev         payload = [mode][8B seed]; UuidAbbrevState::convert
+//!                    key vs the C uuid_abbrev_convert pure kernel per call,
+//!                    plus uuid_abbrev_abort gate execution/invariants.
+//!
+//! SKIPPED (stateful, excluded(state)-class rows; no differential possible):
+//!   - gen_random_uuid / uuidv7 / uuidv7_interval /
+//!     get_real_time_ns_ascending: PRNG (pg_strong_random) and wall-clock +
+//!     backend-private monotonic TLS. The pure core behind uuidv7* —
+//!     generate_uuidv7 — IS covered (arm 6) via the C oracle's rand8 seam.
+//!     uuidv7_interval additionally needs adt_datetime::Interval, not a
+//!     decoder_fuzz dependency.
+//!   - builtins.rs fc_* wrappers: need fmgr Fcinfo machinery (types_fmgr),
+//!     not constructible from this crate; core entry points are driven
+//!     instead (the wrappers are regress-covered).
+//!   - abbrev abort's HyperLogLog estimate is state accumulated across
+//!     calls; the abort gates are executed and checked against the
+//!     deterministic expectations of fixed corpora (not a C differential —
+//!     vendoring PG's hyperloglog.c is out of this target's scope).
+
+use std::ffi::{c_char, CString};
+
+use adt_uuid::abbrev::UuidAbbrevState;
+use adt_uuid::{PgUuid, UUID_LEN, UUID_OUT_LEN};
+use mcx::MemoryContext;
+use stringinfo::StringInfo;
+use types_error::{SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION};
+
+extern "C" {
+    fn pg_diff_uuid_in(source: *const c_char, out: *mut u8) -> i32;
+    fn pg_diff_uuid_out(data: *const u8, buf: *mut c_char) -> i32;
+    fn pg_diff_uuid_cmpop(op: i32, a: *const u8, b: *const u8) -> i32;
+    fn pg_diff_uuid_hash(data: *const u8) -> u32;
+    fn pg_diff_uuid_hash_extended(data: *const u8, seed: u64) -> u64;
+    fn pg_diff_uuid_extract_version(data: *const u8, isnull: *mut i32) -> u16;
+    fn pg_diff_uuid_extract_timestamp(data: *const u8, isnull: *mut i32) -> i64;
+    fn pg_diff_uuid_recv(data: *const u8, len: i32, cursor: *mut i32, out: *mut u8) -> i32;
+    fn pg_diff_uuid_send(data: *const u8, out: *mut u8) -> i32;
+    fn pg_diff_uuid_generate_v7(
+        unix_ts_ms: u64,
+        sub_ms: u32,
+        rand8: *const u8,
+        out: *mut u8,
+    ) -> i32;
+    fn pg_diff_uuid_abbrev_key(data: *const u8) -> u64;
+    // Shared TLS errcode accessor (defined in csrc/pg_float_io.c).
+    fn pg_diff_errcode_get() -> i32;
+}
+
+/// Oracle errcode class for 22P02 (see csrc/pg_uuid_io.c section 4).
+const C_ERR_INVALID_TEXT: i32 = 1;
+
+fn take16(payload: &[u8]) -> Option<PgUuid> {
+    let head = payload.get(..UUID_LEN)?;
+    let mut u = [0u8; UUID_LEN];
+    u.copy_from_slice(head);
+    Some(u)
+}
+
+pub fn uuid_diff(data: &[u8]) {
+    let Some((&sel, payload)) = data.split_first() else {
+        return;
+    };
+    match sel % 8 {
+        0 => in_diff(payload),
+        1 => out_diff(payload),
+        2 => cmp_diff(payload),
+        3 => hash_diff(payload),
+        4 => extract_diff(payload),
+        5 => recv_send_diff(payload),
+        6 => v7_diff(payload),
+        _ => abbrev_diff(payload),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arm 0: uuid_in (parse: canonical / braces / hyphen-free / error arms).
+// ---------------------------------------------------------------------------
+
+fn in_diff(payload: &[u8]) {
+    if payload.len() > 1024 || payload.contains(&0) {
+        return;
+    }
+    let cs = CString::new(payload).unwrap();
+    let mut cval = [0u8; UUID_LEN];
+    let cst = unsafe { pg_diff_uuid_in(cs.as_ptr(), cval.as_mut_ptr()) };
+    let cerr = unsafe { pg_diff_errcode_get() };
+
+    // Hard-error shape (escontext = None), the fc_uuid_in default.
+    match adt_uuid::uuid_in(payload, None) {
+        Ok(r) => {
+            assert!(
+                cst == 0 && r == cval,
+                "uuid_in DIVERGENCE input={:?}: C=(st {cst}, {cval:02x?}) Rust=Ok({r:02x?})",
+                String::from_utf8_lossy(payload)
+            );
+        }
+        Err(e) => {
+            assert!(
+                cst == 1
+                    && cerr == C_ERR_INVALID_TEXT
+                    && e.sqlstate == ERRCODE_INVALID_TEXT_REPRESENTATION,
+                "uuid_in DIVERGENCE input={:?}: C=(st {cst}, err {cerr}) Rust=Err(sqlstate {:?})",
+                String::from_utf8_lossy(payload),
+                e.sqlstate
+            );
+        }
+    }
+
+    // Soft-error shape (ereturn saves into the context and returns Ok).
+    let mut sc = SoftErrorContext::new(true);
+    let soft = adt_uuid::uuid_in(payload, Some(&mut sc));
+    let soft = soft.expect("uuid_in with escontext must not hard-error");
+    assert_eq!(
+        sc.error_occurred(),
+        cst != 0,
+        "uuid_in soft-error verdict DIVERGENCE input={:?}",
+        String::from_utf8_lossy(payload)
+    );
+    if cst == 0 {
+        assert_eq!(soft, cval, "uuid_in soft-path value DIVERGENCE");
+    } else {
+        let saved = sc.error().expect("details_wanted context must save the error");
+        assert_eq!(saved.sqlstate, ERRCODE_INVALID_TEXT_REPRESENTATION);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arm 1: uuid_out — exact 36-byte image.
+// ---------------------------------------------------------------------------
+
+fn out_diff(payload: &[u8]) {
+    let Some(u) = take16(payload) else { return };
+    let mut cbuf = [0u8; UUID_OUT_LEN + 4];
+    unsafe { pg_diff_uuid_out(u.as_ptr(), cbuf.as_mut_ptr() as *mut c_char) };
+    let mut rbuf = [0u8; UUID_OUT_LEN];
+    let rlen = adt_uuid::uuid_out_into(&u, &mut rbuf);
+    assert!(
+        rlen == UUID_OUT_LEN && rbuf == cbuf[..UUID_OUT_LEN] && cbuf[UUID_OUT_LEN] == 0,
+        "uuid_out DIVERGENCE uuid={u:02x?}: C={:?} Rust={:?}",
+        String::from_utf8_lossy(&cbuf[..UUID_OUT_LEN]),
+        String::from_utf8_lossy(&rbuf[..rlen])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Arm 2: uuid_cmp + lt/le/eq/ge/gt/ne (signum on cmp, exact on bools).
+// ---------------------------------------------------------------------------
+
+fn cmp_diff(payload: &[u8]) {
+    let Some(a) = take16(payload) else { return };
+    let Some(b) = take16(&payload[UUID_LEN..]) else { return };
+    let c = |op: i32| unsafe { pg_diff_uuid_cmpop(op, a.as_ptr(), b.as_ptr()) };
+    // memcmp magnitude is implementation-defined; compare signum (btree
+    // comparator contract, same as the proofs harnesses).
+    let (ccmp, rcmp) = (c(0).signum(), adt_uuid::uuid_internal_cmp(&a, &b).signum());
+    assert_eq!(ccmp, rcmp, "uuid_cmp DIVERGENCE a={a:02x?} b={b:02x?}");
+    let rust: [bool; 6] = [
+        adt_uuid::uuid_lt(&a, &b),
+        adt_uuid::uuid_le(&a, &b),
+        adt_uuid::uuid_eq(&a, &b),
+        adt_uuid::uuid_ge(&a, &b),
+        adt_uuid::uuid_gt(&a, &b),
+        adt_uuid::uuid_ne(&a, &b),
+    ];
+    for (i, r) in rust.iter().enumerate() {
+        let cop = c(i as i32 + 1) != 0;
+        assert_eq!(cop, *r, "uuid bool-op {i} DIVERGENCE a={a:02x?} b={b:02x?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arm 3: uuid_hash / uuid_hash_extended (seed 0 and fuzzed seed).
+// ---------------------------------------------------------------------------
+
+fn hash_diff(payload: &[u8]) {
+    let Some(u) = take16(payload) else { return };
+    let ch = unsafe { pg_diff_uuid_hash(u.as_ptr()) };
+    assert_eq!(ch, adt_uuid::uuid_hash(&u), "uuid_hash DIVERGENCE uuid={u:02x?}");
+    let mut seeds = vec![0u64];
+    if let Some(sb) = payload.get(UUID_LEN..UUID_LEN + 8) {
+        seeds.push(u64::from_le_bytes(sb.try_into().unwrap()));
+    }
+    for seed in seeds {
+        let ce = unsafe { pg_diff_uuid_hash_extended(u.as_ptr(), seed) };
+        assert_eq!(
+            ce,
+            adt_uuid::uuid_hash_extended(&u, seed),
+            "uuid_hash_extended DIVERGENCE uuid={u:02x?} seed={seed:#x}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arm 4: uuid_extract_version / uuid_extract_timestamp.
+// ---------------------------------------------------------------------------
+
+fn extract_diff(payload: &[u8]) {
+    let Some(u) = take16(payload) else { return };
+    let mut isnull = 0i32;
+    let cv = unsafe { pg_diff_uuid_extract_version(u.as_ptr(), &mut isnull) };
+    let rv = adt_uuid::uuid_extract_version(&u);
+    match rv {
+        Some(v) => assert!(
+            isnull == 0 && v == cv,
+            "uuid_extract_version DIVERGENCE uuid={u:02x?}: C=(null {isnull}, {cv}) Rust={v}"
+        ),
+        None => assert!(
+            isnull == 1,
+            "uuid_extract_version DIVERGENCE uuid={u:02x?}: C non-null {cv}, Rust NULL"
+        ),
+    }
+    let mut isnull = 0i32;
+    let ct = unsafe { pg_diff_uuid_extract_timestamp(u.as_ptr(), &mut isnull) };
+    let rt = adt_uuid::uuid_extract_timestamp(&u);
+    match rt {
+        Some(t) => assert!(
+            isnull == 0 && t == ct,
+            "uuid_extract_timestamp DIVERGENCE uuid={u:02x?}: C=(null {isnull}, {ct}) Rust={t}"
+        ),
+        None => assert!(
+            isnull == 1,
+            "uuid_extract_timestamp DIVERGENCE uuid={u:02x?}: C non-null {ct}, Rust NULL"
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arm 5: uuid_recv (wire) + uuid_send (varlena image).
+// ---------------------------------------------------------------------------
+
+fn recv_send_diff(payload: &[u8]) {
+    if payload.len() > 4096 {
+        return;
+    }
+    // C side: wire triple.
+    let mut cursor = 0i32;
+    let mut cval = [0u8; UUID_LEN];
+    let cst = unsafe {
+        pg_diff_uuid_recv(
+            payload.as_ptr(),
+            payload.len() as i32,
+            &mut cursor,
+            cval.as_mut_ptr(),
+        )
+    };
+
+    // Rust side: uuid_recv over a StringInfo built on the same bytes.
+    let cx = MemoryContext::new("uuid_fuzz");
+    let mcx = cx.mcx();
+    let mut vec = match mcx::vec_with_capacity_in::<u8>(mcx, payload.len()) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if mcx::vec_append_bytes(&mut vec, payload).is_err() {
+        return;
+    }
+    let mut msg = match StringInfo::from_vec(vec) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    match adt_uuid::uuid_recv(&mut msg) {
+        Ok(r) => {
+            assert!(
+                cst == 0 && r == cval && cursor == UUID_LEN as i32,
+                "uuid_recv DIVERGENCE len={}: C=(st {cst}, cur {cursor}, {cval:02x?}) Rust=Ok({r:02x?})",
+                payload.len()
+            );
+            // Round-trip through uuid_send: exact 20-byte varlena image.
+            let mut cimg = [0u8; 20];
+            let clen = unsafe { pg_diff_uuid_send(r.as_ptr(), cimg.as_mut_ptr()) };
+            let rimg = adt_uuid::uuid_send(mcx, &r).expect("uuid_send cannot fail on 16 bytes");
+            assert!(
+                clen == 20 && rimg.as_bytes() == cimg,
+                "uuid_send DIVERGENCE uuid={r:02x?}: C={cimg:02x?} Rust={:02x?}",
+                rimg.as_bytes()
+            );
+        }
+        Err(_) => {
+            // Insufficient data: C status 4. (Errcode class: both sides are
+            // the 08P01 protocol-violation arm; the C shim has no finer
+            // granularity — verdict parity only, matching the wave-5 shim.)
+            assert!(
+                cst == 4,
+                "uuid_recv DIVERGENCE len={}: C st {cst} but Rust errored",
+                payload.len()
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arm 6: generate_uuidv7 — deterministic planes through the C rand8 seam.
+// ---------------------------------------------------------------------------
+
+fn v7_diff(payload: &[u8]) {
+    let Some(ts_b) = payload.get(..8) else { return };
+    let Some(sub_b) = payload.get(8..12) else { return };
+    let ts = u64::from_le_bytes(ts_b.try_into().unwrap());
+    let sub_ms = u32::from_le_bytes(sub_b.try_into().unwrap());
+
+    let rand8 = [0u8; 8];
+    let mut cval = [0u8; UUID_LEN];
+    let cst = unsafe { pg_diff_uuid_generate_v7(ts, sub_ms, rand8.as_ptr(), cval.as_mut_ptr()) };
+    assert_eq!(cst, 0);
+    let r = adt_uuid::generate_uuidv7(ts, sub_ms).expect("entropy source unavailable");
+
+    // Bytes 0..=5: unix_ts_ms big-endian. Byte 6: version nibble (7, forced
+    // by both sides) | precision high nibble (deterministic).
+    assert_eq!(
+        &r[..7],
+        &cval[..7],
+        "generate_uuidv7 time/version DIVERGENCE ts={ts} sub_ms={sub_ms}"
+    );
+    // Byte 7: precision low byte. On macOS (SUBMS_MINIMAL_STEP_BITS == 10,
+    // both sides) its low 2 bits are xored with data[8] >> 6 — random on the
+    // Rust side, zero in the C oracle — so mask them there.
+    #[cfg(target_os = "macos")]
+    let m = 0xfcu8;
+    #[cfg(not(target_os = "macos"))]
+    let m = 0xffu8;
+    assert_eq!(
+        r[7] & m,
+        cval[7] & m,
+        "generate_uuidv7 sub-ms DIVERGENCE ts={ts} sub_ms={sub_ms}: C={cval:02x?} Rust={r:02x?}"
+    );
+    // Byte 8: RFC 9562 variant bits (10xx xxxx) forced by uuid_set_version.
+    assert_eq!(r[8] & 0xc0, 0x80);
+    assert_eq!(cval[8] & 0xc0, 0x80);
+    // And the result must classify as version 7 through the shipped readers.
+    assert_eq!(adt_uuid::uuid_extract_version(&r), Some(7));
+}
+
+// ---------------------------------------------------------------------------
+// Arm 7: abbrev sortsupport kernels (convert key vs C; abort gate machine).
+// ---------------------------------------------------------------------------
+
+fn splitmix64(x: &mut u64) -> u64 {
+    *x = x.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = *x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+fn check_convert(st: &mut UuidAbbrevState, u: &PgUuid) -> u64 {
+    let rk = st.convert(u);
+    let ck = unsafe { pg_diff_uuid_abbrev_key(u.as_ptr()) };
+    assert_eq!(rk, ck, "uuid_abbrev_convert key DIVERGENCE uuid={u:02x?}");
+    rk
+}
+
+fn abbrev_diff(payload: &[u8]) {
+    let Some((&mode, rest)) = payload.split_first() else {
+        return;
+    };
+    let mut seed = match rest.get(..8) {
+        Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+        None => 0,
+    };
+
+    if mode == 0xa5 {
+        // Rare heavy mode: >100k distinct abbrevs drives the abort machine
+        // through the "stop estimating" arm (card > 100000.0 =>
+        // estimating = false), then the !estimating early return.
+        let mut st = UuidAbbrevState::new();
+        for _ in 0..110_000 {
+            let x = splitmix64(&mut seed);
+            let mut u = [0u8; UUID_LEN];
+            u[..8].copy_from_slice(&x.to_be_bytes());
+            st.convert(&u);
+        }
+        // 110k distinct: cardinality estimate far above the 100k ceiling.
+        assert!(!st.abort(110_000), "abort must commit (not abort) at >100k distinct");
+        assert!(!st.abort(110_000), "!estimating early-return arm must be false");
+        return;
+    }
+
+    match mode % 3 {
+        0 => {
+            // Key-parity sweep over pseudo-random uuids + below-threshold
+            // abort gates (memtupcount / input_count < 10000).
+            let mut st = UuidAbbrevState::default();
+            let mut prev: Option<(u64, PgUuid)> = None;
+            for _ in 0..256 {
+                let x = splitmix64(&mut seed);
+                let y = splitmix64(&mut seed);
+                let mut u = [0u8; UUID_LEN];
+                u[..8].copy_from_slice(&x.to_be_bytes());
+                u[8..].copy_from_slice(&y.to_le_bytes());
+                let k = check_convert(&mut st, &u);
+                // Abbrev contract: unsigned key order agrees with the
+                // authoritative comparator whenever keys differ.
+                if let Some((pk, pu)) = prev {
+                    if pk != k {
+                        let ord = if pk < k { -1 } else { 1 };
+                        assert_eq!(
+                            ord,
+                            adt_uuid::uuid_internal_cmp(&pu, &u).signum(),
+                            "abbrev key order DIVERGENCE {pu:02x?} vs {u:02x?}"
+                        );
+                    }
+                }
+                prev = Some((k, u));
+            }
+            assert!(!st.abort(256), "abort below memtupcount threshold must be false");
+            assert!(!st.abort(20_000), "abort below input_count threshold must be false");
+        }
+        1 => {
+            // Pathological single-value run: cardinality 1 => abort fires.
+            let x = splitmix64(&mut seed);
+            let mut u = [0u8; UUID_LEN];
+            u[..8].copy_from_slice(&x.to_be_bytes());
+            let mut st = UuidAbbrevState::new();
+            for _ in 0..10_000 {
+                check_convert(&mut st, &u);
+            }
+            assert!(!st.abort(9_999), "memtupcount gate");
+            assert!(st.abort(10_000), "cardinality-1 run must abort abbreviation");
+        }
+        _ => {
+            // Small mixed run: convert parity only (fast arm for mutation).
+            let mut st = UuidAbbrevState::new();
+            for chunk in rest.chunks(UUID_LEN).take(64) {
+                let mut u = [0u8; UUID_LEN];
+                u[..chunk.len()].copy_from_slice(chunk);
+                check_convert(&mut st, &u);
+            }
+            assert!(!st.abort(0));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Replay every checked-in seed (catches shim/link errors before the
+    /// nightly fuzz campaign).
+    #[test]
+    fn seed_corpus_replays_clean() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/uuid_diff");
+        let mut n = 0;
+        for e in std::fs::read_dir(dir).expect("corpus/uuid_diff missing") {
+            let p = e.unwrap().path();
+            if p.is_file() {
+                uuid_diff(&std::fs::read(&p).unwrap());
+                n += 1;
+            }
+        }
+        assert!(n >= 30, "expected >=30 seeds, found {n}");
+    }
+
+    #[test]
+    fn in_out_roundtrip_arms() {
+        // Canonical, braced, hyphen-free, upper-case, mixed-hyphen forms.
+        for s in [
+            "11111111-1111-1111-1111-111111111111",
+            "{22222222-2222-2222-2222-222222222222}",
+            "3f3e3c3b3a3039383736353433a2313e",
+            "C232AB00-9414-11EC-B3C8-9F6BDECED846",
+            "0123-4567-89ab-cdef-0123-4567-89ab-cdef",
+            "{a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11}",
+        ] {
+            let mut d = vec![0u8];
+            d.extend_from_slice(s.as_bytes());
+            uuid_diff(&d);
+            let u = adt_uuid::uuid_in(s.as_bytes(), None).unwrap();
+            let mut d = vec![1u8];
+            d.extend_from_slice(&u);
+            uuid_diff(&d);
+        }
+        // Error arms: truncation, bad hex, stray hyphen, unclosed/garbage
+        // braces, trailing junk, empty, non-UTF8 bytes.
+        for s in [
+            &b"11111111-1111-1111-1111-11111111111"[..],
+            b"11111111-1111-1111-G111-111111111111",
+            b"111-11111-1111-1111-1111-111111111111",
+            b"{11111111-1111-1111-1111-11111111111}",
+            b"{22222222-2222-2222-2222-222222222222 ",
+            b"11111111-1111-1111-1111-111111111111F",
+            b"",
+            b"-",
+            b"\xff\xfe1111111-1111-1111-1111-111111111111",
+        ] {
+            let mut d = vec![0u8];
+            d.extend_from_slice(s);
+            uuid_diff(&d);
+        }
+    }
+
+    #[test]
+    fn binary_arms() {
+        let a: PgUuid = [0x11; UUID_LEN];
+        let b_: PgUuid = [0x22; UUID_LEN];
+        let mut v7 = 0x017f22e279b0u64.to_le_bytes().to_vec();
+        v7.extend_from_slice(&500_000u32.to_le_bytes());
+        let mut ab0 = vec![0u8];
+        ab0.extend_from_slice(&7u64.to_le_bytes());
+        let mut ab1 = vec![1u8];
+        ab1.extend_from_slice(&9u64.to_le_bytes());
+        for (sel, payload) in [
+            (2u8, [a, b_].concat()),
+            (2u8, [a, a].concat()),
+            (2u8, [b_, a].concat()),
+            (3u8, {
+                let mut v = a.to_vec();
+                v.extend_from_slice(&0xdeadbeefdeadbeefu64.to_le_bytes());
+                v
+            }),
+            (4u8, a.to_vec()),
+            (5u8, a.to_vec()),      // exact 16 wire bytes
+            (5u8, a[..7].to_vec()), // short read
+            (6u8, v7),
+            (7u8, ab0),
+            (7u8, ab1),
+        ] {
+            let mut d = vec![sel];
+            d.extend_from_slice(&payload);
+            uuid_diff(&d);
+        }
+    }
+
+    /// Version/timestamp extraction over the RFC 9562 variant lattice.
+    #[test]
+    fn extract_lattice() {
+        for ver in 0u8..16 {
+            for variant in [0x00u8, 0x40, 0x80, 0xc0] {
+                let mut u = [0x5au8; UUID_LEN];
+                u[6] = (ver << 4) | 0x0c;
+                u[8] = variant | 0x1f;
+                let mut d = vec![4u8];
+                d.extend_from_slice(&u);
+                uuid_diff(&d);
+            }
+        }
+    }
+
+    /// The heavy >100k-distinct abbrev mode (0xa5) — run once here so the
+    /// estimating-shutoff arm is exercised even if the fuzzer never mutates
+    /// into the magic byte.
+    #[test]
+    fn abbrev_heavy_mode() {
+        let mut d = vec![7u8, 0xa5];
+        d.extend_from_slice(&42u64.to_le_bytes());
+        uuid_diff(&d);
+    }
+}
