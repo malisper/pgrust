@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # run-suite.sh — unified proof-suite runner for proofs/SUITE.tsv.
 #
-# Usage:   ./run-suite.sh <tier>        tier in {per-commit, release-gate, all}
+# Usage:   ./run-suite.sh <tier>   tier in {per-commit, release-gate, all,
+#                                           measure}
 #
-# Tier selection (rows are picked by the `tier` column of SUITE.tsv):
+# Tier selection (rows are picked by the `tier` column of SUITE.tsv, except
+# `measure`, which selects by the `expected` column):
 #   per-commit    tier == per-commit, plus every defect-witness row
 #                 (the must-fail negative controls guard against a
 #                 vacuous rig, so they ride along with every gate).
 #   release-gate  per-commit + release-gate + defect-witness rows.
-#   all           every row, including calibration and unmeasured.
+#   all           every GATING row, including calibration. Rows with
+#                 expected=unmeasured (the dark-harness sweep) are NOT run
+#                 by `all` — 700+ harnesses of unknown solve time do not
+#                 belong in a gate; they are counted and reported only.
+#   measure       ONLY rows with expected=unmeasured, any tier: the opt-in
+#                 dark-harness measurement sweep. Runs each harness, records
+#                 the real verdict as `unmeasured-<verdict>`, and NEVER
+#                 gates (exit code ignores these rows). Greens are emitted
+#                 as promotion candidates (see below).
 #
 # MEMORY PROTOCOL (mandatory): harnesses run STRICTLY SERIALLY — exactly one
 # kani/cbmc solve at a time. Each harness is wrapped in `timeout` plus an RSS
@@ -32,6 +42,19 @@
 #   rss-kill          killed by the 6 GiB RSS watchdog
 #   wall-ok           wall-recorded harness; any terminal outcome is
 #                     informational (recorded, never gates)
+#   skipped-missing   expected=missing row (adjudicated-absent harness,
+#                     check-suite-names.py rule 2): skipped WITHOUT invoking
+#                     kani — `--harness` on a nonexistent name can only
+#                     fail. Never affects the exit code.
+#   unmeasured-*      expected=unmeasured row under `measure`: the real
+#                     verdict, recorded but never gating —
+#                     unmeasured-green / unmeasured-failed /
+#                     unmeasured-timeout / unmeasured-rss-kill.
+#                     unmeasured-green rows are appended to
+#                     proofs/suite-promotion-candidates.tsv with their
+#                     measured wall time: candidates for promotion to
+#                     expected=green with a tier from the measured time.
+#                     Failures are the triage queue.
 #
 # "CBMC failed with status 15" is a killed solver, not a verdict
 # (see text-cmp/run-all.sh); such runs are retried once automatically.
@@ -39,8 +62,11 @@
 set -u
 
 PROOFS_DIR=$(cd "$(dirname "$0")" && pwd)
-SUITE_TSV="$PROOFS_DIR/SUITE.tsv"
-RESULTS_TSV="$PROOFS_DIR/suite-results.tsv"
+# SUITE_TSV / RESULTS_TSV overridable from the environment for rig testing
+# (run a hand-built manifest without touching the real one).
+SUITE_TSV="${SUITE_TSV:-$PROOFS_DIR/SUITE.tsv}"
+RESULTS_TSV="${RESULTS_TSV:-$PROOFS_DIR/suite-results.tsv}"
+PROMO_TSV="${PROMO_TSV:-$PROOFS_DIR/suite-promotion-candidates.tsv}"
 
 RSS_LIMIT_KB=$((6 * 1024 * 1024))   # 6 GiB, in KiB as reported by ps -o rss=
 RSS_POLL_S=15
@@ -49,14 +75,14 @@ MIN_TIMEOUT_S=60
 MAX_TIMEOUT_S=900
 
 usage() {
-    echo "usage: $0 <per-commit|release-gate|all>" >&2
+    echo "usage: $0 <per-commit|release-gate|all|measure>" >&2
     exit 2
 }
 
 [ $# -eq 1 ] || usage
 TIER="$1"
 case "$TIER" in
-    per-commit|release-gate|all) ;;
+    per-commit|release-gate|all|measure) ;;
     *) usage ;;
 esac
 
@@ -82,8 +108,16 @@ tier_known() { # $1 = row tier
     esac
 }
 
-# Does a manifest row belong to the requested tier run?
-row_selected() { # $1 = row tier
+# Does a manifest row belong to the requested run? Gating tiers select by
+# the `tier` column and EXCLUDE expected=unmeasured rows (700+ dark
+# harnesses of unknown solve time never ride a gate); `measure` selects
+# EXACTLY the expected=unmeasured rows, whatever their tier column says.
+row_selected() { # $1 = row tier, $2 = row expected
+    if [ "$TIER" = measure ]; then
+        [ "$2" = unmeasured ]
+        return
+    fi
+    [ "$2" = unmeasured ] && return 1
     case "$TIER" in
         per-commit)   [ "$1" = per-commit ] || [ "$1" = defect-witness ] ;;
         release-gate) [ "$1" = per-commit ] || [ "$1" = release-gate ] \
@@ -156,8 +190,13 @@ printf 'family\tharness\ttier\texpected\toutcome\twall_s\tverdict\n' \
     >"$RESULTS_TSV"
 
 n_pass=0 n_fail=0 n_xfail_ok=0 n_vacuous=0 n_timeout=0 n_rsskill=0 n_wall=0
-n_skipped_missing=0 n_bad_tier=0
+n_missing_crate=0 n_bad_tier=0 n_skipped_missing=0 n_dark_skipped=0
+n_unm_green=0 n_unm_notgreen=0
 suite_rc=0
+
+if [ "$TIER" = measure ]; then
+    printf 'family\tharness\twall_s\n' >"$PROMO_TSV"
+fi
 
 echo "== proof suite: tier=$TIER  (strictly serial; RSS cap 6 GiB) =="
 
@@ -176,12 +215,33 @@ while IFS=$'\t' read -r family harness flags expected tier time_s notes; do
         continue
     fi
 
-    row_selected "$tier" || continue
+    # Dark rows (expected=unmeasured) are excluded from every gating tier;
+    # count what `all` leaves behind so the omission is visible, not silent.
+    if [ "$TIER" = all ] && [ "$expected" = unmeasured ]; then
+        n_dark_skipped=$((n_dark_skipped + 1))
+    fi
+
+    row_selected "$tier" "$expected" || continue
+
+    # expected=missing: adjudicated-absent harness (owned by
+    # check-suite-names.py rule 2 — it ERRORS if the name starts resolving).
+    # Skip WITHOUT invoking kani: `--harness` on a nonexistent name can only
+    # fail. Recorded, never gates.
+    if [ "$expected" = missing ]; then
+        outcome=skipped-missing
+        n_skipped_missing=$((n_skipped_missing + 1))
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$family" "$harness" "$tier" "$expected" "$outcome" 0 \
+            "NOT-RUN (adjudicated-absent harness)" >>"$RESULTS_TSV"
+        printf '%-16s %-42s %-16s %4ss  %s\n' \
+            "$family" "$harness" "$outcome" 0 "NOT-RUN"
+        continue
+    fi
 
     crate_dir="$PROOFS_DIR/$family"
     if [ ! -d "$crate_dir" ]; then
         echo "MISSING-CRATE  $family/$harness (skipped)"
-        n_skipped_missing=$((n_skipped_missing + 1))
+        n_missing_crate=$((n_missing_crate + 1))
         suite_rc=1
         continue
     fi
@@ -263,6 +323,28 @@ while IFS=$'\t' read -r family harness flags expected tier time_s notes; do
             outcome=wall-ok
             n_wall=$((n_wall + 1))
             ;;
+        unmeasured)
+            # Dark harness under `measure`: record the REAL verdict, never
+            # gate. Green => promotion candidate (promote the row to
+            # expected=green with a tier from the measured wall time);
+            # anything else => triage queue. suite_rc untouched.
+            if [ -z "$outcome" ]; then
+                if [ "$ok" -eq 1 ]; then
+                    outcome=unmeasured-green
+                else
+                    outcome=unmeasured-failed
+                fi
+            else
+                outcome=unmeasured-$outcome   # -timeout / -rss-kill
+            fi
+            if [ "$outcome" = unmeasured-green ]; then
+                n_unm_green=$((n_unm_green + 1))
+                printf '%s\t%s\t%s\n' "$family" "$harness" "$RUN_WALL" \
+                    >>"$PROMO_TSV"
+            else
+                n_unm_notgreen=$((n_unm_notgreen + 1))
+            fi
+            ;;
         *)
             echo "BAD-MANIFEST-ROW  $family/$harness expected='$expected'"
             outcome=fail
@@ -287,7 +369,17 @@ echo "  vacuous-pass:      $n_vacuous   (must-fail control verified: BROKEN GATE
 echo "  timeout:           $n_timeout"
 echo "  rss-kill:          $n_rsskill"
 echo "  wall-recorded:     $n_wall"
-[ "$n_skipped_missing" -gt 0 ] && echo "  missing-crate:     $n_skipped_missing"
+[ "$n_skipped_missing" -gt 0 ] && echo "  skipped-missing:   $n_skipped_missing   (adjudicated-absent harnesses; never run, never gate)"
+[ "$n_dark_skipped" -gt 0 ] && echo "  dark rows skipped: $n_dark_skipped   (expected=unmeasured; run them with: $0 measure)"
+[ "$n_missing_crate" -gt 0 ] && echo "  missing-crate:     $n_missing_crate"
 [ "$n_bad_tier" -gt 0 ] && echo "  bad-manifest-tier: $n_bad_tier   (row in NO gate tier: BROKEN GATE)"
+if [ "$TIER" = measure ]; then
+    echo "  unmeasured-green:  $n_unm_green   (promotion candidates)"
+    echo "  unmeasured-other:  $n_unm_notgreen   (failed/timeout/rss-kill: triage queue)"
+    echo
+    echo "== promotion candidates =="
+    echo "  $n_unm_green harness(es) solved green; promote to expected=green"
+    echo "  with a tier from the measured wall time. List: $PROMO_TSV"
+fi
 echo "  results:           $RESULTS_TSV"
 exit "$suite_rc"
