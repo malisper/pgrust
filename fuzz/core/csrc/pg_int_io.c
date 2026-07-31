@@ -44,8 +44,8 @@
  *     verbatim.
  *   - port/pg_bswap.h pg_ntoh16/32, pg_hton16/32 -> __builtin_bswap16/32
  *     on little-endian, their exact definitions.
- *   - palloc -> malloc, palloc0 -> calloc, repalloc -> realloc (freed by
- *     the dispatcher).
+ *   - palloc/palloc0/repalloc -> malloc-backed TLS pointer arena, reset at
+ *     every dispatcher entry (PostgreSQL's memory-context reset, minimally).
  *   - SET_VARSIZE -> little-endian 4-byte varlena header (len << 2),
  *     the 4B-header definition from postgres.h varatt on LE builds.
  *   - StringInfoData: {data, len, maxlen, cursor}. For the send path,
@@ -155,10 +155,66 @@ typedef struct MiniFcinfo
 #define PG_RETURN_NULL() return 0  /* unreachable post-ereport lines in div/mod bodies */
 #define PG_RETURN_BYTEA_P(x) return (Datum) (uintptr_t) (x)
 
+/* palloc arena shim: PostgreSQL frees these via memory-context reset; the
+ * oracle mirrors that with a TLS pointer arena reset at every pg_diff_*
+ * dispatcher entry, so error-path longjmp/ereturn exits cannot leak (LSan
+ * artifact 2026-07-31, 88-byte int2vectorin result on the soft-error path). */
+#define PG_DIFF_ARENA_MAX 64
+static _Thread_local void *pg_diff_arena[PG_DIFF_ARENA_MAX];
+static _Thread_local int pg_diff_arena_n;
+
+static void
+pg_diff_arena_reset(void)
+{
+	int			i;
+
+	for (i = 0; i < pg_diff_arena_n; i++)
+		free(pg_diff_arena[i]);
+	pg_diff_arena_n = 0;
+}
+
+static void *
+pg_diff_palloc_impl(size_t n)
+{
+	void	   *p = malloc(n);
+
+	assert(pg_diff_arena_n < PG_DIFF_ARENA_MAX);
+	pg_diff_arena[pg_diff_arena_n++] = p;
+	return p;
+}
+
+static void *
+pg_diff_palloc0_impl(size_t n)
+{
+	void	   *p = calloc(1, n);
+
+	assert(pg_diff_arena_n < PG_DIFF_ARENA_MAX);
+	pg_diff_arena[pg_diff_arena_n++] = p;
+	return p;
+}
+
+static void *
+pg_diff_repalloc_impl(void *old, size_t n)
+{
+	void	   *p = realloc(old, n);
+	int			i;
+
+	for (i = 0; i < pg_diff_arena_n; i++)
+	{
+		if (pg_diff_arena[i] == old)
+		{
+			pg_diff_arena[i] = p;
+			return p;
+		}
+	}
+	assert(!"repalloc of a pointer the arena never issued");
+	return p;
+}
+
 #undef palloc
-#define palloc(n) malloc(n)
-#define palloc0(n) calloc(1, (n))
-#define repalloc(p, n) realloc((p), (n))
+#define palloc(n) pg_diff_palloc_impl(n)
+#define palloc0(n) pg_diff_palloc0_impl(n)
+#define repalloc(p, n) pg_diff_repalloc_impl((p), (n))
 
 #define PG_INT16_MIN INT16_MIN
 #define PG_INT16_MAX INT16_MAX
@@ -2494,6 +2550,7 @@ pg_diff_int2in(const char *num, int soft, int16_t *out)
 	static _Thread_local int soft_sentinel;
 	MiniFcinfo	fc = {{0}};
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return pg_diff_int_errcode;
@@ -2509,6 +2566,7 @@ pg_diff_int4in(const char *num, int soft, int32_t *out)
 	static _Thread_local int soft_sentinel;
 	MiniFcinfo	fc = {{0}};
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return pg_diff_int_errcode;
@@ -2527,6 +2585,7 @@ pg_diff_int2out(int16_t val, char *buf)
 	char	   *res;
 	int			len;
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return -pg_diff_int_errcode;
@@ -2534,7 +2593,6 @@ pg_diff_int2out(int16_t val, char *buf)
 	res = (char *) (uintptr_t) int2out(&fc);
 	len = (int) strlen(res);
 	memcpy(buf, res, len + 1);
-	free(res);
 	return len;
 }
 
@@ -2545,6 +2603,7 @@ pg_diff_int4out(int32_t val, char *buf)
 	char	   *res;
 	int			len;
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return -pg_diff_int_errcode;
@@ -2552,7 +2611,6 @@ pg_diff_int4out(int32_t val, char *buf)
 	res = (char *) (uintptr_t) int4out(&fc);
 	len = (int) strlen(res);
 	memcpy(buf, res, len + 1);
-	free(res);
 	return len;
 }
 
@@ -2568,6 +2626,7 @@ pg_diff_int2vectorin(const char *str, int soft, unsigned char *out_img,
 	int2vector *res;
 	uint32		sz;
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return pg_diff_int_errcode;
@@ -2578,13 +2637,9 @@ pg_diff_int2vectorin(const char *str, int soft, unsigned char *out_img,
 		return -pg_diff_int_errcode;	/* soft error: result is (Datum) 0 */
 	sz = (*(uint32 *) res) >> 2;		/* VARSIZE_4B, little-endian */
 	if ((int) sz > out_cap)
-	{
-		free(res);
 		return 99;
-	}
 	memcpy(out_img, res, sz);
 	*out_len = (int) sz;
-	free(res);
 	return 0;
 }
 
@@ -2597,6 +2652,7 @@ pg_diff_int2vectorout(const unsigned char *img, char *buf, int buflen)
 	char	   *res;
 	int			len;
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return -pg_diff_int_errcode;
@@ -2605,7 +2661,6 @@ pg_diff_int2vectorout(const unsigned char *img, char *buf, int buflen)
 	len = (int) strlen(res);
 	assert(len < buflen);
 	memcpy(buf, res, len + 1);
-	free(res);
 	return len;
 }
 
@@ -2616,6 +2671,7 @@ pg_diff_int2recv(const unsigned char *data, int len, int16_t *out)
 	StringInfoData msg;
 	MiniFcinfo	fc = {{0}};
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return pg_diff_int_errcode;
@@ -2634,6 +2690,7 @@ pg_diff_int4recv(const unsigned char *data, int len, int32_t *out)
 	StringInfoData msg;
 	MiniFcinfo	fc = {{0}};
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return pg_diff_int_errcode;
@@ -2657,6 +2714,7 @@ pg_diff_int2send(int16_t val, unsigned char *buf)
 	bytea	   *res;
 	uint32		sz;
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return -pg_diff_int_errcode;
@@ -2686,6 +2744,7 @@ pg_diff_int4send(int32_t val, unsigned char *buf)
 	bytea	   *res;
 	uint32		sz;
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return -pg_diff_int_errcode;
@@ -2717,6 +2776,7 @@ pg_diff_int_fn(int fn_id, int64_t a, int64_t b, int64_t c, int sub, int less,
 	MiniFcinfo	fc = {{0}};
 	Datum		d = 0;
 
+	pg_diff_arena_reset();
 	pg_diff_int_errcode = 0;
 	if (setjmp(pg_diff_int_jb))
 		return pg_diff_int_errcode;
