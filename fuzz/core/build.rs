@@ -213,6 +213,34 @@ fn main() {
         "pq_begintypsend", "pq_copymsgbytes", "pq_endtypsend",
         "pq_getmsgbytes", "pq_getmsgint", "pq_getmsgtext", "pq_sendtext",
         "psprintf", "pvsnprintf",
+        // jsonpathexec_diff additions (p1-laneaa, adt/jsonpath_exec): the
+        // exec oracle extends this family; generic-named exports that other
+        // oracle families also vendor (float8in_internal in pg_float_io.c,
+        // hash_any in pg_mac_io.c) or could plausibly grow get the same
+        // jporcl_ prefix so each family keeps its OWN vendored copy.
+        "float8in_internal", "hash_any", "hash_any_extended",
+        "cstring_to_text", "cstring_to_text_with_len", "text_to_cstring",
+        "varstr_cmp", "parse_bool", "parse_bool_with_len",
+        "int4in", "int8in", "pg_ltoa", "pg_ultoa_n",
+        "pg_strtoint64", "pg_strtoint64_safe", "qsort_arg",
+        "RE_compile_and_cache", "RE_compile_and_execute",
+        "construct_array_builtin", "ArrayGetIntegerTypmods",
+        "MemoryContextSwitchTo", "AllocSetContextCreate",
+        "MemoryContextResetOnly", "MemoryContextDelete",
+        "MemoryContextSetIdentifier", "MemoryContextSetParent",
+        "CurrentMemoryContext", "TopMemoryContext",
+        "ExecEvalExpr", "exprTypmod", "init_MultiFuncCall",
+        "per_MultiFuncCall", "format_type_be", "pnstrdup",
+        "pg_strncoll", "pg_server_to_any", "session_timezone",
+        "parse_datetime", "JsonEncodeDateTime", "timestamp2tm", "j2date",
+        "DetermineTimeZoneOffset", "AdjustTimeForTypmod",
+        "AdjustTimestampForTypmod", "anytime_typmod_check",
+        "anytimestamp_typmod_check", "date_cmp_timestamp_internal",
+        "date_cmp_timestamptz_internal",
+        "timestamp_cmp_timestamptz_internal",
+        "hash_numeric", "hash_numeric_extended", "hashchar",
+        "hashcharextended", "jsonb_in", "numeric_eq", "numeric_cmp",
+        "int64_to_numeric",
     ];
     let mut jsonpath = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
@@ -226,6 +254,12 @@ fn main() {
         "pg_numeric_min.c", "pg_formatting_min.c", "pg_stringinfo.c",
         "pg_support_min.c", "pg_jsonpath_env.c",
         "regex/regcomp.c", "regex/regerror.c", "regex/regfree.c",
+        // jsonpathexec_diff (p1-laneaa, adt/jsonpath_exec): verbatim
+        // jsonpath_exec.c + jsonb_util.c + regexec.c, the pg_jsonb_min.c
+        // extract file, qsort_arg, and the exec env/driver entries.
+        "jsonpath_exec.c", "jsonb_util.c", "pg_jsonb_min.c",
+        "pg_qsort_arg.c", "pg_jsonpath_exec_env.c",
+        "regex/regexec.c",
     ] {
         jsonpath.file(format!("csrc/jsonpath/{f}"));
     }

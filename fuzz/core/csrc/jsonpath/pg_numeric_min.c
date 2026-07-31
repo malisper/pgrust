@@ -27,6 +27,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "nodes/miscnodes.h"
+#include "utils/array.h"
 #include "utils/numeric.h"
 
 /* ---- numeric.c:46-321 VERBATIM ---- */
@@ -451,6 +452,110 @@ numeric_typmod_scale(int32 typmod)
 }
 
 /* ---- common/int.h VERBATIM (pg_abs_s64; used by the extracted set) ---- */
+/* ---- int.h:233-259 VERBATIM (pg_add_s64_overflow) ---- */
+static inline bool
+pg_add_s64_overflow(int64 a, int64 b, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_add_overflow(a, b, result);
+#elif defined(HAVE_INT128)
+	int128		res = (int128) a + (int128) b;
+
+	if (res > PG_INT64_MAX || res < PG_INT64_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int64) res;
+	return false;
+#else
+	if ((a > 0 && b > 0 && a > PG_INT64_MAX - b) ||
+		(a < 0 && b < 0 && a < PG_INT64_MIN - b))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = a + b;
+	return false;
+#endif
+}
+
+/* ---- int.h:260-290 VERBATIM (pg_sub_s64_overflow) ---- */
+static inline bool
+pg_sub_s64_overflow(int64 a, int64 b, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_sub_overflow(a, b, result);
+#elif defined(HAVE_INT128)
+	int128		res = (int128) a - (int128) b;
+
+	if (res > PG_INT64_MAX || res < PG_INT64_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int64) res;
+	return false;
+#else
+	/*
+	 * Note: overflow is also possible when a == 0 and b < 0 (specifically,
+	 * when b == PG_INT64_MIN).
+	 */
+	if ((a < 0 && b > 0 && a < PG_INT64_MIN + b) ||
+		(a >= 0 && b < 0 && a > PG_INT64_MAX + b))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = a - b;
+	return false;
+#endif
+}
+
+/* ---- int.h:291-333 VERBATIM (pg_mul_s64_overflow) ---- */
+static inline bool
+pg_mul_s64_overflow(int64 a, int64 b, int64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_mul_overflow(a, b, result);
+#elif defined(HAVE_INT128)
+	int128		res = (int128) a * (int128) b;
+
+	if (res > PG_INT64_MAX || res < PG_INT64_MIN)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = (int64) res;
+	return false;
+#else
+	/*
+	 * Overflow can only happen if at least one value is outside the range
+	 * sqrt(min)..sqrt(max) so check that first as the division can be quite a
+	 * bit more expensive than the multiplication.
+	 *
+	 * Multiplying by 0 or 1 can't overflow of course and checking for 0
+	 * separately avoids any risk of dividing by 0.  Be careful about dividing
+	 * INT_MIN by -1 also, note reversing the a and b to ensure we're always
+	 * dividing it by a positive value.
+	 *
+	 */
+	if ((a > PG_INT32_MAX || a < PG_INT32_MIN ||
+		 b > PG_INT32_MAX || b < PG_INT32_MIN) &&
+		a != 0 && a != 1 && b != 0 && b != 1 &&
+		((a > 0 && b > 0 && a > PG_INT64_MAX / b) ||
+		 (a > 0 && b < 0 && b < PG_INT64_MIN / a) ||
+		 (a < 0 && b > 0 && a < PG_INT64_MIN / b) ||
+		 (a < 0 && b < 0 && a < PG_INT64_MAX / b)))
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = a * b;
+	return false;
+#endif
+}
+
 /* ---- int.h:351-357 VERBATIM (pg_abs_s64) ---- */
 static inline uint64
 pg_abs_s64(int64 a)
@@ -2868,3 +2973,2172 @@ strip_var(NumericVar *var)
 	var->digits = digits;
 	var->ndigits = ndigits;
 }
+
+/* ---- jsonpathexec_diff additions: forward declarations for the newly
+ * extracted statics (extraction order differs from numeric.c's) ---- */
+static int	cmp_var(const NumericVar *var1, const NumericVar *var2);
+static int	cmp_var_common(const NumericDigit *var1digits, int var1ndigits,
+						   int var1weight, int var1sign,
+						   const NumericDigit *var2digits, int var2ndigits,
+						   int var2weight, int var2sign);
+static void sub_var(const NumericVar *var1, const NumericVar *var2,
+					NumericVar *result);
+static void div_var(const NumericVar *var1, const NumericVar *var2,
+					NumericVar *result, int rscale, bool round, bool exact);
+static void div_var_int(const NumericVar *var, int ival, int ival_weight,
+						NumericVar *result, int rscale, bool round);
+#ifdef HAVE_INT128
+static void div_var_int64(const NumericVar *var, int64 ival, int ival_weight,
+						  NumericVar *result, int rscale, bool round);
+#endif
+static int	select_div_scale(const NumericVar *var1, const NumericVar *var2);
+static void mod_var(const NumericVar *var1, const NumericVar *var2,
+					NumericVar *result);
+static void div_mod_var(const NumericVar *var1, const NumericVar *var2,
+						NumericVar *quot, NumericVar *rem);
+static void ceil_var(const NumericVar *var, NumericVar *result);
+static void floor_var(const NumericVar *var, NumericVar *result);
+static bool numericvar_to_int32(const NumericVar *var, int32 *result);
+static bool numericvar_to_int64(const NumericVar *var, int64 *result);
+static int	cmp_numerics(Numeric num1, Numeric num2);
+static void set_var_from_num(Numeric num, NumericVar *dest);
+static int	numeric_sign_internal(Numeric num);
+
+
+/* ---- jsonpathexec_diff additions: VERBATIM extracts (see header) ---- */
+/* ---- numeric.c:845-854 VERBATIM (numeric_is_nan) ---- */
+/*
+ * numeric_is_nan() -
+ *
+ *	Is Numeric value a NaN?
+ */
+bool
+numeric_is_nan(Numeric num)
+{
+	return NUMERIC_IS_NAN(num);
+}
+
+/* ---- numeric.c:856-865 VERBATIM (numeric_is_inf) ---- */
+/*
+ * numeric_is_inf() -
+ *
+ *	Is Numeric value an infinity?
+ */
+bool
+numeric_is_inf(Numeric num)
+{
+	return NUMERIC_IS_INF(num);
+}
+
+/* ---- numeric.c:1323-1366 VERBATIM (numerictypmodin) ---- */
+Datum
+numerictypmodin(PG_FUNCTION_ARGS)
+{
+	ArrayType  *ta = PG_GETARG_ARRAYTYPE_P(0);
+	int32	   *tl;
+	int			n;
+	int32		typmod;
+
+	tl = ArrayGetIntegerTypmods(ta, &n);
+
+	if (n == 2)
+	{
+		if (tl[0] < 1 || tl[0] > NUMERIC_MAX_PRECISION)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("NUMERIC precision %d must be between 1 and %d",
+							tl[0], NUMERIC_MAX_PRECISION)));
+		if (tl[1] < NUMERIC_MIN_SCALE || tl[1] > NUMERIC_MAX_SCALE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("NUMERIC scale %d must be between %d and %d",
+							tl[1], NUMERIC_MIN_SCALE, NUMERIC_MAX_SCALE)));
+		typmod = make_numeric_typmod(tl[0], tl[1]);
+	}
+	else if (n == 1)
+	{
+		if (tl[0] < 1 || tl[0] > NUMERIC_MAX_PRECISION)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("NUMERIC precision %d must be between 1 and %d",
+							tl[0], NUMERIC_MAX_PRECISION)));
+		/* scale defaults to zero */
+		typmod = make_numeric_typmod(tl[0], 0);
+	}
+	else
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid NUMERIC type modifier")));
+		typmod = 0;				/* keep compiler quiet */
+	}
+
+	PG_RETURN_INT32(typmod);
+}
+
+/* ---- numeric.c:1392-1416 VERBATIM (numeric_abs) ---- */
+Datum
+numeric_abs(PG_FUNCTION_ARGS)
+{
+	Numeric		num = PG_GETARG_NUMERIC(0);
+	Numeric		res;
+
+	/*
+	 * Do it the easy way directly on the packed format
+	 */
+	res = duplicate_numeric(num);
+
+	if (NUMERIC_IS_SHORT(num))
+		res->choice.n_short.n_header =
+			num->choice.n_short.n_header & ~NUMERIC_SHORT_SIGN_MASK;
+	else if (NUMERIC_IS_SPECIAL(num))
+	{
+		/* This changes -Inf to Inf, and doesn't affect NaN */
+		res->choice.n_short.n_header =
+			num->choice.n_short.n_header & ~NUMERIC_INF_SIGN_MASK;
+	}
+	else
+		res->choice.n_long.n_sign_dscale = NUMERIC_POS | NUMERIC_DSCALE(num);
+
+	PG_RETURN_NUMERIC(res);
+}
+
+/* ---- numeric.c:1589-1638 VERBATIM (numeric_trunc) ---- */
+/*
+ * numeric_trunc() -
+ *
+ *	Truncate a value to have 'scale' digits after the decimal point.
+ *	We allow negative 'scale', implying a truncation before the decimal
+ *	point --- Oracle interprets truncation that way.
+ */
+Datum
+numeric_trunc(PG_FUNCTION_ARGS)
+{
+	Numeric		num = PG_GETARG_NUMERIC(0);
+	int32		scale = PG_GETARG_INT32(1);
+	Numeric		res;
+	NumericVar	arg;
+
+	/*
+	 * Handle NaN and infinities
+	 */
+	if (NUMERIC_IS_SPECIAL(num))
+		PG_RETURN_NUMERIC(duplicate_numeric(num));
+
+	/*
+	 * Limit the scale value to avoid possible overflow in calculations.
+	 *
+	 * These limits are based on the maximum number of digits a Numeric value
+	 * can have before and after the decimal point.
+	 */
+	scale = Max(scale, -(NUMERIC_WEIGHT_MAX + 1) * DEC_DIGITS);
+	scale = Min(scale, NUMERIC_DSCALE_MAX);
+
+	/*
+	 * Unpack the argument and truncate it at the proper digit position
+	 */
+	init_var(&arg);
+	set_var_from_num(num, &arg);
+
+	trunc_var(&arg, scale);
+
+	/* We don't allow negative output dscale */
+	if (scale < 0)
+		arg.dscale = 0;
+
+	/*
+	 * Return the truncated result
+	 */
+	res = make_result(&arg);
+
+	free_var(&arg);
+	PG_RETURN_NUMERIC(res);
+}
+
+/* ---- numeric.c:1641-1666 VERBATIM (numeric_ceil) ---- */
+/*
+ * numeric_ceil() -
+ *
+ *	Return the smallest integer greater than or equal to the argument
+ */
+Datum
+numeric_ceil(PG_FUNCTION_ARGS)
+{
+	Numeric		num = PG_GETARG_NUMERIC(0);
+	Numeric		res;
+	NumericVar	result;
+
+	/*
+	 * Handle NaN and infinities
+	 */
+	if (NUMERIC_IS_SPECIAL(num))
+		PG_RETURN_NUMERIC(duplicate_numeric(num));
+
+	init_var_from_num(num, &result);
+	ceil_var(&result, &result);
+
+	res = make_result(&result);
+	free_var(&result);
+
+	PG_RETURN_NUMERIC(res);
+}
+
+/* ---- numeric.c:1669-1694 VERBATIM (numeric_floor) ---- */
+/*
+ * numeric_floor() -
+ *
+ *	Return the largest integer equal to or less than the argument
+ */
+Datum
+numeric_floor(PG_FUNCTION_ARGS)
+{
+	Numeric		num = PG_GETARG_NUMERIC(0);
+	Numeric		res;
+	NumericVar	result;
+
+	/*
+	 * Handle NaN and infinities
+	 */
+	if (NUMERIC_IS_SPECIAL(num))
+		PG_RETURN_NUMERIC(duplicate_numeric(num));
+
+	init_var_from_num(num, &result);
+	floor_var(&result, &result);
+
+	res = make_result(&result);
+	free_var(&result);
+
+	PG_RETURN_NUMERIC(res);
+}
+
+/* ---- numeric.c:2517-2530 VERBATIM (numeric_cmp) ---- */
+Datum
+numeric_cmp(PG_FUNCTION_ARGS)
+{
+	Numeric		num1 = PG_GETARG_NUMERIC(0);
+	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	int			result;
+
+	result = cmp_numerics(num1, num2);
+
+	PG_FREE_IF_COPY(num1, 0);
+	PG_FREE_IF_COPY(num2, 1);
+
+	PG_RETURN_INT32(result);
+}
+
+/* ---- numeric.c:2533-2546 VERBATIM (numeric_eq) ---- */
+Datum
+numeric_eq(PG_FUNCTION_ARGS)
+{
+	Numeric		num1 = PG_GETARG_NUMERIC(0);
+	Numeric		num2 = PG_GETARG_NUMERIC(1);
+	bool		result;
+
+	result = cmp_numerics(num1, num2) == 0;
+
+	PG_FREE_IF_COPY(num1, 0);
+	PG_FREE_IF_COPY(num2, 1);
+
+	PG_RETURN_BOOL(result);
+}
+
+/* ---- numeric.c:2623-2675 VERBATIM (cmp_numerics) ---- */
+static int
+cmp_numerics(Numeric num1, Numeric num2)
+{
+	int			result;
+
+	/*
+	 * We consider all NANs to be equal and larger than any non-NAN (including
+	 * Infinity).  This is somewhat arbitrary; the important thing is to have
+	 * a consistent sort order.
+	 */
+	if (NUMERIC_IS_SPECIAL(num1))
+	{
+		if (NUMERIC_IS_NAN(num1))
+		{
+			if (NUMERIC_IS_NAN(num2))
+				result = 0;		/* NAN = NAN */
+			else
+				result = 1;		/* NAN > non-NAN */
+		}
+		else if (NUMERIC_IS_PINF(num1))
+		{
+			if (NUMERIC_IS_NAN(num2))
+				result = -1;	/* PINF < NAN */
+			else if (NUMERIC_IS_PINF(num2))
+				result = 0;		/* PINF = PINF */
+			else
+				result = 1;		/* PINF > anything else */
+		}
+		else					/* num1 must be NINF */
+		{
+			if (NUMERIC_IS_NINF(num2))
+				result = 0;		/* NINF = NINF */
+			else
+				result = -1;	/* NINF < anything else */
+		}
+	}
+	else if (NUMERIC_IS_SPECIAL(num2))
+	{
+		if (NUMERIC_IS_NINF(num2))
+			result = 1;			/* normal > NINF */
+		else
+			result = -1;		/* normal < NAN or PINF */
+	}
+	else
+	{
+		result = cmp_var_common(NUMERIC_DIGITS(num1), NUMERIC_NDIGITS(num1),
+								NUMERIC_WEIGHT(num1), NUMERIC_SIGN(num1),
+								NUMERIC_DIGITS(num2), NUMERIC_NDIGITS(num2),
+								NUMERIC_WEIGHT(num2), NUMERIC_SIGN(num2));
+	}
+
+	return result;
+}
+
+/* ---- numeric.c:2978-3035 VERBATIM (numeric_add_opt_error) ---- */
+/*
+ * numeric_add_opt_error() -
+ *
+ *	Internal version of numeric_add().  If "*have_error" flag is provided,
+ *	on error it's set to true, NULL returned.  This is helpful when caller
+ *	need to handle errors by itself.
+ */
+Numeric
+numeric_add_opt_error(Numeric num1, Numeric num2, bool *have_error)
+{
+	NumericVar	arg1;
+	NumericVar	arg2;
+	NumericVar	result;
+	Numeric		res;
+
+	/*
+	 * Handle NaN and infinities
+	 */
+	if (NUMERIC_IS_SPECIAL(num1) || NUMERIC_IS_SPECIAL(num2))
+	{
+		if (NUMERIC_IS_NAN(num1) || NUMERIC_IS_NAN(num2))
+			return make_result(&const_nan);
+		if (NUMERIC_IS_PINF(num1))
+		{
+			if (NUMERIC_IS_NINF(num2))
+				return make_result(&const_nan); /* Inf + -Inf */
+			else
+				return make_result(&const_pinf);
+		}
+		if (NUMERIC_IS_NINF(num1))
+		{
+			if (NUMERIC_IS_PINF(num2))
+				return make_result(&const_nan); /* -Inf + Inf */
+			else
+				return make_result(&const_ninf);
+		}
+		/* by here, num1 must be finite, so num2 is not */
+		if (NUMERIC_IS_PINF(num2))
+			return make_result(&const_pinf);
+		Assert(NUMERIC_IS_NINF(num2));
+		return make_result(&const_ninf);
+	}
+
+	/*
+	 * Unpack the values, let add_var() compute the result and return it.
+	 */
+	init_var_from_num(num1, &arg1);
+	init_var_from_num(num2, &arg2);
+
+	init_var(&result);
+	add_var(&arg1, &arg2, &result);
+
+	res = make_result_opt_error(&result, have_error);
+
+	free_var(&result);
+
+	return res;
+}
+
+/* ---- numeric.c:3056-3113 VERBATIM (numeric_sub_opt_error) ---- */
+/*
+ * numeric_sub_opt_error() -
+ *
+ *	Internal version of numeric_sub().  If "*have_error" flag is provided,
+ *	on error it's set to true, NULL returned.  This is helpful when caller
+ *	need to handle errors by itself.
+ */
+Numeric
+numeric_sub_opt_error(Numeric num1, Numeric num2, bool *have_error)
+{
+	NumericVar	arg1;
+	NumericVar	arg2;
+	NumericVar	result;
+	Numeric		res;
+
+	/*
+	 * Handle NaN and infinities
+	 */
+	if (NUMERIC_IS_SPECIAL(num1) || NUMERIC_IS_SPECIAL(num2))
+	{
+		if (NUMERIC_IS_NAN(num1) || NUMERIC_IS_NAN(num2))
+			return make_result(&const_nan);
+		if (NUMERIC_IS_PINF(num1))
+		{
+			if (NUMERIC_IS_PINF(num2))
+				return make_result(&const_nan); /* Inf - Inf */
+			else
+				return make_result(&const_pinf);
+		}
+		if (NUMERIC_IS_NINF(num1))
+		{
+			if (NUMERIC_IS_NINF(num2))
+				return make_result(&const_nan); /* -Inf - -Inf */
+			else
+				return make_result(&const_ninf);
+		}
+		/* by here, num1 must be finite, so num2 is not */
+		if (NUMERIC_IS_PINF(num2))
+			return make_result(&const_ninf);
+		Assert(NUMERIC_IS_NINF(num2));
+		return make_result(&const_pinf);
+	}
+
+	/*
+	 * Unpack the values, let sub_var() compute the result and return it.
+	 */
+	init_var_from_num(num1, &arg1);
+	init_var_from_num(num2, &arg2);
+
+	init_var(&result);
+	sub_var(&arg1, &arg2, &result);
+
+	res = make_result_opt_error(&result, have_error);
+
+	free_var(&result);
+
+	return res;
+}
+
+/* ---- numeric.c:3134-3234 VERBATIM (numeric_mul_opt_error) ---- */
+/*
+ * numeric_mul_opt_error() -
+ *
+ *	Internal version of numeric_mul().  If "*have_error" flag is provided,
+ *	on error it's set to true, NULL returned.  This is helpful when caller
+ *	need to handle errors by itself.
+ */
+Numeric
+numeric_mul_opt_error(Numeric num1, Numeric num2, bool *have_error)
+{
+	NumericVar	arg1;
+	NumericVar	arg2;
+	NumericVar	result;
+	Numeric		res;
+
+	/*
+	 * Handle NaN and infinities
+	 */
+	if (NUMERIC_IS_SPECIAL(num1) || NUMERIC_IS_SPECIAL(num2))
+	{
+		if (NUMERIC_IS_NAN(num1) || NUMERIC_IS_NAN(num2))
+			return make_result(&const_nan);
+		if (NUMERIC_IS_PINF(num1))
+		{
+			switch (numeric_sign_internal(num2))
+			{
+				case 0:
+					return make_result(&const_nan); /* Inf * 0 */
+				case 1:
+					return make_result(&const_pinf);
+				case -1:
+					return make_result(&const_ninf);
+			}
+			Assert(false);
+		}
+		if (NUMERIC_IS_NINF(num1))
+		{
+			switch (numeric_sign_internal(num2))
+			{
+				case 0:
+					return make_result(&const_nan); /* -Inf * 0 */
+				case 1:
+					return make_result(&const_ninf);
+				case -1:
+					return make_result(&const_pinf);
+			}
+			Assert(false);
+		}
+		/* by here, num1 must be finite, so num2 is not */
+		if (NUMERIC_IS_PINF(num2))
+		{
+			switch (numeric_sign_internal(num1))
+			{
+				case 0:
+					return make_result(&const_nan); /* 0 * Inf */
+				case 1:
+					return make_result(&const_pinf);
+				case -1:
+					return make_result(&const_ninf);
+			}
+			Assert(false);
+		}
+		Assert(NUMERIC_IS_NINF(num2));
+		switch (numeric_sign_internal(num1))
+		{
+			case 0:
+				return make_result(&const_nan); /* 0 * -Inf */
+			case 1:
+				return make_result(&const_ninf);
+			case -1:
+				return make_result(&const_pinf);
+		}
+		Assert(false);
+	}
+
+	/*
+	 * Unpack the values, let mul_var() compute the result and return it.
+	 * Unlike add_var() and sub_var(), mul_var() will round its result. In the
+	 * case of numeric_mul(), which is invoked for the * operator on numerics,
+	 * we request exact representation for the product (rscale = sum(dscale of
+	 * arg1, dscale of arg2)).  If the exact result has more digits after the
+	 * decimal point than can be stored in a numeric, we round it.  Rounding
+	 * after computing the exact result ensures that the final result is
+	 * correctly rounded (rounding in mul_var() using a truncated product
+	 * would not guarantee this).
+	 */
+	init_var_from_num(num1, &arg1);
+	init_var_from_num(num2, &arg2);
+
+	init_var(&result);
+	mul_var(&arg1, &arg2, &result, arg1.dscale + arg2.dscale);
+
+	if (result.dscale > NUMERIC_DSCALE_MAX)
+		round_var(&result, NUMERIC_DSCALE_MAX);
+
+	res = make_result_opt_error(&result, have_error);
+
+	free_var(&result);
+
+	return res;
+}
+
+/* ---- numeric.c:3255-3369 VERBATIM (numeric_div_opt_error) ---- */
+/*
+ * numeric_div_opt_error() -
+ *
+ *	Internal version of numeric_div().  If "*have_error" flag is provided,
+ *	on error it's set to true, NULL returned.  This is helpful when caller
+ *	need to handle errors by itself.
+ */
+Numeric
+numeric_div_opt_error(Numeric num1, Numeric num2, bool *have_error)
+{
+	NumericVar	arg1;
+	NumericVar	arg2;
+	NumericVar	result;
+	Numeric		res;
+	int			rscale;
+
+	if (have_error)
+		*have_error = false;
+
+	/*
+	 * Handle NaN and infinities
+	 */
+	if (NUMERIC_IS_SPECIAL(num1) || NUMERIC_IS_SPECIAL(num2))
+	{
+		if (NUMERIC_IS_NAN(num1) || NUMERIC_IS_NAN(num2))
+			return make_result(&const_nan);
+		if (NUMERIC_IS_PINF(num1))
+		{
+			if (NUMERIC_IS_SPECIAL(num2))
+				return make_result(&const_nan); /* Inf / [-]Inf */
+			switch (numeric_sign_internal(num2))
+			{
+				case 0:
+					if (have_error)
+					{
+						*have_error = true;
+						return NULL;
+					}
+					ereport(ERROR,
+							(errcode(ERRCODE_DIVISION_BY_ZERO),
+							 errmsg("division by zero")));
+					break;
+				case 1:
+					return make_result(&const_pinf);
+				case -1:
+					return make_result(&const_ninf);
+			}
+			Assert(false);
+		}
+		if (NUMERIC_IS_NINF(num1))
+		{
+			if (NUMERIC_IS_SPECIAL(num2))
+				return make_result(&const_nan); /* -Inf / [-]Inf */
+			switch (numeric_sign_internal(num2))
+			{
+				case 0:
+					if (have_error)
+					{
+						*have_error = true;
+						return NULL;
+					}
+					ereport(ERROR,
+							(errcode(ERRCODE_DIVISION_BY_ZERO),
+							 errmsg("division by zero")));
+					break;
+				case 1:
+					return make_result(&const_ninf);
+				case -1:
+					return make_result(&const_pinf);
+			}
+			Assert(false);
+		}
+		/* by here, num1 must be finite, so num2 is not */
+
+		/*
+		 * POSIX would have us return zero or minus zero if num1 is zero, and
+		 * otherwise throw an underflow error.  But the numeric type doesn't
+		 * really do underflow, so let's just return zero.
+		 */
+		return make_result(&const_zero);
+	}
+
+	/*
+	 * Unpack the arguments
+	 */
+	init_var_from_num(num1, &arg1);
+	init_var_from_num(num2, &arg2);
+
+	init_var(&result);
+
+	/*
+	 * Select scale for division result
+	 */
+	rscale = select_div_scale(&arg1, &arg2);
+
+	/*
+	 * If "have_error" is provided, check for division by zero here
+	 */
+	if (have_error && (arg2.ndigits == 0 || arg2.digits[0] == 0))
+	{
+		*have_error = true;
+		return NULL;
+	}
+
+	/*
+	 * Do the divide and return the result
+	 */
+	div_var(&arg1, &arg2, &result, rscale, true, true);
+
+	res = make_result_opt_error(&result, have_error);
+
+	free_var(&result);
+
+	return res;
+}
+
+/* ---- numeric.c:3479-3547 VERBATIM (numeric_mod_opt_error) ---- */
+/*
+ * numeric_mod_opt_error() -
+ *
+ *	Internal version of numeric_mod().  If "*have_error" flag is provided,
+ *	on error it's set to true, NULL returned.  This is helpful when caller
+ *	need to handle errors by itself.
+ */
+Numeric
+numeric_mod_opt_error(Numeric num1, Numeric num2, bool *have_error)
+{
+	Numeric		res;
+	NumericVar	arg1;
+	NumericVar	arg2;
+	NumericVar	result;
+
+	if (have_error)
+		*have_error = false;
+
+	/*
+	 * Handle NaN and infinities.  We follow POSIX fmod() on this, except that
+	 * POSIX treats x-is-infinite and y-is-zero identically, raising EDOM and
+	 * returning NaN.  We choose to throw error only for y-is-zero.
+	 */
+	if (NUMERIC_IS_SPECIAL(num1) || NUMERIC_IS_SPECIAL(num2))
+	{
+		if (NUMERIC_IS_NAN(num1) || NUMERIC_IS_NAN(num2))
+			return make_result(&const_nan);
+		if (NUMERIC_IS_INF(num1))
+		{
+			if (numeric_sign_internal(num2) == 0)
+			{
+				if (have_error)
+				{
+					*have_error = true;
+					return NULL;
+				}
+				ereport(ERROR,
+						(errcode(ERRCODE_DIVISION_BY_ZERO),
+						 errmsg("division by zero")));
+			}
+			/* Inf % any nonzero = NaN */
+			return make_result(&const_nan);
+		}
+		/* num2 must be [-]Inf; result is num1 regardless of sign of num2 */
+		return duplicate_numeric(num1);
+	}
+
+	init_var_from_num(num1, &arg1);
+	init_var_from_num(num2, &arg2);
+
+	init_var(&result);
+
+	/*
+	 * If "have_error" is provided, check for division by zero here
+	 */
+	if (have_error && (arg2.ndigits == 0 || arg2.digits[0] == 0))
+	{
+		*have_error = true;
+		return NULL;
+	}
+
+	mod_var(&arg1, &arg2, &result);
+
+	res = make_result_opt_error(&result, NULL);
+
+	free_var(&result);
+
+	return res;
+}
+
+/* ---- numeric.c:4401-4416 VERBATIM (int64_to_numeric) ---- */
+Numeric
+int64_to_numeric(int64 val)
+{
+	Numeric		res;
+	NumericVar	result;
+
+	init_var(&result);
+
+	int64_to_numericvar(val, &result);
+
+	res = make_result(&result);
+
+	free_var(&result);
+
+	return res;
+}
+
+/* ---- numeric.c:4507-4513 VERBATIM (int4_numeric) ---- */
+Datum
+int4_numeric(PG_FUNCTION_ARGS)
+{
+	int32		val = PG_GETARG_INT32(0);
+
+	PG_RETURN_NUMERIC(int64_to_numeric(val));
+}
+
+/* ---- numeric.c:4515-4563 VERBATIM (numeric_int4_opt_error) ---- */
+int32
+numeric_int4_opt_error(Numeric num, bool *have_error)
+{
+	NumericVar	x;
+	int32		result;
+
+	if (have_error)
+		*have_error = false;
+
+	if (NUMERIC_IS_SPECIAL(num))
+	{
+		if (have_error)
+		{
+			*have_error = true;
+			return 0;
+		}
+		else
+		{
+			if (NUMERIC_IS_NAN(num))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot convert NaN to %s", "integer")));
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot convert infinity to %s", "integer")));
+		}
+	}
+
+	/* Convert to variable format, then convert to int4 */
+	init_var_from_num(num, &x);
+
+	if (!numericvar_to_int32(&x, &result))
+	{
+		if (have_error)
+		{
+			*have_error = true;
+			return 0;
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("integer out of range")));
+		}
+	}
+
+	return result;
+}
+
+/* ---- numeric.c:4573-4593 VERBATIM (numericvar_to_int32) ---- */
+/*
+ * Given a NumericVar, convert it to an int32. If the NumericVar
+ * exceeds the range of an int32, false is returned, otherwise true is returned.
+ * The input NumericVar is *not* free'd.
+ */
+static bool
+numericvar_to_int32(const NumericVar *var, int32 *result)
+{
+	int64		val;
+
+	if (!numericvar_to_int64(var, &val))
+		return false;
+
+	if (unlikely(val < PG_INT32_MIN) || unlikely(val > PG_INT32_MAX))
+		return false;
+
+	/* Down-convert to int4 */
+	*result = (int32) val;
+
+	return true;
+}
+
+/* ---- numeric.c:4595-4601 VERBATIM (int8_numeric) ---- */
+Datum
+int8_numeric(PG_FUNCTION_ARGS)
+{
+	int64		val = PG_GETARG_INT64(0);
+
+	PG_RETURN_NUMERIC(int64_to_numeric(val));
+}
+
+/* ---- numeric.c:4603-4651 VERBATIM (numeric_int8_opt_error) ---- */
+int64
+numeric_int8_opt_error(Numeric num, bool *have_error)
+{
+	NumericVar	x;
+	int64		result;
+
+	if (have_error)
+		*have_error = false;
+
+	if (NUMERIC_IS_SPECIAL(num))
+	{
+		if (have_error)
+		{
+			*have_error = true;
+			return 0;
+		}
+		else
+		{
+			if (NUMERIC_IS_NAN(num))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot convert NaN to %s", "bigint")));
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot convert infinity to %s", "bigint")));
+		}
+	}
+
+	/* Convert to variable format, then convert to int8 */
+	init_var_from_num(num, &x);
+
+	if (!numericvar_to_int64(&x, &result))
+	{
+		if (have_error)
+		{
+			*have_error = true;
+			return 0;
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("bigint out of range")));
+		}
+	}
+
+	return result;
+}
+
+/* ---- numeric.c:4662-4668 VERBATIM (int2_numeric) ---- */
+Datum
+int2_numeric(PG_FUNCTION_ARGS)
+{
+	int16		val = PG_GETARG_INT16(0);
+
+	PG_RETURN_NUMERIC(int64_to_numeric(val));
+}
+
+/* ---- numeric.c:4711-4743 VERBATIM (float8_numeric) ---- */
+Datum
+float8_numeric(PG_FUNCTION_ARGS)
+{
+	float8		val = PG_GETARG_FLOAT8(0);
+	Numeric		res;
+	NumericVar	result;
+	char		buf[DBL_DIG + 100];
+	const char *endptr;
+
+	if (isnan(val))
+		PG_RETURN_NUMERIC(make_result(&const_nan));
+
+	if (isinf(val))
+	{
+		if (val < 0)
+			PG_RETURN_NUMERIC(make_result(&const_ninf));
+		else
+			PG_RETURN_NUMERIC(make_result(&const_pinf));
+	}
+
+	snprintf(buf, sizeof(buf), "%.*g", DBL_DIG, val);
+
+	init_var(&result);
+
+	/* Assume we need not worry about leading/trailing spaces */
+	(void) set_var_from_str(buf, buf, &result, &endptr, NULL);
+
+	res = make_result(&result);
+
+	free_var(&result);
+
+	PG_RETURN_NUMERIC(res);
+}
+
+/* ---- numeric.c:4805-4837 VERBATIM (float4_numeric) ---- */
+Datum
+float4_numeric(PG_FUNCTION_ARGS)
+{
+	float4		val = PG_GETARG_FLOAT4(0);
+	Numeric		res;
+	NumericVar	result;
+	char		buf[FLT_DIG + 100];
+	const char *endptr;
+
+	if (isnan(val))
+		PG_RETURN_NUMERIC(make_result(&const_nan));
+
+	if (isinf(val))
+	{
+		if (val < 0)
+			PG_RETURN_NUMERIC(make_result(&const_ninf));
+		else
+			PG_RETURN_NUMERIC(make_result(&const_pinf));
+	}
+
+	snprintf(buf, sizeof(buf), "%.*g", FLT_DIG, val);
+
+	init_var(&result);
+
+	/* Assume we need not worry about leading/trailing spaces */
+	(void) set_var_from_str(buf, buf, &result, &endptr, NULL);
+
+	res = make_result(&result);
+
+	free_var(&result);
+
+	PG_RETURN_NUMERIC(res);
+}
+
+/* ---- numeric.c:8142-8217 VERBATIM (numericvar_to_int64) ---- */
+/*
+ * Convert numeric to int8, rounding if needed.
+ *
+ * If overflow, return false (no error is raised).  Return true if okay.
+ */
+static bool
+numericvar_to_int64(const NumericVar *var, int64 *result)
+{
+	NumericDigit *digits;
+	int			ndigits;
+	int			weight;
+	int			i;
+	int64		val;
+	bool		neg;
+	NumericVar	rounded;
+
+	/* Round to nearest integer */
+	init_var(&rounded);
+	set_var_from_var(var, &rounded);
+	round_var(&rounded, 0);
+
+	/* Check for zero input */
+	strip_var(&rounded);
+	ndigits = rounded.ndigits;
+	if (ndigits == 0)
+	{
+		*result = 0;
+		free_var(&rounded);
+		return true;
+	}
+
+	/*
+	 * For input like 10000000000, we must treat stripped digits as real. So
+	 * the loop assumes there are weight+1 digits before the decimal point.
+	 */
+	weight = rounded.weight;
+	Assert(weight >= 0 && ndigits <= weight + 1);
+
+	/*
+	 * Construct the result. To avoid issues with converting a value
+	 * corresponding to INT64_MIN (which can't be represented as a positive 64
+	 * bit two's complement integer), accumulate value as a negative number.
+	 */
+	digits = rounded.digits;
+	neg = (rounded.sign == NUMERIC_NEG);
+	val = -digits[0];
+	for (i = 1; i <= weight; i++)
+	{
+		if (unlikely(pg_mul_s64_overflow(val, NBASE, &val)))
+		{
+			free_var(&rounded);
+			return false;
+		}
+
+		if (i < ndigits)
+		{
+			if (unlikely(pg_sub_s64_overflow(val, digits[i], &val)))
+			{
+				free_var(&rounded);
+				return false;
+			}
+		}
+	}
+
+	free_var(&rounded);
+
+	if (!neg)
+	{
+		if (unlikely(val == PG_INT64_MIN))
+			return false;
+		val = -val;
+	}
+	*result = val;
+
+	return true;
+}
+
+/* ---- numeric.c:8485-8498 VERBATIM (cmp_var) ---- */
+/*
+ * cmp_var() -
+ *
+ *	Compare two values on variable level.  We assume zeroes have been
+ *	truncated to no digits.
+ */
+static int
+cmp_var(const NumericVar *var1, const NumericVar *var2)
+{
+	return cmp_var_common(var1->digits, var1->ndigits,
+						  var1->weight, var1->sign,
+						  var2->digits, var2->ndigits,
+						  var2->weight, var2->sign);
+}
+
+/* ---- numeric.c:8500-8540 VERBATIM (cmp_var_common) ---- */
+/*
+ * cmp_var_common() -
+ *
+ *	Main routine of cmp_var(). This function can be used by both
+ *	NumericVar and Numeric.
+ */
+static int
+cmp_var_common(const NumericDigit *var1digits, int var1ndigits,
+			   int var1weight, int var1sign,
+			   const NumericDigit *var2digits, int var2ndigits,
+			   int var2weight, int var2sign)
+{
+	if (var1ndigits == 0)
+	{
+		if (var2ndigits == 0)
+			return 0;
+		if (var2sign == NUMERIC_NEG)
+			return 1;
+		return -1;
+	}
+	if (var2ndigits == 0)
+	{
+		if (var1sign == NUMERIC_POS)
+			return 1;
+		return -1;
+	}
+
+	if (var1sign == NUMERIC_POS)
+	{
+		if (var2sign == NUMERIC_NEG)
+			return 1;
+		return cmp_abs_common(var1digits, var1ndigits, var1weight,
+							  var2digits, var2ndigits, var2weight);
+	}
+
+	if (var2sign == NUMERIC_POS)
+		return -1;
+
+	return cmp_abs_common(var2digits, var2ndigits, var2weight,
+						  var1digits, var1ndigits, var1weight);
+}
+
+/* ---- numeric.c:8660-8778 VERBATIM (sub_var) ---- */
+/*
+ * sub_var() -
+ *
+ *	Full version of sub functionality on variable level (handling signs).
+ *	result might point to one of the operands too without danger.
+ */
+static void
+sub_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
+{
+	/*
+	 * Decide on the signs of the two variables what to do
+	 */
+	if (var1->sign == NUMERIC_POS)
+	{
+		if (var2->sign == NUMERIC_NEG)
+		{
+			/* ----------
+			 * var1 is positive, var2 is negative
+			 * result = +(ABS(var1) + ABS(var2))
+			 * ----------
+			 */
+			add_abs(var1, var2, result);
+			result->sign = NUMERIC_POS;
+		}
+		else
+		{
+			/* ----------
+			 * Both are positive
+			 * Must compare absolute values
+			 * ----------
+			 */
+			switch (cmp_abs(var1, var2))
+			{
+				case 0:
+					/* ----------
+					 * ABS(var1) == ABS(var2)
+					 * result = ZERO
+					 * ----------
+					 */
+					zero_var(result);
+					result->dscale = Max(var1->dscale, var2->dscale);
+					break;
+
+				case 1:
+					/* ----------
+					 * ABS(var1) > ABS(var2)
+					 * result = +(ABS(var1) - ABS(var2))
+					 * ----------
+					 */
+					sub_abs(var1, var2, result);
+					result->sign = NUMERIC_POS;
+					break;
+
+				case -1:
+					/* ----------
+					 * ABS(var1) < ABS(var2)
+					 * result = -(ABS(var2) - ABS(var1))
+					 * ----------
+					 */
+					sub_abs(var2, var1, result);
+					result->sign = NUMERIC_NEG;
+					break;
+			}
+		}
+	}
+	else
+	{
+		if (var2->sign == NUMERIC_NEG)
+		{
+			/* ----------
+			 * Both are negative
+			 * Must compare absolute values
+			 * ----------
+			 */
+			switch (cmp_abs(var1, var2))
+			{
+				case 0:
+					/* ----------
+					 * ABS(var1) == ABS(var2)
+					 * result = ZERO
+					 * ----------
+					 */
+					zero_var(result);
+					result->dscale = Max(var1->dscale, var2->dscale);
+					break;
+
+				case 1:
+					/* ----------
+					 * ABS(var1) > ABS(var2)
+					 * result = -(ABS(var1) - ABS(var2))
+					 * ----------
+					 */
+					sub_abs(var1, var2, result);
+					result->sign = NUMERIC_NEG;
+					break;
+
+				case -1:
+					/* ----------
+					 * ABS(var1) < ABS(var2)
+					 * result = +(ABS(var2) - ABS(var1))
+					 * ----------
+					 */
+					sub_abs(var2, var1, result);
+					result->sign = NUMERIC_POS;
+					break;
+			}
+		}
+		else
+		{
+			/* ----------
+			 * var1 is negative, var2 is positive
+			 * result = -(ABS(var1) + ABS(var2))
+			 * ----------
+			 */
+			add_abs(var1, var2, result);
+			result->sign = NUMERIC_NEG;
+		}
+	}
+}
+
+/* ---- numeric.c:9347-9897 VERBATIM (div_var) ---- */
+/*
+ * div_var() -
+ *
+ *	Compute the quotient var1 / var2 to rscale fractional digits.
+ *
+ *	If "round" is true, the result is rounded at the rscale'th digit; if
+ *	false, it is truncated (towards zero) at that digit.
+ *
+ *	If "exact" is true, the exact result is computed to the specified rscale;
+ *	if false, successive quotient digits are approximated up to rscale plus
+ *	DIV_GUARD_DIGITS extra digits, ignoring all contributions from digits to
+ *	the right of that, before rounding or truncating to the specified rscale.
+ *	This can be significantly faster, and usually gives the same result as the
+ *	exact computation, but it may occasionally be off by one in the final
+ *	digit, if contributions from the ignored digits would have propagated
+ *	through the guard digits.  This is good enough for the transcendental
+ *	functions, where small errors are acceptable.
+ */
+static void
+div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+		int rscale, bool round, bool exact)
+{
+	int			var1ndigits = var1->ndigits;
+	int			var2ndigits = var2->ndigits;
+	int			res_sign;
+	int			res_weight;
+	int			res_ndigits;
+	int			var1ndigitpairs;
+	int			var2ndigitpairs;
+	int			res_ndigitpairs;
+	int			div_ndigitpairs;
+	int64	   *dividend;
+	int32	   *divisor;
+	double		fdivisor,
+				fdivisorinverse,
+				fdividend,
+				fquotient;
+	int64		maxdiv;
+	int			qi;
+	int32		qdigit;
+	int64		carry;
+	int64		newdig;
+	int64	   *remainder;
+	NumericDigit *res_digits;
+	int			i;
+
+	/*
+	 * First of all division by zero check; we must not be handed an
+	 * unnormalized divisor.
+	 */
+	if (var2ndigits == 0 || var2->digits[0] == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DIVISION_BY_ZERO),
+				 errmsg("division by zero")));
+
+	/*
+	 * If the divisor has just one or two digits, delegate to div_var_int(),
+	 * which uses fast short division.
+	 *
+	 * Similarly, on platforms with 128-bit integer support, delegate to
+	 * div_var_int64() for divisors with three or four digits.
+	 */
+	if (var2ndigits <= 2)
+	{
+		int			idivisor;
+		int			idivisor_weight;
+
+		idivisor = var2->digits[0];
+		idivisor_weight = var2->weight;
+		if (var2ndigits == 2)
+		{
+			idivisor = idivisor * NBASE + var2->digits[1];
+			idivisor_weight--;
+		}
+		if (var2->sign == NUMERIC_NEG)
+			idivisor = -idivisor;
+
+		div_var_int(var1, idivisor, idivisor_weight, result, rscale, round);
+		return;
+	}
+#ifdef HAVE_INT128
+	if (var2ndigits <= 4)
+	{
+		int64		idivisor;
+		int			idivisor_weight;
+
+		idivisor = var2->digits[0];
+		idivisor_weight = var2->weight;
+		for (i = 1; i < var2ndigits; i++)
+		{
+			idivisor = idivisor * NBASE + var2->digits[i];
+			idivisor_weight--;
+		}
+		if (var2->sign == NUMERIC_NEG)
+			idivisor = -idivisor;
+
+		div_var_int64(var1, idivisor, idivisor_weight, result, rscale, round);
+		return;
+	}
+#endif
+
+	/*
+	 * Otherwise, perform full long division.
+	 */
+
+	/* Result zero check */
+	if (var1ndigits == 0)
+	{
+		zero_var(result);
+		result->dscale = rscale;
+		return;
+	}
+
+	/*
+	 * The approximate computation can be significantly faster than the exact
+	 * one, since the working dividend is var2ndigitpairs base-NBASE^2 digits
+	 * shorter below.  However, that comes with the tradeoff of computing
+	 * DIV_GUARD_DIGITS extra base-NBASE result digits.  Ignoring all other
+	 * overheads, that suggests that, in theory, the approximate computation
+	 * will only be faster than the exact one when var2ndigits is greater than
+	 * 2 * (DIV_GUARD_DIGITS + 1), independent of the size of var1.
+	 *
+	 * Thus, we're better off doing an exact computation when var2 is shorter
+	 * than this.  Empirically, it has been found that the exact threshold is
+	 * a little higher, due to other overheads in the outer division loop.
+	 */
+	if (var2ndigits <= 2 * (DIV_GUARD_DIGITS + 2))
+		exact = true;
+
+	/*
+	 * Determine the result sign, weight and number of digits to calculate.
+	 * The weight figured here is correct if the emitted quotient has no
+	 * leading zero digits; otherwise strip_var() will fix things up.
+	 */
+	if (var1->sign == var2->sign)
+		res_sign = NUMERIC_POS;
+	else
+		res_sign = NUMERIC_NEG;
+	res_weight = var1->weight - var2->weight + 1;
+	/* The number of accurate result digits we need to produce: */
+	res_ndigits = res_weight + 1 + (rscale + DEC_DIGITS - 1) / DEC_DIGITS;
+	/* ... but always at least 1 */
+	res_ndigits = Max(res_ndigits, 1);
+	/* If rounding needed, figure one more digit to ensure correct result */
+	if (round)
+		res_ndigits++;
+	/* Add guard digits for roundoff error when producing approx result */
+	if (!exact)
+		res_ndigits += DIV_GUARD_DIGITS;
+
+	/*
+	 * The computation itself is done using base-NBASE^2 arithmetic, so we
+	 * actually process the input digits in pairs, producing a base-NBASE^2
+	 * intermediate result.  This significantly improves performance, since
+	 * the computation is O(N^2) in the number of input digits, and working in
+	 * base NBASE^2 effectively halves "N".
+	 */
+	var1ndigitpairs = (var1ndigits + 1) / 2;
+	var2ndigitpairs = (var2ndigits + 1) / 2;
+	res_ndigitpairs = (res_ndigits + 1) / 2;
+	res_ndigits = 2 * res_ndigitpairs;
+
+	/*
+	 * We do the arithmetic in an array "dividend[]" of signed 64-bit
+	 * integers.  Since PG_INT64_MAX is much larger than NBASE^4, this gives
+	 * us a lot of headroom to avoid normalizing carries immediately.
+	 *
+	 * When performing an exact computation, the working dividend requires
+	 * res_ndigitpairs + var2ndigitpairs digits.  If var1 is larger than that,
+	 * the extra digits do not contribute to the result, and are ignored.
+	 *
+	 * When performing an approximate computation, the working dividend only
+	 * requires res_ndigitpairs digits (which includes the extra guard
+	 * digits).  All input digits beyond that are ignored.
+	 */
+	if (exact)
+	{
+		div_ndigitpairs = res_ndigitpairs + var2ndigitpairs;
+		var1ndigitpairs = Min(var1ndigitpairs, div_ndigitpairs);
+	}
+	else
+	{
+		div_ndigitpairs = res_ndigitpairs;
+		var1ndigitpairs = Min(var1ndigitpairs, div_ndigitpairs);
+		var2ndigitpairs = Min(var2ndigitpairs, div_ndigitpairs);
+	}
+
+	/*
+	 * Allocate room for the working dividend (div_ndigitpairs 64-bit digits)
+	 * plus the divisor (var2ndigitpairs 32-bit base-NBASE^2 digits).
+	 *
+	 * For convenience, we allocate one extra dividend digit, which is set to
+	 * zero and not counted in div_ndigitpairs, so that the main loop below
+	 * can safely read and write the (qi+1)'th digit in the approximate case.
+	 */
+	dividend = (int64 *) palloc((div_ndigitpairs + 1) * sizeof(int64) +
+								var2ndigitpairs * sizeof(int32));
+	divisor = (int32 *) (dividend + div_ndigitpairs + 1);
+
+	/* load var1 into dividend[0 .. var1ndigitpairs-1], zeroing the rest */
+	for (i = 0; i < var1ndigitpairs - 1; i++)
+		dividend[i] = var1->digits[2 * i] * NBASE + var1->digits[2 * i + 1];
+
+	if (2 * i + 1 < var1ndigits)
+		dividend[i] = var1->digits[2 * i] * NBASE + var1->digits[2 * i + 1];
+	else
+		dividend[i] = var1->digits[2 * i] * NBASE;
+
+	memset(dividend + i + 1, 0, (div_ndigitpairs - i) * sizeof(int64));
+
+	/* load var2 into divisor[0 .. var2ndigitpairs-1] */
+	for (i = 0; i < var2ndigitpairs - 1; i++)
+		divisor[i] = var2->digits[2 * i] * NBASE + var2->digits[2 * i + 1];
+
+	if (2 * i + 1 < var2ndigits)
+		divisor[i] = var2->digits[2 * i] * NBASE + var2->digits[2 * i + 1];
+	else
+		divisor[i] = var2->digits[2 * i] * NBASE;
+
+	/*
+	 * We estimate each quotient digit using floating-point arithmetic, taking
+	 * the first 2 base-NBASE^2 digits of the (current) dividend and divisor.
+	 * This must be float to avoid overflow.
+	 *
+	 * Since the floating-point dividend and divisor use 4 base-NBASE input
+	 * digits, they include roughly 40-53 bits of information from their
+	 * respective inputs (assuming NBASE is 10000), which fits well in IEEE
+	 * double-precision variables.  The relative error in the floating-point
+	 * quotient digit will then be less than around 2/NBASE^3, so the
+	 * estimated base-NBASE^2 quotient digit will typically be correct, and
+	 * should not be off by more than one from the correct value.
+	 */
+	fdivisor = (double) divisor[0] * NBASE_SQR;
+	if (var2ndigitpairs > 1)
+		fdivisor += (double) divisor[1];
+	fdivisorinverse = 1.0 / fdivisor;
+
+	/*
+	 * maxdiv tracks the maximum possible absolute value of any dividend[]
+	 * entry; when this threatens to exceed PG_INT64_MAX, we take the time to
+	 * propagate carries.  Furthermore, we need to ensure that overflow
+	 * doesn't occur during the carry propagation passes either.  The carry
+	 * values may have an absolute value as high as PG_INT64_MAX/NBASE^2 + 1,
+	 * so really we must normalize when digits threaten to exceed PG_INT64_MAX
+	 * - PG_INT64_MAX/NBASE^2 - 1.
+	 *
+	 * To avoid overflow in maxdiv itself, it represents the max absolute
+	 * value divided by NBASE^2-1, i.e., at the top of the loop it is known
+	 * that no dividend[] entry has an absolute value exceeding maxdiv *
+	 * (NBASE^2-1).
+	 *
+	 * Actually, though, that holds good only for dividend[] entries after
+	 * dividend[qi]; the adjustment done at the bottom of the loop may cause
+	 * dividend[qi + 1] to exceed the maxdiv limit, so that dividend[qi] in
+	 * the next iteration is beyond the limit.  This does not cause problems,
+	 * as explained below.
+	 */
+	maxdiv = 1;
+
+	/*
+	 * Outer loop computes next quotient digit, which goes in dividend[qi].
+	 */
+	for (qi = 0; qi < res_ndigitpairs; qi++)
+	{
+		/* Approximate the current dividend value */
+		fdividend = (double) dividend[qi] * NBASE_SQR;
+		fdividend += (double) dividend[qi + 1];
+
+		/* Compute the (approximate) quotient digit */
+		fquotient = fdividend * fdivisorinverse;
+		qdigit = (fquotient >= 0.0) ? ((int32) fquotient) :
+			(((int32) fquotient) - 1);	/* truncate towards -infinity */
+
+		if (qdigit != 0)
+		{
+			/* Do we need to normalize now? */
+			maxdiv += i64abs(qdigit);
+			if (maxdiv > (PG_INT64_MAX - PG_INT64_MAX / NBASE_SQR - 1) / (NBASE_SQR - 1))
+			{
+				/*
+				 * Yes, do it.  Note that if var2ndigitpairs is much smaller
+				 * than div_ndigitpairs, we can save a significant amount of
+				 * effort here by noting that we only need to normalise those
+				 * dividend[] entries touched where prior iterations
+				 * subtracted multiples of the divisor.
+				 */
+				carry = 0;
+				for (i = Min(qi + var2ndigitpairs - 2, div_ndigitpairs - 1); i > qi; i--)
+				{
+					newdig = dividend[i] + carry;
+					if (newdig < 0)
+					{
+						carry = -((-newdig - 1) / NBASE_SQR) - 1;
+						newdig -= carry * NBASE_SQR;
+					}
+					else if (newdig >= NBASE_SQR)
+					{
+						carry = newdig / NBASE_SQR;
+						newdig -= carry * NBASE_SQR;
+					}
+					else
+						carry = 0;
+					dividend[i] = newdig;
+				}
+				dividend[qi] += carry;
+
+				/*
+				 * All the dividend[] digits except possibly dividend[qi] are
+				 * now in the range 0..NBASE^2-1.  We do not need to consider
+				 * dividend[qi] in the maxdiv value anymore, so we can reset
+				 * maxdiv to 1.
+				 */
+				maxdiv = 1;
+
+				/*
+				 * Recompute the quotient digit since new info may have
+				 * propagated into the top two dividend digits.
+				 */
+				fdividend = (double) dividend[qi] * NBASE_SQR;
+				fdividend += (double) dividend[qi + 1];
+				fquotient = fdividend * fdivisorinverse;
+				qdigit = (fquotient >= 0.0) ? ((int32) fquotient) :
+					(((int32) fquotient) - 1);	/* truncate towards -infinity */
+
+				maxdiv += i64abs(qdigit);
+			}
+
+			/*
+			 * Subtract off the appropriate multiple of the divisor.
+			 *
+			 * The digits beyond dividend[qi] cannot overflow, because we know
+			 * they will fall within the maxdiv limit.  As for dividend[qi]
+			 * itself, note that qdigit is approximately trunc(dividend[qi] /
+			 * divisor[0]), which would make the new value simply dividend[qi]
+			 * mod divisor[0].  The lower-order terms in qdigit can change
+			 * this result by not more than about twice PG_INT64_MAX/NBASE^2,
+			 * so overflow is impossible.
+			 *
+			 * This inner loop is the performance bottleneck for division, so
+			 * code it in the same way as the inner loop of mul_var() so that
+			 * it can be auto-vectorized.
+			 */
+			if (qdigit != 0)
+			{
+				int			istop = Min(var2ndigitpairs, div_ndigitpairs - qi);
+				int64	   *dividend_qi = &dividend[qi];
+
+				for (i = 0; i < istop; i++)
+					dividend_qi[i] -= (int64) qdigit * divisor[i];
+			}
+		}
+
+		/*
+		 * The dividend digit we are about to replace might still be nonzero.
+		 * Fold it into the next digit position.
+		 *
+		 * There is no risk of overflow here, although proving that requires
+		 * some care.  Much as with the argument for dividend[qi] not
+		 * overflowing, if we consider the first two terms in the numerator
+		 * and denominator of qdigit, we can see that the final value of
+		 * dividend[qi + 1] will be approximately a remainder mod
+		 * (divisor[0]*NBASE^2 + divisor[1]).  Accounting for the lower-order
+		 * terms is a bit complicated but ends up adding not much more than
+		 * PG_INT64_MAX/NBASE^2 to the possible range.  Thus, dividend[qi + 1]
+		 * cannot overflow here, and in its role as dividend[qi] in the next
+		 * loop iteration, it can't be large enough to cause overflow in the
+		 * carry propagation step (if any), either.
+		 *
+		 * But having said that: dividend[qi] can be more than
+		 * PG_INT64_MAX/NBASE^2, as noted above, which means that the product
+		 * dividend[qi] * NBASE^2 *can* overflow.  When that happens, adding
+		 * it to dividend[qi + 1] will always cause a canceling overflow so
+		 * that the end result is correct.  We could avoid the intermediate
+		 * overflow by doing the multiplication and addition using unsigned
+		 * int64 arithmetic, which is modulo 2^64, but so far there appears no
+		 * need.
+		 */
+		dividend[qi + 1] += dividend[qi] * NBASE_SQR;
+
+		dividend[qi] = qdigit;
+	}
+
+	/*
+	 * If an exact result was requested, use the remainder to correct the
+	 * approximate quotient.  The remainder is in dividend[], immediately
+	 * after the quotient digits.  Note, however, that although the remainder
+	 * starts at dividend[qi = res_ndigitpairs], the first digit is the result
+	 * of folding two remainder digits into one above, and the remainder
+	 * currently only occupies var2ndigitpairs - 1 digits (the last digit of
+	 * the working dividend was untouched by the computation above).  Thus we
+	 * expand the remainder down by one base-NBASE^2 digit when we normalize
+	 * it, so that it completely fills the last var2ndigitpairs digits of the
+	 * dividend array.
+	 */
+	if (exact)
+	{
+		/* Normalize the remainder, expanding it down by one digit */
+		remainder = &dividend[qi];
+		carry = 0;
+		for (i = var2ndigitpairs - 2; i >= 0; i--)
+		{
+			newdig = remainder[i] + carry;
+			if (newdig < 0)
+			{
+				carry = -((-newdig - 1) / NBASE_SQR) - 1;
+				newdig -= carry * NBASE_SQR;
+			}
+			else if (newdig >= NBASE_SQR)
+			{
+				carry = newdig / NBASE_SQR;
+				newdig -= carry * NBASE_SQR;
+			}
+			else
+				carry = 0;
+			remainder[i + 1] = newdig;
+		}
+		remainder[0] = carry;
+
+		if (remainder[0] < 0)
+		{
+			/*
+			 * The remainder is negative, so the approximate quotient is too
+			 * large.  Correct by reducing the quotient by one and adding the
+			 * divisor to the remainder until the remainder is positive.  We
+			 * expect the quotient to be off by at most one, which has been
+			 * borne out in all testing, but not conclusively proven, so we
+			 * allow for larger corrections, just in case.
+			 */
+			do
+			{
+				/* Add the divisor to the remainder */
+				carry = 0;
+				for (i = var2ndigitpairs - 1; i > 0; i--)
+				{
+					newdig = remainder[i] + divisor[i] + carry;
+					if (newdig >= NBASE_SQR)
+					{
+						remainder[i] = newdig - NBASE_SQR;
+						carry = 1;
+					}
+					else
+					{
+						remainder[i] = newdig;
+						carry = 0;
+					}
+				}
+				remainder[0] += divisor[0] + carry;
+
+				/* Subtract 1 from the quotient (propagating carries later) */
+				dividend[qi - 1]--;
+
+			} while (remainder[0] < 0);
+		}
+		else
+		{
+			/*
+			 * The remainder is nonnegative.  If it's greater than or equal to
+			 * the divisor, then the approximate quotient is too small and
+			 * must be corrected.  As above, we don't expect to have to apply
+			 * more than one correction, but allow for it just in case.
+			 */
+			while (true)
+			{
+				bool		less = false;
+
+				/* Is remainder < divisor? */
+				for (i = 0; i < var2ndigitpairs; i++)
+				{
+					if (remainder[i] < divisor[i])
+					{
+						less = true;
+						break;
+					}
+					if (remainder[i] > divisor[i])
+						break;	/* remainder > divisor */
+				}
+				if (less)
+					break;		/* quotient is correct */
+
+				/* Subtract the divisor from the remainder */
+				carry = 0;
+				for (i = var2ndigitpairs - 1; i > 0; i--)
+				{
+					newdig = remainder[i] - divisor[i] + carry;
+					if (newdig < 0)
+					{
+						remainder[i] = newdig + NBASE_SQR;
+						carry = -1;
+					}
+					else
+					{
+						remainder[i] = newdig;
+						carry = 0;
+					}
+				}
+				remainder[0] = remainder[0] - divisor[0] + carry;
+
+				/* Add 1 to the quotient (propagating carries later) */
+				dividend[qi - 1]++;
+			}
+		}
+	}
+
+	/*
+	 * Because the quotient digits were estimates that might have been off by
+	 * one (and we didn't bother propagating carries when adjusting the
+	 * quotient above), some quotient digits might be out of range, so do a
+	 * final carry propagation pass to normalize back to base NBASE^2, and
+	 * construct the base-NBASE result digits.  Note that this is still done
+	 * at full precision w/guard digits.
+	 */
+	alloc_var(result, res_ndigits);
+	res_digits = result->digits;
+	carry = 0;
+	for (i = res_ndigitpairs - 1; i >= 0; i--)
+	{
+		newdig = dividend[i] + carry;
+		if (newdig < 0)
+		{
+			carry = -((-newdig - 1) / NBASE_SQR) - 1;
+			newdig -= carry * NBASE_SQR;
+		}
+		else if (newdig >= NBASE_SQR)
+		{
+			carry = newdig / NBASE_SQR;
+			newdig -= carry * NBASE_SQR;
+		}
+		else
+			carry = 0;
+		res_digits[2 * i + 1] = (NumericDigit) ((uint32) newdig % NBASE);
+		res_digits[2 * i] = (NumericDigit) ((uint32) newdig / NBASE);
+	}
+	Assert(carry == 0);
+
+	pfree(dividend);
+
+	/*
+	 * Finally, round or truncate the result to the requested precision.
+	 */
+	result->weight = res_weight;
+	result->sign = res_sign;
+
+	/* Round or truncate to target rscale (and set result->dscale) */
+	if (round)
+		round_var(result, rscale);
+	else
+		trunc_var(result, rscale);
+
+	/* Strip leading and trailing zeroes */
+	strip_var(result);
+}
+
+/* ---- numeric.c:9900-10009 VERBATIM (div_var_int) ---- */
+/*
+ * div_var_int() -
+ *
+ *	Divide a numeric variable by a 32-bit integer with the specified weight.
+ *	The quotient var / (ival * NBASE^ival_weight) is stored in result.
+ */
+static void
+div_var_int(const NumericVar *var, int ival, int ival_weight,
+			NumericVar *result, int rscale, bool round)
+{
+	NumericDigit *var_digits = var->digits;
+	int			var_ndigits = var->ndigits;
+	int			res_sign;
+	int			res_weight;
+	int			res_ndigits;
+	NumericDigit *res_buf;
+	NumericDigit *res_digits;
+	uint32		divisor;
+	int			i;
+
+	/* Guard against division by zero */
+	if (ival == 0)
+		ereport(ERROR,
+				errcode(ERRCODE_DIVISION_BY_ZERO),
+				errmsg("division by zero"));
+
+	/* Result zero check */
+	if (var_ndigits == 0)
+	{
+		zero_var(result);
+		result->dscale = rscale;
+		return;
+	}
+
+	/*
+	 * Determine the result sign, weight and number of digits to calculate.
+	 * The weight figured here is correct if the emitted quotient has no
+	 * leading zero digits; otherwise strip_var() will fix things up.
+	 */
+	if (var->sign == NUMERIC_POS)
+		res_sign = ival > 0 ? NUMERIC_POS : NUMERIC_NEG;
+	else
+		res_sign = ival > 0 ? NUMERIC_NEG : NUMERIC_POS;
+	res_weight = var->weight - ival_weight;
+	/* The number of accurate result digits we need to produce: */
+	res_ndigits = res_weight + 1 + (rscale + DEC_DIGITS - 1) / DEC_DIGITS;
+	/* ... but always at least 1 */
+	res_ndigits = Max(res_ndigits, 1);
+	/* If rounding needed, figure one more digit to ensure correct result */
+	if (round)
+		res_ndigits++;
+
+	res_buf = digitbuf_alloc(res_ndigits + 1);
+	res_buf[0] = 0;				/* spare digit for later rounding */
+	res_digits = res_buf + 1;
+
+	/*
+	 * Now compute the quotient digits.  This is the short division algorithm
+	 * described in Knuth volume 2, section 4.3.1 exercise 16, except that we
+	 * allow the divisor to exceed the internal base.
+	 *
+	 * In this algorithm, the carry from one digit to the next is at most
+	 * divisor - 1.  Therefore, while processing the next digit, carry may
+	 * become as large as divisor * NBASE - 1, and so it requires a 64-bit
+	 * integer if this exceeds UINT_MAX.
+	 */
+	divisor = abs(ival);
+
+	if (divisor <= UINT_MAX / NBASE)
+	{
+		/* carry cannot overflow 32 bits */
+		uint32		carry = 0;
+
+		for (i = 0; i < res_ndigits; i++)
+		{
+			carry = carry * NBASE + (i < var_ndigits ? var_digits[i] : 0);
+			res_digits[i] = (NumericDigit) (carry / divisor);
+			carry = carry % divisor;
+		}
+	}
+	else
+	{
+		/* carry may exceed 32 bits */
+		uint64		carry = 0;
+
+		for (i = 0; i < res_ndigits; i++)
+		{
+			carry = carry * NBASE + (i < var_ndigits ? var_digits[i] : 0);
+			res_digits[i] = (NumericDigit) (carry / divisor);
+			carry = carry % divisor;
+		}
+	}
+
+	/* Store the quotient in result */
+	digitbuf_free(result->buf);
+	result->ndigits = res_ndigits;
+	result->buf = res_buf;
+	result->digits = res_digits;
+	result->weight = res_weight;
+	result->sign = res_sign;
+
+	/* Round or truncate to target rscale (and set result->dscale) */
+	if (round)
+		round_var(result, rscale);
+	else
+		trunc_var(result, rscale);
+
+	/* Strip leading/trailing zeroes */
+	strip_var(result);
+}
+
+/* ---- numeric.c:10129-10195 VERBATIM (select_div_scale) ---- */
+/*
+ * Default scale selection for division
+ *
+ * Returns the appropriate result scale for the division result.
+ */
+static int
+select_div_scale(const NumericVar *var1, const NumericVar *var2)
+{
+	int			weight1,
+				weight2,
+				qweight,
+				i;
+	NumericDigit firstdigit1,
+				firstdigit2;
+	int			rscale;
+
+	/*
+	 * The result scale of a division isn't specified in any SQL standard. For
+	 * PostgreSQL we select a result scale that will give at least
+	 * NUMERIC_MIN_SIG_DIGITS significant digits, so that numeric gives a
+	 * result no less accurate than float8; but use a scale not less than
+	 * either input's display scale.
+	 */
+
+	/* Get the actual (normalized) weight and first digit of each input */
+
+	weight1 = 0;				/* values to use if var1 is zero */
+	firstdigit1 = 0;
+	for (i = 0; i < var1->ndigits; i++)
+	{
+		firstdigit1 = var1->digits[i];
+		if (firstdigit1 != 0)
+		{
+			weight1 = var1->weight - i;
+			break;
+		}
+	}
+
+	weight2 = 0;				/* values to use if var2 is zero */
+	firstdigit2 = 0;
+	for (i = 0; i < var2->ndigits; i++)
+	{
+		firstdigit2 = var2->digits[i];
+		if (firstdigit2 != 0)
+		{
+			weight2 = var2->weight - i;
+			break;
+		}
+	}
+
+	/*
+	 * Estimate weight of quotient.  If the two first digits are equal, we
+	 * can't be sure, but assume that var1 is less than var2.
+	 */
+	qweight = weight1 - weight2;
+	if (firstdigit1 <= firstdigit2)
+		qweight--;
+
+	/* Select result scale */
+	rscale = NUMERIC_MIN_SIG_DIGITS - qweight * DEC_DIGITS;
+	rscale = Max(rscale, var1->dscale);
+	rscale = Max(rscale, var2->dscale);
+	rscale = Max(rscale, NUMERIC_MIN_DISPLAY_SCALE);
+	rscale = Min(rscale, NUMERIC_MAX_DISPLAY_SCALE);
+
+	return rscale;
+}
+
+/* ---- numeric.c:10198-10223 VERBATIM (mod_var) ---- */
+/*
+ * mod_var() -
+ *
+ *	Calculate the modulo of two numerics at variable level
+ */
+static void
+mod_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
+{
+	NumericVar	tmp;
+
+	init_var(&tmp);
+
+	/* ---------
+	 * We do this using the equation
+	 *		mod(x,y) = x - trunc(x/y)*y
+	 * div_var can be persuaded to give us trunc(x/y) directly.
+	 * ----------
+	 */
+	div_var(var1, var2, &tmp, 0, false, true);
+
+	mul_var(var2, &tmp, &tmp, var2->dscale);
+
+	sub_var(var1, &tmp, result);
+
+	free_var(&tmp);
+}
+
+/* ---- numeric.c:10226-10293 VERBATIM (div_mod_var) ---- */
+/*
+ * div_mod_var() -
+ *
+ *	Calculate the truncated integer quotient and numeric remainder of two
+ *	numeric variables.  The remainder is precise to var2's dscale.
+ */
+static void
+div_mod_var(const NumericVar *var1, const NumericVar *var2,
+			NumericVar *quot, NumericVar *rem)
+{
+	NumericVar	q;
+	NumericVar	r;
+
+	init_var(&q);
+	init_var(&r);
+
+	/*
+	 * Use div_var() with exact = false to get an initial estimate for the
+	 * integer quotient (truncated towards zero).  This might be slightly
+	 * inaccurate, but we correct it below.
+	 */
+	div_var(var1, var2, &q, 0, false, false);
+
+	/* Compute initial estimate of remainder using the quotient estimate. */
+	mul_var(var2, &q, &r, var2->dscale);
+	sub_var(var1, &r, &r);
+
+	/*
+	 * Adjust the results if necessary --- the remainder should have the same
+	 * sign as var1, and its absolute value should be less than the absolute
+	 * value of var2.
+	 */
+	while (r.ndigits != 0 && r.sign != var1->sign)
+	{
+		/* The absolute value of the quotient is too large */
+		if (var1->sign == var2->sign)
+		{
+			sub_var(&q, &const_one, &q);
+			add_var(&r, var2, &r);
+		}
+		else
+		{
+			add_var(&q, &const_one, &q);
+			sub_var(&r, var2, &r);
+		}
+	}
+
+	while (cmp_abs(&r, var2) >= 0)
+	{
+		/* The absolute value of the quotient is too small */
+		if (var1->sign == var2->sign)
+		{
+			add_var(&q, &const_one, &q);
+			sub_var(&r, var2, &r);
+		}
+		else
+		{
+			sub_var(&q, &const_one, &q);
+			add_var(&r, var2, &r);
+		}
+	}
+
+	set_var_from_var(&q, quot);
+	set_var_from_var(&r, rem);
+
+	free_var(&q);
+	free_var(&r);
+}
+
+/* ---- numeric.c:10296-10317 VERBATIM (ceil_var) ---- */
+/*
+ * ceil_var() -
+ *
+ *	Return the smallest integer greater than or equal to the argument
+ *	on variable level
+ */
+static void
+ceil_var(const NumericVar *var, NumericVar *result)
+{
+	NumericVar	tmp;
+
+	init_var(&tmp);
+	set_var_from_var(var, &tmp);
+
+	trunc_var(&tmp, 0);
+
+	if (var->sign == NUMERIC_POS && cmp_var(var, &tmp) != 0)
+		add_var(&tmp, &const_one, &tmp);
+
+	set_var_from_var(&tmp, result);
+	free_var(&tmp);
+}
+
+/* ---- numeric.c:10320-10341 VERBATIM (floor_var) ---- */
+/*
+ * floor_var() -
+ *
+ *	Return the largest integer equal to or less than the argument
+ *	on variable level
+ */
+static void
+floor_var(const NumericVar *var, NumericVar *result)
+{
+	NumericVar	tmp;
+
+	init_var(&tmp);
+	set_var_from_var(var, &tmp);
+
+	trunc_var(&tmp, 0);
+
+	if (var->sign == NUMERIC_NEG && cmp_var(var, &tmp) != 0)
+		sub_var(&tmp, &const_one, &tmp);
+
+	set_var_from_var(&tmp, result);
+	free_var(&tmp);
+}
+/* ---- numeric.c:7533-7552 VERBATIM (set_var_from_num) ---- */
+/*
+ * set_var_from_num() -
+ *
+ *	Convert the packed db format into a variable
+ */
+static void
+set_var_from_num(Numeric num, NumericVar *dest)
+{
+	int			ndigits;
+
+	ndigits = NUMERIC_NDIGITS(num);
+
+	alloc_var(dest, ndigits);
+
+	dest->weight = NUMERIC_WEIGHT(num);
+	dest->sign = NUMERIC_SIGN(num);
+	dest->dscale = NUMERIC_DSCALE(num);
+
+	memcpy(dest->digits, NUMERIC_DIGITS(num), ndigits * sizeof(NumericDigit));
+}
+
+/* ---- numeric.c:1470-1501 VERBATIM (numeric_sign_internal) ---- */
+/*
+ * numeric_sign_internal() -
+ *
+ * Returns -1 if the argument is less than 0, 0 if the argument is equal
+ * to 0, and 1 if the argument is greater than zero.  Caller must have
+ * taken care of the NaN case, but we can handle infinities here.
+ */
+static int
+numeric_sign_internal(Numeric num)
+{
+	if (NUMERIC_IS_SPECIAL(num))
+	{
+		Assert(!NUMERIC_IS_NAN(num));
+		/* Must be Inf or -Inf */
+		if (NUMERIC_IS_PINF(num))
+			return 1;
+		else
+			return -1;
+	}
+
+	/*
+	 * The packed format is known to be totally zero digit trimmed always. So
+	 * once we've eliminated specials, we can identify a zero by the fact that
+	 * there are no digits at all.
+	 */
+	else if (NUMERIC_NDIGITS(num) == 0)
+		return 0;
+	else if (NUMERIC_SIGN(num) == NUMERIC_NEG)
+		return -1;
+	else
+		return 1;
+}
+

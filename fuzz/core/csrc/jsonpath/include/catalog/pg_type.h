@@ -15,4 +15,10 @@
 #define JSONBOID 3802
 #define JSONPATHOID 4072
 #define CSTRINGOID 2275
+#define INT2OID 21
+#define INT8OID 20
+#define FLOAT4OID 700
+#define FLOAT8OID 701
+#define VARCHAROID 1043
+#define JSONOID 114
 #endif

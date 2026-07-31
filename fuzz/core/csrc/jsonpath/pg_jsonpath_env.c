@@ -77,6 +77,13 @@ pg_jsonpath_arena_track(void *p)
 	pg_jsonpath_arena[pg_jsonpath_arena_n++] = p;
 }
 
+/* exported for the jsonpathexec_diff entries (pg_jsonpath_exec_env.c) */
+void
+pg_jsonpath_arena_reset_public(void)
+{
+	pg_jsonpath_arena_reset();
+}
+
 void *
 pg_jsonpath_palloc(Size size)
 {

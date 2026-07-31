@@ -23,4 +23,21 @@ NumericGetDatum(Numeric X)
 }
 #define PG_GETARG_NUMERIC(n)	  DatumGetNumeric(PG_GETARG_DATUM(n))
 #define PG_RETURN_NUMERIC(x)	  return NumericGetDatum(x)
+/* vendored verbatim in pg_numeric_min.c */
+extern Numeric int64_to_numeric(int64 val);
+extern int64 numeric_int8_safe(Numeric num, Node *escontext);
+extern Numeric numeric_add_opt_error(Numeric num1, Numeric num2,
+									 bool *have_error);
+extern Numeric numeric_sub_opt_error(Numeric num1, Numeric num2,
+									 bool *have_error);
+extern Numeric numeric_mul_opt_error(Numeric num1, Numeric num2,
+									 bool *have_error);
+extern Numeric numeric_div_opt_error(Numeric num1, Numeric num2,
+									 bool *have_error);
+extern Numeric numeric_mod_opt_error(Numeric num1, Numeric num2,
+									 bool *have_error);
+extern int32 numeric_int4_opt_error(Numeric num, bool *have_error);
+extern int64 numeric_int8_opt_error(Numeric num, bool *have_error);
+extern bool numeric_is_nan(Numeric num);
+extern bool numeric_is_inf(Numeric num);
 #endif

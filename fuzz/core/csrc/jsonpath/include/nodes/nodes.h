@@ -21,6 +21,16 @@ typedef enum NodeTag
 	T_XidList = 4,
 	T_String = 5,
 	T_ErrorSaveContext = 6,
+	/* jsonpathexec_diff additions (shim model tags; values arbitrary —
+	 * tags never cross the FFI boundary) */
+	T_Const = 7,
+	T_ExprState = 8,
+	T_TableFuncScan = 9,
+	T_TableFuncScanState = 10,
+	T_JsonExpr = 11,
+	T_JsonTablePath = 12,
+	T_JsonTablePathScan = 13,
+	T_JsonTableSiblingJoin = 14,
 } NodeTag;
 
 /* postgres.h forward-declares "typedef struct Node Node"; define it here */

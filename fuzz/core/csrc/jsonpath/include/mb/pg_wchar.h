@@ -114,4 +114,9 @@ unicode_utf8len(pg_wchar c)
 		return 4;
 }
 
+/* same-encoding arm model (shim; see pg_jsonpath_exec_env.c): under the
+ * UTF-8 pin every conversion is the identity, exactly mbutils.c's
+ * src==dest arm. Only reachable when server encoding != UTF-8, i.e. never
+ * here. */
+extern char *pg_server_to_any(const char *s, int len, int encoding);
 #endif							/* PG_WCHAR_H */
