@@ -1026,8 +1026,21 @@ pub fn numeric_ops_diff(data: &[u8]) {
             // (pack(a)==pack(b) ⇔ eq(a,b) whenever both pack).
             let Some((a, ..)) = take_operand(r) else { return };
             let Some((b, ..)) = take_operand(r) else { return };
+            const MANT_MAX: u64 = (1u64 << 55) - 1; /* nodeagg width-8 bound */
             for img in [&a, &b] {
+                // out-of-contract budget must be fenced, never wrap (clamp
+                // added after this target found the m-as-i64 wrap)
                 if let Some(key) = adt_numeric::numeric_key_pack(img.num(), u64::MAX) {
+                    let back = adt_numeric::numeric_key_unpack(key)
+                        .expect("numeric_key_unpack of a packed key");
+                    assert!(
+                        back.as_bytes() == img.as_bytes(),
+                        "numeric_key_pack(u64::MAX) BYTE-ROUNDTRIP failure img={:02x?} -> {:02x?}",
+                        img.as_bytes(),
+                        back.as_bytes()
+                    );
+                }
+                if let Some(key) = adt_numeric::numeric_key_pack(img.num(), MANT_MAX) {
                     let back = adt_numeric::numeric_key_unpack(key)
                         .expect("numeric_key_unpack of a packed key");
                     assert!(
@@ -1039,8 +1052,8 @@ pub fn numeric_ops_diff(data: &[u8]) {
                 }
             }
             if let (Some(ka), Some(kb)) = (
-                adt_numeric::numeric_key_pack(a.num(), u64::MAX),
-                adt_numeric::numeric_key_pack(b.num(), u64::MAX),
+                adt_numeric::numeric_key_pack(a.num(), MANT_MAX),
+                adt_numeric::numeric_key_pack(b.num(), MANT_MAX),
             ) {
                 let cres = c_call(OP_EQ, Some(a.as_bytes()), Some(b.as_bytes()), None, 0, 0, 0.0);
                 let ceq = match cres {
