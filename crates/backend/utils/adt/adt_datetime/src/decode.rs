@@ -2506,20 +2506,108 @@ fn strtod_model(s: &[u8]) -> Option<(f64, usize, bool)> {
     if let Some(tok) = adt_float::scan_number(s) {
         // SAFETY-free slice: scan_number consumed ASCII only.
         let token = &s[..tok.len];
+        let is_hex = matches!(tok.kind, adt_float::NumKind::Hex);
         let val = match tok.kind {
             adt_float::NumKind::Decimal => {
                 core::str::from_utf8(token).ok()?.parse::<f64>().ok()?
             }
             adt_float::NumKind::Hex => adt_float::parse_hex_float(token),
         };
+        // ERANGE per glibc/macOS strtod (verified identical): overflow to
+        // ±inf; underflow to zero from a nonzero mantissa; INEXACT
+        // subnormal. An EXACTLY representable subnormal sets no error —
+        // 'P0x1p-1073'::interval is 00:00:00 on real 18.3 (fuzz witness
+        // p1-laney), so hex tokens get an exactness check. Decimal tokens
+        // cannot hit that case: the shortest exact decimal expansion of
+        // any subnormal needs ~1074 significant digits, far past every
+        // caller's input budget, so inexactness is implied.
+        let sub = val != 0.0 && val.abs() < f64::MIN_POSITIVE;
         let erange = val.is_infinite()
-            || (tok.nonzero && val.abs() < f64::MIN_POSITIVE);
+            || (tok.nonzero && val == 0.0)
+            || (sub && !(is_hex && hex_subnormal_exact(token, val)));
         return Some((val, tok.len, erange));
     }
     // ±inf/±infinity/±nan(...) — strtod accepts these with errno 0; the
     // range check downstream turns them into DTERR_FIELD_OVERFLOW exactly
     // as C does ('P-infY' is 22015 on real 18.3).
     adt_float::special_float8(s).map(|(v, n)| (v, n, false))
+}
+
+/// Is this C99 hex-float token EXACTLY the subnormal `val`? (strtod flags
+/// ERANGE only on inexact underflow.) token value = M * 2^E with M the
+/// significant hex digits and E from the digit positions + p-exponent;
+/// `val` = k * 2^-1074 with k the subnormal mantissa bits. Exact iff
+/// M * 2^(E+1074) == k over the integers.
+fn hex_subnormal_exact(token: &[u8], val: f64) -> bool {
+    let mut i = 0usize;
+    if token[i] == b'+' || token[i] == b'-' {
+        i += 1;
+    }
+    i += 2; /* 0x / 0X (scan_number guarantees) */
+    // fixed digit buffer sized past every caller's input cap (200 bytes);
+    // a longer token is treated inexact.
+    let mut digits = [0u8; 256];
+    let mut ndig = 0usize;
+    let mut frac_len: i64 = 0;
+    let mut in_frac = false;
+    while i < token.len() {
+        match token[i] {
+            b'.' => in_frac = true,
+            b'p' | b'P' => break,
+            c => {
+                let d = (c as char).to_digit(16).unwrap() as u8;
+                if ndig == digits.len() {
+                    return false;
+                }
+                digits[ndig] = d;
+                ndig += 1;
+                if in_frac {
+                    frac_len += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    let digits = &digits[..ndig];
+    let mut pexp: i64 = 0;
+    if i < token.len() && (token[i] == b'p' || token[i] == b'P') {
+        let neg = token.get(i + 1) == Some(&b'-');
+        if neg || token.get(i + 1) == Some(&b'+') {
+            i += 1;
+        }
+        i += 1;
+        while i < token.len() && token[i].is_ascii_digit() {
+            pexp = (pexp * 10 + (token[i] - b'0') as i64).min(1 << 40);
+            i += 1;
+        }
+        if neg {
+            pexp = -pexp;
+        }
+    }
+    let Some(first) = digits.iter().position(|&d| d != 0) else {
+        return false; /* zero mantissa: not a subnormal producer */
+    };
+    let last = digits.iter().rposition(|&d| d != 0).unwrap();
+    let sig = &digits[first..=last];
+    if sig.len() > 28 {
+        return false; /* > 112 significant bits: cannot be a 52-bit k */
+    }
+    let mut m: u128 = 0;
+    for &d in sig {
+        m = m * 16 + d as u128;
+    }
+    // trailing zero digits between last nonzero and the point contribute
+    // 16^(digits.len()-1-last); frac digits contribute 16^-frac_len.
+    let e = pexp + 4 * ((digits.len() as i64 - 1 - last as i64) - frac_len);
+    let k = val.abs().to_bits() as u128; /* subnormal: exponent field 0 */
+    let sh = e + 1074;
+    if sh >= 0 {
+        sh < 76 && (m << sh) >> sh == m && (m << sh) == k
+    } else {
+        // m * 2^-n == k: m must carry n zero low bits
+        let n = (-sh) as u32;
+        n < 128 && m.trailing_zeros() >= n.min(127) && (m >> n) == k
+    }
 }
 
 fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f64) -> i32 {
