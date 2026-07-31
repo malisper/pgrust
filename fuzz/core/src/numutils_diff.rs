@@ -124,6 +124,25 @@ macro_rules! diff_strtoint {
                     .take_error()
                     .unwrap_or_else(|| panic!("{}: verdict diverged on {s:?}: C errcode {c_rc}, Rust ok={r}", $what));
                 assert_errcode(c_rc, &e, $what, s);
+                // Error-location plane (client-keyed: pg8000 pins F/R on
+                // integer-input errors — see numutils crate comment). The C
+                // reference is __func__ inside vendored numutils.c, which is
+                // exactly the *_safe entry name; pinned by rule here.
+                let loc = e.location().unwrap_or_else(|| {
+                    panic!("{}: error location missing on {s:?}", $what)
+                });
+                assert_eq!(
+                    loc.funcname.as_deref(),
+                    Some(concat!($what, "_safe")),
+                    "{}: error R (funcname) diverged on {s:?}",
+                    $what
+                );
+                assert_eq!(
+                    loc.filename.as_deref(),
+                    Some("numutils.c"),
+                    "{}: error F (filename) diverged on {s:?}",
+                    $what
+                );
                 // ereturn dummy: C returns 0 on the soft path; Rust matches.
                 assert_eq!(r, 0, "{}: soft-error dummy diverged on {s:?}", $what);
                 match r_plain {
