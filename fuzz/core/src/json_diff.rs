@@ -149,7 +149,10 @@ fn pin_utf8() {
     // fc plane detoasts its text/array args; all images here are inline.
     // Seams are process-global set-once: install exactly once.
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(detoast::init_seams);
+    ONCE.call_once(|| {
+        detoast::init_seams();
+        adt_json::init_seams(); // shipped no-op registration hook
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +389,32 @@ fn json_in_diff(payload: &[u8]) {
             "fc_json_in verdict DIVERGENCE input={:?}",
             String::from_utf8_lossy(payload)
         ),
+    }
+
+    // fc-wrapper soft-error plane: an armed ErrorSaveNode absorbs the parse
+    // failure into a SQL NULL, sqlstate preserved (input_function_call_safe
+    // shape).
+    let mut esn = types_fmgr::ErrorSaveNode::new(true);
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    // SAFETY: cx outlives this call.
+    unsafe { fcinfo.set_result_mcx(m) };
+    fcinfo.context = esn.fm_node_ptr();
+    fcinfo.args = [NullableDatum::value(Datum::from_usize(cstr.as_ptr() as usize))];
+    let frs = adt_json::builtins::fc_json_in(None, &mut fcinfo);
+    match &c {
+        COut::Val(cv) => {
+            let d = frs.expect("fc_json_in soft-plane spurious error");
+            assert!(!fcinfo.isnull && read_varlena_data(d) == *cv, "fc_json_in soft value");
+            assert!(!esn.ctx.error_occurred(), "fc_json_in soft spurious save");
+        }
+        COut::Err(ce) => {
+            // Absorbed: Ok(null Datum) + error saved in the node (the
+            // input_function_call_safe caller keys off error_occurred).
+            assert!(frs.is_ok(), "fc_json_in soft verdict");
+            let se = esn.ctx.error().expect("soft error saved");
+            assert!(sqlstate_i32(se) == *ce, "fc_json_in soft sqlstate");
+        }
+        COut::Null => unreachable!(),
     }
 }
 
