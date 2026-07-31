@@ -39,6 +39,11 @@ fn main() {
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).
         .file("csrc/pg_quote_io.c")
+        // fmt_dch_diff + fmt_num_diff oracle (p1-lanek): verbatim formatting.c
+        // DCH+NUM+engine slice, single TU (the NUM SQL entries call the static
+        // NUM_processor/NUM_cache there); csrc/pg_fmt_num_io.c is intentionally
+        // NOT compiled — see fuzz/core/src/fmt_num_diff.rs header.
+        .file("csrc/pg_fmt_dch_io.c")
         // COMPILE GATE (hashfn_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_hashfn_io.c is filled
         // with verbatim vendored C (README-TODO-hashfn_diff.md step 1).

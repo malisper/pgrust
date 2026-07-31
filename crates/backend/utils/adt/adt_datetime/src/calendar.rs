@@ -32,7 +32,10 @@ pub const fn date2j(mut year: i32, mut month: i32, day: i32) -> i32 {
     let century = year / 100;
     let mut julian = year.wrapping_mul(365).wrapping_sub(32167);
     julian = julian.wrapping_add(year / 4 - century + century / 4);
-    julian = julian.wrapping_add(7834 * month / 256 + day);
+    // `+ day` must wrap too: to_char(interval) reaches here with raw
+    // tm_mday up to INT_MAX/INT_MIN (DCH_J over interval day counts; found
+    // by fmt_dch_diff witness seed gr-iv-imaxdy-f19, p1-lanek remediation).
+    julian = julian.wrapping_add((7834 * month / 256).wrapping_add(day));
 
     julian
 }

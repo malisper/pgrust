@@ -437,7 +437,13 @@ pub fn float4_to_char<'mcx>(mcx: Mcx<'mcx>, value: f32, fmt: &[u8]) -> PgResult<
     } else {
         let mut val = value;
         if num.is_multi() {
-            val = value * 10f32.powi(num.multi);
+            // C (formatting.c:6539): `float multi = pow((double) 10, (double)
+            // Num.multi); val = value * multi;` — pow computed in DOUBLE and
+            // rounded once to float. 10f32.powi accumulates f32 roundings and
+            // diverges for large V-digit counts (found by the fmt_num_diff
+            // FLEET campaign 2026-07-31).
+            let multi = 10f64.powf(num.multi as f64) as f32;
+            val = value * multi;
             num.pre += num.multi;
         }
         let pre = fmt_f0(val.abs() as f64);
@@ -501,7 +507,10 @@ pub fn float8_to_char<'mcx>(mcx: Mcx<'mcx>, value: f64, fmt: &[u8]) -> PgResult<
     } else {
         let mut val = value;
         if num.is_multi() {
-            val = value * 10f64.powi(num.multi);
+            // C (formatting.c:6649): pow((double) 10, (double) Num.multi) —
+            // libm pow, not powi (same class as the float4 arm; see there).
+            let multi = 10f64.powf(num.multi as f64);
+            val = value * multi;
             num.pre += num.multi;
         }
         let pre = fmt_f0(val.abs());

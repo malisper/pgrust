@@ -362,6 +362,14 @@ pub use encode_diff::encode_diff;
 pub mod quote_diff;
 pub use quote_diff::quote_diff;
 
+// fmt_dch_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-fmt_dch_diff.md.
+pub mod fmt_dch_diff;
+pub use fmt_dch_diff::fmt_dch_diff;
+
+// fmt_num_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-fmt_num_diff.md.
+pub mod fmt_num_diff;
+pub use fmt_num_diff::fmt_num_diff;
+
 // geo_io_diff: geo text-I/O family (p1-laner) — see core/src/geo_io_diff.rs.
 pub mod geo_io_diff;
 pub use geo_io_diff::geo_io_diff;

@@ -374,7 +374,16 @@ pub fn do_to_timestamp<'mcx>(
                     }
                 }
             } else {
-                tm.tm_year = tmfc.cc * 100 + (if tmfc.cc >= 0 { 0 } else { 1 });
+                // C (formatting.c:4594) computes this with a bare multiply
+                // under -fwrapv: `tmfc.cc * 100` WRAPS for |cc| > ~21.4M
+                // (SQL-reachable: to_date('-2147483648 0','CC YY') yields
+                // 0001-01-01 in real PG 18.3, ground-truthed via docker).
+                // wrapping_* keeps that exact behavior; a plain `*` panics
+                // in debug builds (found by fmt_dch_diff fuzz 2026-07-30).
+                tm.tm_year = tmfc
+                    .cc
+                    .wrapping_mul(100)
+                    .wrapping_add(if tmfc.cc >= 0 { 0 } else { 1 });
             }
         } else {
             tm.tm_year = tmfc.year;
