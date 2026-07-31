@@ -70,8 +70,18 @@ fn diff_keyword_lookup(payload: &[u8]) {
     }
 }
 
-fn diff_keyword_index(n: usize) {
-    let n = n % keywords::SCANKEYWORDS_NUM_KEYWORDS;
+fn diff_keyword_index(raw: usize) {
+    // Out-of-range plane first: Rust None must pair with C NULL (the C shim
+    // range-guards exactly as GetScanKeyword's callers do).
+    let oob = raw.max(keywords::SCANKEYWORDS_NUM_KEYWORDS);
+    assert!(
+        keywords::GetScanKeyword(oob, &keywords::ScanKeywords).is_none(),
+        "GetScanKeyword({oob}) must be None"
+    );
+    // SAFETY: total function; returns NULL out of range.
+    assert!(unsafe { pg_diff_get_scan_keyword(oob.min(i32::MAX as usize) as c_int) }.is_null());
+
+    let n = raw % keywords::SCANKEYWORDS_NUM_KEYWORDS;
     let r_kw = keywords::GetScanKeyword(n, &keywords::ScanKeywords).expect("in range");
     // SAFETY: n < num_keywords; C returns a pointer into the static table.
     let c_kw = unsafe { CStr::from_ptr(pg_diff_get_scan_keyword(n as c_int)) }.to_bytes();
