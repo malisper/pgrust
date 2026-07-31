@@ -3448,15 +3448,20 @@ pg_diff_mr_internals(int typ, const unsigned char *img, int i,
 	*is_empty = MultirangeIsEmpty(mr) ? 1 : 0;
 	*range_len = 0;
 	*union_len = 0;
-	if (mr->rangeCount == 0)
-		return 0;
 
-	r = multirange_get_range(rangetyp, mr, i % (int) mr->rangeCount);
-	n = (int) VARSIZE(r);
-	if (n > outcap)
-		return -1;
-	memcpy(range_out, r, n);
-	*range_len = n;
+	/* multirange_get_union_range HANDLES the empty multirange (it returns
+	 * make_empty_range), so it is called unconditionally: guarding it behind
+	 * rangeCount != 0 left that arm dead on both sides. Only get_range needs
+	 * a non-empty multirange, because it indexes. */
+	if (mr->rangeCount > 0)
+	{
+		r = multirange_get_range(rangetyp, mr, i % (int) mr->rangeCount);
+		n = (int) VARSIZE(r);
+		if (n > outcap)
+			return -1;
+		memcpy(range_out, r, n);
+		*range_len = n;
+	}
 
 	r = multirange_get_union_range(rangetyp, mr);
 	n = (int) VARSIZE(r);

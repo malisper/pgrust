@@ -951,7 +951,17 @@ typedef struct RangeBound
 #define RangeIsOrContainsEmpty(r) \
 	((range_get_flags(r) & (RANGE_EMPTY | RANGE_CONTAIN_EMPTY)) != 0)
 
-#define DatumGetRangeTypeP(X) ((RangeType *) DatumGetPointer(X))
+/*
+ * VERBATIM rangetypes.h (18.3): DatumGetRangeTypeP DETOASTS, it is not a raw
+ * cast. Spelled as a macro over the same PG_DETOAST_DATUM the header uses.
+ *
+ * This was a raw DatumGetPointer here until lane p1-laneac fed the first
+ * SHORT-header range image: every image the driver built was flat 4B, so the
+ * missing detoast was invisible and the oracle silently disagreed with C on the
+ * one input class that distinguishes them. Any future entry that reads a range
+ * header directly must detoast for ITS OWN read too (see pg_diff_range_accessors).
+ */
+#define DatumGetRangeTypeP(X) ((RangeType *) PG_DETOAST_DATUM(X))
 #define RangeTypePGetDatum(X) PointerGetDatum(X)
 #define PG_GETARG_RANGE_P(n) DatumGetRangeTypeP(PG_GETARG_DATUM(n))
 #define PG_RETURN_RANGE_P(x) return RangeTypePGetDatum(x)
@@ -9119,7 +9129,7 @@ pg_diff_range_accessors(const unsigned char *img,
 	Datum		args[1];
 	Datum		d;
 	bool		isnull;
-	RangeType  *r = (RangeType *) img;
+	RangeType  *r;
 	TypeCacheEntry *tc;
 	int			i;
 	struct
@@ -9131,6 +9141,13 @@ pg_diff_range_accessors(const unsigned char *img,
 	}			acc[2];
 
 	PG_DIFF_ENTER();
+	/* The HARNESS's own header read must detoast first: the driver also feeds
+	 * SHORT-header (1-byte) range images, which is the form a small stored
+	 * range really carries, and reading ->rangetypid off a short image lands 3
+	 * bytes off and produced a bogus typcache miss. The fmgr calls below still
+	 * receive the ORIGINAL datum, so each callee runs its own detoast — which
+	 * is exactly the path under test. */
+	r = (RangeType *) pg_rt_detoast((void *) img);
 	/* SWEEP (lane p1-laneac): range_get_typcache is the C-faithful accessor and
 	 * elogs when rngelemtype is unset, so the ->rngelemtype deref below cannot
 	 * be reached with a non-range entry. A raw lookup_type_cache + unchecked

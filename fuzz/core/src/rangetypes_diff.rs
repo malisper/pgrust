@@ -789,6 +789,26 @@ fn bump(f: impl FnOnce(&mut BuildStats)) {
     STATS.with(|s| f(&mut s.borrow_mut()));
 }
 
+/// Re-pack a 4-byte-header range image into the SHORT (1-byte) varlena header
+/// form, which is what a small stored range actually carries on disk: range
+/// types are typlen -1 with typstorage 'x', so datum_write packs them short in
+/// a tuple. Feeding one exercises the detoast-on-argument path
+/// (`arg_range`'s RangeArg::Owned arm, builtins.rs:47) that a 4B-only driver
+/// never reaches; the C oracle's PG_GETARG_RANGE_P expands short headers
+/// through pg_rt_detoast, so both sides see the same logical value.
+/// `None` = too big for the short form (>126 bytes payload).
+fn to_short_header(img: &[u8]) -> Option<Vec<u8>> {
+    let payload = &img[4..];
+    let total = payload.len() + 1;
+    if total > 126 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(total);
+    out.push(((total as u8) << 1) | 0x01);
+    out.extend_from_slice(payload);
+    Some(out)
+}
+
 /// One image for an arm, in one of the two layouts. `None` = skip this exec.
 fn image_for(
     t: usize,
@@ -889,7 +909,18 @@ fn maybe_report_stats() {
     });
 }
 
+/// `arg_range` detoasts a non-flat range argument through the detoast seam.
+/// Install the SHIPPED implementation: the seam is ENVIRONMENT, the detoast
+/// logic is COMPUTATION and must never be mocked (Michael's minimal-seaming
+/// rule). Short-header images built by this driver are expanded by it; the
+/// external-TOAST fetch below it is never reached, since no arm mints a toast
+/// pointer (see GAPS-p1-laneac.md for why that arm stays out of scope).
+fn install_seams() {
+    crate::install_detoast_seam_once();
+}
+
 pub fn rangetypes_diff(data: &[u8]) {
+    install_seams();
     maybe_report_stats();
     let Some((&sel, rest)) = data.split_first() else {
         return;
@@ -1287,7 +1318,17 @@ fn arm_accessors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
     let lo = Bound::decode(t, &mut rd, mcx);
     let up = Bound::decode(t, &mut rd, mcx);
     let (Some(lo), Some(up)) = (lo, up) else { return };
-    let Some(img) = image_for(t, layout_ctor, flags, &lo, &up, mcx) else { return };
+    let Some(img4) = image_for(t, layout_ctor, flags, &lo, &up, mcx) else { return };
+    // A stored small range carries a SHORT (1-byte) varlena header; feed that
+    // form on a payload bit so the detoast-on-argument path is compared.
+    let short = sel & 0x40 != 0;
+    let img = match if short { to_short_header(&img4) } else { None } {
+        Some(s) => {
+            bump(|st| st.toast_built[2] += 1);
+            s
+        }
+        None => img4,
+    };
     let mut lob = vec![0u8; OUTCAP];
     let mut upb = vec![0u8; OUTCAP];
     let (mut lol, mut lon, mut upl, mut upn) = (0i32, 0i32, 0i32, 0i32);

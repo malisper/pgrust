@@ -743,25 +743,62 @@ fn maxalign(n: usize) -> usize {
 /// `ndim` are parameters so the wrong-elemtype and multidimensional error arms
 /// are reachable.
 fn build_range_array(ranges: &[Vec<u8>], elemtype: Oid, ndim: i32) -> Vec<u8> {
+    build_range_array_nulls(ranges, elemtype, ndim, &[])
+}
+
+/// `null_at` = element indexes to mark NULL in the array's null bitmap. A
+/// non-empty list is what reaches multirange_constructor2's per-element
+/// null_member arm (builtins.rs:220): the argisnull(0) arm rejects a NULL
+/// ARGUMENT, but a non-null array carrying a NULL MEMBER is a different, also
+/// SQL-reachable path (`select int4multirange(ARRAY[NULL::int4range])`).
+fn build_range_array_nulls(
+    ranges: &[Vec<u8>],
+    elemtype: Oid,
+    ndim: i32,
+    null_at: &[usize],
+) -> Vec<u8> {
+    let nelems = ranges.len();
+    let has_nulls = !null_at.is_empty();
     let mut img = vec![0u8; 16];
     img[4..8].copy_from_slice(&ndim.to_ne_bytes());
-    // dataoffset stays 0 = no null bitmap
     img[12..16].copy_from_slice(&elemtype.to_ne_bytes());
     if ndim > 0 {
-        img.extend_from_slice(&(ranges.len() as i32).to_ne_bytes()); // dims[0]
+        img.extend_from_slice(&(nelems as i32).to_ne_bytes()); // dims[0]
         img.extend_from_slice(&1i32.to_ne_bytes()); // lbound[0]
+    }
+    if has_nulls {
+        // ArrayType null bitmap: one bit per element, LSB-first, 1 = NOT null.
+        let nbytes = (nelems + 7) / 8;
+        let mut bits = vec![0u8; nbytes];
+        for i in 0..nelems {
+            if !null_at.contains(&i) {
+                bits[i / 8] |= 1 << (i % 8);
+            }
+        }
+        img.extend_from_slice(&bits);
     }
     while img.len() != maxalign(img.len()) {
         img.push(0);
     }
+    if has_nulls {
+        // dataoffset != 0 is the flag that a null bitmap is present, and it
+        // must be the MAXALIGN'd offset of the data area.
+        let off = img.len() as i32;
+        img[8..12].copy_from_slice(&off.to_ne_bytes());
+    }
     if ndim > 0 {
+        let mut first = true;
         for (i, r) in ranges.iter().enumerate() {
-            if i > 0 {
+            if null_at.contains(&i) {
+                continue; // NULL elements occupy no payload bytes
+            }
+            if !first {
                 // element alignment: the range type's own typalign is 'd'
                 while img.len() % 8 != 0 {
                     img.push(0);
                 }
             }
+            first = false;
             img.extend_from_slice(r);
         }
     }
@@ -846,6 +883,17 @@ pub fn numeric_tie_fallback_count() -> u64 {
 /// vacuity tests assert the counts advance.
 static SOFT_MODE: AtomicU64 = AtomicU64::new(0);
 static SOFT_CAPTURED: AtomicU64 = AtomicU64::new(0);
+static NULL_ARG: AtomicU64 = AtomicU64::new(0);
+static NULL_MEMBER: AtomicU64 = AtomicU64::new(0);
+static UNION_RANGE_EMPTY: AtomicU64 = AtomicU64::new(0);
+
+pub fn null_member_count() -> u64 {
+    NULL_MEMBER.load(Ordering::Relaxed)
+}
+
+pub fn union_range_empty_count() -> u64 {
+    UNION_RANGE_EMPTY.load(Ordering::Relaxed)
+}
 
 pub fn soft_mode_count() -> u64 {
     SOFT_MODE.load(Ordering::Relaxed)
@@ -869,6 +917,15 @@ impl MrStats {
     fn soft_captured_inc(&self) {
         SOFT_CAPTURED.fetch_add(1, Ordering::Relaxed);
     }
+    fn null_arg_inc(&self) {
+        NULL_ARG.fetch_add(1, Ordering::Relaxed);
+    }
+    fn null_member_inc(&self) {
+        NULL_MEMBER.fetch_add(1, Ordering::Relaxed);
+    }
+    fn union_range_empty_inc(&self) {
+        UNION_RANGE_EMPTY.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Total driver iterations, for the fallback-rate line below.
@@ -883,11 +940,14 @@ fn report_tie_fallbacks() {
     if n & (n - 1) == 0 && n >= 1 << 16 {
         eprintln!(
             "multirangetypes_diff: numeric-tie fallbacks {} / {} execs; \
-             soft_mode={} soft_captured={}",
+             soft_mode={} soft_captured={} null_arg={} null_member={} union_empty={}",
             NUMERIC_TIE_FALLBACKS.load(Ordering::Relaxed),
             n,
             SOFT_MODE.load(Ordering::Relaxed),
-            SOFT_CAPTURED.load(Ordering::Relaxed)
+            SOFT_CAPTURED.load(Ordering::Relaxed),
+            NULL_ARG.load(Ordering::Relaxed),
+            NULL_MEMBER.load(Ordering::Relaxed),
+            UNION_RANGE_EMPTY.load(Ordering::Relaxed)
         );
     }
 }
@@ -1047,10 +1107,7 @@ fn agreed_from_payload(t: usize, rd: &mut Rd, mcx: mcx::Mcx<'_>) -> Option<Vec<u
 /// driver builds are flat, so the external-TOAST fetch seam below it is never
 /// reached.
 fn install_seams() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        detoast_seams::detoast_attr::set(detoast::detoast_attr);
-    });
+    crate::install_detoast_seam_once();
 }
 
 pub fn multirangetypes_diff(data: &[u8]) {
@@ -1445,14 +1502,28 @@ fn arm_ctors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         2 => {
             let _ = agreed_from_payload(t, &mut rd, mcx);
         }
-        // constructor2 error arms: multidimensional / wrong element type
+        // constructor2 error arms: NULL argument / NULL member / multidim /
+        // wrong element type
         _ => {
-            let multidim = rd.u8() & 1 == 1;
-            let wrong_elem = rd.u8() & 1 == 1;
+            let sel = rd.u8();
+            let multidim = sel & 1 == 1;
+            let wrong_elem = sel & 2 == 2;
+            // The two NULL arms are DISTINCT paths: a NULL ARGUMENT
+            // (argisnull(0)) versus a non-null array carrying a NULL MEMBER
+            // in its bitmap. Both raise 22004 and both are SQL-reachable.
+            let arg_null = sel & 4 == 4;
+            let member_null = sel & 8 == 8;
             let Some(rimg) = decode_range(t, &mut rd, mcx) else { return };
             let elemtype = if wrong_elem { INT4OID } else { PINS[t].rngtypid };
             let ndim = if multidim { 2 } else { 1 };
-            let arr = build_range_array(&[rimg], elemtype, ndim);
+            let null_at: &[usize] = if member_null { &[0] } else { &[] };
+            let arr = build_range_array_nulls(&[rimg], elemtype, ndim, null_at);
+            if arg_null {
+                bump(|st| st.null_arg_inc());
+            }
+            if member_null {
+                bump(|st| st.null_member_inc());
+            }
             let mut cbuf = vec![0u8; OUTCAP];
             let mut clen = 0i32;
             let cret = unsafe {
@@ -1461,19 +1532,15 @@ fn arm_ctors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
                     1,
                     core::ptr::null(),
                     arr.as_ptr(),
-                    0,
+                    i32::from(arg_null),
                     cbuf.as_mut_ptr(),
                     &mut clen,
                     OUTCAP as i32,
                 )
             };
             let mut fl = ops_flinfo(t);
-            let r = fc_call(
-                mb::fc_multirange_constructor2,
-                Some(&mut fl),
-                mcx,
-                [Some(Datum::from_usize(arr.as_ptr() as usize))],
-            );
+            let a0 = if arg_null { None } else { Some(Datum::from_usize(arr.as_ptr() as usize)) };
+            let r = fc_call(mb::fc_multirange_constructor2, Some(&mut fl), mcx, [a0]);
             compare_mr_image(
                 "multirange_constructor2_err",
                 t,
@@ -1481,7 +1548,10 @@ fn arm_ctors(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
                 &cbuf[..clen as usize],
                 &r,
                 mcx,
-                &format!("t={t} multidim={multidim} wrong_elem={wrong_elem}"),
+                &format!(
+                    "t={t} multidim={multidim} wrong_elem={wrong_elem} \
+                     arg_null={arg_null} member_null={member_null}"
+                ),
             );
         }
     }
@@ -1842,19 +1912,22 @@ fn arm_internals(t: usize, payload: &[u8], mcx: mcx::Mcx<'_>) {
         "multirange_is_empty DIVERGENCE {dbg}: C={} Rust={rempty}",
         is_empty != 0
     );
-    if count == 0 {
-        return;
-    }
-
     let mut mi = multirange_info(t);
-    let i = (idx as usize) % (count as usize);
-    let got = mrt::multirange_get_range(mcx, &mut mi.rng, &img, i).expect("get_range");
-    assert!(
-        got[..] == rbuf[..rlen as usize],
-        "multirange_get_range DIVERGENCE {dbg}: C={:02x?} Rust={:02x?}",
-        &rbuf[..rlen as usize],
-        &got[..]
-    );
+    if count > 0 {
+        let i = (idx as usize) % (count as usize);
+        let got = mrt::multirange_get_range(mcx, &mut mi.rng, &img, i).expect("get_range");
+        assert!(
+            got[..] == rbuf[..rlen as usize],
+            "multirange_get_range DIVERGENCE {dbg}: C={:02x?} Rust={:02x?}",
+            &rbuf[..rlen as usize],
+            &got[..]
+        );
+    } else {
+        bump(|st| st.union_range_empty_inc());
+    }
+    // union_range is compared for the EMPTY multirange too: it has a dedicated
+    // make_empty_range arm (lib.rs:395) that the old `count == 0 => return`
+    // guard made unreachable on both sides.
     let un = mrt::multirange_get_union_range(mcx, &mut mi.rng, &img).expect("union_range");
     assert!(
         un[..] == ubuf[..ulen as usize],
