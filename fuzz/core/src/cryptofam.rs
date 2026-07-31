@@ -158,7 +158,13 @@ fn call_int_fn(
 
 fn init_seams() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| postgres_seams::check_for_interrupts::set(|| Ok(())));
+    // Tolerate hashenc (p1-lanee) installing the identical no-op CFI seam
+    // first — both lanes' oracles run in one test binary since the p1 union.
+    ONCE.call_once(|| {
+        let _ = std::panic::catch_unwind(|| {
+            postgres_seams::check_for_interrupts::set(|| Ok(()));
+        });
+    });
 }
 
 fn diff_md5(payload: &[u8]) {

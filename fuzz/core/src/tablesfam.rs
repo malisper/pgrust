@@ -28,7 +28,12 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint};
 
 extern "C" {
+    // tablesfam_-prefixed at compile time (build.rs symbol isolation): the
+    // main oracle lib (p1-laneg enc_tables) exports glue with the SAME
+    // pg_diff_* names over a DIFFERENT vendored kwlookup copy.
+    #[link_name = "tablesfam_pg_diff_scan_keyword_lookup"]
     fn pg_diff_scan_keyword_lookup(s: *const c_char) -> c_int;
+    #[link_name = "tablesfam_pg_diff_get_scan_keyword"]
     fn pg_diff_get_scan_keyword(n: c_int) -> *const c_char;
     fn pg_diff_keyword_category(n: c_int) -> c_int;
     fn pg_diff_keyword_bare_label(n: c_int) -> c_int;

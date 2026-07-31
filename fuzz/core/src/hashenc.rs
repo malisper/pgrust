@@ -316,7 +316,13 @@ fn hmac_family(payload: &[u8]) {
 /// CHECK_FOR_INTERRUPTS seam is a sanctioned no-op (never Err).
 fn install_cfi() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| postgres_seams::check_for_interrupts::set(|| Ok(())));
+    // Tolerate cryptofam (p1-lanef) installing the identical no-op CFI seam
+    // first — both lanes' oracles run in one test binary since the p1 union.
+    ONCE.call_once(|| {
+        let _ = std::panic::catch_unwind(|| {
+            postgres_seams::check_for_interrupts::set(|| Ok(()));
+        });
+    });
 }
 
 fn scram_family(payload: &[u8]) {

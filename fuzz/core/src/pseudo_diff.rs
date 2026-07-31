@@ -138,7 +138,13 @@ fn rust_err_code(e: &PgError) -> i32 {
 fn init_seams() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        mbutils_seams::pg_server_to_client::set(|_, _| Ok(None));
+        // Tolerate another module (name_diff installs the REAL mbutils
+        // seams) having installed first: with the client encoding at its
+        // SQL_ASCII default the real seam is the same identity conversion
+        // (returns None), so either install order satisfies this driver.
+        let _ = std::panic::catch_unwind(|| {
+            mbutils_seams::pg_server_to_client::set(|_, _| Ok(None));
+        });
     });
 }
 
