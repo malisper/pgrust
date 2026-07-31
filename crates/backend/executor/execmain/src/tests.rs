@@ -20,6 +20,10 @@ use crate::{exec_init_node, exec_proc_node, exec_re_scan};
 const INT4OID: u32 = 23;
 const BOOLOID: u32 = 16;
 const INT8OID: u32 = 20;
+const TEXTOID: u32 = 25;
+/// C collation (pg_collation.dat 950) — the memcmp tier lanefold's
+/// `str_collation_safe` admits without a locale seam.
+const C_COLLATION: u32 = 950;
 const INT4_LT: u32 = 97;
 const INTEGER_BTREE_FAM: u32 = 1976;
 const BTREE_AM: u32 = 403;
@@ -75,6 +79,15 @@ fn install_seams() {
                     typalign: ::types_tuple::TYPALIGN_DOUBLE,
                     typstorage: ::types_tuple::TYPSTORAGE_EXTENDED,
                     typcollation: 0,
+                }),
+                // text (pg_type.dat 25): max(text)'s transtype — the
+                // GL-SINKCRASH-3 str-transvalue fold regression unit.
+                TEXTOID => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_INT,
+                    typstorage: ::types_tuple::TYPSTORAGE_EXTENDED,
+                    typcollation: 100,
                 }),
                 _ => None,
             })
@@ -161,13 +174,38 @@ fn install_seams() {
                     aggmtranstype: 1016,
                     aggtransspace: 0,
                 }),
+                // max(text): the REAL pg_aggregate.dat row (PostgreSQL 18.3:
+                // aggtransfn/aggcombinefn text_larger 458, aggsortop 666
+                // (text >), aggtranstype text, NULL initval, no moving
+                // columns) — the GL-SINKCRASH-3 str-transvalue fold
+                // regression unit's aggregate.
+                2129 => Some(::syscache_seams::PgAggregateShape {
+                    aggkind: b'n' as i8,
+                    aggnumdirectargs: 0,
+                    aggtransfn: 458,
+                    aggfinalfn: 0,
+                    aggcombinefn: 458,
+                    aggserialfn: 0,
+                    aggdeserialfn: 0,
+                    aggfinalextra: false,
+                    aggfinalmodify: b'r' as i8,
+                    aggsortop: 666,
+                    aggtranstype: TEXTOID,
+                    aggmtransfn: 0,
+                    aggminvtransfn: 0,
+                    aggmfinalfn: 0,
+                    aggmfinalextra: false,
+                    aggmfinalmodify: b'r' as i8,
+                    aggmtranstype: 0,
+                    aggtransspace: 0,
+                }),
                 _ => None,
             })
         });
         syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
             Ok(match aggfnoid {
                 2803 => Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap())),
-                2108 => Some(None),
+                2108 | 2129 => Some(None),
                 _ => None,
             })
         });
@@ -177,6 +215,7 @@ fn install_seams() {
             Ok(match aggfnoid {
                 2803 => Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap())),
                 2108 => Some(Some(::mcx::PgString::from_str_in("{0,0}", mcx).unwrap())),
+                2129 => Some(None),
                 _ => None,
             })
         });
@@ -600,6 +639,8 @@ mod scanfix {
         pages: Vec<usize>,
         pins: Vec<i32>,
         two_col: std::collections::HashSet<Oid>,
+        // GL-SINKCRASH-3 regression fixture: `(k int4, v text)` relations.
+        kv_text: std::collections::HashSet<Oid>,
         // WS-J express_ab: fake btree indexes (index oid -> indexed heap
         // oid); fake_relation_open serves these as RELKIND_INDEX btree
         // relations over a 1-col int4 key.
@@ -615,6 +656,7 @@ mod scanfix {
             pages: Vec::new(),
             pins: Vec::new(),
             two_col: std::collections::HashSet::new(),
+            kv_text: std::collections::HashSet::new(),
             indexes: HashMap::new(),
         }))
     }
@@ -732,13 +774,40 @@ mod scanfix {
     #[repr(align(8))]
     struct TestPage([u8; BLCKSZ]);
 
+    /// One heap tuple image for the GL-SINKCRASH-3 `(k int4, v text)`
+    /// fixture: 2 attributes, no nulls, the text value as a SHORT (1-byte
+    /// header) varlena — alignment-free, exactly what an untoasted small
+    /// text lands as on a real heap page.
+    fn tuple_image_kv_text(k: i32, v: &str) -> Vec<u8> {
+        use ::types_tuple::varatt::VARATT_SHORT_MAX;
+        assert!(v.len() + 1 < VARATT_SHORT_MAX, "short-varlena fixture");
+        let mut img = vec![0u8; 24 + 4 + 1 + v.len()];
+        img[0..4].copy_from_slice(&10u32.to_ne_bytes());
+        img[18..20].copy_from_slice(&2u16.to_ne_bytes());
+        img[20..22].copy_from_slice(
+            &(HEAP_XMAX_INVALID | ::types_tuple::HEAP_HASVARWIDTH).to_ne_bytes(),
+        );
+        img[22] = 24;
+        img[24..28].copy_from_slice(&k.to_ne_bytes());
+        // SAFETY: in-bounds write of the 1-byte short-varlena header + payload.
+        unsafe {
+            ::types_tuple::varatt::set_varsize_short(img.as_mut_ptr().add(28), 1 + v.len())
+        };
+        img[29..29 + v.len()].copy_from_slice(v.as_bytes());
+        img
+    }
+
     fn build_page(rows: &[&[i32]]) -> Box<TestPage> {
+        let imgs: Vec<Vec<u8>> = rows.iter().map(|row| tuple_image(row)).collect();
+        build_page_imgs(&imgs)
+    }
+
+    fn build_page_imgs(imgs: &[Vec<u8>]) -> Box<TestPage> {
         let mut page = Box::new(TestPage([0u8; BLCKSZ]));
-        let n = rows.len();
+        let n = imgs.len();
         let lower = SizeOfPageHeaderData + n * 4;
         let mut upper = BLCKSZ;
-        for (i, row) in rows.iter().enumerate() {
-            let img = tuple_image(row);
+        for (i, img) in imgs.iter().enumerate() {
             upper = (upper - img.len()) & !7;
             page.0[upper..upper + img.len()].copy_from_slice(&img);
             let id = ItemIdData::new(upper as u16, LP_NORMAL, img.len() as u16);
@@ -781,6 +850,23 @@ mod scanfix {
             }
             f.tables.insert(relid, bufs);
             f.two_col.insert(relid);
+        });
+    }
+
+    /// GL-SINKCRASH-3 regression fixture: a `(k int4, v text)` heap.
+    pub fn register_table_kv_text(relid: Oid, pages: &[&[(i32, &str)]]) {
+        with_fake(|f| {
+            let mut bufs = Vec::new();
+            for rows in pages {
+                let imgs: Vec<Vec<u8>> =
+                    rows.iter().map(|&(k, v)| tuple_image_kv_text(k, v)).collect();
+                let addr = Box::leak(build_page_imgs(&imgs)).0.as_mut_ptr() as usize;
+                f.pages.push(addr);
+                f.pins.push(0);
+                bufs.push(f.pages.len() as Buffer);
+            }
+            f.tables.insert(relid, bufs);
+            f.kv_text.insert(relid);
         });
     }
 
@@ -922,6 +1008,49 @@ mod scanfix {
         with_fake(|f| f.pins.iter().sum())
     }
 
+    /// The `(k int4, v text)` tupdesc (GL-SINKCRASH-3 fixture). Text is the
+    /// real pg_attribute shape: varlena (attlen -1), byref, 'i' align,
+    /// EXTENDED storage (⇒ attispackable — short-header images deform),
+    /// default collation 100.
+    fn kv_text_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        let k = FormData_pg_attribute {
+            attnum: 1,
+            atttypid: 23,
+            atttypmod: -1,
+            attlen: 4,
+            attbyval: true,
+            attalign: TYPALIGN_INT,
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        };
+        let v = FormData_pg_attribute {
+            attnum: 2,
+            atttypid: 25,
+            atttypmod: -1,
+            attlen: -1,
+            attbyval: false,
+            attalign: TYPALIGN_INT,
+            attstorage: ::types_tuple::TYPSTORAGE_EXTENDED,
+            attcollation: 100,
+            ..Default::default()
+        };
+        for att in [k, v] {
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+        }
+        Rc::new(TupleDescData {
+            natts: 2,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
     fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: i16) -> Rc<TupleDescData<'mcx>> {
         let mut attrs = PgVec::new_in(mcx);
         let mut compact = PgVec::new_in(mcx);
@@ -1005,7 +1134,11 @@ mod scanfix {
                 },
             },
             rd_rel,
-            rd_att: int4_tupdesc(mcx, if with_fake(|f| f.two_col.contains(&relid)) { 2 } else { 1 }),
+            rd_att: if with_fake(|f| f.kv_text.contains(&relid)) {
+                kv_text_tupdesc(mcx)
+            } else {
+                int4_tupdesc(mcx, if with_fake(|f| f.two_col.contains(&relid)) { 2 } else { 1 })
+            },
             rd_index: None,
             rd_opcintype: PgVec::new_in(mcx),
             rd_opfamily: PgVec::new_in(mcx),
@@ -2211,6 +2344,178 @@ fn hashed_group_by_over_fake_heap_end_to_end() {
         }
         again.sort_unstable();
         assert_eq!(again, vec![(1, 3), (2, 2), (3, 1)]);
+
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}
+
+// GL-SINKCRASH-3 regression: Agg(AGG_HASHED) with a BY-REF STR TRANSVALUE —
+// SELECT k, max(v COLLATE "C") FROM t GROUP BY k over a (k int4, v text)
+// fake heap — through the REAL InitPlan path and the lane-v2 SERIAL staged
+// fold (verified engaged: `[lanev2] agg-over-seqscan: staged fold feed
+// engaged (compact table)` under PGRUST_LANE_V2_TRACE=1).
+//
+// The defect this pins: `agg_fold_staged_mm`'s GL-SINKCRASH-2 fail-closed
+// guard spelled "is a sink build" as `agg_sink_state_bytes(agg).is_some()`,
+// which is true for EVERY hashed build (perhash always reports a state
+// size), while the store-arming side keys on `sink_cap` — so this perfectly
+// sound SERIAL grouped max(text) fold (aggcontext home; table and context
+// die together) errored "aggregation sink shape violation: byref str
+// transvalue folded on a sink build with no table-owned state store"
+// (SQLSTATE XX000 to the client; found by the SQL differential fuzzer).
+// The guard must read `agg_sink_mode` — the arming side's own predicate.
+fn mk_hashed_strmax_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Agg, Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{Aggref, OUTER_VAR};
+
+    // Unprojected physical scan tlist (k, v) — the serial K2 staged-fold
+    // shape (a projected scan would route the expr-key decide instead).
+    let k_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let v_var = Node::mk_var(mcx, 1, 2, TEXTOID, -1, C_COLLATION, 0).unwrap();
+    let mut scan_tlist =
+        NodeList::make1(mcx, Node::mk_target_entry(mcx, k_var, 1, Some("k"), false).unwrap())
+            .unwrap();
+    scan_tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, v_var, 2, Some("v"), false).unwrap())
+        .unwrap();
+    let scan_node = Node::mk(
+        mcx,
+        SeqScan {
+            cb_scan_cols: None,
+            scan: Scan {
+                plan: Plan {
+                    targetlist: scan_tlist,
+                    plan_width: 8,
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let group_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let group_tle = Node::mk_target_entry(mcx, group_var, 1, Some("k"), false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = 2129; // max(text)
+    aggref.aggtype = TEXTOID;
+    aggref.aggtranstype = TEXTOID;
+    aggref.aggcollid = C_COLLATION;
+    aggref.inputcollid = C_COLLATION;
+    aggref.aggargtypes = ::types_nodes::list::OidList::make1(mcx, TEXTOID).unwrap();
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let arg_var = Node::mk_var(mcx, OUTER_VAR, 2, TEXTOID, -1, C_COLLATION, 0).unwrap();
+    aggref.args = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, arg_var, 1, None, false).unwrap(),
+    )
+    .unwrap();
+    let max_tle = Node::mk_target_entry(mcx, aggref.seal(), 2, Some("max"), false).unwrap();
+    let mut tlist = NodeList::make1(mcx, group_tle).unwrap();
+    tlist.lappend(mcx, max_tle).unwrap();
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(scan_node);
+    agg.aggstrategy = 2; // AGG_HASHED
+    agg.numCols = 1;
+    agg.grpColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 2;
+    let agg_node = agg.seal();
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(agg_node);
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+/// Decode a text datum (short- or 4-byte-header varlena) into a String.
+fn text_datum_str(d: Datum) -> String {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: the datum is a live in-slot varlena pointer for the duration
+    // of this call (the caller copies before the next slot fill).
+    unsafe {
+        let total = ::types_tuple::varatt::varsize_any(p);
+        let (off, len) = if ::types_tuple::varatt::varatt_is_1b(p) {
+            (1, total - 1)
+        } else {
+            (4, total - 4)
+        };
+        String::from_utf8(std::slice::from_raw_parts(p.add(off), len).to_vec()).unwrap()
+    }
+}
+
+#[test]
+fn hashed_group_by_str_max_over_fake_heap_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70019;
+    scanfix::register_table_kv_text(
+        relid,
+        &[
+            &[(1, "apple"), (2, "zeta"), (1, "pear")],
+            &[(2, "anchor"), (1, "banana"), (2, "kiwi")],
+        ],
+    );
+    let pstmt = mk_hashed_strmax_pstmt(mcx, relid);
+
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts, 2);
+        assert_eq!(desc.attr(0).atttypid, INT4OID);
+        assert_eq!(desc.attr(1).atttypid, TEXTOID);
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut got: Vec<(i32, String)> = Vec::new();
+        while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[0] && !base.tts_isnull[1]);
+            got.push((base.tts_values[0].as_i32(), text_datum_str(base.tts_values[1])));
+        }
+        got.sort();
+        assert_eq!(got, vec![(1, "pear".to_string()), (2, "zeta".to_string())]);
 
         crate::exec_end_node(ps, estate).unwrap();
         estate.exec_reset_tuple_table(false);

@@ -2052,7 +2052,7 @@ fn compact_migrate<'mcx>(
     // costs nothing and removes a use-after-free shape. Per the debug-assert
     // masking law an invariant this load-bearing cannot be enforced by a check
     // that compiles out.
-    if node.perhash.as_ref().is_some_and(|ph| ph.sink_cap.is_some()) {
+    if crate::sink::agg_sink_mode(node) {
         return Err(crate::sink::sink_shape_error(
             "compact table migration on a sink build (state blocks are not self-contained)",
         ));

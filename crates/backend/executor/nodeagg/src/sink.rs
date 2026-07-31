@@ -3846,6 +3846,28 @@ pub fn agg_sink_clear_cap(node: &mut AggStateData<'_>) {
     }
 }
 
+/// SINK MODE is live on this build: `agg_sink_set_cap*` armed the cap and no
+/// `agg_sink_clear_cap` ran since. This is THE "is a sink build" predicate —
+/// every discipline that distinguishes a migrating worker sink table from the
+/// leader's own serial build (the table-owned str state store's fail-closed
+/// check, `compact_migrate`'s refusal) must read this one expression.
+///
+/// GL-SINKCRASH-3: the fail-closed check in `agg_fold_staged_mm` originally
+/// spelled "is a sink build" as `agg_sink_state_bytes(node).is_some()` — but
+/// that is `perhash.is_some()` in disguise (every AGG_HASHED node has a
+/// perhash and its hashtable an `additionalsize`), so the guard classified
+/// EVERY hashed build as a sink build and rejected perfectly sound SERIAL
+/// grouped `min/max(text|varchar|bpchar)` folds, whose aggcontext copy
+/// discipline is C's own one-allocator-per-table invariant (table and context
+/// die together). Meanwhile the arming side keys on `sink_cap` (see
+/// `agg_sink_arm_str_state`), so serial builds — correctly never armed — could
+/// not satisfy the guard. Predicate asymmetry between an arming site and its
+/// fail-closed check is exactly what `plan_has_str_trans` exists to prevent on
+/// the trans-class axis; this accessor is the same move on the sink axis.
+pub fn agg_sink_mode(node: &AggStateData<'_>) -> bool {
+    node.perhash.as_ref().is_some_and(|ph| ph.sink_cap.is_some())
+}
+
 /// The node's per-participant hash memory budget (C
 /// `work_mem × hash_mem_multiplier` — `get_hash_memory_limit`), the R3
 /// per-Local envelope.

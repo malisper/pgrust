@@ -2845,3 +2845,116 @@ fn grouponly_empty_plan_is_vacuous() {
     assert!(plan.filters.is_empty() && plan.resid.is_empty());
     assert!(!plan.guarded);
 }
+
+// find_cols_walker (nodeAgg.c) parity: the walker special-cases exactly Var
+// and Aggref and hands every OTHER node to the generic expression_tree_walker,
+// so it is total over the expression vocabulary. The port's
+// `collect_base_var_cols` inlines a fast path over the common tags and must
+// delegate the rest, not raise.
+//
+// Regression: the fast path's final arm was
+// `tag => panic!("find_cols (nodeAgg.c): node family {tag:?} not ported")`,
+// so `SELECT count(ar[1]) FROM t GROUP BY k` — whose Agg tlist carries a
+// T_SubscriptingRef — panicked the executor. Found by the sqldiff query-level
+// differential fuzzer (gen:306) at 1k queries.
+mod find_cols_walks_unlisted_node_families {
+    use ::mcx::PgVec;
+    use ::types_nodes::list::OptNodeList;
+    use ::types_nodes::node_tree::Node;
+
+    // Walk `node` over a 3-column outer tuple and return the marked columns.
+    fn marked(node_of: fn(::mcx::Mcx<'_>) -> Node<'_>) -> Vec<bool> {
+        let ctx = ::mcx::MemoryContext::new("find-cols-test");
+        let mcx = ctx.mcx();
+        let mut out: PgVec<'_, bool> = PgVec::new_in(mcx);
+        out.resize(3, false);
+        crate::collect_base_var_cols(node_of(mcx), &mut out);
+        out.as_slice().to_vec()
+    }
+
+    fn outer_var<'mcx>(mcx: ::mcx::Mcx<'mcx>, attno: i16) -> Node<'mcx> {
+        Node::mk_var(mcx, ::types_nodes::primnodes::OUTER_VAR, attno, 23, -1, 0, 0).unwrap()
+    }
+
+    // `ar[2]` — a SubscriptingRef whose refexpr is outer column 2. Pre-fix this
+    // panicked; post-fix the delegated walk reaches the Var and marks col 2.
+    #[test]
+    fn subscripting_ref_marks_its_container_column() {
+        assert_eq!(
+            marked(|mcx| {
+                let idx =
+                    Node::mk_const(mcx, 23, -1, 0, 4, ::datum::Datum::from_i32(2), false, true)
+                        .unwrap();
+                Node::mk(
+                    mcx,
+                    ::types_nodes::primnodes::SubscriptingRef {
+                        refcontainertype: 1007,
+                        refelemtype: 23,
+                        refrestype: 23,
+                        reftypmod: -1,
+                        refcollid: 0,
+                        refupperindexpr: {
+                            let mut l = OptNodeList::nil();
+                            l.lappend(mcx, Some(idx)).unwrap();
+                            l
+                        },
+                        reflowerindexpr: OptNodeList::nil(),
+                        refexpr: Some(outer_var(mcx, 2)),
+                        refassgnexpr: None,
+                    },
+                )
+                .unwrap()
+            }),
+            vec![false, true, false],
+        );
+    }
+
+    // A subscript EXPRESSION that is itself a Var must be marked too — the
+    // delegated walk descends every child the generic walker does, not just
+    // the container.
+    #[test]
+    fn subscripting_ref_marks_its_index_column() {
+        assert_eq!(
+            marked(|mcx| Node::mk(
+                mcx,
+                ::types_nodes::primnodes::SubscriptingRef {
+                    refcontainertype: 1007,
+                    refelemtype: 23,
+                    refrestype: 23,
+                    reftypmod: -1,
+                    refcollid: 0,
+                    refupperindexpr: {
+                        let mut l = OptNodeList::nil();
+                        l.lappend(mcx, Some(outer_var(mcx, 3))).unwrap();
+                        l
+                    },
+                    reflowerindexpr: OptNodeList::nil(),
+                    refexpr: Some(outer_var(mcx, 1)),
+                    refassgnexpr: None,
+                },
+            )
+            .unwrap()),
+            vec![true, false, true],
+        );
+    }
+
+    // A SECOND unlisted tag, proving the delegation fixes the CLASS: FieldSelect
+    // was never in the inlined enumeration either.
+    #[test]
+    fn field_select_marks_its_argument_column() {
+        assert_eq!(
+            marked(|mcx| Node::mk(
+                mcx,
+                ::types_nodes::primnodes::FieldSelect {
+                    arg: outer_var(mcx, 3),
+                    fieldnum: 1,
+                    resulttype: 23,
+                    resulttypmod: -1,
+                    resultcollid: 0,
+                },
+            )
+            .unwrap()),
+            vec![false, false, true],
+        );
+    }
+}

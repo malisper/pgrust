@@ -488,22 +488,47 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
             Ok(if tuples > 0.0 { 1.0 / tuples } else { 0.5 })
         }
         NodeTag::T_RowCompareExpr => rowcomparesel(run, clause, varrelid, jointype, sjinfo),
+        // C: `else if (IsA(clause, CoerceToDomain))` — "Not sure this case is
+        // needed, but it can't hurt": recurse into the argument, exactly as
+        // the RelabelType arm above.
+        NodeTag::T_CoerceToDomain => clause_selectivity_node_ext(
+            run,
+            clause.as_coerce_to_domain().unwrap().arg,
+            varrelid,
+            jointype,
+            sjinfo,
+            use_extended_stats,
+        ),
         // C's catch-all default: no way to estimate, use 0.5.
         NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Param => Ok(0.5),
-        // C's final else: boolvarsel. NullIfExpr belongs here (GL-TESTFIX-1
-        // / GL-TESTRIGS-1 F-R3-1): its C node REPRESENTATION is OpExpr, but
-        // its tag is T_NullIfExpr, so C's `is_opclause(clause) ||
-        // IsA(clause, DistinctExpr)` arm rejects it and clausesel.c's final
-        // else takes it — a boolean NULLIF qual estimates via boolvarsel,
-        // never via the operator's restriction estimator.
-        NodeTag::T_CaseExpr
-        | NodeTag::T_CoalesceExpr
-        | NodeTag::T_JsonIsPredicate
-        | NodeTag::T_NullIfExpr
-        | NodeTag::T_PlaceHolderVar => {
-            crate::selfuncs::boolvarsel(run, clause, varrelid)
-        }
-        other => panic!("clause_selectivity_ext (clausesel.c): {other:?}; M2 qual lane"),
+        // C's final else, verbatim:
+        //
+        //     /*
+        //      * For anything else, see if we can consider it as a boolean
+        //      * variable.  This only works if it's an immutable expression in
+        //      * Vars of a single relation; but there's no point in us checking
+        //      * that here because boolvarsel() will do it internally, and
+        //      * return a suitable default selectivity if not.
+        //      */
+        //     s1 = boolvarsel(root, clause, varRelid);
+        //
+        // C has NO unhandled-node error here: `clause_selectivity_ext` is
+        // total over expression node tags, and any tag its explicit arms miss
+        // falls through to `boolvarsel`, which itself defaults to 0.5 when
+        // `examine_variable` finds no stats. This arm must therefore stay a
+        // wildcard, not an enumeration: a qual can legally contain ANY
+        // expression node (T_MinMaxExpr from `WHERE least(k, k)`,
+        // T_SubscriptingRef, T_ArrayExpr, T_ScalarArrayOpExpr variants,
+        // T_XmlExpr, T_SQLValueFunction, T_CoerceViaIO, ...), and enumerating
+        // them is an open-ended list whose misses are planner panics on
+        // ordinary SQL rather than estimate differences.
+        //
+        // NullIfExpr lands here (GL-TESTFIX-1 / GL-TESTRIGS-1 F-R3-1): its C
+        // node REPRESENTATION is OpExpr, but its tag is T_NullIfExpr, so C's
+        // `is_opclause(clause) || IsA(clause, DistinctExpr)` arm rejects it and
+        // this final else takes it — a boolean NULLIF qual estimates via
+        // boolvarsel, never via the operator's restriction estimator.
+        _ => crate::selfuncs::boolvarsel(run, clause, varrelid),
     }
 }
 

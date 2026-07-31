@@ -7303,3 +7303,95 @@ mod appendrel_ec {
         assert!(relids_is_member(ec_id.0 as i32, &run.root.rel(child).eclass_indexes));
     }
 }
+
+// clausesel.c parity: `clause_selectivity_ext` is TOTAL over expression node
+// tags. Its C tail is an unconditional `else { s1 = boolvarsel(...); }`, so a
+// qual containing ANY node its explicit arms miss estimates via boolvarsel
+// (default 0.5 when there are no usable stats) rather than raising.
+//
+// Regression: the port's final arm was `other => panic!(... "M2 qual lane")`,
+// so ordinary SQL — `SELECT ... FROM t WHERE least(k, k)`, a boolean-typed
+// T_MinMaxExpr used directly as a qual — panicked the planner. Found by the
+// sqldiff query-level differential fuzzer (gen:275, gen:820) at 1k queries.
+mod unhandled_qual_nodes_take_boolvarsel {
+    use super::*;
+    use types_nodes::primnodes::{MinMaxExpr, MinMaxOp, SubscriptingRef};
+
+    // A qual that is a bare `least(<bool>, <bool>)` MinMaxExpr — the exact
+    // shape of `WHERE least(k, k)`.
+    fn minmax_qual<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+        let a = eq_qual(mcx, 1, 42);
+        let b = eq_qual(mcx, 1, 42);
+        Node::mk(
+            mcx,
+            MinMaxExpr {
+                minmaxtype: 16,
+                minmaxcollid: 0,
+                inputcollid: 0,
+                op: MinMaxOp::IS_LEAST,
+                args: NodeList::make2(mcx, a, b).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    // A qual that is a bare `ar[1]`-shaped SubscriptingRef over a table Var —
+    // a SECOND tag the old enumeration missed, proving the wildcard arm fixes
+    // the CLASS and not just T_MinMaxExpr.
+    fn subscript_qual<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+        let var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let idx = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        Node::mk(
+            mcx,
+            SubscriptingRef {
+                refcontainertype: 1007,
+                refelemtype: 23,
+                refrestype: 16,
+                reftypmod: -1,
+                refcollid: 0,
+                refupperindexpr: {
+                    let mut l = types_nodes::list::OptNodeList::nil();
+                    l.lappend(mcx, Some(idx)).unwrap();
+                    l
+                },
+                reflowerindexpr: types_nodes::list::OptNodeList::nil(),
+                refexpr: Some(var),
+                refassgnexpr: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn plans_with_qual(qual: fn(Mcx<'_>) -> Node<'_>) {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let parse = table_query(mcx, Some(qual(mcx)));
+        // Pre-fix this panicked inside clause_selectivity_ext instead of
+        // returning a plan.
+        let stmt = planner(
+            mcx,
+            leak_q(mcx, parse),
+            "SELECT * FROM t WHERE <unhandled node>",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap().as_plan().expect("planTree is a Plan");
+        // The qual is not an indexable clause, so it stays a filter on a seq
+        // scan and its selectivity is boolvarsel's no-stats default of 0.5 over
+        // the fixture's 10000 tuples.
+        assert_eq!(plan.qual.len(), 1);
+        assert_eq!(plan.plan_rows, 5000.0);
+    }
+
+    #[test]
+    fn minmax_expr_qual_plans() {
+        plans_with_qual(minmax_qual);
+    }
+
+    #[test]
+    fn subscripting_ref_qual_plans() {
+        plans_with_qual(subscript_qual);
+    }
+}

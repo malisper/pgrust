@@ -18,7 +18,7 @@ use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr, CaseTestExpr,
     CaseWhen, CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
-    CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
+    CollateExpr, Const, ConvertRowtypeExpr, MinMaxExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubLink, SubPlan, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     MergeSupportFunc, WindowFuncRunCondition, XmlExpr,
@@ -89,6 +89,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_CaseWhen => cmp!(as_case_when),
         NodeTag::T_CaseTestExpr => cmp!(as_case_test_expr),
         NodeTag::T_CoalesceExpr => cmp!(as_coalesce_expr),
+        NodeTag::T_MinMaxExpr => cmp!(as_min_max_expr),
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
         NodeTag::T_DistinctExpr => cmp!(as_distinct_expr),
@@ -605,6 +606,22 @@ impl NodeEqual for CoalesceExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.coalescetype == b.coalescetype
             && self.coalescecollid == b.coalescecollid
+            && self.args.node_equal(&b.args)
+    }
+}
+
+// _equalMinMaxExpr (equalfuncs.funcs.c, generated from the MinMaxExpr node
+// definition in primnodes.h): every scalar field is compared — the node
+// carries `query_jumble_ignore` on minmaxtype/minmaxcollid/inputcollid, which
+// suppresses them in the QUERY JUMBLE only, NOT in equal() (that would need
+// `equal_ignore`) — plus the args list; `location` is a COMPARE_LOCATION_FIELD
+// and so is never compared.
+impl NodeEqual for MinMaxExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.minmaxtype == b.minmaxtype
+            && self.minmaxcollid == b.minmaxcollid
+            && self.inputcollid == b.inputcollid
+            && self.op == b.op
             && self.args.node_equal(&b.args)
     }
 }
