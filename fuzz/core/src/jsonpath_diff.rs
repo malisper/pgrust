@@ -142,8 +142,11 @@ const MAX_WIRE: usize = 512;
 fn setup() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        mbutils::init_seams();
-        pg_locale::init_seams();
+        // Tolerate the sibling jsonpathexec_diff target installing the
+        // IDENTICAL seam implementations first (one test binary; seam set
+        // panics on double install after swapping in the same impl).
+        let _ = std::panic::catch_unwind(mbutils::init_seams);
+        let _ = std::panic::catch_unwind(pg_locale::init_seams);
         pg_locale::set_default_locale_c_for_tests();
     });
     // Per-thread (cargo test runs arms on parallel threads).

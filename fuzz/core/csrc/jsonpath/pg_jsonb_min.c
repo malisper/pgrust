@@ -28,6 +28,7 @@
 #include "mb/pg_wchar.h"
 #include "nodes/miscnodes.h"
 #include "regex/regex.h"
+#include "catalog/pg_type.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/jsonb.h"
@@ -45,6 +46,28 @@ static void check_collation_set(Oid collid);
  * pg_jsonpath_exec_env.c */
 extern int	pg_strncoll(const char *arg1, ssize_t len1,
 						const char *arg2, ssize_t len2, pg_locale_t locale);
+
+/* ---- jsonb.c:155-174 VERBATIM (JsonbContainerTypeName) ---- */
+/*
+ * Get the type name of a jsonb container.
+ */
+static const char *
+JsonbContainerTypeName(JsonbContainer *jbc)
+{
+	JsonbValue	scalar;
+
+	if (JsonbExtractScalar(jbc, &scalar))
+		return JsonbTypeName(&scalar);
+	else if (JsonContainerIsArray(jbc))
+		return "array";
+	else if (JsonContainerIsObject(jbc))
+		return "object";
+	else
+	{
+		elog(ERROR, "invalid jsonb container type: 0x%08x", jbc->header);
+		return "unknown";
+	}
+}
 
 /* ---- jsonb.c:1964-2002 VERBATIM (JsonbExtractScalar) ---- */
 /*
@@ -86,6 +109,53 @@ JsonbExtractScalar(JsonbContainer *jbc, JsonbValue *res)
 
 	return true;
 }
+/* ---- jsonb.c:176-220 VERBATIM (JsonbTypeName) ---- */
+/*
+ * Get the type name of a jsonb value.
+ */
+const char *
+JsonbTypeName(JsonbValue *val)
+{
+	switch (val->type)
+	{
+		case jbvBinary:
+			return JsonbContainerTypeName(val->val.binary.data);
+		case jbvObject:
+			return "object";
+		case jbvArray:
+			return "array";
+		case jbvNumeric:
+			return "number";
+		case jbvString:
+			return "string";
+		case jbvBool:
+			return "boolean";
+		case jbvNull:
+			return "null";
+		case jbvDatetime:
+			switch (val->val.datetime.typid)
+			{
+				case DATEOID:
+					return "date";
+				case TIMEOID:
+					return "time without time zone";
+				case TIMETZOID:
+					return "time with time zone";
+				case TIMESTAMPOID:
+					return "timestamp without time zone";
+				case TIMESTAMPTZOID:
+					return "timestamp with time zone";
+				default:
+					elog(ERROR, "unrecognized jsonb value datetime type: %d",
+						 val->val.datetime.typid);
+			}
+			return "unknown";
+		default:
+			elog(ERROR, "unrecognized jsonb value type: %d", val->type);
+			return "unknown";
+	}
+}
+
 /* ---- varlena.c:185-196 VERBATIM (cstring_to_text) ---- */
 /*
  * cstring_to_text

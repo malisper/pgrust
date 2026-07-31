@@ -530,6 +530,98 @@ pg_diff_image_common(Datum (*fn) (FunctionCallInfo),
 	return 0;
 }
 
+/*
+ * The pure row-collection core of jsonb_path_query (the SRF wrapper's
+ * MultiFuncCall plumbing is OUT OF SCOPE — documented carve): runs the
+ * VERBATIM 4-arg jsonb_path_query_array wrapper's exact collection semantics
+ * by calling the VERBATIM executeJsonPath through jsonb_path_query_array,
+ * then re-walking the result array? No — that would change the plane.
+ * Instead this entry mirrors jsonb_path_query_internal's collection pass
+ * with the same verbatim calls (executeJsonPath is static, so we go through
+ * the wrapper JsonPathQuery-free route): serialize each found item exactly
+ * like SRF_RETURN_NEXT does (JsonbValueToJsonb per item).
+ *
+ * Implementation note: executeJsonPath is file-static in jsonpath_exec.c,
+ * so this entry uses jsonb_path_query_array to obtain the found list is NOT
+ * possible without re-wrapping. The 18.3 SRF body does:
+ *     executeJsonPath(jp, vars, getJsonPathVariableFromJsonb,
+ *                     countVariablesFromJsonb, jb, !silent, &found, tz)
+ * then JsonbValueToJsonb per item. Both callbacks and executeJsonPath are
+ * static; the ONLY exported route with identical semantics is
+ * jsonb_path_query_array (same executeJsonPath call, same silent handling)
+ * followed by disassembling the wrapping array — but disassembly would not
+ * be the SRF's per-item serialization. Therefore this entry is built from
+ * the wrapper pair instead:
+ *   items buffer := for each element of query_array's result array (in
+ *   order), the jsonb image produced by JsonbValueToJsonb over the
+ *   element's JsonbValue as extracted with getIthJsonbValueFromContainer.
+ * getIthJsonbValueFromContainer + JsonbValueToJsonb are VERBATIM
+ * (jsonb_util.c). For scalars/objects/arrays this is exactly the SRF's
+ * per-item image (PostgreSQL serializes each found item to a standalone
+ * jsonb); the driver's unit tier locks this equivalence against docker
+ * ground truth.
+ *
+ * Output framing: *items_out = arena buffer of concatenated
+ * [u32 native-endian image_len][image bytes] records; *count_out = number
+ * of records. rc 0 ok / 1 hard error.
+ */
+int
+pg_diff_jsonb_path_query_items(const unsigned char *doc, size_t doc_len,
+							   const unsigned char *path, size_t path_len,
+							   const unsigned char *vars, size_t vars_len,
+							   int silent, int tz,
+							   const unsigned char **items_out,
+							   size_t *items_len, int *count_out,
+							   int *sqlstate_out)
+{
+	Datum		d;
+	Jsonb	   *arr;
+	uint32		nelems;
+	StringInfoData buf;
+	uint32		i;
+
+	pg_diff_exec_entry_reset();
+	if (sigsetjmp(pg_jsonpath_error_jmp, 0) != 0)
+	{
+		*sqlstate_out = pg_jsonpath_errcode;
+		return 1;
+	}
+
+	{
+		LOCAL_FCINFO(fcinfo, 4);
+		memset(fcinfo, 0, SizeForFunctionCallInfo(4));
+		fcinfo->nargs = 4;
+		fcinfo->args[0].value = PointerGetDatum(pg_diff_image_copy(doc, doc_len));
+		fcinfo->args[1].value = PointerGetDatum(pg_diff_image_copy(path, path_len));
+		fcinfo->args[2].value = PointerGetDatum(pg_diff_image_copy(vars, vars_len));
+		fcinfo->args[3].value = BoolGetDatum(silent != 0);
+		d = (tz ? jsonb_path_query_array_tz : jsonb_path_query_array) (fcinfo);
+		if (fcinfo->isnull)
+			abort();			/* query_array never returns NULL */
+	}
+
+	arr = (Jsonb *) DatumGetPointer(d);
+	if (!JsonContainerIsArray(&arr->root) || JsonContainerIsScalar(&arr->root))
+		abort();				/* wrapper always returns a plain array */
+	nelems = JsonContainerSize(&arr->root);
+
+	initStringInfo(&buf);
+	for (i = 0; i < nelems; i++)
+	{
+		JsonbValue *v = getIthJsonbValueFromContainer(&arr->root, i);
+		Jsonb	   *item = JsonbValueToJsonb(v);
+		uint32		ilen = VARSIZE(item);
+
+		appendBinaryStringInfo(&buf, (const char *) &ilen, sizeof(uint32));
+		appendBinaryStringInfo(&buf, (const char *) item, ilen);
+	}
+
+	*items_out = (const unsigned char *) buf.data;
+	*items_len = (size_t) buf.len;
+	*count_out = (int) nelems;
+	return 0;
+}
+
 int
 pg_diff_jsonb_path_query_array(const unsigned char *doc, size_t doc_len,
 							   const unsigned char *path, size_t path_len,

@@ -245,3 +245,11 @@ path = "fuzz_targets/jsonpath_diff.rs"
 test = false
 doc = false
 bench = false
+
+# jsonpathexec_diff (p1-laneaa, adt/jsonpath_exec): see README-TODO-jsonpathexec_diff.md.
+[[bin]]
+name = "jsonpathexec_diff"
+path = "fuzz_targets/jsonpathexec_diff.rs"
+test = false
+doc = false
+bench = false
