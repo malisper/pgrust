@@ -857,6 +857,34 @@ pub fn cmp_surrogate_pair(first: u32, second: u32) {
     assert!(c == r, "surrogate_pair DIVERGENCE {first:#x},{second:#x}: C={c:#x} Rust={r:#x}");
 }
 
+/// fc_pg_encoding_max_length (oid 2319) on a real Fcinfo frame vs the C
+/// wrapper rule: PG_VALID_ENCODING -> maxmblen (oracle value), else NULL.
+/// C validity is oracle-derived from pg_encoding_to_char's gate (the same
+/// PG_VALID_ENCODING macro), never re-derived in Rust.
+pub fn cmp_fc_max_length(enc: i32, cx: &mcx::MemoryContext) {
+    use datum::NullableDatum;
+    use types_fmgr::LocalFcinfo;
+    let mut f = LocalFcinfo::<1>::new(types_core::C_COLLATION_OID);
+    f.args[0] = NullableDatum::value(datum::Datum::from_i32(enc));
+    // SAFETY: the context outlives the call (fn stack frame).
+    unsafe { f.set_result_mcx(cx.mcx()) };
+    let res = mbutils::builtins::fc_pg_encoding_max_length(None, &mut f)
+        .expect("fc_pg_encoding_max_length never errors");
+    let c_name = unsafe { wfam_x_encoding_to_char(enc) };
+    let c_valid = unsafe { *c_name != 0 };
+    if c_valid {
+        let c_val = unsafe { wfam_x_encoding_max_length(enc) };
+        assert!(
+            !f.isnull && res.as_i32() == c_val,
+            "fc_pg_encoding_max_length DIVERGENCE enc={enc}: C={c_val} Rust=({},{})",
+            f.isnull,
+            res.as_i32()
+        );
+    } else {
+        assert!(f.isnull, "fc_pg_encoding_max_length DIVERGENCE enc={enc}: C=NULL Rust=value");
+    }
+}
+
 #[cfg(test)]
 mod smoke {
     use super::*;

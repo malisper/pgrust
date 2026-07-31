@@ -338,3 +338,20 @@ fn x_verifystr_3byte_full() {
 fn _keep(b: &[u8]) -> [u8; 8] {
     pad8(b)
 }
+
+/// fc wrapper for pg_encoding_max_length (oid 2319): full i32 domain,
+/// NULL arm included.
+#[test]
+#[ignore = "x-tier exhaustive: full 2^32 fcinfo calls (~minutes)"]
+fn x_fc_max_length_full_i32() {
+    let cx = mcx::MemoryContext::new("wcharfam_x_fc");
+    let mut enc = i32::MIN;
+    loop {
+        cmp_fc_max_length(enc, &cx);
+        if enc == i32::MAX {
+            break;
+        }
+        enc += 1;
+    }
+    eprintln!("x_fc_max_length_full_i32: done (4294967296 calls)");
+}

@@ -85,8 +85,11 @@ static _Thread_local int wfam_errcode_val;
 	do { wfam_errcode_val = ERRCODE_INTERNAL_SHIM; longjmp(wfam_env, 1); } while (0)
 #define VALGRIND_CHECK_MEM_IS_DEFINED(a, b) ((void) 0)
 
-/* mbutils.c line 83 (verbatim; the session cell the extracts read) */
-static const pg_enc2name *DatabaseEncoding = &pg_enc2name_tbl[PG_SQL_ASCII];
+/* mbutils.c line 83 (verbatim body; _Thread_local added as SHIM: the C
+ * backend is one process per session, the harness is one thread per
+ * session — the Rust side's DATABASE_ENCODING is a thread_local Cell,
+ * and parallel test threads must not race one process-global cell) */
+static _Thread_local const pg_enc2name *DatabaseEncoding = &pg_enc2name_tbl[PG_SQL_ASCII];
 
 /* ---- second rename block: mbutils.c extern symbols (same device) ---- */
 #define pg_mb2wchar                     wfam_pg_mb2wchar
