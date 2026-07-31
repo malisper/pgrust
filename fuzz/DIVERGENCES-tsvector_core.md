@@ -104,3 +104,36 @@ LISTS stay order-strict.
   decoded content has duplicate lexemes AND the sorted-multiset gate passes.
   (Duplicate lexemes from binary input violate the sortedness/uniqueness
   contract identically in both engines — upstream-parity.)
+
+---
+
+## DIVERGENCE-3 (CI cluster re-floor, 2026-07-31): uniquePos kept-weight at the
+## 16383/MAXNUMPOS break — third instance of the pg_qsort tie class. FIXED.
+
+Found by CI cluster job pgrust-fuzz-campaign-1785518399-3483-18016 (crash-afa0fa20…,
+banked as corpus seed-regr-uniquepos-tieweight): a lexeme with >7 positions
+including several that clamp to 16383 with different weights. C's uniquePos
+(tsvector.c) sorts positions with qsort keyed on POSITION ONLY, then the dedup
+loop BREAKS immediately after advancing onto a 16383 position — so the kept
+entry's weight is whichever equal-position element the sort put first. Rust's
+stable sort kept a different one (0x3fff vs C 0xffff in the image).
+
+Docker postgres:18.3 ground truth (tie order is real PG behavior):
+  'w:1,2,3,4,5,6,7,16384,20000A'  -> 'w':1,2,3,4,5,6,7,16383
+  'w:1,2,3,4,5,6,7,20000A,16384'  -> 'w':1,2,3,4,5,6,7,16383A
+
+Fix: crates/backend/utils/adt/tsvector_core/src/qsort.rs (verbatim pg_qsort
+port, per-crate-copy convention) now used at ALL THREE C qsort sites in this
+crate: uniquePos (position-only key), uniqueentry (lexeme key; index-
+permutation variant since EntryIn is not Copy), and tsvectorrecv needSort.
+The recv duplicate-lexeme multiset gate is RETIRED — recv image plane is now
+fully strict. array_to_tsvector's qsort ties are byte-identical elements
+(no observable order) — no port needed, documented here.
+
+Also from the same CI cluster round: the ungated oversize arm collapsed throughput
+to ~190 exec/s (each exec parses ~1.2 MiB on four sides) and blew the 3600 s
+job deadline once before the divergence surfaced. The arm is now gated on a
+4-byte magic ("OVSZ") so only its committed seeds pay the cost; it remains a
+deterministic boundary witness replayed by every coverage capture.
+
+Crate regression tests: tsvector_uniquepos_tie_weight_pg_qsort_parity.

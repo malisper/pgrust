@@ -173,3 +173,23 @@ fn tsvector_recv_needsort_storage_wire_order() {
     assert_eq!(v.entry(1).pos(), 0);
     assert_eq!(v.strdata(), b"bbaa");
 }
+
+// Regression: uniquePos kept-weight at the 16383 break is decided by
+// pg_qsort's equal-position tie order (C qsort, tsvector.c:60); ground-truthed
+// on postgres:18.3 2026-07-31. A stable sort produced 'w':...,16383 where real
+// PG keeps 'w':...,16383A on the second input.
+#[test]
+fn tsvector_uniquepos_tie_weight_pg_qsort_parity() {
+    assert_eq!(
+        roundtrip("w:1,2,3,4,5,6,7,16384,20000A"),
+        "'w':1,2,3,4,5,6,7,16383"
+    );
+    assert_eq!(
+        roundtrip("w:1,2,3,4,5,6,7,20000A,16384"),
+        "'w':1,2,3,4,5,6,7,16383A"
+    );
+    assert_eq!(
+        roundtrip("w:1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,16384,20000A,17000B"),
+        "'w':1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,16383"
+    );
+}

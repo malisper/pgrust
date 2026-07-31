@@ -7,11 +7,26 @@ use crate::layout::*;
 use crate::parser::{Next, TsvParser};
 
 // uniquePos: sort, dedup by position keeping the max weight.
+// C (tsvector.c:60): qsort with compareWordEntryPos — POSITION-ONLY key. The
+// loop below BREAKS right after advancing onto a 16383 position (or at
+// MAXNUMPOS), so which weight the kept entry carries at the break is decided
+// by the sort's equal-position output order. pg_qsort tie parity required
+// (re-floor divergence 2026-07-31); a stable sort here produced weight D
+// where real C keeps weight A.
 pub fn unique_pos(a: &mut PgVec<'_, WordEntryPos>) {
     if a.len() <= 1 {
         return;
     }
-    a.sort_by_key(|&p| wep_getpos(p));
+    crate::qsort::pg_qsort(a, |&x, &y| {
+        let (px, py) = (wep_getpos(x) as i32, wep_getpos(y) as i32);
+        if px == py {
+            0
+        } else if px > py {
+            1
+        } else {
+            -1
+        }
+    });
     let mut res = 0usize;
     for ptr in 1..a.len() {
         if wep_getpos(a[ptr]) != wep_getpos(a[res]) {
@@ -102,11 +117,25 @@ pub fn tsvector_in_core<'mcx>(
 
     let mut buflen = 0usize;
     if !arr.is_empty() {
-        arr.sort_by(|a, b| match ts_compare_string(&a.word, &b.word, false) {
-            n if n < 0 => core::cmp::Ordering::Less,
-            0 => core::cmp::Ordering::Equal,
-            _ => core::cmp::Ordering::Greater,
+        // C (tsvector.c:112 uniqueentry): qsort_arg over WordEntryIN keyed on
+        // the lexeme string only. Duplicate-lexeme ties decide the ORDER their
+        // position lists are concatenated below, which feeds unique_pos's
+        // break path — pg_qsort tie parity required. EntryIn is not Copy, so
+        // run the identical compare/swap sequence on an index permutation
+        // (same comparisons at the same positions => same final permutation).
+        let mut idx: PgVec<usize> = vec_with_capacity_in(mcx, arr.len())?;
+        idx.extend(0..arr.len());
+        crate::qsort::pg_qsort(&mut idx, |&x, &y| {
+            ts_compare_string(&arr[x].word, &arr[y].word, false)
         });
+        let mut sorted: PgVec<EntryIn> = PgVec::new_in(mcx);
+        for &i in idx.iter() {
+            sorted.push(core::mem::replace(
+                &mut arr[i],
+                EntryIn { word: PgVec::new_in(mcx), pos: PgVec::new_in(mcx) },
+            ));
+        }
+        arr = sorted;
         // uniqueentry: merge duplicate lexemes' position lists.
         let mut res = 0usize;
         for ptr in 1..arr.len() {
@@ -278,9 +307,8 @@ pub fn tsvector_recv_core<'mcx>(
     // WordEntry array (compareentry against STRPTR); the lexeme/position
     // STORAGE keeps wire order. Ground-truthed on postgres:18.3 via binary
     // COPY + pageinspect 2026-07-31: entries sorted, storage in wire order.
-    // Within-tie order for DUPLICATE lexemes is qsort-implementation-defined
-    // in C (unstable) — ratified non-surface, sorted-multiset gate on the
-    // harness side (GL-PARMERGE-1 precedent).
+    // Duplicate-lexeme tie order now matches C exactly via the pg_qsort port
+    // (tsvector.c:551 qsort_arg with compareentry) — strict image parity.
     let mut img = b.finish(mcx)?;
     let n = {
         let v = TsVec { payload: &img[4..] };
@@ -293,14 +321,10 @@ pub fn tsvector_recv_core<'mcx>(
         let off = ENTRIES_AT + i * 4;
         entries.push(WordEntry(u32::from_ne_bytes(img[off..off + 4].try_into().unwrap())));
     }
-    entries.sort_unstable_by(|&ea, &eb| {
+    crate::qsort::pg_qsort(&mut entries, |&ea, &eb| {
         let la = &img[str_at + ea.pos()..str_at + ea.pos() + ea.len()];
         let lb = &img[str_at + eb.pos()..str_at + eb.pos() + eb.len()];
-        match ts_compare_string(la, lb, false) {
-            n if n < 0 => core::cmp::Ordering::Less,
-            0 => core::cmp::Ordering::Equal,
-            _ => core::cmp::Ordering::Greater,
-        }
+        ts_compare_string(la, lb, false)
     });
     for (i, e) in entries.iter().enumerate() {
         let off = ENTRIES_AT + i * 4;

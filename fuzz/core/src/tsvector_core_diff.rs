@@ -464,11 +464,10 @@ fn short_varlena_image(payload: &[u8]) -> Option<Vec<u8>> {
 // Arm 1: tsvectorrecv (+ fc plane)
 // ---------------------------------------------------------------------------
 
-/// Decoded-content equality for tsvector payloads as a SORTED MULTISET of
-/// (lexeme, positions) — independent of string-storage layout AND of
-/// within-tie entry order for duplicate lexemes (C qsort_arg is unstable,
-/// Rust sort is stable; within-tie order is a ratified non-surface, the
-/// GL-PARMERGE-1 sorted-multiset gate). Used only under KNOWN-DIVERGENCE-1.
+/// Decoded-content equality (sorted multiset of (lexeme, positions)) —
+/// retained as a triage helper for divergence minimization; the recv plane
+/// itself is fully strict since the pg_qsort tie-parity port.
+#[allow(dead_code)]
 fn tsvec_semantic_eq(a: &[u8], b: &[u8]) -> bool {
     let decode = |p: &[u8]| -> Vec<(Vec<u8>, Vec<u16>)> {
         let v = TsVec { payload: p };
@@ -520,28 +519,16 @@ fn arm_recv(payload: &[u8]) {
     assert_ne!(crc, -2, "C output buffer overflow: harness bug");
     match (&rres, crc) {
         (Ok(rimg), 0) => {
-            // KNOWN-DIVERGENCE-1 FIXED 2026-07-31 (io.rs needSort now sorts
-            // entry words in place, storage keeps wire order — C parity,
-            // ground-truthed via binary COPY + pageinspect). STRICT image
-            // plane, with ONE remaining ratified non-surface: within-tie
-            // entry order for DUPLICATE lexemes (C qsort_arg unstable vs
-            // Rust sort_unstable — different unstable algorithms). On byte
-            // mismatch require (a) sorted-multiset equality AND (b) the
-            // decoded content actually contains duplicate lexemes.
-            if rimg[..] != *cout.bytes() {
-                let dup = {
-                    let v = TsVec { payload: rimg };
-                    let mut lex: Vec<&[u8]> =
-                        (0..v.size()).map(|i| v.lexeme(v.entry(i))).collect();
-                    lex.sort();
-                    lex.windows(2).any(|w| w[0] == w[1])
-                };
-                assert!(
-                    dup && tsvec_semantic_eq(rimg, cout.bytes()),
-                    "tsvectorrecv divergence (beyond duplicate-lexeme tie order): rust {:02x?} vs C {:02x?} (wire {:02x?})",
-                    rimg, cout.bytes(), payload
-                );
-            }
+            // KNOWN-DIVERGENCE-1 FIXED (needSort entry-in-place sort) and the
+            // duplicate-lexeme tie carve RETIRED 2026-07-31: io.rs now uses
+            // the verbatim pg_qsort port, so tie order matches C exactly.
+            // FULLY STRICT image plane.
+            assert_eq!(
+                &rimg[..],
+                cout.bytes(),
+                "tsvectorrecv IMAGE divergence (wire {:02x?})",
+                payload
+            );
             // Reconstruction plane (sorted wire only, where storage order ==
             // entry order): rebuild the image with TsVecBuilder::push_raw and
             // require byte identity — an independent check that the builder,
@@ -1172,9 +1159,17 @@ fn arm_match(payload: &[u8]) {
 
 fn arm_oversize(payload: &[u8]) {
     const MAXSTRPOS: usize = (1 << 20) - 1;
-    let mode = payload.first().copied().unwrap_or(0) % 4;
-    // Small deterministic jitter so the corpus can carry distinct shapes.
-    let jitter = (payload.get(1).copied().unwrap_or(0) as usize) % 64;
+    // COST GATE (re-floor lesson 2026-07-31): an oversize exec parses ~1.2 MiB
+    // on four engine sides (~20+ ms); ungated, mutants collapsed the CI cluster
+    // campaign to ~190 exec/s and blew the job deadline. The arm is a
+    // deterministic boundary WITNESS, not a search surface — require the
+    // 4-byte magic so only the committed seeds (and their prefix-preserving
+    // descendants) pay; random selector hits return in nanoseconds.
+    if payload.len() < 5 || &payload[0..4] != b"OVSZ" {
+        return;
+    }
+    let mode = payload[4] % 4;
+    let jitter = 0usize;
     let cx = MemoryContext::new("tsvec_fuzz_big");
     let m = cx.mcx();
 
