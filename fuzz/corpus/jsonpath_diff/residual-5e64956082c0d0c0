@@ -1,0 +1,1 @@
+$.a.time(2) != $.b.datetime("HH24:MI")

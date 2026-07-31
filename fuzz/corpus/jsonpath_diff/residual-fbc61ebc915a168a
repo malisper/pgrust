@@ -1,0 +1,1 @@
+œ$.a.time_tz(2) == $.b.timestamp_tz(2)

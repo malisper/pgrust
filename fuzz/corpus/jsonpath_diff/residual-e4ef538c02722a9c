@@ -1,0 +1,1 @@
+strict $[last].datetime() == $.a.datetime()
