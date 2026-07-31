@@ -858,6 +858,33 @@ fn ts_in_arm(payload: &[u8]) {
         [Datum::from_usize(cs.as_ptr() as usize), Datum::from_i32(0), Datum::from_i32(typmod)],
     );
     fc_check_i64("timestamp_in", &r, fc);
+
+    // soft-error plane: SQL soft input (COPY ... ON_ERROR ignore) must
+    // reach the same verdict/sqlstate as the hard path, never throw.
+    let mut esc = types_error::SoftErrorContext::new(true);
+    let rs = if tz == 1 {
+        adt_timestamp::timestamptz_in(s, typmod, Some(&mut esc))
+    } else {
+        adt_timestamp::timestamp_in(s, typmod, Some(&mut esc))
+    };
+    match (&r, &rs) {
+        (Ok(hv), Ok(sv)) => {
+            assert!(!esc.error_occurred() && hv == sv, "timestamp_in SOFT-PLANE value mismatch")
+        }
+        (Err(he), Ok(_)) => assert!(
+            esc.error_occurred()
+                && esc.error().map(|e| e.sqlstate) == Some(he.sqlstate),
+            "timestamp_in SOFT-PLANE verdict/sqlstate mismatch"
+        ),
+        (_, Err(se)) => {
+            // soft mode may still hard-error for non-softenable raisers;
+            // then it must be the SAME error.
+            assert!(
+                r.as_ref().err().map(|e| e.sqlstate) == Some(se.sqlstate),
+                "timestamp_in SOFT-PLANE hard-error mismatch"
+            );
+        }
+    }
 }
 
 fn ts_out_arm(payload: &[u8]) {
@@ -945,11 +972,29 @@ fn interval_in_arm(payload: &[u8]) {
     // SAFETY: cstring + out pointers valid for the call.
     let cerr = unsafe { pg_tsdiff_interval_in(cs.as_ptr(), typmod, is, &mut ct, &mut cd, &mut cm) };
     let r = tsiv::interval_in(s, typmod, None);
-    let c_ok = cerr == 0;
-    if c_ok != r.is_ok() && dblmin_boundary(s.as_bytes()) {
+    if dblmin_boundary(s.as_bytes()) {
         return; /* strtod tininess platform carve — see dblmin_boundary */
     }
     check_interval("interval_in", cerr, (ct, cd, cm), &r);
+
+    // soft-error plane (as ts_in_arm)
+    let mut esc = types_error::SoftErrorContext::new(true);
+    let rs = tsiv::interval_in(s, typmod, Some(&mut esc));
+    match (&r, &rs) {
+        (Ok(hv), Ok(sv)) => assert!(
+            !esc.error_occurred() && (hv.time, hv.day, hv.month) == (sv.time, sv.day, sv.month),
+            "interval_in SOFT-PLANE value mismatch"
+        ),
+        (Err(he), Ok(_)) => assert!(
+            esc.error_occurred()
+                && esc.error().map(|e| e.sqlstate) == Some(he.sqlstate),
+            "interval_in SOFT-PLANE verdict/sqlstate mismatch"
+        ),
+        (_, Err(se)) => assert!(
+            r.as_ref().err().map(|e| e.sqlstate) == Some(se.sqlstate),
+            "interval_in SOFT-PLANE hard-error mismatch"
+        ),
+    }
 }
 
 fn interval_out_arm(payload: &[u8]) {
