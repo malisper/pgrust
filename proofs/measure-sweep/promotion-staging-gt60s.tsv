@@ -154,3 +154,5 @@ uuid	wave5::eq_uuid_recv_core_ok20_4	422
 vector-io	proofs::eq_i2vout_n1	241
 vector-io	proofs::eq_i2vout_spot_bounds	291
 vector-io	proofs::eq_i2vout_spot_mixed	241
+vector-io	proofs::eq_ovin_len0	70
+float-arith	proofs::dsqrt_bisect_grid	90

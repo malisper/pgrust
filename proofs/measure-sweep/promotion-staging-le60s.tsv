@@ -329,3 +329,11 @@ vector-io	proofs::eq_i2vin_len0	50
 vector-io	proofs::eq_i2vout_n0	40
 vector-io	proofs::eq_ovout_n0	50
 xid8snap	proofs::spot_parse_empty	10
+float-agg	proofs::eq_finals_nullity_t3	10
+float-agg	proofs::eq_finals_nullity_t6	10
+cash	proofs::eq_cash_div_flt4_grid	30
+cash	proofs::eq_cash_div_flt8_grid	30
+datetime-b	proofs::eq_timetz_part_tz	40
+datetime-b	proofs::spot_timetz_part_tz_time_nonzero	50
+datetime-b	proofs::eq_timetz_part_tz_hour	50
+datetime-b	proofs::eq_timetz_part_tz_minute	50
