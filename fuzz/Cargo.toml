@@ -109,3 +109,11 @@ path = "fuzz_targets/hashenc_diff.rs"
 test = false
 doc = false
 bench = false
+
+# encode_diff: scaffolded by fuzz/scaffold.py — see README-TODO-encode_diff.md.
+[[bin]]
+name = "encode_diff"
+path = "fuzz_targets/encode_diff.rs"
+test = false
+doc = false
+bench = false

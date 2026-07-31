@@ -35,9 +35,10 @@ pg_hmac = { path = "../../crates/common/hmac" }
 scram_common = { path = "../../crates/common/scram_common" }
 adt_ascii = { path = "../../crates/backend/utils/adt/adt_ascii" }
 cryptohashfuncs = { path = "../../crates/backend/utils/adt/cryptohashfuncs" }
-datum = { path = "../../crates/_support/types/datum" }
-types_fmgr = { path = "../../crates/_support/types/fmgr" }
 postgres_seams = { path = "../../crates/backend/tcop/postgres_seams" }
+adt_encode = { path = "../../crates/backend/utils/adt/encode" }  # encode_diff (scaffold.py)
+datum = { path = "../../crates/_support/types/datum" }  # fc-wrapper plane (scaffold.py)
+types_fmgr = { path = "../../crates/_support/types/fmgr" }  # fc-wrapper plane (scaffold.py)
 
 [build-dependencies]
 cc = "1"
