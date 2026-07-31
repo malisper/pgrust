@@ -73,6 +73,20 @@ extern "C" {
     // verbatim 18.3 appendStringInfoStringQuoted over a flat buffer
     // (csrc/mbconv_glue.c; pg_mbcliplen = pg_name_io.c's UTF8-pinned copy)
     fn pg_diff_append_quoted(s: *const u8, maxlen: c_int, out: *mut u8) -> c_int;
+    // vendored conv.c engines (invalid-encoding arm fires before any map
+    // deref, so NULL map/cmap is safe for that arm)
+    fn UtfToLocal(
+        utf: *const u8, len: c_int, iso: *mut u8,
+        map: *const core::ffi::c_void, cmap: *const core::ffi::c_void,
+        cmapsize: c_int, conv_func: *const core::ffi::c_void,
+        encoding: c_int, no_error: bool,
+    ) -> c_int;
+    fn LocalToUtf(
+        iso: *const u8, len: c_int, utf: *mut u8,
+        map: *const core::ffi::c_void, cmap: *const core::ffi::c_void,
+        cmapsize: c_int, conv_func: *const core::ffi::c_void,
+        encoding: c_int, no_error: bool,
+    ) -> c_int;
 
     // cyrillic_and_mic
     fn pg_koi8r_to_mic(s: *const u8, d: *mut u8, l: c_int, ne: bool) -> c_int;
@@ -666,6 +680,52 @@ mod tests {
             diff_bad_args(pair, pair.src_enc.max(0), pair.dst_enc.max(0), -1);
             diff_bad_args(pair, pair.src_enc.max(0), pair.dst_enc.max(0), i32::MIN);
             diff_bad_args(pair, i32::MAX, i32::MIN, 4);
+        }
+    }
+
+    /// Invalid-encoding-number arm of the pub UtfToLocal/LocalToUtf engines
+    /// (unreachable through every shipped wrapper, which pass compile-time
+    /// constants; the pub API surface still has it) — diffed against the
+    /// vendored C engines over every invalid encoding id near the valid band.
+    #[test]
+    fn utf_engines_invalid_encoding() {
+        let src = [0x41u8, 0x42];
+        for enc in [-1000, -2, -1, 42, 43, 100, i32::MAX] {
+            let mut cdst = [0xAAu8; 16];
+            unsafe { pg_mbconv_err_reset() };
+            let c = unsafe {
+                UtfToLocal(
+                    src.as_ptr(), 2, cdst.as_mut_ptr(),
+                    core::ptr::null(), core::ptr::null(), 0, core::ptr::null(),
+                    enc, false,
+                )
+            };
+            let cerr = unsafe { pg_mbconv_err_get() };
+            assert!(c == -1 && cerr == 3, "C UtfToLocal accepted invalid encoding {enc}");
+            let mut rdst = [0xAAu8; 16];
+            let map = &conv::maps::euc2004::EUC_JIS_2004_FROM_UNICODE_TREE;
+            let r = unsafe { conv::UtfToLocal(&src, rdst.as_mut_ptr(), map, &[], None, enc, false) };
+            match r {
+                Ok(_) => panic!("Rust UtfToLocal accepted invalid encoding {enc}"),
+                Err(e) => assert!(rust_err_class(&e) == 3, "class divergence enc={enc}"),
+            }
+
+            unsafe { pg_mbconv_err_reset() };
+            let c = unsafe {
+                LocalToUtf(
+                    src.as_ptr(), 2, cdst.as_mut_ptr(),
+                    core::ptr::null(), core::ptr::null(), 0, core::ptr::null(),
+                    enc, false,
+                )
+            };
+            let cerr = unsafe { pg_mbconv_err_get() };
+            assert!(c == -1 && cerr == 3, "C LocalToUtf accepted invalid encoding {enc}");
+            let lmap = &conv::maps::euc2004::EUC_JIS_2004_TO_UNICODE_TREE;
+            let r = unsafe { conv::LocalToUtf(&src, rdst.as_mut_ptr(), lmap, &[], None, enc, false) };
+            match r {
+                Ok(_) => panic!("Rust LocalToUtf accepted invalid encoding {enc}"),
+                Err(e) => assert!(rust_err_class(&e) == 3, "class divergence enc={enc}"),
+            }
         }
     }
 
