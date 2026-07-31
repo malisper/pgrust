@@ -1437,16 +1437,16 @@ unicode-cat	eq_isdigit_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver k
 unicode-cat	eq_isdigit_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	113	category-search cost; measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
 unicode-cat	eq_isalpha	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	19	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
 unicode-cat	eq_isalnum_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	26	measured locally 2026-07-30 p1-laneg (load ~30, timings inflated)
-unicode-cat	eq_isalnum_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isupper	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_islower	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isblank	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isgraph	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isprint	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_ispunct_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_ispunct_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	eq_isspace	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	unmeasured	?	INFERRED recipe
-unicode-cat	control_lower_vs_upper_must_fail	-Z c-ffi --c-lib c/pg_unicode_category.c	must-fail	defect-witness	?	DEFAULT solver (suite convention)
+unicode-cat	eq_isalnum_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	251	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isupper	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	20	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_islower	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	20	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isblank	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	171	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isgraph	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	201	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isprint	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	550	recipe confirmed; CI cluster 600s-timeout (packed conc), local kissat green 549.6s 2026-07-30
+unicode-cat	eq_ispunct_posix	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	230	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_ispunct_std	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	170	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	eq_isspace	-Z c-ffi --c-lib c/pg_unicode_category.c --solver kissat	green	calibration	10	recipe confirmed; CI cluster kani-suite pass 2026-07-30 (pgrust-kani-suite-1785475447-625a-48285)
+unicode-cat	control_lower_vs_upper_must_fail	-Z c-ffi --c-lib c/pg_unicode_category.c	must-fail	defect-witness	10	DEFAULT solver (suite convention); CI cluster expected-fail-ok 2026-07-30
 utf8	islegal_len1	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	INFERRED recipe; 0.3-0.6s
 utf8	islegal_len2	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	0.3-0.6s
 utf8	islegal_len3	-Z c-ffi --c-lib c/pg_wchar.c c/pg_wchar_kernels.c --solver kissat	green	per-commit	0.6	0.3-0.6s
