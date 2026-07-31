@@ -344,3 +344,8 @@ pub use quote_diff::quote_diff;
 // geo_io_diff: geo text-I/O family (p1-laner) — see core/src/geo_io_diff.rs.
 pub mod geo_io_diff;
 pub use geo_io_diff::geo_io_diff;
+
+// p1-laneah: common/wchar + mb/mbutils dual-exec differential target
+// (oracle csrc/pg_wcharfam.c + csrc/wcharfam/, verbatim 18.3)
+pub mod wcharfam;
+pub use wcharfam::wcharfam_diff;
