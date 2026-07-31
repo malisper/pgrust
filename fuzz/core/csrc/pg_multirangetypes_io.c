@@ -269,6 +269,11 @@ static TypeCacheEntry pg_mr_int8multirange_typentry = {
 	.rngtype = &pg_rt_int8range_typentry,
 };
 
+/* The verbatim multirange bodies call lookup_type_cache with a MULTIRANGE oid,
+ * which the range oracle's mock does not know (it elogs on anything but the
+ * three ranges and their elements). Extend it for this half of the TU by the
+ * same rename shim used for get_type_io_data below: multirange oids resolve
+ * here, everything else delegates to the range oracle's mock unchanged. */
 static TypeCacheEntry *
 pg_mr_lookup(Oid mltrngtypid)
 {
@@ -281,8 +286,18 @@ pg_mr_lookup(Oid mltrngtypid)
 		case INT8MULTIRANGEOID:
 			return &pg_mr_int8multirange_typentry;
 		default:
-			elog(ERROR, "typcache stub: unexpected multirange type oid");
+			return NULL;
 	}
+}
+
+static TypeCacheEntry *
+pg_mr_lookup_type_cache(Oid type_id, int flags)
+{
+	TypeCacheEntry *e = pg_mr_lookup(type_id);
+
+	if (e != NULL)
+		return e;
+	return lookup_type_cache(type_id, flags);
 }
 
 /* multirangetypes.c multirange_get_typcache over the stub (fn_extra memo
@@ -290,46 +305,77 @@ pg_mr_lookup(Oid mltrngtypid)
 static TypeCacheEntry *
 multirange_get_typcache(FunctionCallInfo fcinfo, Oid mltrngtypid)
 {
-	TypeCacheEntry *typcache = pg_mr_lookup(mltrngtypid);
+	TypeCacheEntry *typcache = pg_mr_lookup_type_cache(mltrngtypid,
+													   TYPECACHE_MULTIRANGE_INFO);
 
 	if (typcache->rngtype == NULL)
 		elog(ERROR, "type %u is not a multirange type", mltrngtypid);
 	return typcache;
 }
 
-/* lsyscache get_type_io_data for the RANGE element of a multirange: the range
- * type's own I/O functions (range_in/out/recv/send), which the range oracle
- * already defines. Mirrors the shipped cached_multirange_io_data path. */
-static void
-pg_mr_get_range_io(Oid rngtypid, IOFuncSelector which_func,
-				   FmgrInfo *finfo, Oid *typioparam)
-{
-	TypeCacheEntry *e = lookup_type_cache(rngtypid, 0);
+/* A multirange's ELEMENT is its range type, so get_multirange_io_data resolves
+ * range_in/out/recv/send where the range oracle's own lsyscache/fmgr shims only
+ * know the three scalar element types (they elog on anything else). Extend both
+ * shims for this half of the TU by RENAMING the two calls: the verbatim
+ * multirange bodies below bind to the extended versions, while the range
+ * oracle's already-compiled bodies keep using their originals. Plumbing only —
+ * the range-type rows are the real pg_type/pg_proc rows. */
+#define F_RANGE_IN   3834
+#define F_RANGE_OUT  3835
+#define F_RANGE_RECV 3836
+#define F_RANGE_SEND 3837
 
-	memset(finfo, 0, sizeof(*finfo));
-	finfo->fn_strict = true;
-	*typioparam = rngtypid;
-	switch (which_func)
+static void
+pg_mr_get_type_io_data(Oid typid, IOFuncSelector which_func,
+					   int16 *typlen, bool *typbyval, char *typalign,
+					   char *typdelim, Oid *typioparam, Oid *func)
+{
+	if (typid != INT4RANGEOID && typid != INT8RANGEOID && typid != NUMRANGEOID)
 	{
-		case IOFunc_input:
-			finfo->fn_addr = range_in;
-			finfo->fn_oid = 3834;
-			break;
-		case IOFunc_output:
-			finfo->fn_addr = range_out;
-			finfo->fn_oid = 3835;
-			break;
-		case IOFunc_receive:
-			finfo->fn_addr = range_recv;
-			finfo->fn_oid = 3836;
+		get_type_io_data(typid, which_func, typlen, typbyval, typalign,
+						 typdelim, typioparam, func);
+		return;
+	}
+	{
+		TypeCacheEntry *e = lookup_type_cache(typid, 0);
+
+		*typlen = e->typlen;
+		*typbyval = e->typbyval;
+		*typalign = e->typalign;
+		*typdelim = ',';
+		*typioparam = typid;
+		*func = (which_func == IOFunc_input) ? F_RANGE_IN :
+			(which_func == IOFunc_output) ? F_RANGE_OUT :
+			(which_func == IOFunc_receive) ? F_RANGE_RECV : F_RANGE_SEND;
+	}
+}
+
+static void
+pg_mr_fmgr_info_cxt(Oid functionId, FmgrInfo *finfo, int mcxt)
+{
+	switch (functionId)
+	{
+		case F_RANGE_IN:
+		case F_RANGE_OUT:
+		case F_RANGE_RECV:
+		case F_RANGE_SEND:
+			(void) mcxt;
+			memset(finfo, 0, sizeof(*finfo));
+			finfo->fn_oid = functionId;
+			finfo->fn_strict = true;
+			finfo->fn_addr = (functionId == F_RANGE_IN) ? range_in :
+				(functionId == F_RANGE_OUT) ? range_out :
+				(functionId == F_RANGE_RECV) ? range_recv : range_send;
 			break;
 		default:
-			finfo->fn_addr = range_send;
-			finfo->fn_oid = 3837;
+			fmgr_info_cxt(functionId, finfo, mcxt);
 			break;
 	}
-	(void) e;
 }
+
+#define lookup_type_cache pg_mr_lookup_type_cache
+#define get_type_io_data pg_mr_get_type_io_data
+#define fmgr_info_cxt pg_mr_fmgr_info_cxt
 
 
 /* ---- auto-generated static prototypes (paste-order shim) ---- */
@@ -3154,8 +3200,17 @@ pg_diff_mr_accessors(int typ, const unsigned char *img,
 			}
 			else
 			{
-				varlena    *p = (varlena *) PG_DETOAST_DATUM(d);
-				int			n = (int) VARSIZE(p);
+				/*
+				 * Copy the byref datum EXACTLY as the accessor returned it —
+				 * never through PG_DETOAST_DATUM. multirange_lower/upper return
+				 * `lower.val`, a pointer INTO the multirange image, and a
+				 * numeric bound stored there is PACKED SHORT (1-byte header).
+				 * Detoasting here would expand it to the 4-byte form and report
+				 * a divergence against the shipped code, which also returns the
+				 * packed pointer: a harness artifact, not a behavior difference.
+				 */
+				const void *p = (const void *) DatumGetPointer(d);
+				int			n = (int) VARSIZE_ANY(p);
 
 				if (n > outcap)
 					return -1;

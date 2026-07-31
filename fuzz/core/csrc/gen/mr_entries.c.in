@@ -231,8 +231,17 @@ pg_diff_mr_accessors(int typ, const unsigned char *img,
 			}
 			else
 			{
-				varlena    *p = (varlena *) PG_DETOAST_DATUM(d);
-				int			n = (int) VARSIZE(p);
+				/*
+				 * Copy the byref datum EXACTLY as the accessor returned it —
+				 * never through PG_DETOAST_DATUM. multirange_lower/upper return
+				 * `lower.val`, a pointer INTO the multirange image, and a
+				 * numeric bound stored there is PACKED SHORT (1-byte header).
+				 * Detoasting here would expand it to the 4-byte form and report
+				 * a divergence against the shipped code, which also returns the
+				 * packed pointer: a harness artifact, not a behavior difference.
+				 */
+				const void *p = (const void *) DatumGetPointer(d);
+				int			n = (int) VARSIZE_ANY(p);
 
 				if (n > outcap)
 					return -1;

@@ -83,6 +83,11 @@ nbt_compare = { path = "../../crates/backend/access/nbtree/compare" }
 lsyscache = { path = "../../crates/backend/utils/cache/lsyscache" }
 types_tuple = { path = "../../crates/_support/types/types_tuple" }
 adt_multirangetypes = { path = "../../crates/backend/utils/adt/multirangetypes" }  # multirangetypes_diff (scaffold.py)
+# multirange_constructor2 detoasts its variadic array through the detoast
+# seam; multirangetypes_diff installs the SHIPPED impl (never a mock: the
+# seam is environment, the detoast logic is computation).
+detoast = { path = "../../crates/backend/access/common/detoast" }
+detoast_seams = { path = "../../crates/backend/access/common/detoast_seams" }
 
 [build-dependencies]
 cc = "1"
