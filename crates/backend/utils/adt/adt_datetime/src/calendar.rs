@@ -42,7 +42,11 @@ pub fn j2date(jd: i32, year: &mut i32, month: &mut i32, day: &mut i32) {
     julian = julian.wrapping_add(32044);
     let mut quad = julian / 146097;
     let extra = (julian - quad * 146097) * 4 + 3;
-    julian += 60 + quad * 3 + extra / 146097;
+    // C's julian is unsigned int: this add legitimately wraps for the
+    // huge u32 values a negative jd casts to (BC-year DOY inputs, e.g.
+    // '4955-120@BC'::timestamp — real 18.3 rejects downstream with 22008;
+    // fuzz witness p1-laney). Unsigned wrap is defined in C; match it.
+    julian = julian.wrapping_add(60 + quad * 3 + extra / 146097);
     quad = julian / 1461;
     julian -= quad * 1461;
     let mut y = (julian * 4 / 1461) as i32;

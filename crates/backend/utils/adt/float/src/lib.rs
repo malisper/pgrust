@@ -18,7 +18,7 @@ pub use funcs::*;
 pub use io::{
     float4in, float4in_internal, float4out, float4out_with, float4recv, float4send, float8in,
     float8in_internal, float8out, float8out_internal, float8out_internal_with, float8recv,
-    float8send, MAXDOUBLEWIDTH,
+    float8send, parse_hex_float, scan_number, special_float8, NumKind, NumToken, MAXDOUBLEWIDTH,
 };
 
 pub const M_PI: f64 = core::f64::consts::PI;

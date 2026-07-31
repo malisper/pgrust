@@ -308,6 +308,10 @@ path = "fuzz_targets/jsonbops_diff.rs"
 [[bin]]
 name = "hashfn_diff"
 path = "fuzz_targets/hashfn_diff.rs"
+# timestamp_diff: scaffolded by fuzz/scaffold.py — see README-TODO-timestamp_diff.md.
+[[bin]]
+name = "timestamp_diff"
+path = "fuzz_targets/timestamp_diff.rs"
 test = false
 doc = false
 bench = false

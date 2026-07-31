@@ -393,3 +393,6 @@ pub use arrayutils_diff::arrayutils_diff;
 // hashfn_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-hashfn_diff.md.
 pub mod hashfn_diff;
 pub use hashfn_diff::hashfn_diff;
+// timestamp_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-timestamp_diff.md.
+pub mod timestamp_diff;
+pub use timestamp_diff::timestamp_diff;

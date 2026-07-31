@@ -344,4 +344,69 @@ fn main() {
 
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");
+    // timestamp_diff oracle (p1-laney): verbatim 18.3 timestamp.c SQL-entry
+    // bodies over the SAME vendored datetime.c/date.c core as p1-lanel's
+    // datetime-family oracle (csrc/pg_datetime_verbatim.inc). Compiled as
+    // its own TU with a tsdiff_impl_ prefix rename of every global (the
+    // hashenc/cryptofam symbol-isolation precedent) so both lanes' oracles
+    // keep their own vendored copies when they land together.
+    const TSDIFF_SHARED_SYMS: &[&str] = &[
+        "AdjustTimeForTypmod", "AdjustTimestampForTypmod", "anytime_typmod_check", "anytimestamp_typmod_check",
+        "ClearTimeZoneAbbrevCache", "date_in", "date_out", "date_timestamptz",
+        "date2isoweek", "date2isoyear", "date2isoyearday", "date2j",
+        "date2timestamptz_opt_overflow", "DateOrder", "DateStyle", "DateTimeParseError",
+        "day_tab", "days", "DecodeDateTime", "DecodeInterval",
+        "DecodeISO8601Interval", "DecodeSpecial", "DecodeTimeOnly", "DecodeTimezone",
+        "DecodeTimezoneAbbrev", "DecodeTimezoneName", "DecodeTimezoneNameToTz", "DecodeUnits",
+        "DetermineTimeZoneAbbrevOffset", "DetermineTimeZoneOffset", "downcase_identifier", "downcase_truncate_identifier",
+        "dt2time", "EncodeDateOnly", "EncodeDateTime", "EncodeInterval",
+        "EncodeSpecialDate", "EncodeSpecialTimestamp", "EncodeTimeOnly", "extract_interval",
+        "extract_timestamp", "extract_timestamptz", "float_time_overflows", "GetCurrentDateTime",
+        "GetCurrentTimeUsec", "GetEpochTime", "int64_div_fast_to_numeric", "int64_to_numeric",
+        "interval_avg", "interval_avg_combine", "interval_avg_deserialize", "interval_avg_serialize",
+        "interval_div", "interval_in", "interval_justify_days", "interval_justify_hours",
+        "interval_justify_interval", "interval_larger", "interval_mi", "interval_mul",
+        "interval_out", "interval_part", "interval_pl", "interval_recv",
+        "interval_scale", "interval_send", "interval_smaller", "interval_sum",
+        "interval_time", "interval_trunc", "interval_um", "interval2itm",
+        "IntervalStyle", "isoweek2date", "isoweek2j", "isoweekdate2date",
+        "itm2interval", "itmin2interval", "j2date", "j2day",
+        "make_date", "make_interval", "make_time", "make_timestamp",
+        "make_timestamptz", "make_timestamptz_at_timezone", "months", "mul_d_interval",
+        "numeric_add_opt_error", "numeric_div_opt_error", "numeric_sub_opt_error", "ParseDateTime",
+        "pg_diff_datetime_tzset_name", "pg_diff_datetime_tzset_nongmt", "pg_dt_strlcpy", "pg_dt_tzset_name",
+        "pg_dt_tzset_nongmt", "pg_get_timezone_offset", "pg_gmtime", "pg_interpret_timezone_abbrev",
+        "pg_localtime", "pg_next_dst_boundary", "pg_timezone_abbrev_is_known", "pg_tolower",
+        "pg_toupper", "pg_ts_numchain", "pg_tzset", "pg_ultoa_n",
+        "pg_ultostr", "pg_ultostr_zeropad", "session_timezone", "strtoint",
+        "time_in", "time_mi_interval", "time_out", "time_overflows",
+        "time_part", "time_pl_interval", "time2tm", "timestamp_age",
+        "timestamp_bin", "timestamp_cmp_internal", "timestamp_date", "timestamp_in",
+        "timestamp_izone", "timestamp_larger", "timestamp_mi", "timestamp_mi_interval",
+        "timestamp_out", "timestamp_part", "timestamp_pl_interval", "timestamp_recv",
+        "timestamp_scale", "timestamp_send", "timestamp_smaller", "timestamp_time",
+        "timestamp_trunc", "timestamp2timestamptz_opt_overflow", "timestamp2tm", "timestamptz_age",
+        "timestamptz_bin", "timestamptz_date", "timestamptz_in", "timestamptz_izone",
+        "timestamptz_mi_interval", "timestamptz_out", "timestamptz_part", "timestamptz_pl_interval",
+        "timestamptz_recv", "timestamptz_send", "timestamptz_time", "timestamptz_timetz",
+        "timestamptz_trunc", "timestamptz_trunc_zone", "timetz_in", "timetz_mi_interval",
+        "timetz_out", "timetz_pl_interval", "timetz2tm", "tm2time",
+        "tm2timestamp", "tm2timetz", "ValidateDate",
+    ];
+    let mut tsdiff = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        tsdiff.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in TSDIFF_SHARED_SYMS {
+        tsdiff.define(s, format!("tsdiff_impl_{s}").as_str());
+    }
+    tsdiff
+        .file("csrc/pg_timestamp_io.c")
+        .include("csrc/shim")
+        .include("csrc/pgdt")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .compile("pg_difffuzz_tsdiff");
+
 }

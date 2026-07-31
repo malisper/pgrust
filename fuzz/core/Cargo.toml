@@ -115,6 +115,15 @@ types_fmgr = { path = "../../crates/_support/types/fmgr" }  # fc-wrapper plane (
 pg_prng = { path = "../../crates/common/pg_prng" }  # pg_prng_diff (scaffold.py)
 arrayutils = { path = "../../crates/backend/utils/adt/arrayutils" }  # arrayutils_diff (scaffold.py)
 hashfn = { path = "../../crates/common/hashfn" }  # hashfn_diff (scaffold.py)
+adt_timestamp = { path = "../../crates/backend/utils/adt/adt_timestamp" }  # timestamp_diff (scaffold.py)
+
+adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }  # timestamp_diff
+adt_date = { path = "../../crates/backend/utils/adt/adt_date" }  # timestamp_diff fc plane (owed fc_timestamp_mi)
+pgtz = { path = "../../crates/backend/timezone/pgtz" }  # timestamp_diff env pin
+elog = { path = "../../crates/backend/utils/error/elog" }  # timestamp_diff env pin
+fd = { path = "../../crates/backend/storage/file/fd" }  # timestamp_diff env pin
+xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }  # timestamp_diff env pin
+timestamp_seams = { path = "../../crates/backend/utils/adt/timestamp_seams" }  # timestamp_diff env pin
 
 [build-dependencies]
 cc = "1"
