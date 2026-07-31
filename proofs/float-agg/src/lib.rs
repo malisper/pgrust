@@ -305,7 +305,17 @@ mod proofs {
     /// symbolic [f64; 3]. Values are NOT asserted here (divide/sqrt circuits
     /// stay unconstrained); the grid_* harnesses own value parity.
     #[kani::proof]
+    // Deterministic sqrt model on BOTH sides (dsqrt dual-mode fix; see
+    // crate::det_sqrt_model). The stddev finals reach C sqrt(), which the
+    // shim routes to pg_proof_sqrt — without forcing codegen of that Rust
+    // symbol (referenced only from the vendored C, invisible to Kani's
+    // reachability) the goto program has a missing definition and the
+    // harness FAILS on "missing definition is unreachable" (MEASURE-SWEEP
+    // 2026-07-30 triage). Values are unasserted here; the stub only keeps
+    // both sides on the same deterministic model.
+    #[kani::stub(f64::sqrt, crate::det_sqrt_model)]
     fn eq_finals_nullity_t3() {
+        let _keep = crate::pg_proof_sqrt as extern "C" fn(f64) -> f64;
         let t = [any_f64(), any_f64(), any_f64()];
         let mut sink = 0f64;
 
@@ -334,7 +344,11 @@ mod proofs {
     /// t6 finals: the full nullity lattice (n<1 / n<2 thresholds, corr/r2/
     /// slope/intercept sxx==0 / syy==0 arms) over fully symbolic [f64; 6].
     #[kani::proof]
+    // Same missing-definition fix as eq_finals_nullity_t3: float8_corr
+    // reaches C sqrt() -> pg_proof_sqrt.
+    #[kani::stub(f64::sqrt, crate::det_sqrt_model)]
     fn eq_finals_nullity_t6() {
+        let _keep = crate::pg_proof_sqrt as extern "C" fn(f64) -> f64;
         let t = [
             any_f64(),
             any_f64(),
