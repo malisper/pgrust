@@ -323,6 +323,10 @@ fn json_in_diff(payload: &[u8]) {
         COut::Err(crc)
     };
 
+    // Accessor plane: JsonLex::input() is the C-parity input view.
+    let lex = adt_json::jsonapi::JsonLex::new(payload, PG_UTF8);
+    assert!(lex.input() == payload, "JsonLex::input identity");
+
     // Shipped Rust core, hard-error lane.
     let cx = mcx::MemoryContext::new("json_fuzz");
     let m = cx.mcx();
