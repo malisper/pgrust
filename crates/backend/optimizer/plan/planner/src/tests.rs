@@ -1200,6 +1200,57 @@ fn non_index_qual_plans_to_seqscan_with_qual() {
     assert!((sscan.scan.plan.total_cost - 225.0).abs() < 1e-9);
 }
 
+// clausesel.c parity: DistinctExpr is estimated in C's
+// `is_opclause(clause) || IsA(clause, DistinctExpr)` arm — restriction
+// selectivity of the contained "=" operator, then `s1 = 1.0 - s1`. There is
+// no fixed 0.5 for DistinctExpr in C.
+//
+// Regression: the port had `NodeTag::T_DistinctExpr => Ok(0.5)` under a
+// comment misclaiming that C uses a fixed 0.5 (stale-mechanism-comment
+// class). The mis-estimate flipped HashAggregate -> GroupAggregate+Sort on
+// an `IS DISTINCT FROM` filter and changed which of two row errors surfaced
+// first (SQLSTATE 22012 vs 22008). Found by the sqldiff query-level
+// differential fuzzer (seed 7, gen:2810) at 10k queries.
+#[test]
+fn distinct_expr_qual_inverts_eq_selectivity() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+    let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+    let qual = Node::mk(
+        mcx,
+        types_nodes::primnodes::DistinctExpr {
+            opno: INT4EQ_OP,
+            opfuncid: INT4EQ_PROC,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, var, konst).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let parse = table_query(mcx, Some(qual));
+    let stmt = planner(
+        mcx,
+        leak_q(mcx, parse),
+        "SELECT * FROM t WHERE val IS DISTINCT FROM 7",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    let plan = stmt.planTree.unwrap();
+    assert_eq!(plan.node_tag(), NodeTag::T_SeqScan);
+    let sscan = plan.as_seq_scan().unwrap();
+    assert_eq!(sscan.scan.plan.qual.len(), 1);
+    // No stats: eqsel defaults to 1/DEFAULT_NUM_DISTINCT = 0.005, and the
+    // DistinctExpr complement gives 1 - 0.005 = 0.995 -> rows 9950 of the
+    // fixture's 10000. The defective fixed 0.5 gave 5000.
+    assert_eq!(sscan.scan.plan.plan_rows, 9950.0);
+}
+
 fn cx() -> MemoryContext {
     install_fixtures();
     MemoryContext::new_bump("planner-test")

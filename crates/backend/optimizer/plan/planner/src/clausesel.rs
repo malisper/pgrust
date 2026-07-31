@@ -319,20 +319,11 @@ fn clause_selectivity_rinfo_ext<'mcx>(
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
 
     let s1 = match clause.node_tag() {
-        NodeTag::T_OpExpr => {
-            let (opno, inputcollid, args): (u32, u32, PgVec<'mcx, NodeId>) = {
-                let o = clause.as_op_expr().unwrap();
-                let mut ids = PgVec::new_in(run.mcx);
-                for a in &o.args {
-                    ids.push(run.intern_expr(a));
-                }
-                (o.opno, o.inputcollid, ids)
-            };
-            if treat_as_join_clause(run, Some(rinfo), clause, varrelid, sjinfo)? {
-                crate::plancat::join_selectivity(run, opno, &args, inputcollid, jointype, sjinfo)?
-            } else {
-                crate::plancat::restriction_selectivity(run, opno, &args, inputcollid, varrelid)?
-            }
+        // C: `is_opclause(clause) || IsA(clause, DistinctExpr)` — DistinctExpr
+        // shares OpExpr's representation and estimates through the contained
+        // "=" operator, then inverts (see opexpr_selectivity).
+        NodeTag::T_OpExpr | NodeTag::T_DistinctExpr => {
+            opexpr_selectivity(run, Some(rinfo), clause, varrelid, jointype, sjinfo)?
         }
         _ => clause_selectivity_node_ext(run, clause, varrelid, jointype, sjinfo, use_extended_stats)?,
     };
@@ -419,21 +410,10 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
                 ),
             }
         }
-        NodeTag::T_OpExpr => {
-            let (opno, inputcollid, args): (u32, u32, PgVec<'mcx, NodeId>) = {
-                let o = clause.as_op_expr().unwrap();
-                let mut ids = PgVec::new_in(run.mcx);
-                for a in &o.args {
-                    ids.push(run.intern_expr(a));
-                }
-                (o.opno, o.inputcollid, ids)
-            };
-            let s = if treat_as_join_clause(run, None, clause, varrelid, sjinfo)? {
-                crate::plancat::join_selectivity(run, opno, &args, inputcollid, jointype, sjinfo)?
-            } else {
-                crate::plancat::restriction_selectivity(run, opno, &args, inputcollid, varrelid)?
-            };
-            Ok(s)
+        // C: `is_opclause(clause) || IsA(clause, DistinctExpr)` — one arm for
+        // both; DistinctExpr inverts the "=" estimate (see opexpr_selectivity).
+        NodeTag::T_OpExpr | NodeTag::T_DistinctExpr => {
+            opexpr_selectivity(run, None, clause, varrelid, jointype, sjinfo)
         }
         NodeTag::T_FuncExpr => {
             let f = clause.as_func_expr().unwrap();
@@ -467,8 +447,6 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
                 varrelid,
             )
         }
-        // C: "can we do better?" — DistinctExpr is a fixed 0.5.
-        NodeTag::T_DistinctExpr => Ok(0.5),
         NodeTag::T_BooleanTest => {
             let bt = clause.as_boolean_test().unwrap();
             crate::selfuncs::booltestsel(
@@ -532,6 +510,49 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
     }
 }
 
+
+// clause_selectivity_ext (clausesel.c), the
+// `is_opclause(clause) || IsA(clause, DistinctExpr)` arm: estimate via the
+// contained operator's join/restriction estimator. For DistinctExpr the
+// contained operator is "=" not "<>", so the result is negated. C:
+//
+//     /*
+//      * DistinctExpr has the same representation as OpExpr, but the
+//      * contained operator is "=" not "<>", so we must negate the result.
+//      * This estimation method doesn't give the right behavior for nulls,
+//      * but it's better than doing nothing.
+//      */
+//     if (IsA(clause, DistinctExpr))
+//         s1 = 1.0 - s1;
+fn opexpr_selectivity<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: Option<RinfoId>,
+    clause: Node<'mcx>,
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    let (opno, inputcollid, args): (u32, u32, PgVec<'mcx, NodeId>) = {
+        // C `typedef OpExpr DistinctExpr`: identical layout, tag differs.
+        let (opno, inputcollid, arg_list) = if let Some(o) = clause.as_op_expr() {
+            (o.opno, o.inputcollid, &o.args)
+        } else {
+            let d = clause.as_distinct_expr().unwrap();
+            (d.opno, d.inputcollid, &d.args)
+        };
+        let mut ids = PgVec::new_in(run.mcx);
+        for a in arg_list {
+            ids.push(run.intern_expr(a));
+        }
+        (opno, inputcollid, ids)
+    };
+    let s1 = if treat_as_join_clause(run, rinfo, clause, varrelid, sjinfo)? {
+        crate::plancat::join_selectivity(run, opno, &args, inputcollid, jointype, sjinfo)?
+    } else {
+        crate::plancat::restriction_selectivity(run, opno, &args, inputcollid, varrelid)?
+    };
+    Ok(if clause.node_tag() == NodeTag::T_DistinctExpr { 1.0 - s1 } else { s1 })
+}
 
 // rowcomparesel (selfuncs.c): estimate on the leading column pair only.
 fn rowcomparesel<'mcx>(
