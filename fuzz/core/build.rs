@@ -211,6 +211,21 @@ fn main() {
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         wcharfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
+    // ASan ON THIS SHARED TU (Michael's ruling 2026-08-01, blocker-TUs only —
+    // NOT the deferred tree-wide pass, task #84). p1-spell's 10M floor dies on a
+    // C-side wild control transfer (ASan SEGV, pc AND sp garbage, no artifact
+    // writable); instrumenting p1-spell's own TU did not attribute it, which
+    // localizes the offending write to a shared TU that spell.c calls — this
+    // one first (every spell.c parser walk goes through wfam_pg_mblen* /
+    // wfam_pg_mb2wchar_with_len). Gated on CARGO_CFG_FUZZING so only cargo-fuzz
+    // builds (which link an ASan runtime) are affected; plain `cargo test` is
+    // unchanged. SHARED-TU NOTICE: this TU is also linked by tzfam_diff,
+    // wparser_diff, hstore_diff and the wcharfam target, so those oracles get
+    // rebuilt with ASan too and may surface their OWN latent C-side memory bugs.
+    // Their corpora are deliberately NOT replayed here (that is task #84).
+    if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
+        wcharfam.flag("-fsanitize=address");
+    }
     wcharfam
         .file("csrc/pg_wcharfam.c")
         // LINK FIX (p1-microbatch, 2026-08-01): pg_wcharfam.c's vendored
