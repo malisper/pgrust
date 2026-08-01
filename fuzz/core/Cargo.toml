@@ -181,6 +181,7 @@ isn = { path = "../../crates/contrib/isn" }
 aclchk_seams = { path = "../../crates/backend/catalog/aclchk_seams" }
 superuser_seams = { path = "../../crates/backend/utils/misc/superuser_seams" }
 miscinit = { path = "../../crates/backend/utils/init/miscinit" }
+define = { path = "../../crates/backend/commands/define" }  # define_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"

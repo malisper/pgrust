@@ -466,3 +466,11 @@ path = "fuzz_targets/contriba_diff.rs"
 test = false
 doc = false
 bench = false
+
+# define_diff: scaffolded by fuzz/scaffold.py — see README-TODO-define_diff.md.
+[[bin]]
+name = "define_diff"
+path = "fuzz_targets/define_diff.rs"
+test = false
+doc = false
+bench = false

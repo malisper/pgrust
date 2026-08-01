@@ -47,7 +47,9 @@ pub fn defGetString<'r, 'mcx: 'r, 'a: 'r>(
             if tn.pct_type {
                 s.try_push_str("%TYPE")?;
             }
-            for _ in tn.arrayBounds.iter() {
+            // C appendTypeNameToBuffer (parse_type.c): "[]" appended ONCE
+            // when arrayBounds != NIL, regardless of dimension count.
+            if !tn.arrayBounds.is_nil() {
                 s.try_push_str("[]")?;
             }
             Ok(str_in(mcx, s.as_str())?)

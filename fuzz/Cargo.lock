@@ -1730,6 +1730,7 @@ dependencies = [
  "crc32c",
  "cryptohashfuncs",
  "datum",
+ "define",
  "detoast",
  "detoast_seams",
  "dfmgr",

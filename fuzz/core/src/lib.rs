@@ -527,3 +527,7 @@ pub use wparserfam_diff::wparserfam_diff;
 // contriba_diff (p1-mb-contriba): contrib fuzzystrmatch + isn two-crate family.
 pub mod contriba_diff;
 pub use contriba_diff::contriba_diff;
+
+// define_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-define_diff.md.
+pub mod define_diff;
+pub use define_diff::define_diff;

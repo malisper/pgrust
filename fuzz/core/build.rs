@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // COMPILE GATE (define_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_define_io.c is filled
+        // with verbatim vendored C (README-TODO-define_diff.md step 1).
+        .file("csrc/pg_define_io.c")
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         .file("csrc/pg_libfam_io.c")
