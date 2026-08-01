@@ -879,6 +879,25 @@ pub static ENUM_CARVES: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub static VALUE_TOKEN_CARVES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// C `nodeTokenType`'s integer-vs-float decision, verbatim: strip one leading
+/// sign, require a digit (or `.digit`), then C's `strtoint` must consume the
+/// entire token without ERANGE to call it T_Integer. Anything else numeric is
+/// T_Float.
+fn c_reads_as_float(tok: &str) -> bool {
+    let body = tok.strip_prefix('+').or_else(|| tok.strip_prefix('-')).unwrap_or(tok);
+    let b = body.as_bytes();
+    let numeric_lead = (!b.is_empty() && b[0].is_ascii_digit())
+        || (b.len() > 1 && b[0] == b'.' && b[1].is_ascii_digit());
+    if !numeric_lead {
+        return false;
+    }
+    // strtoint == whole token, base 10, i32 range
+    match body.parse::<i32>() {
+        Ok(_) => false, // T_Integer
+        Err(_) => true, // syntax stop or ERANGE -> T_Float
+    }
+}
+
 /// Classification of a chartered Rust panic.
 enum PanicClass {
     /// out-of-charter node label (scoped port) — chartered loud panic
@@ -909,6 +928,20 @@ fn classify_panic(text: &str, msg: &str, labels: &[&str]) -> PanicClass {
         .any(|(_, field)| text.contains(&format!(":{field} <>")))
     {
         return PanicClass::NonNull;
+    }
+    // C nodeTokenType (read.c, verbatim rule): a numeric-leading token is
+    // T_Integer only if `strtoint` consumes the WHOLE token without ERANGE —
+    // otherwise it is T_Float, i.e. a FLOAT value node, which is outside the
+    // port's chartered read set. So an over-long or non-integral digit string
+    // (`66666666666666666666`, `1.5`) is a VALUE-TOKEN carve, not a
+    // divergence, even though the port reports it as a bad integer token.
+    if let Some(tok) = msg
+        .strip_prefix("readfuncs.c: bad integer token \"")
+        .and_then(|r| r.split('"').next())
+    {
+        if c_reads_as_float(tok) {
+            return PanicClass::ValueToken;
+        }
     }
     if let Some(tok) = msg
         .strip_prefix("nodeRead (read.c): unhandled token \"")

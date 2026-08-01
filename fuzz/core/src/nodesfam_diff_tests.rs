@@ -789,3 +789,73 @@ fn empty_and_whitespace_input_is_the_null_node() {
         let _ = run_text(text.as_bytes());
     }
 }
+
+/// C's integer-vs-float token rule is modelled EXACTLY (read.c
+/// nodeTokenType): the port's "bad integer token" panic is a value-token
+/// carve precisely when C would have built a Float node instead.
+#[test]
+fn integer_vs_float_token_rule_matches_c() {
+    // C: T_Integer (strtoint consumes all, in range)
+    for t in ["0", "-1", "2147483647", "-2147483647", "+7"] {
+        assert!(!c_reads_as_float(t), "{t:?} should be T_Integer");
+    }
+    // C: T_Float. Note "-2147483648" IS here: nodeTokenType advances past the
+    // sign and calls strtoint on the UNSIGNED body, so INT32_MIN's magnitude
+    // raises ERANGE and C builds a FLOAT node for the exact text outfuncs
+    // writes for an Integer node holding INT32_MIN. See
+    // int32_min_token_is_a_c_float_node for the divergence that follows.
+    for t in ["2147483648", "-2147483648", "-2147483649", "66666666666666666666", "1.5", ".5",
+              "1e3", "1x"] {
+        assert!(c_reads_as_float(t), "{t:?} should be T_Float");
+    }
+    // and the classification is live end-to-end
+    let before = VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(!run_text(b"66666666666666666666"));
+    assert!(
+        VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed) > before,
+        "over-long integer token was not charged to the value-token carve"
+    );
+}
+
+/// DIVERGENCE OF RECORD (text-invisible, tag-level): the token
+/// `-2147483648`.
+///
+/// `nodeTokenType` advances past the sign and calls `strtoint` on the
+/// UNSIGNED body, so INT32_MIN's magnitude raises ERANGE and C builds a
+/// **Float** node — for the exact text `outfuncs` writes for an **Integer**
+/// node holding INT32_MIN (`%d`). C's own out->read round trip is therefore
+/// not type-preserving at INT32_MIN. pgrust's reader parses the signed token
+/// as i32, which succeeds, and builds an **Integer** node.
+///
+/// The out-TEXT is identical on both sides (a Float node stores and reprints
+/// its token verbatim), so the text plane cannot see this — recorded here as
+/// the harness's known blind spot rather than left undocumented. Downstream
+/// consumers that switch on the node tag would differ.
+#[test]
+fn int32_min_token_is_a_c_float_node() {
+    let text = "-2147483648";
+    // C: text-stable
+    match c_exec(text.as_bytes()) {
+        COut::Ok { out, .. } => assert_eq!(String::from_utf8_lossy(&out), text),
+        COut::Err { errcode } => panic!("C rejected {text:?} ({errcode:#x})"),
+    }
+    // C's classification says Float...
+    assert!(c_reads_as_float(text), "C should classify INT32_MIN as T_Float");
+    // ...while pgrust builds an Integer node with the same rendering
+    let cx = mcx::MemoryContext::new("nodesfam_int32min");
+    let m = cx.mcx();
+    let node = readfuncs::stringToNodeNullable(m, text)
+        .expect("no error")
+        .expect("some node");
+    assert_eq!(
+        node.node_tag(),
+        types_nodes::NodeTag::T_Integer,
+        "pgrust's tag for INT32_MIN changed — re-audit this divergence record"
+    );
+    assert_eq!(
+        outfuncs::nodeToString(m, node).expect("out").as_str(),
+        text,
+        "the divergence must stay text-invisible; if the text differs it is a \
+         LIVE text-plane divergence and must be reported, not recorded"
+    );
+}
