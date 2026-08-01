@@ -632,45 +632,64 @@ fn const_datums_are_well_formed(text: &str) -> bool {
     true
 }
 
-/// DIVERGENCE OF RECORD — needs a match-or-fix ruling (lane p1-nodes).
+/// DIVERGENCE OF RECORD — MATCH-OR-FIX RULING OWED (lane p1-nodes).
 ///
-/// `{GROUPINGSET :kind 1 :content (14) :location -1}`: C's `READ_NODE_FIELD`
-/// builds a generic `List` of Integer VALUE nodes and `outNode` prints it back
-/// as `(14)`; the pgrust port stores Integer nodes in a NodeList and its
-/// writer ALWAYS emits the int-list marker, so it prints `(i 14)`. The port is
-/// lossy for "generic List of Integer nodes" in this field.
+/// `GroupingSet.content`: the pgrust writer picks the list FLAVOR from `kind`
+/// (`out_grouping_set`: emit `(i ...)` iff kind == GROUPING_SET_SIMPLE, else
+/// `out_list`), while C's `outNode` picks it from the LIST'S ACTUAL TAG. The
+/// mismatch cuts both ways, and the fuzzer found both directions:
 ///
-/// Why it is gated rather than reported: PG's own writer never emits that
-/// form HERE — the rewriter stores an `IntList` in `GroupingSet.content`, so
-/// outfuncs writes `(i ...)`, which round-trips identically on both sides (the
-/// `groupingset-intlist` seed covers it). The `(14)` spelling is only reachable
-/// from hand-edited catalog bytes. Fixing it properly means giving the
-/// vocabulary an IntList-vs-List distinction in that field, which is a port
-/// change outside this lane's mandate — hence a RULING, not a silent carve.
+///   `:kind 1 :content (14)`     C -> `(14)`,     pgrust -> `(i 14)`
+///   `:kind 0 :content (i 14)`   C -> `(i 14)`,   pgrust -> `(14)`
 ///
-/// Table form (label, field, required list marker) so the rule is data, not a
-/// special case buried in the walker.
-const WRITER_LIST_MARKERS: &[(&str, &str, &str)] = &[("GROUPINGSET", "content", "i")];
-
-fn writer_list_markers_respected(text: &str) -> bool {
+/// Root cause is one line of the port: flavor is inferred from a sibling field
+/// instead of carried by the value. Both spellings are UNREACHABLE from
+/// PG-written text — the rewriter stores an `IntList` exactly when kind is
+/// SIMPLE, NIL (`<>`) for EMPTY, and a List of GroupingSet nodes for
+/// ROLLUP/CUBE/SETS — so the compared domain excludes the mismatched
+/// combinations, and the writer-produced ones round-trip identically on both
+/// sides (seed `seed-groupingset-intlist`). Fixing it properly means carrying
+/// the IntList-vs-List distinction in the vocabulary, a port change outside
+/// this lane's mandate; hence a RULING, not a silent carve.
+///
+/// The gate below encodes the WRITER's rule: content may be `<>` always;
+/// `(i ...)` only under kind 1; a node list only under kinds 2/3/4.
+fn groupingset_content_is_writer_producible(text: &str) -> bool {
     let toks = pg_strtok_all(text);
     let mut k = 0;
     while k < toks.len() {
-        if toks[k] == "{" {
-            let label = toks.get(k + 1).copied().unwrap_or("");
+        if toks[k] == "{" && toks.get(k + 1).copied() == Some("GROUPINGSET") {
+            let mut kind: Option<i64> = None;
             let mut j = k + 2;
-            while j < toks.len() && toks[j] != "}" {
-                if let Some(f) = toks[j].strip_prefix(':') {
-                    if let Some((_, _, marker)) = WRITER_LIST_MARKERS
-                        .iter()
-                        .find(|(l, fld, _)| *l == label && *fld == f)
-                    {
-                        if toks.get(j + 1).copied() == Some("(")
-                            && toks.get(j + 2).copied() != Some(*marker)
-                        {
-                            return false;
+            let mut depth = 1usize;
+            while j < toks.len() {
+                match toks[j] {
+                    "{" => depth += 1,
+                    "}" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
                         }
                     }
+                    ":kind" if depth == 1 => {
+                        kind = toks.get(j + 1).and_then(|t| t.parse::<i64>().ok());
+                    }
+                    ":content" if depth == 1 => {
+                        let v = toks.get(j + 1).copied();
+                        match v {
+                            Some("<>") => {}
+                            Some("(") => {
+                                let marked = toks.get(j + 2).copied() == Some("i");
+                                match kind {
+                                    Some(1) if marked => {}
+                                    Some(2) | Some(3) | Some(4) if !marked => {}
+                                    _ => return false,
+                                }
+                            }
+                            _ => return false,
+                        }
+                    }
+                    _ => {}
                 }
                 j += 1;
             }
@@ -681,7 +700,7 @@ fn writer_list_markers_respected(text: &str) -> bool {
 }
 
 fn is_well_formed(text: &str) -> bool {
-    if !writer_list_markers_respected(text) {
+    if !groupingset_content_is_writer_producible(text) {
         return false;
     }
     if !const_datums_are_well_formed(text) {

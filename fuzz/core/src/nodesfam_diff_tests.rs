@@ -1176,12 +1176,22 @@ fn groupingset_content_list_marker_divergence_is_recorded() {
         run_text(b"{GROUPINGSET :kind 1 :content (i 14) :location -1 }"),
         "the writer-produced (i ...) form stopped comparing"
     );
-    // the generic-List spelling is gated (recorded divergence, not silent)
+    // BOTH mismatched spellings are gated (the recorded divergence cuts both
+    // ways, because the port infers the flavor from `kind`)
     assert!(
         !run_text(b"{GROUPINGSET :kind 1 :content (14) :location -1 }"),
-        "the recorded (14) divergence is no longer gated — re-read the ruling note"
+        "the recorded (14)-under-SIMPLE divergence is no longer gated"
     );
-    // and the port really does normalize (the claim behind the record)
+    assert!(
+        !run_text(b"{GROUPINGSET :kind 0 :content (i 14) :location -1 }"),
+        "the recorded (i 14)-under-EMPTY divergence is no longer gated"
+    );
+    // and the other writer-produced forms still compare
+    assert!(
+        run_text(b"{GROUPINGSET :kind 0 :content <> :location -1 }"),
+        "EMPTY with a NULL content stopped comparing"
+    );
+    // and the port really does infer the flavor from `kind` (both directions)
     let cx = mcx::MemoryContext::new("nodesfam_gs");
     let m = cx.mcx();
     let n = readfuncs::stringToNodeNullable(m, "{GROUPINGSET :kind 1 :content (14) :location -1 }")
@@ -1190,6 +1200,14 @@ fn groupingset_content_list_marker_divergence_is_recorded() {
     assert_eq!(
         outfuncs::nodeToString(m, n).expect("out").as_str(),
         "{GROUPINGSET :kind 1 :content (i 14) :location -1}",
-        "the port's normalization changed — re-audit the divergence record"
+        "the port's kind-driven flavor choice changed — re-audit the record"
+    );
+    let n0 = readfuncs::stringToNodeNullable(m, "{GROUPINGSET :kind 0 :content (i 14) :location -1 }")
+        .expect("no error")
+        .expect("node");
+    assert_eq!(
+        outfuncs::nodeToString(m, n0).expect("out").as_str(),
+        "{GROUPINGSET :kind 0 :content (14) :location -1}",
+        "the reverse direction changed — re-audit the record"
     );
 }
