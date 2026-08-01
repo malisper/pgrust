@@ -111,6 +111,13 @@ session cell) vs `pg_stub_float8out_guc` (verbatim body reading
 
 # Constructed-state stub facilities (`stub:*`)
 
+> **LANDING ORDER (coordinator ruling 2026-08-01): HOLD.** This branch's
+> ancestry merges the LIVE lanes `proofs/p1-tupaccess` and `proofs/p1-nodes`
+> (their claims are still open on main). Order of record: those lanes land
+> first and flip their claims to done; THEN `fuzz/stub-constructed` lands as
+> the small remaining delta — verify with `git cherry` + `git range-diff`
+> before pushing (containment-audit rule). The coordinator owns the trigger.
+
 Shared builders that construct STATE-SHAPED inputs identically on the Rust
 side and the C-oracle side from the same fuzz bytes (branch
 `fuzz/stub-constructed`, charter 2026-08-01). The constructed structure is
