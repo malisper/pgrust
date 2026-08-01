@@ -1711,18 +1711,37 @@ hash_combine(uint32 a, uint32 b)
 }
 
 
-/* ---- SHIM: MemoryContext machinery -> arena (contexts inert here) ---- */
+/* ---- SHIM: MemoryContext machinery. Allocations normally go to the
+ * per-iteration arena; while switched to TopMemoryContext they go to plain
+ * malloc and are NEVER freed - honoring PG's TopMemoryContext lifetime for
+ * getmissingattr's missing_cache datumCopy (the cache outlives iterations,
+ * so its values must too). ---- */
 typedef void *MemoryContext;
-static MemoryContext TopMemoryContext = (MemoryContext) &TopMemoryContext;
-static MemoryContext CurrentMemoryContext = (MemoryContext) &TopMemoryContext;
+static char pg_ta_top_tag;
+static MemoryContext TopMemoryContext = (MemoryContext) &pg_ta_top_tag;
+static _Thread_local MemoryContext pg_ta_current_cxt_init;
+#define CurrentMemoryContext \
+	(pg_ta_current_cxt_init ? pg_ta_current_cxt_init : (MemoryContext) &pg_ta_current_cxt_init)
+static _Thread_local bool pg_ta_in_top_context;
+
 static inline MemoryContext
 MemoryContextSwitchTo(MemoryContext cxt)
 {
-	MemoryContext old = CurrentMemoryContext;
+	MemoryContext old = pg_ta_in_top_context ? TopMemoryContext : NULL;
 
-	CurrentMemoryContext = cxt;
+	pg_ta_in_top_context = (cxt == TopMemoryContext);
 	return old;
 }
+
+static void *
+pg_ta_palloc_route(size_t n)
+{
+	if (pg_ta_in_top_context)
+		return malloc(n);		/* TopMemoryContext: process lifetime */
+	return pg_diff_palloc_impl(n);
+}
+#undef palloc
+#define palloc(n) pg_ta_palloc_route(n)
 #define MemoryContextAllocZero(cxt, n) pg_diff_palloc0_impl(n)
 
 static char *
@@ -1795,7 +1814,11 @@ hash_search(HTAB *h, const void *key, HASHACTION action, bool *found)
 	*found = false;
 	if (action == HASH_FIND)
 		return NULL;
-	assert(h->nents < PG_TA_HTAB_MAX);
+	/* full: reset (fuzz-bounded stand-in for a process-lifetime cache; the
+	 * cache is content-keyed, so eviction only changes WHICH copy callers
+	 * get, never its bytes - the compared planes are unaffected) */
+	if (h->nents >= PG_TA_HTAB_MAX)
+		h->nents = 0;
 	{
 		char	   *e = h->ents + (Size) h->nents * h->ctl.entrysize;
 
@@ -5772,6 +5795,7 @@ pg_ta_put_desc_plane(PgTaW *w, TupleDesc d)
 	do { \
 		pg_diff_arena_reset(); \
 		pg_diff_errcode = 0; \
+		pg_ta_in_top_context = false; \
 		if (setjmp(pg_diff_rowtypes_jmp)) \
 			return 1; \
 	} while (0)

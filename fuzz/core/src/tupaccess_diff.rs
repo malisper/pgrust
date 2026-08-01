@@ -41,19 +41,21 @@
 //!     is exercised by the DEDICATED op 1 spot-check (natts = 1665), not by
 //!     the generator (preferred option per charter).
 //!
-//! INJECTION SWEEP AT CREATION (2026-08-01, all planted defects CRASHED the
-//! seed replay, then reverted; plane -> planted defect -> verdict):
-//!   form image        -> flip byte 0 of Rust image before compare -> CAUGHT
-//!   deform round-trip -> xor 1 into byval deform serialization    -> CAUGHT
-//!   getattr           -> serialize warm result with isnull forced -> CAUGHT
-//!   minimal chain     -> truncate minimal image by 1 byte         -> CAUGHT
-//!   modify            -> skip one doReplace flag on the Rust side -> CAUGHT
-//!   copy              -> perturb t_len of the Rust copy image     -> CAUGHT
-//!   expand            -> drop last byte of Rust expanded image    -> CAUGHT
-//!   tupdesc field-plane -> flip serialized attndims               -> CAUGHT
-//!   equal/hash verdicts -> invert Rust equalRowTypes verdict      -> CAUGHT
-//!   attmap            -> add 1 to first Rust attmap entry         -> CAUGHT
-//!   error-verdict     -> map DATATYPE_MISMATCH to class 1         -> CAUGHT
+//! INJECTION SWEEP AT CREATION (2026-08-01, scratchpad inject.py; every
+//! planted defect FAILED the seed-replay test, then was reverted;
+//! plane -> planted defect -> verdict):
+//!   form image          -> flip byte 0 of the Rust image           -> CAUGHT
+//!   deform round-trip   -> xor 1 into first serialized deform byte -> CAUGHT
+//!   getattr (cold)      -> serialize cold result with isnull=true  -> CAUGHT
+//!   getattr (warm pair) -> serialize warm result with isnull=true  -> CAUGHT
+//!   minimal chain       -> truncate Rust minimal image by 1 byte   -> CAUGHT
+//!   modify              -> skip doReplace for att index 1          -> CAUGHT
+//!   copy                -> xor 0xff into byte 4 of the Rust copy   -> CAUGHT
+//!   expand              -> drop last byte of Rust expanded image   -> CAUGHT
+//!   tupdesc field-plane -> flip serialized attndims bit 0          -> CAUGHT
+//!   equal/hash verdicts -> invert Rust equalRowTypes verdict       -> CAUGHT
+//!   attmap              -> add 1 to every Rust attmap entry        -> CAUGHT
+//!   error-verdict       -> map DATATYPE_MISMATCH to class 1        -> CAUGHT
 
 use alloc::format;
 use alloc::string::String;
@@ -319,8 +321,11 @@ fn decode_att(cur: &mut Cursor<'_>, has_constr: bool) -> AttSpec {
     let nameidx = cur.u8();
     let xflags = cur.u8() & 0x3f;
     let dropped = aflags & 1 != 0;
-    if dropped || !has_constr {
-        aflags &= !0x04; // hasmissing only with constr, never on dropped
+    if dropped || !has_constr || MENU[menu as usize].attlen == -2 {
+        // hasmissing only with constr, never on dropped columns, and never
+        // on cstring columns (C getmissingattr Asserts attlen > 0 || -1:
+        // cstring is not a table-column type, so no attmissingval exists)
+        aflags &= !0x04;
     }
     let missing = if aflags & 0x04 != 0 {
         gen_value(cur, menu as usize)
@@ -362,7 +367,10 @@ fn decode_desc(cur: &mut Cursor<'_>) -> DescSpec {
             }
             let blen = cur.u8() as usize % 16;
             let mut b = cur.bytes(blen);
-            b.retain(|&x| x != 0);
+            // constr strings are nodeToString outputs: ASCII in practice, and
+            // the Rust TupleConstr carries them as PgString (UTF-8) — keep
+            // the generator to NUL-free ASCII on both sides
+            b.retain(|&x| x != 0 && x < 0x80);
             defvals.push((adnum, b));
         }
         let nc = cur.u8() % 3;
@@ -370,10 +378,10 @@ fn decode_desc(cur: &mut Cursor<'_>) -> DescSpec {
             let cflags = cur.u8() & 0x07;
             let nlen = cur.u8() as usize % 8;
             let mut nm = cur.bytes(nlen);
-            nm.retain(|&x| x != 0);
+            nm.retain(|&x| x != 0 && x < 0x80);
             let blen = cur.u8() as usize % 12;
             let mut b = cur.bytes(blen);
-            b.retain(|&x| x != 0);
+            b.retain(|&x| x != 0 && x < 0x80);
             checks.push((cflags, nm, b));
         }
         // equalTupleDescs assumes ConstrCheck entries sorted by name
@@ -513,7 +521,7 @@ fn build_rust_desc<'m>(mcx: Mcx<'m>, s: &DescSpec) -> TupleDescData<'m> {
             defval.push(AttrDefault {
                 adnum: *adnum as i16,
                 adbin: Some(
-                    PgString::from_str_in(core::str::from_utf8(b).unwrap_or(""), mcx).unwrap(),
+                    PgString::from_str_in(core::str::from_utf8(b).expect("non-ASCII adbin"), mcx).unwrap(),
                 ),
             });
         }
@@ -521,10 +529,10 @@ fn build_rust_desc<'m>(mcx: Mcx<'m>, s: &DescSpec) -> TupleDescData<'m> {
         for (cflags, nm, b) in &s.checks {
             check.push(ConstrCheck {
                 ccname: Some(
-                    PgString::from_str_in(core::str::from_utf8(nm).unwrap_or(""), mcx).unwrap(),
+                    PgString::from_str_in(core::str::from_utf8(nm).expect("non-ASCII ccname"), mcx).unwrap(),
                 ),
                 ccbin: Some(
-                    PgString::from_str_in(core::str::from_utf8(b).unwrap_or(""), mcx).unwrap(),
+                    PgString::from_str_in(core::str::from_utf8(b).expect("non-ASCII adbin"), mcx).unwrap(),
                 ),
                 ccenforced: cflags & 1 != 0,
                 ccvalid: cflags & 2 != 0,
@@ -840,6 +848,7 @@ fn install() -> bool {
     INSTALL.call_once(|| {
         if syscache_seams::lookup_pg_type_shape::is_installed()
             || syscache_seams::lookup_pg_type_typcache_shape::is_installed()
+            || syscache_seams::pg_type_io_shape::is_installed()
             || catalog_seams::is_catalog_relation_oid::is_installed()
         {
             return; // another diff module owns the environment
@@ -870,6 +879,25 @@ fn install() -> bool {
         catalog_seams::is_catalog_relation_oid::set(|_relid| false);
         // format_type_be (error DETAIL construction only) probes visibility
         namespace_seams::type_is_visible::set(|_typid| Ok(true));
+        // print_typmod (typmod >= 0 error DETAIL) probes typmodout; an
+        // InvalidOid typmodout keeps the generic "(n)" print, no fmgr call
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            Ok(Some(syscache_seams::PgTypeIoShape {
+                oid: typid,
+                typinput: types_core::primitive::InvalidOid,
+                typoutput: types_core::primitive::InvalidOid,
+                typreceive: types_core::primitive::InvalidOid,
+                typsend: types_core::primitive::InvalidOid,
+                typmodin: types_core::primitive::InvalidOid,
+                typmodout: types_core::primitive::InvalidOid,
+                typelem: types_core::primitive::InvalidOid,
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }))
+        });
     });
     OWNED.load(Relaxed)
 }
