@@ -3,7 +3,8 @@
 //! C state machine (the regression suite compares exact parse results AND the
 
 use ::types_error::{
-    ERRCODE_NAME_TOO_LONG, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NAME_TOO_LONG, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ERRCODE_SYNTAX_ERROR,
 };
 use ::types_error::PgError;
 
@@ -13,6 +14,15 @@ use crate::repr::*;
 #[inline]
 fn mblen(s: &[u8]) -> usize {
     ::mbutils::pg_mblen(s).max(1) as usize
+}
+
+/// C's `isspace((unsigned char) c)` in the C locale, which is what
+/// ltxtquery_io.c's WAITOPERAND arm calls. Note the set includes '\v', which
+/// Rust's `u8::is_ascii_whitespace` omits, and excludes every byte >= 0x80,
+/// which `(c as char).is_whitespace()` would wrongly accept (U+0085, U+00A0).
+#[inline]
+fn is_space_c_locale(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
 #[inline]
@@ -668,15 +678,15 @@ fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
                     strval = st.i;
                     lenval = charlen as i32;
                     flag = 0;
-                } else if st.at_end() {
-                    // *buf == '\0' in WAITOPERAND is not handled by C here; it
-                    // falls through to the isspace check (NUL is not space) →
-                    // operand syntax error. But makepol's loop only calls
-                    // gettoken when not at END; reaching here means empty input
-                    // → the `!state.num` empty-query check fires. Return END so
-                    // makepol terminates and the caller reports "Empty query".
-                    return Ok(Tok { kind: END, val: 0, lenval: 0, strval: 0, flag: 0 });
-                } else if !(c as char).is_whitespace() {
+                // No end-of-input arm here, deliberately: C has none either.
+                // `cur()` yields C's NUL at the terminator, NUL is neither a
+                // label nor isspace, so end-of-input in WAITOPERAND falls
+                // through to "operand syntax error" — which is what C reports
+                // for a trailing operator ('a&'), for '!' alone, and for the
+                // empty query. Returning END here instead let makepol finish
+                // with an operator that has no right operand, and findoprnd
+                // then walked off the end of the ITEM array.
+                } else if !is_space_c_locale(c) {
                     return Err(PgError::error("operand syntax error")
                         .with_sqlstate(ERRCODE_SYNTAX_ERROR));
                 }
@@ -741,11 +751,11 @@ fn pushquery(
 ) -> Result<(), PgError> {
     if distance > 0xffff {
         return Err(PgError::error("value is too big")
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR));
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
     if lenval > 0xff {
         return Err(PgError::error("operand is too long")
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR));
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
     st.str.push(QNode { typ, val, distance, length: lenval, flag });
     st.num += 1;
@@ -761,7 +771,7 @@ fn pushval_asis(
 ) -> Result<(), PgError> {
     if lenval > 0xffff {
         return Err(PgError::error("word is too long")
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR));
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
     let distance = st.op.len() as i32;
     let crc = ltree_crc32_sz(&st.buf[strval..strval + lenval as usize]) as i32;

@@ -314,12 +314,12 @@ fn fc_lt_q_rregex(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
 
 fn fc_ltxtq_exec(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (tree, query) = cmp_args(fcinfo)?;
-    Ok(Datum::from_bool(op::ltxtq_exec(&tree, &query)))
+    Ok(Datum::from_bool(op::ltxtq_exec(&tree, &query)?))
 }
 
 fn fc_ltxtq_rexec(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (query, tree) = cmp_args(fcinfo)?;
-    Ok(Datum::from_bool(op::ltxtq_exec(&tree, &query)))
+    Ok(Datum::from_bool(op::ltxtq_exec(&tree, &query)?))
 }
 
 
@@ -354,7 +354,7 @@ fn array_iter_ltxtq(la: &[u8], query: &[u8]) -> PgResult<Option<Vec<u8>>> {
     let arr = array::LtreeArray::parse(la);
     arr.check_1d_no_nulls()?;
     for item in arr.elements() {
-        if op::ltxtq_exec(item, query) {
+        if op::ltxtq_exec(item, query)? {
             return Ok(Some(item.to_vec()));
         }
     }
@@ -840,8 +840,8 @@ mod tests {
     #[test]
     fn ltxtquery_match() {
         let q = io::parse_ltxtquery(b"Astro* & !pictures").unwrap();
-        assert!(op::ltxtq_exec(&img("Top.Astronomy.Stars"), &q));
-        assert!(!op::ltxtq_exec(&img("Top.Astronomy.pictures"), &q));
+        assert!(op::ltxtq_exec(&img("Top.Astronomy.Stars"), &q).unwrap());
+        assert!(!op::ltxtq_exec(&img("Top.Astronomy.pictures"), &q).unwrap());
     }
 
     #[test]
@@ -937,6 +937,152 @@ mod tests {
             fcinfo_with_arg(&ctx, Datum::from_usize(core::ptr::from_mut(&mut si) as usize));
         let e = fc_ltree_recv(None, &mut fcinfo).unwrap_err();
         assert_eq!(e.message(), "unsupported ltree version number 2");
+    }
+
+    /// p1-ltree REGRESSION (release blocker #2, fixed 2026-08-01): the
+    /// MATCHING operators recurse too — `check_cond` (C lquery_op.c:206
+    /// checkCond) once per lquery level, and `ltree_execute` (C
+    /// ltxtquery_op.c:23) once per ltxtquery tree node. Both were guarded by a
+    /// fixed `depth > 100_000` frame cap, unreachable by ~30-100x behind a real
+    /// backend stack, so the guard was dead code; `ltree_execute` additionally
+    /// returned a bare `false` — a silently wrong boolean — where C raises
+    /// 54001.
+    ///
+    /// The DISARMED leg is the must-fail control: with no stack base recorded,
+    /// `stack_is_too_deep()` short-circuits and the recursion runs unguarded,
+    /// which is exactly the pre-fix plane. It MUST die. If it ever stops
+    /// dying, this test has stopped proving that the guard is what saves us.
+    #[test]
+    fn matching_operators_deep_recursion_raise_54001_and_do_not_abort() {
+        const STATEMENT_TOO_COMPLEX: u32 = 5 + (4 << 6) + (1 << 24);
+        if let Ok(spec) = std::env::var("LTREE_OP_PROBE") {
+            let (which, arm) = spec.split_once(':').unwrap();
+            let armed = arm == "armed";
+            let which = which.to_string();
+            let n = 20_000;
+            // Build the images on a generous stack with the guard OFF: the
+            // PARSERS recurse too (findoprnd), and this test is about the
+            // OPERATORS. Only the operator call runs on the backend-sized
+            // stack below.
+            let (tree, query) = std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn({
+                    let which = which.clone();
+                    move || {
+                        if which == "check_cond" {
+                            (
+                                io::parse_ltree(
+                                    "a.".repeat(n).trim_end_matches('.').as_bytes(),
+                                )
+                                .unwrap(),
+                                io::parse_lquery(
+                                    format!("{}a", "*{0,1}.".repeat(n)).as_bytes(),
+                                )
+                                .unwrap(),
+                            )
+                        } else {
+                            (
+                                io::parse_ltree(b"a.b").unwrap(),
+                                io::parse_ltxtquery(
+                                    format!("{}a", "a&".repeat(n)).as_bytes(),
+                                )
+                                .unwrap(),
+                            )
+                        }
+                    }
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            let h = std::thread::Builder::new()
+                .stack_size(2 << 20)
+                .spawn(move || {
+                    if armed {
+                        stack_depth::set_stack_base();
+                        stack_depth::assign_max_stack_depth(2048);
+                    }
+                    if which == "check_cond" {
+                        op::ltq_regex(&tree, &query).map(|b| b.to_string())
+                    } else {
+                        op::ltxtq_exec(&tree, &query).map(|b| b.to_string())
+                    }
+                })
+                .unwrap();
+            match h.join().expect("must not panic") {
+                Ok(v) => eprintln!("OPPROBE OK {v}"),
+                Err(e) => eprintln!("OPPROBE ERR {}", e.sqlstate().0),
+            }
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let run = |spec: &str| {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "--nocapture",
+                    "tests::matching_operators_deep_recursion_raise_54001_and_do_not_abort",
+                ])
+                .env("LTREE_OP_PROBE", spec)
+                .output()
+                .unwrap();
+            let se = String::from_utf8_lossy(&out.stderr).to_string();
+            let verdict = se
+                .lines()
+                .find(|l| l.starts_with("OPPROBE"))
+                .map(str::to_string);
+            (out.status.success(), verdict, se)
+        };
+        for which in ["check_cond", "ltree_execute"] {
+            let (ok, verdict, se) = run(&format!("{which}:armed"));
+            assert!(ok, "{which} armed: process died: {se}");
+            assert_eq!(
+                verdict.as_deref(),
+                Some(format!("OPPROBE ERR {STATEMENT_TOO_COMPLEX}").as_str()),
+                "{which} armed: expected a clean 54001"
+            );
+            // must-fail control: unguarded, this recursion overflows the stack.
+            let (ok, verdict, se) = run(&format!("{which}:disarmed"));
+            assert!(
+                !ok && verdict.is_none() && se.contains("overflow"),
+                "{which} disarmed: expected an unguarded stack overflow (the \
+                 pre-fix plane); if this now survives, the guard is no longer \
+                 what prevents the abort and this control is vacuous. got: {se}"
+            );
+        }
+    }
+
+    /// p1-ltree docker-differential probe (not a gate; a bug-finding rig).
+    /// `LTREE_PROBE=<seeds.tsv>` prints `kind<TAB>hex<TAB>OK:<text>|ERR:<code>`
+    /// for each seed so the same seeds can be replayed through
+    /// docker postgres:18.3 and diffed. Inert without the env var.
+    #[test]
+    fn docker_differential_probe() {
+        let Ok(path) = std::env::var("LTREE_PROBE") else { return };
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Emulate a backend thread: the stack-depth guard short-circuits on
+        // base == 0, so without this the recursive parsers run UNGUARDED and
+        // the probe measures a plane the server never has.
+        stack_depth::set_stack_base();
+        stack_depth::assign_max_stack_depth(2048);
+        for line in body.lines() {
+            let (kind, hex) = line.split_once('\t').unwrap();
+            let buf: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            let r = match kind {
+                "ltree" => io::parse_ltree(&buf).map(|i| io::deparse_ltree(&i)),
+                "lquery" => io::parse_lquery(&buf).map(|i| io::deparse_lquery(&i)),
+                "ltxtquery" => io::parse_ltxtquery(&buf)
+                    .and_then(|i| io::deparse_ltxtquery(&i)),
+                k => panic!("bad kind {k}"),
+            };
+            let v = match r {
+                Ok(t) => format!("OK:{}", String::from_utf8_lossy(&t)),
+                Err(e) => format!("ERR:{}", e.sqlstate().0),
+            };
+            println!("{kind}\t{hex}\t{v}");
+        }
     }
 
     /// p1-ltree REGRESSION (divergence, fixed 2026-08-01): lquery repeat

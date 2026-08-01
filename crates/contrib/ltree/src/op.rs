@@ -324,12 +324,14 @@ fn check_cond(
     t_names: &[&[u8]],
     ti: usize,
     tlen: usize,
-    depth: u32,
 ) -> Result<bool, PgError> {
-    if depth > 100_000 {
-        return Err(PgError::error("stack depth limit exceeded")
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
-    }
+    // C lquery_op.c checkCond(): "Since this function recurses, it could be
+    // driven to stack overflow" -> check_stack_depth(), plus
+    // CHECK_FOR_INTERRUPTS() for "pathological patterns could take awhile".
+    // The guard must be BYTE-based like C's: a frame-count cap cannot bound
+    // stack bytes and at real frame sizes a 100_000-frame cap is unreachable
+    // behind any backend stack, i.e. dead code.
+    stack_depth::check_stack_depth()?;
     let mut qi = qi;
     let mut qlen = qlen;
     let mut ti = ti;
@@ -355,7 +357,7 @@ fn check_cond(
         let mut matchcnt = 0i32;
         while matchcnt < high {
             if matchcnt >= low
-                && check_cond(levels, nextqi, qlen, t_names, ti, tlen as usize, depth + 1)?
+                && check_cond(levels, nextqi, qlen, t_names, ti, tlen as usize)?
             {
                 return Ok(true);
             }
@@ -383,7 +385,6 @@ pub fn ltq_regex(tree: &[u8], query: &[u8]) -> Result<bool, PgError> {
         &t_names,
         0,
         t.numlevel(),
-        0,
     )
 }
 
@@ -416,53 +417,53 @@ fn ltree_execute(
     t_names: &[&[u8]],
     operand: &[u8],
     calcnot: bool,
-    depth: u32,
-) -> bool {
-    if depth > 100_000 {
-        return false;
-    }
+) -> Result<bool, PgError> {
+    // C ltxtquery_op.c ltree_execute(): check_stack_depth(). Returning a bare
+    // `false` on depth exhaustion (the previous frame-count shape) is a
+    // SILENTLY WRONG answer where C raises 54001, so this propagates instead.
+    stack_depth::check_stack_depth()?;
     let it = &items[cur];
     if it.typ as i32 == VAL {
-        checkcondition_str(t_names, operand, it)
+        Ok(checkcondition_str(t_names, operand, it))
     } else if it.val == b'!' as i32 {
         if calcnot {
-            !ltree_execute(items, cur + 1, t_names, operand, calcnot, depth + 1)
+            Ok(!ltree_execute(items, cur + 1, t_names, operand, calcnot)?)
         } else {
-            true
+            Ok(true)
         }
     } else if it.val == b'&' as i32 {
-        if ltree_execute(items, cur + it.left as usize, t_names, operand, calcnot, depth + 1) {
-            ltree_execute(items, cur + 1, t_names, operand, calcnot, depth + 1)
+        if ltree_execute(items, cur + it.left as usize, t_names, operand, calcnot)? {
+            ltree_execute(items, cur + 1, t_names, operand, calcnot)
         } else {
-            false
+            Ok(false)
         }
     } else {
         // |-operator
-        if ltree_execute(items, cur + it.left as usize, t_names, operand, calcnot, depth + 1) {
-            true
+        if ltree_execute(items, cur + it.left as usize, t_names, operand, calcnot)? {
+            Ok(true)
         } else {
-            ltree_execute(items, cur + 1, t_names, operand, calcnot, depth + 1)
+            ltree_execute(items, cur + 1, t_names, operand, calcnot)
         }
     }
 }
 
-pub fn ltxtq_exec(tree: &[u8], query: &[u8]) -> bool {
+pub fn ltxtq_exec(tree: &[u8], query: &[u8]) -> Result<bool, PgError> {
     let t = Ltree::new(tree);
     let q = Ltxtquery::new(query);
     let t_names: Vec<&[u8]> = t.levels().map(|l| l.name).collect();
     let items: Vec<Item> = (0..q.size()).map(|i| q.item(i)).collect();
     let operand = q.operand();
-    ltree_execute(&items, 0, &t_names, operand, true, 0)
+    ltree_execute(&items, 0, &t_names, operand, true)
 }
 
 pub fn ltxtq_exec_sign(
     query: &[u8],
     canlooksign: &dyn Fn(u8) -> bool,
     bit_set: &dyn Fn(i32) -> bool,
-) -> bool {
+) -> Result<bool, PgError> {
     let q = Ltxtquery::new(query);
     let items: Vec<Item> = (0..q.size()).map(|i| q.item(i)).collect();
-    ltree_execute_sign(&items, 0, canlooksign, bit_set, 0)
+    ltree_execute_sign(&items, 0, canlooksign, bit_set)
 }
 
 /// `ltree_execute` with the `checkcondition_bit` callback and `calcnot = false`.
@@ -471,34 +472,33 @@ fn ltree_execute_sign(
     cur: usize,
     canlooksign: &dyn Fn(u8) -> bool,
     bit_set: &dyn Fn(i32) -> bool,
-    depth: u32,
-) -> bool {
-    if depth > 100_000 {
-        return false;
-    }
+) -> Result<bool, PgError> {
+    // C ltxtquery_op.c ltree_execute() via checkcondition_bit (see above).
+    stack_depth::check_stack_depth()?;
     let it = &items[cur];
     if it.typ as i32 == VAL {
         // checkcondition_bit: FLG_CANLOOKSIGN(val->flag) ? GETBIT(sign, HASHVAL(val->val)) : true
         if canlooksign(it.flag) {
-            bit_set(it.val)
+            Ok(bit_set(it.val))
         } else {
-            true
+            Ok(true)
         }
     } else if it.val == b'!' as i32 {
-        // calcnot == false → a NOT node optimistically matches.
-        true
+        // calcnot == false -> a NOT node optimistically matches.
+        Ok(true)
     } else if it.val == b'&' as i32 {
-        if ltree_execute_sign(items, cur + it.left as usize, canlooksign, bit_set, depth + 1) {
-            ltree_execute_sign(items, cur + 1, canlooksign, bit_set, depth + 1)
+        if ltree_execute_sign(items, cur + it.left as usize, canlooksign, bit_set)? {
+            ltree_execute_sign(items, cur + 1, canlooksign, bit_set)
         } else {
-            false
+            Ok(false)
         }
     } else {
         // |-operator
-        if ltree_execute_sign(items, cur + it.left as usize, canlooksign, bit_set, depth + 1) {
-            true
+        if ltree_execute_sign(items, cur + it.left as usize, canlooksign, bit_set)? {
+            Ok(true)
         } else {
-            ltree_execute_sign(items, cur + 1, canlooksign, bit_set, depth + 1)
+            ltree_execute_sign(items, cur + 1, canlooksign, bit_set)
         }
     }
 }
+

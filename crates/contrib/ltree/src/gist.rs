@@ -570,16 +570,16 @@ fn gist_between(key: &LtgKey, query: &[u8]) -> bool {
     true
 }
 
-fn gist_qtxt(key: &LtgKey, query: &[u8], siglen: usize) -> bool {
+fn gist_qtxt(key: &LtgKey, query: &[u8], siglen: usize) -> PgResult<bool> {
     if key.is_alltrue() {
-        return true;
+        return Ok(true);
     }
     let sign = &key.sign;
-    op::ltxtq_exec_sign(
-        query,
-        &flg_canlooksign,
-        &|val| getbit(sign, hashval(val, siglen)),
-    )
+    op::ltxtq_exec_sign(query, &flg_canlooksign, &|val| {
+        getbit(sign, hashval(val, siglen))
+    })
+    .map_err(Box::new)
+    .map_err(Into::into)
 }
 
 fn arrq_cons(key: &LtgKey, query_array: &[u8], siglen: usize) -> PgResult<bool> {
@@ -667,9 +667,9 @@ pub fn ltree_consistent(
         // 14, 15: ltree @ ltxtquery
         14 | 15 => {
             if is_leaf {
-                op::ltxtq_exec(key.get_lnode(), &query)
+                op::ltxtq_exec(key.get_lnode(), &query)?
             } else {
-                gist_qtxt(&key, &query, siglen)
+                gist_qtxt(&key, &query, siglen)?
             }
         }
         // 16, 17: ltree ? lquery[]
@@ -996,7 +996,7 @@ pub fn array_consistent(
     let res = match strategy {
         10 | 11 => gist_te(&key, &query, siglen),
         12 | 13 => gist_qe(&key, &query, siglen),
-        14 | 15 => gist_qtxt(&key, &query, siglen),
+        14 | 15 => gist_qtxt(&key, &query, siglen)?,
         16 | 17 => array_arrq_cons(&key, &query, siglen)?,
         other => {
             return Err(PgError::error(format!("unrecognized StrategyNumber: {other}")).into());
