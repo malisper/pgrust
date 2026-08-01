@@ -406,6 +406,17 @@ fn custom_shapes() -> &'static std::collections::HashMap<String, Vec<Vec<String>
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
+                // CURATED SEEDS ONLY (`seed-*`): every one was validated
+                // against the C oracle before it was committed. Learning
+                // shapes from FUZZER-GROWN corpus entries self-poisons the
+                // gate — witnessed: libFuzzer wrote
+                // `{BOOLEXPR :boolop and :args <> :locatiol -1}` into the
+                // corpus, the gate then accepted that misspelled field name
+                // as a legal BOOLEXPR shape, and the harness reported the
+                // resulting (C-accepts / port-verifies) panic as a divergence.
+                if !e.file_name().to_string_lossy().starts_with("seed-") {
+                    continue;
+                }
                 let Ok(data) = std::fs::read(e.path()) else { continue };
                 let body = if data.first() == Some(&0) { &data[1..] } else { &data[..] };
                 let Ok(text) = std::str::from_utf8(body) else { continue };
@@ -481,9 +492,58 @@ fn is_well_formed(text: &str) -> bool {
 /// permissiveness delta, but it is only reachable from text no PG writer
 /// emits, so the compared domain excludes it (finding recorded in the lane
 /// report; witnessed by `{GROUPINGSET :kind 0 :content <> K:location -1 }`).
+/// Is a BARE token (a list element or a top-level value, i.e. not a field name
+/// and not a field value) one that C's own writer could emit?
+///
+/// outfuncs writes exactly: `<>` for NULL, `"..."` for strings (with
+/// outToken's backslash escapes), `%d` integers, shortest-decimal floats,
+/// `true`/`false`, and `b<bits>` bitstrings — plus the structural tokens.
+/// C's `nodeTokenType` classifies by LEADING character and then parses with
+/// `atoi`/`strtol`, so `8A` reads as the integer 8 while the Rust port
+/// validates the whole token and panics; same atoi-prefix permissiveness as
+/// the field-kind case, so it is gated the same way.
+fn bare_token_producible(tok: &str) -> bool {
+    if matches!(tok, "{" | "}" | "(" | ")" | "<>" | "true" | "false") {
+        return true;
+    }
+    // list-kind markers: (i ...) (o ...) (x ...) (b ...)
+    if matches!(tok, "i" | "o" | "x" | "b") {
+        return true;
+    }
+    let bytes = tok.as_bytes();
+    // quoted string token (nodeTokenType: leading and trailing '"')
+    if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
+        return true;
+    }
+    // bitstring: b followed by bits
+    if bytes[0] == b'b' && tok[1..].bytes().all(|c| c == b'0' || c == b'1') {
+        return true;
+    }
+    // numeric: C's nodeTokenType takes a leading digit/sign/dot, then the
+    // writer only ever emits a fully-valid integer or float
+    let lead_numeric = bytes[0].is_ascii_digit()
+        || ((bytes[0] == b'-' || bytes[0] == b'+' || bytes[0] == b'.') && bytes.len() > 1);
+    if lead_numeric {
+        let body = tok.strip_prefix('-').unwrap_or(tok);
+        let body = body.strip_prefix('+').unwrap_or(body);
+        return body.bytes().all(|c| c.is_ascii_digit()) || tok.parse::<f64>().is_ok();
+    }
+    // an unquoted word: outfuncs emits these only for enum-ish spellings the
+    // hand-written readers consume as field VALUES (handled at field slots),
+    // never as a bare list element.
+    false
+}
+
 fn well_formed_token_stream(text: &str) -> bool {
     let exp = expected_fields();
     let toks = pg_strtok_all(text);
+    // tokens consumed as a field name, a kind-checked field value, or inside a
+    // CUSTOM-reader block (whose whole field sequence is validated against the
+    // C-validated corpus shapes, so its unquoted enum-ish value tokens —
+    // BOOLEXPR's `and`, RANGETBLENTRY's relkind `r`, ... — are producible by
+    // construction and must not be re-judged by the bare-token rule).
+    let mut consumed = vec![false; toks.len()];
+    let mut custom_depth = 0usize;
     // stack of (expected field list, next index)
     let mut stack: Vec<(Option<&Vec<(String, String)>>, usize)> = Vec::new();
     let mut k = 0;
@@ -491,21 +551,32 @@ fn well_formed_token_stream(text: &str) -> bool {
         let t = toks[k];
         if t == "{" {
             let Some(&label) = toks.get(k + 1) else { return false };
-            let e = if CUSTOM_READER_LABELS.contains(&label) {
-                None
-            } else {
-                exp.get(label)
-            };
+            let is_custom = CUSTOM_READER_LABELS.contains(&label);
+            let e = if is_custom { None } else { exp.get(label) };
+            if is_custom {
+                custom_depth += 1;
+            }
             stack.push((e, 0));
+            consumed[k] = true;
+            consumed[k + 1] = true;
             k += 2;
             continue;
         }
         if t == "}" {
             match stack.pop() {
                 Some((Some(fields), n)) if n != fields.len() => return false,
+                Some((None, _)) => {
+                    // closing a custom block (or an unknown label)
+                    custom_depth = custom_depth.saturating_sub(1);
+                }
                 Some(_) => {}
                 None => return false,
             }
+            k += 1;
+            continue;
+        }
+        if custom_depth > 0 {
+            consumed[k] = true;
             k += 1;
             continue;
         }
@@ -517,6 +588,7 @@ fn well_formed_token_stream(text: &str) -> bool {
                 if t != format!(":{fname}") {
                     return false;
                 }
+                consumed[k] = true;
                 if let Some(top) = stack.last_mut() {
                     top.1 += 1;
                 }
@@ -553,6 +625,7 @@ fn well_formed_token_stream(text: &str) -> bool {
                         if !value_token_matches_kind(v, kind) {
                             return false;
                         }
+                        consumed[k] = true;
                         k += 1;
                         continue;
                     }
@@ -562,7 +635,14 @@ fn well_formed_token_stream(text: &str) -> bool {
         }
         k += 1;
     }
-    stack.is_empty()
+    if !stack.is_empty() {
+        return false;
+    }
+    // every token not consumed at a field slot must be writer-producible
+    // (list elements, top-level values, nested-list contents)
+    toks.iter()
+        .zip(consumed.iter())
+        .all(|(t, &c)| c || bare_token_producible(t))
 }
 
 
