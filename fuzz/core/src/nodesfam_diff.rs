@@ -786,12 +786,42 @@ fn parse_block(toks: &[&str], k: usize) -> Option<usize> {
                     // constvalue's payload is validated by
                     // const_datums_are_well_formed (it is not a single value)
                     if fname == "constvalue" {
-                        // skip the length token, `[`, the bytes and `]`
-                        while !matches!(toks.get(j).copied(), Some("]") | Some("}") | None) {
+                        // readDatum's payload SHAPE (length, `[`, decimal byte
+                        // tokens, `]`) or the `<>` NULL marker. A loose
+                        // skip-to-`]`-or-`}` used to swallow arbitrary
+                        // corrupted content and let a shape through that
+                        // SEGV'd _readRangeTblEntry; the exact byte COUNT is
+                        // enforced by const_datums_are_well_formed, which
+                        // knows the block's constbyval/constisnull.
+                        if toks.get(j).copied() == Some("<>") {
                             j += 1;
+                            continue;
                         }
-                        if toks.get(j).copied() == Some("]") {
-                            j += 1;
+                        let lt = toks.get(j).copied()?;
+                        if lt.is_empty() || !lt.bytes().all(|b| b.is_ascii_digit()) {
+                            return None;
+                        }
+                        j += 1;
+                        if toks.get(j).copied()? != "[" {
+                            return None;
+                        }
+                        j += 1;
+                        loop {
+                            match toks.get(j).copied()? {
+                                "]" => {
+                                    j += 1;
+                                    break;
+                                }
+                                t => {
+                                    let body = t.strip_prefix('-').unwrap_or(t);
+                                    if body.is_empty()
+                                        || !body.bytes().all(|b| b.is_ascii_digit())
+                                    {
+                                        return None;
+                                    }
+                                    j += 1;
+                                }
+                            }
                         }
                         continue;
                     }

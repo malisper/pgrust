@@ -1153,3 +1153,14 @@ fn nonnull_carve_is_whitespace_insensitive() {
         );
     }
 }
+
+/// The `:constvalue` payload must match readDatum's SHAPE wherever it appears;
+/// a loose skip-to-`]` swallowed corrupted content and let a shape through
+/// that SEGV'd _readRangeTblEntry (witness from a 25M local leg).
+#[test]
+fn corrupted_constvalue_payload_is_gated() {
+    let bad = "{RANGETBLENTRY :alisa <> :eref {ALIAS :aliasname s :colnames (\"a\")} \
+               :qtekind 0 :relidONST \u{1}T :constvalue -$qqqqelid 1 :i{CONCT :c:ae 1 \
+               [ 1e :serityQuals <s}";
+    assert!(!run_text(bad.as_bytes()), "corrupted constvalue payload reached the oracle");
+}
