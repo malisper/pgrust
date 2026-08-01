@@ -267,22 +267,21 @@ mod out_ceiling {
     use super::*;
     use crate::io::{multirange_out, MultirangeIOData};
 
-    std::thread_local! {
-        static HUGE_CSTR: std::cell::RefCell<std::vec::Vec<u8>> =
-            const { std::cell::RefCell::new(std::vec::Vec::new()) };
-    }
-
-    /// range_out stand-in returning a huge NUL-terminated cstring.
-    fn fc_huge_range_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-        HUGE_CSTR.with(|c| {
-            let mut b = c.borrow_mut();
-            if b.is_empty() {
-                let n = ::mcx::MAX_ALLOC_SIZE / 2 + 16;
-                b.resize(n, b'x');
-                b.push(0);
-            }
-            Ok(Datum::from_usize(b.as_ptr() as usize))
-        })
+    /// range_out stand-in returning a huge NUL-terminated cstring, built in
+    /// the caller's result mcx (the fc_mytextin pattern from rowtypes'
+    /// tests_ws.rs) so the datum outlives this call without any TLS scratch
+    /// (the tree-wide TLS census is textual and pinned; a test thread_local
+    /// here would move it).
+    fn fc_huge_range_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let n = ::mcx::MAX_ALLOC_SIZE / 2 + 16;
+        let mut b: PgVec<'_, u8> = ::mcx::vec_with_capacity_in(mcx, n + 1)?;
+        b.resize(n, b'x');
+        b.push(0);
+        let d = Datum::from_usize(b.as_ptr() as usize);
+        // Lives until the test's MemoryContext drops.
+        core::mem::forget(b);
+        Ok(d)
     }
 
     #[test]
