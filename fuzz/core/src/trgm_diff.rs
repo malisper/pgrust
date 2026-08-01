@@ -54,9 +54,21 @@
 //!     the phase1-ranking.tsv cell.
 //!   - trgm_regexp (regexp.rs): reserved arm 9, second half of the lane.
 //!
-//! INJECTION SWEEP: kill table maintained at the END of this header —
-//! filled in by the sweep run; a plane with an unfilled table has never
-//! been shown to compare anything.
+//! INJECTION SWEEP (2026-08-01, run at driver completion; each defect
+//! planted alone, `cargo test trgm_diff` seed replay observed FAILING on
+//! the expected plane, then reverted — seeds-only kills, no fuzzing):
+//!   i1 cmp_trgm signed -> unsigned byte cmp (product trgm.rs)
+//!      KILLED: show_trgm rendered-element order + seed replay (arm 1
+//!      CRC/high-bit ordering seeds).
+//!   i2 make_trigrams `bytelen < 3` gate -> `< 4` (product trgm.rs)
+//!      KILLED: generate_wildcard_trgm + generate arms (short-word seeds).
+//!   i3 iterate_word_similarity drop `count += 1` (product trgm.rs)
+//!      KILLED: word_similarity(flags=2) value plane (rust 0 vs c
+//!      0.33333334, hedgehog seed).
+//!   i4 wrong CRC variant in harness env wiring (bit-flipped legacy crc)
+//!      KILLED: compact_trigram raw-byte arm + arm-1 CRC trigram seeds.
+//!   i5 get_wildcard_part drop trailing-pad push (product trgm.rs)
+//!      KILLED: generate_wildcard_trgm value plane (pct20/esc seeds).
 //!
 //! Ground-truth pins (live postgres:18.3 docker, aarch64 Debian,
 //! 2026-08-01): the arm-tagged unit tests at the bottom.
@@ -277,11 +289,19 @@ fn fc_ready() -> bool {
         // First-wins across lanes sharing one test binary.
         let _trgm = catch_unwind(pg_trgm::init_seams);
         if cfg!(fuzzing) {
+            // contriba_diff guc_env_bootstrap, verbatim environment set:
+            // fc wrappers reach GUC reads + array construction, which walk
+            // these process-global seams.
             let _g1 = catch_unwind(guc_tables::init_seams);
             let _g2 = catch_unwind(elog::init_seams);
             let _g3 = catch_unwind(guc::init_seams);
+            let _g4 = catch_unwind(|| xact_seams::is_in_parallel_mode::set(|| false));
+            // the SHIPPED bool parser (computation stays real; seam = wiring)
+            let _g4b = catch_unwind(|| scalar_seams::parse_bool::set(adt_bool::parse_bool));
+            let _g5 = catch_unwind(|| aclchk_seams::pg_parameter_aclcheck_set::set(|_, _| Ok(true)));
+            let _g6 = catch_unwind(|| superuser_seams::superuser::set(|| Ok(true)));
             if !guc::store::is_initialized() {
-                let _g4 = catch_unwind(guc::store::initialize_guc_options);
+                let _g7 = catch_unwind(guc::store::initialize_guc_options);
             }
         }
     });
