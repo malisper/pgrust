@@ -19,6 +19,12 @@ fn main() {
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         .file("csrc/pg_libfam_io.c")
+        // stub-pin facility (fuzz/STUBS.md): shared thread-local pinned
+        // session state (GUC/clock/prng/workmem) + setters the Rust driver
+        // (core/src/stubs.rs) calls, + consumer wrappers routing the pinned
+        // globals into verbatim vendored consumers by extern call. NOT
+        // PostgreSQL source; stdint-only, no family include tree.
+        .file("csrc/stubshims/pg_stub_state.c")
         // portfam_diff oracle (p1-microbatch PORTFAM) compiles in its OWN
         // cc::Build below (pg_difffuzz_portfam): it needs the
         // csrc/portfam/{shim,include} tree, whose c.h/postgres.h must not

@@ -258,6 +258,11 @@ pub(crate) fn c_oracle_serial() -> std::sync::MutexGuard<'static, ()> {
     M.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+// stubs: the shared stub-pin facility (stub:guc / stub:clock / stub:prng /
+// stub:workmem) — both-sides pinned session state for state-dependent
+// differential targets. See fuzz/STUBS.md and csrc/stubshims/.
+pub mod stubs;
+
 pub mod diff;
 pub use diff::{
     float_in_diff, float_math2_diff, float_math_diff, float_misc_diff, float_out_diff, geo_diff,

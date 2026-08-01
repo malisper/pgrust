@@ -606,6 +606,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "pqformat",
+ "stack_depth",
  "stringinfo",
  "typcache",
  "types_core",
@@ -752,7 +753,9 @@ dependencies = [
  "elog",
  "mbutils",
  "mcx",
+ "postgres_seams",
  "pqformat",
+ "stack_depth",
  "stringinfo",
  "ts_locale",
  "types_core",
@@ -784,7 +787,9 @@ dependencies = [
  "heaptuple",
  "mbutils",
  "mcx",
+ "postgres_seams",
  "pqformat",
+ "stack_depth",
  "stringinfo",
  "tupdesc",
  "typcache_seams",
@@ -1782,6 +1787,7 @@ dependencies = [
  "relpath_seams",
  "ryu",
  "scalar_seams",
+ "scan_fgram",
  "scram_common",
  "stack_depth",
  "strftime",
@@ -3460,6 +3466,8 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "mcx",
+ "ryu",
+ "stack_depth_core",
  "types_core",
  "types_error",
  "types_nodes",
@@ -4205,6 +4213,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "mcx",
+ "stack_depth_core",
  "types_core",
  "types_error",
  "types_nodes",
@@ -4593,6 +4602,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "scan_fgram"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "keywords",
+ "mcx",
+ "numutils",
+ "parser_small1",
+ "types_core",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4961,12 +4985,20 @@ dependencies = [
 name = "stack_depth"
 version = "0.0.0"
 dependencies = [
- "elog",
  "guc",
  "guc_tables",
- "libc",
+ "stack_depth_core",
  "types_error",
  "types_guc",
+]
+
+[[package]]
+name = "stack_depth_core"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "libc",
+ "types_error",
 ]
 
 [[package]]

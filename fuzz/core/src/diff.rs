@@ -519,6 +519,10 @@ pub fn float_math2_diff(data: &[u8]) {
 //   14: write_float8_transarray roundtrip: the written image must be
 //       ACCEPTED by the vendored C check and yield the same value bits —
 //       witnesses the writer emits exactly a C-valid transarray.
+//   15: float8out via the SHARED stub:guc facility (fuzz/STUBS.md demo
+//       wiring): payload = [efd byte][8 bytes le f64]; the efd pin is set
+//       on BOTH sides through stubs::guc::pin_extra_float_digits and both
+//       sides run their GUC-reading output paths (no efd argument).
 //   Extra bytes ignored so libFuzzer can grow/shrink freely.
 
 fn dsign_ok(x: f64) -> types_error::PgResult<f64> {
@@ -554,7 +558,7 @@ pub fn float_misc_diff(data: &[u8]) {
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
-    match sel % 15 {
+    match sel % 16 {
         arm @ 0..=7 => {
             if rest.len() < 8 {
                 return;
@@ -692,6 +696,34 @@ pub fn float_misc_diff(data: &[u8]) {
                     &image[..need]
                 ),
             }
+        }
+        15 => {
+            // stub:guc demonstration wiring (fuzz/STUBS.md): the
+            // extra_float_digits pin goes through the SHARED stub facility
+            // instead of argument-passing — the driver pins the GUC on both
+            // sides from the fuzz byte (Rust: the adt_float session cell the
+            // shipped float8out reads; C: pg_stub_extra_float_digits, read
+            // by the verbatim float8out_internal_efd via the stubshims
+            // wrapper), then both sides run their GUC-READING entry points
+            // with no efd argument in sight.
+            if rest.len() < 9 {
+                return;
+            }
+            let efd = crate::stubs::guc::pin_extra_float_digits(rest[0]);
+            let v = f64::from_le_bytes(rest[1..9].try_into().unwrap());
+            let mut cbuf = [0u8; 40];
+            let clen =
+                unsafe { crate::stubs::pg_stub_float8out_guc(v, cbuf.as_mut_ptr().cast()) }
+                    as usize;
+            let mut rbuf = [0u8; 64];
+            let rlen = adt_float::float8out(v, &mut rbuf);
+            assert!(
+                cbuf[..clen] == rbuf[..rlen],
+                "float8out(stub:guc efd={efd}) DIVERGENCE bits={:016x}: C={:?} Rust={:?}",
+                v.to_bits(),
+                std::str::from_utf8(&cbuf[..clen]),
+                std::str::from_utf8(&rbuf[..rlen])
+            );
         }
         14 => {
             let Some((&nsel, vbytes)) = rest.split_first() else {
@@ -1163,6 +1195,11 @@ mod tests {
                 let mut d4 = vec![10u8, efd_byte];
                 d4.extend_from_slice(&((bits >> 32) as u32).to_le_bytes());
                 float_misc_diff(&d4);
+                // stub:guc demo arm (15): same corpus through the SHARED
+                // both-sides GUC pin instead of argument passing.
+                let mut ds = vec![15u8, efd_byte];
+                ds.extend_from_slice(&bits.to_le_bytes());
+                float_misc_diff(&ds);
             }
         }
         // transarray arms: writer roundtrip + check over crafted images

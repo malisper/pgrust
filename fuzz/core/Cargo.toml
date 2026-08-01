@@ -78,6 +78,7 @@ adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (sca
 # mbconv_diff (p1-lanez encoding-conversion family):
 conv = { path = "../../crates/backend/utils/mb/conv" }
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+scan_fgram = { path = "../../crates/backend/parser/scan_fgram" }  # stubs: standard_conforming_strings session cell
 adt_json = { path = "../../crates/backend/utils/adt/json" }  # json_diff (scaffold.py)
 arrayfuncs = { path = "../../crates/backend/utils/adt/arrayfuncs" }  # arrayfuncs_diff (scaffold.py)
 adt_int = { path = "../../crates/backend/utils/adt/int" }    # arrayfuncs_diff element io
