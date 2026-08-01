@@ -1007,3 +1007,60 @@ fn null_const_value_must_be_the_marker() {
                 :constbyval true :constisnull true :location -1 :constvalue <>}";
     assert!(run_text(good.as_bytes()), "gate rejected a valid NULL Const");
 }
+
+/// A custom reader's shape key includes its DISCRIMINANT enum values, because
+/// its field sequence depends on them (_readRangeTblEntry switches on rtekind).
+/// `:rtekind 6` (RTE_CTE) with a relation-shaped body must be gated, and the
+/// seeded rtekind must still be compared.
+#[test]
+fn custom_shape_key_includes_discriminants() {
+    let cte_shaped_wrong = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r \
+        :colnames (\"a\")} :rtekind 6 :relid 1 :inh false :relkind r :rellockmode 1 \
+        :perminfoindex 0 :tablesample <> :lateral false :inFromCl true :securityQuals <>}";
+    assert!(!run_text(cte_shaped_wrong.as_bytes()), "rtekind 6 with a relation body passed");
+    let relation = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colnames (\"a\")} \
+        :rtekind 0 :relid 1 :inh false :relkind r :rellockmode 1 :perminfoindex 0 \
+        :tablesample <> :lateral false :inFromCl true :securityQuals <>}";
+    assert!(run_text(relation.as_bytes()), "the seeded rtekind stopped being compared");
+}
+
+/// RANGETBLENTRY's reader is a 10-way switch on rtekind, and the gate keys
+/// shapes by the discriminant — so EVERY RTEKind needs its own validated seed,
+/// or that branch is silently gated out of the compared domain (the
+/// coverage-completeness trap, one level below the tag census).
+///
+/// SCOPE GAP OF RECORD: the port implements 8 of C's 10 rtekind arms.
+/// RTE_RESULT (8) alone hits its `arm unported` panic, so it is exercised on
+/// the C side and charged to the unported carve rather than compared. Named
+/// here so the gap is visible: RTE_RESULT is legal in a stored view rule
+/// (SELECT with no FROM), so this is a genuine port TODO, not a non-surface.
+const UNPORTED_RTEKINDS: &[i64] = &[8];
+
+#[test]
+fn every_rtekind_branch_has_a_seed_and_is_compared() {
+    let c_kinds = enum_domains()
+        .get("RTEKind")
+        .and_then(|v| v.clone())
+        .expect("RTEKind must be a modelled enum");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
+    let mut compared = 0;
+    for k in &c_kinds {
+        let p = dir.join(format!("seed-rangetblentry-rtekind{k}"));
+        let data = std::fs::read(&p)
+            .unwrap_or_else(|_| panic!("no seed for RTEKind {k} — that branch is gated out"));
+        let before = UNPORTED_CARVES.load(std::sync::atomic::Ordering::Relaxed);
+        let full = run_text(&data[1..]);
+        let carved = UNPORTED_CARVES.load(std::sync::atomic::Ordering::Relaxed) > before;
+        if UNPORTED_RTEKINDS.contains(k) {
+            assert!(carved, "RTEKind {k} is recorded unported but was not carved");
+        } else {
+            assert!(full, "RTEKind {k}'s seed does not reach a full comparison");
+            compared += 1;
+        }
+    }
+    println!(
+        "RTEKind: {compared}/{} branches fully compared, {:?} unported (carved)",
+        c_kinds.len(),
+        UNPORTED_RTEKINDS
+    );
+}

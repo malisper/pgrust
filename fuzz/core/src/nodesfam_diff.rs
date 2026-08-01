@@ -517,8 +517,20 @@ fn text_blocks(text: &str) -> Vec<(String, Vec<String>)> {
             continue;
         }
         if let Some(name) = t.strip_prefix(':') {
+            // DISCRIMINANT-AWARE SHAPE KEY: a custom reader's field sequence
+            // depends on an enum field's VALUE (_readRangeTblEntry switches on
+            // rtekind, _readA_Expr on kind), so the value joins the key.
+            // Without this, `:rtekind 6` (RTE_CTE) with a relation-shaped body
+            // matched the relation shape, C read its CTE branch happily (its
+            // READ macros do not verify field names) and the port panicked.
+            let entry = match custom_field_kinds().get(name) {
+                Some(kind) if kind.starts_with("READ_ENUM_FIELD:") => {
+                    format!("{name}={}", toks.get(k + 1).copied().unwrap_or(""))
+                }
+                _ => name.to_owned(),
+            };
             if let Some(top) = stack.last_mut() {
-                top.1.push(name.to_owned());
+                top.1.push(entry);
             }
         }
         k += 1;
