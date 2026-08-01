@@ -923,3 +923,23 @@ fn out_of_range_integer_token_does_not_wrap() {
         assert_eq!(outfuncs::nodeToString(m, n).expect("out").as_str(), t);
     }
 }
+
+/// A node field's value token must be one `outNode` can write: `<>`, `{`, or
+/// `(`. Witness: `{FROMEXPR :fromlist 2> :quals <> }` — `2>` is a
+/// digit-leading token C classifies T_Float and stores in the node field,
+/// where the port expects a list.
+#[test]
+fn node_field_value_must_be_node_shaped() {
+    assert!(
+        !run_text(b"{FROMEXPR :fromlist 2> :quals <> }"),
+        "gate let a non-node token into a node field"
+    );
+    for ok in [
+        &b"{FROMEXPR :fromlist <> :quals <> }"[..],
+        b"{FROMEXPR :fromlist () :quals <> }",
+        b"{FROMEXPR :fromlist ({RANGETBLREF :rtindex 1}) :quals <> }",
+    ] {
+        assert!(run_text(ok), "gate rejected a writer-producible node field: {:?}",
+                std::str::from_utf8(ok).unwrap());
+    }
+}

@@ -634,116 +634,118 @@ fn bare_token_producible(tok: &str) -> bool {
 }
 
 fn well_formed_token_stream(text: &str) -> bool {
-    let exp = expected_fields();
     let toks = pg_strtok_all(text);
-    // tokens consumed as a field name, a kind-checked field value, or inside a
-    // CUSTOM-reader block (whose whole field sequence is validated against the
-    // C-validated corpus shapes, so its unquoted enum-ish value tokens —
-    // BOOLEXPR's `and`, RANGETBLENTRY's relkind `r`, ... — are producible by
-    // construction and must not be re-judged by the bare-token rule).
-    let mut consumed = vec![false; toks.len()];
-    let mut custom_depth = 0usize;
-    // stack of (expected field list, next index)
-    let mut stack: Vec<(Option<&Vec<(String, String)>>, usize)> = Vec::new();
     let mut k = 0;
+    // the text is a sequence of top-level values (normally exactly one)
     while k < toks.len() {
-        let t = toks[k];
-        if t == "{" {
-            let Some(&label) = toks.get(k + 1) else { return false };
-            let is_custom = CUSTOM_READER_LABELS.contains(&label);
-            let e = if is_custom { None } else { exp.get(label) };
-            if is_custom {
-                custom_depth += 1;
+        match parse_value(&toks, k) {
+            Some(next) => {
+                debug_assert!(next > k);
+                k = next;
             }
-            stack.push((e, 0));
-            consumed[k] = true;
-            consumed[k + 1] = true;
-            k += 2;
-            continue;
+            None => return false,
         }
-        if t == "}" {
-            match stack.pop() {
-                Some((Some(fields), n)) if n != fields.len() => return false,
-                Some((None, _)) => {
-                    // closing a custom block (or an unknown label)
-                    custom_depth = custom_depth.saturating_sub(1);
-                }
-                Some(_) => {}
-                None => return false,
-            }
-            k += 1;
-            continue;
-        }
-        if custom_depth > 0 {
-            consumed[k] = true;
-            k += 1;
-            continue;
-        }
-        // inside a generated-reader block, the next non-structural token at a
-        // field slot must be exactly the expected field name
-        if let Some((Some(fields), n)) = stack.last().map(|e| (e.0, e.1)) {
-            if n < fields.len() {
-                let (fname, kind) = (&fields[n].0, fields[n].1.as_str());
-                if t != format!(":{fname}") {
-                    return false;
-                }
-                consumed[k] = true;
-                if let Some(top) = stack.last_mut() {
-                    top.1 += 1;
-                }
-                k += 1;
-                // consume this field's VALUE: either a nested block/list
-                // (handled by the loop) or a single token
-                match toks.get(k).copied() {
-                    Some("{") | Some("(") => {
-                        // let the structural walk handle it; find the match
-                        let open = toks[k];
-                        let close = if open == "{" { "}" } else { ")" };
-                        let mut depth = 0usize;
-                        while k < toks.len() {
-                            if toks[k] == open {
-                                depth += 1;
-                            } else if toks[k] == close {
-                                depth -= 1;
-                                if depth == 0 {
-                                    k += 1;
-                                    break;
-                                }
-                            } else if toks[k] == "{" || toks[k] == "(" {
-                                // mixed nesting inside a value: validate it
-                                // by recursing over the whole remaining text
-                                // is unnecessary — nested blocks are visited
-                                // by text_blocks/this walk on their own.
-                            }
-                            k += 1;
-                        }
-                        // re-walk nested blocks for their own field checks
-                        continue;
-                    }
-                    Some(v) => {
-                        if !value_token_matches_kind(v, kind) {
-                            return false;
-                        }
-                        consumed[k] = true;
-                        k += 1;
-                        continue;
-                    }
-                    None => return false,
-                }
-            }
-        }
-        k += 1;
     }
-    if !stack.is_empty() {
-        return false;
-    }
-    // every token not consumed at a field slot must be writer-producible
-    // (list elements, top-level values, nested-list contents)
-    toks.iter()
-        .zip(consumed.iter())
-        .all(|(t, &c)| c || bare_token_producible(t))
+    true
 }
 
+/// One node-text VALUE: `<>`, a bare token, a `{...}` block, or a `(...)` list.
+/// Returns the index just past it, or None if it is not writer-producible.
+fn parse_value(toks: &[&str], k: usize) -> Option<usize> {
+    match toks.get(k).copied()? {
+        "{" => parse_block(toks, k),
+        "(" => parse_list(toks, k),
+        ")" | "}" => None, // unbalanced
+        t if bare_token_producible(t) => Some(k + 1),
+        _ => None,
+    }
+}
+
+/// `( ... )`: an optional kind marker (`i`/`o`/`x`/`b`) then values.
+fn parse_list(toks: &[&str], k: usize) -> Option<usize> {
+    debug_assert_eq!(toks[k], "(");
+    let mut j = k + 1;
+    // typed lists carry a one-letter marker whose elements are plain ints
+    if matches!(toks.get(j).copied(), Some("i") | Some("o") | Some("x") | Some("b")) {
+        j += 1;
+        while let Some(t) = toks.get(j).copied() {
+            if t == ")" {
+                return Some(j + 1);
+            }
+            // C reads these with strtol/atoi; the writer emits decimals
+            if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+                return None;
+            }
+            j += 1;
+        }
+        return None;
+    }
+    loop {
+        match toks.get(j).copied()? {
+            ")" => return Some(j + 1),
+            _ => j = parse_value(toks, j)?,
+        }
+    }
+}
+
+/// `{LABEL :field value ... }`, validated against C's expected field sequence
+/// for that label (or, for a CUSTOM reader, consumed as a whole because its
+/// shape is checked against the C-validated corpus shapes elsewhere).
+fn parse_block(toks: &[&str], k: usize) -> Option<usize> {
+    debug_assert_eq!(toks[k], "{");
+    let label = toks.get(k + 1).copied()?;
+    if label == "}" {
+        return None;
+    }
+    let mut j = k + 2;
+    if CUSTOM_READER_LABELS.contains(&label) || !expected_fields().contains_key(label) {
+        // custom reader, or a label C does not know (C's parseNodeString
+        // elogs before touching a field, a compared error verdict): consume
+        // the block, keeping brace/paren balance.
+        let mut depth = 1usize;
+        while let Some(t) = toks.get(j).copied() {
+            match t {
+                "{" => depth += 1,
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(j + 1);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        return None;
+    }
+    let fields = expected_fields().get(label)?;
+    for (fname, kind) in fields {
+        if toks.get(j).copied()? != format!(":{fname}") {
+            return None;
+        }
+        j += 1;
+        // the value: a nested structure, or one kind-checked token
+        match toks.get(j).copied()? {
+            "{" => j = parse_block(toks, j)?,
+            "(" => {
+                if !value_token_matches_kind("(", kind) {
+                    return None;
+                }
+                j = parse_list(toks, j)?;
+            }
+            t => {
+                if !value_token_matches_kind(t, kind) {
+                    return None;
+                }
+                j += 1;
+            }
+        }
+    }
+    if toks.get(j).copied()? != "}" {
+        return None;
+    }
+    Some(j + 1)
+}
 
 /// Does a value token have the LEXICAL FORM C's reader macro for this field
 /// kind would produce on the writing side?
@@ -818,7 +820,17 @@ fn value_token_matches_kind(tok: &str, kind: &str) -> bool {
             tok.parse::<f64>().is_ok()
                 || matches!(tok, "Infinity" | "-Infinity" | "NaN" | "inf" | "-inf" | "nan")
         }
-        // strings/nodes/bitmapsets/arrays: shape handled structurally
+        // A NODE field's value is written by outNode, which emits exactly
+        // "<>" (NULL), "{...}" (a node) or "(...)" (a list) — nothing else is
+        // writer-producible. Without this rule the fuzzer reaches shapes like
+        // `{FROMEXPR :fromlist 2> ...}`, where `2>` is a digit-leading token
+        // that C classifies T_Float and happily stores in a node field, while
+        // the port expects a list and takes its chartered panic.
+        "READ_NODE_FIELD" => matches!(tok, "<>" | "{" | "("),
+        // a Bitmapset is written as "(b ...)" or "<>"
+        "READ_BITMAPSET_FIELD" => matches!(tok, "<>" | "("),
+        // strings (outToken: bare escaped word, `""`, or `<>`) and arrays:
+        // shape handled structurally / permissively
         _ => true,
     }
 }
