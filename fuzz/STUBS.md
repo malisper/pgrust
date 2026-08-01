@@ -244,6 +244,7 @@ the substrate.
 | `tupdesc_control_one_side_notnull_flip_is_caught` | attnotnull flipped in the C wire only | desc field plane sees one-side construction drift |
 | `tupdesc_control_one_side_menu_swap_is_caught` | att menu (attlen/byval shape) swapped C-side only | shape-level drift caught |
 | `nodes_control_one_side_tree_difference_is_caught` | C fed a text describing a different tree | re-out plane sees it |
+| `nodes_clamp_strings_are_nul_free` | NUL-riddled builder input | the NUL-stripping clamp holds (added to close injection N1) |
 | `snapshot_control_c_side_tamper_is_caught` | xmax low byte flipped in the wire only | field plane sees C-side drift |
 | `snapshot_control_rust_side_tamper_is_caught` | xip[0] flipped on the Rust side only | field plane sees Rust-side drift |
 | `encoding_control_shifted_index_is_caught` | every Rust row compared against the wrong C row | comparator live at every index |
