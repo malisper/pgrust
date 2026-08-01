@@ -1164,3 +1164,32 @@ fn corrupted_constvalue_payload_is_gated() {
                [ 1e :serityQuals <s}";
     assert!(!run_text(bad.as_bytes()), "corrupted constvalue payload reached the oracle");
 }
+
+/// DIVERGENCE OF RECORD (ruling owed): `{GROUPINGSET ... :content (14) ...}` —
+/// C builds a generic List of Integer value nodes and reprints `(14)`; the port
+/// normalizes to `(i 14)`. Gated because PG's writer emits `(i ...)` for this
+/// field (the rewriter stores an IntList), which DOES round-trip identically.
+#[test]
+fn groupingset_content_list_marker_divergence_is_recorded() {
+    // the writer-produced form must round-trip on both sides
+    assert!(
+        run_text(b"{GROUPINGSET :kind 1 :content (i 14) :location -1 }"),
+        "the writer-produced (i ...) form stopped comparing"
+    );
+    // the generic-List spelling is gated (recorded divergence, not silent)
+    assert!(
+        !run_text(b"{GROUPINGSET :kind 1 :content (14) :location -1 }"),
+        "the recorded (14) divergence is no longer gated — re-read the ruling note"
+    );
+    // and the port really does normalize (the claim behind the record)
+    let cx = mcx::MemoryContext::new("nodesfam_gs");
+    let m = cx.mcx();
+    let n = readfuncs::stringToNodeNullable(m, "{GROUPINGSET :kind 1 :content (14) :location -1 }")
+        .expect("no error")
+        .expect("node");
+    assert_eq!(
+        outfuncs::nodeToString(m, n).expect("out").as_str(),
+        "{GROUPINGSET :kind 1 :content (i 14) :location -1}",
+        "the port's normalization changed — re-audit the divergence record"
+    );
+}

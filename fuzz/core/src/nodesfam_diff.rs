@@ -632,7 +632,58 @@ fn const_datums_are_well_formed(text: &str) -> bool {
     true
 }
 
+/// DIVERGENCE OF RECORD — needs a match-or-fix ruling (lane p1-nodes).
+///
+/// `{GROUPINGSET :kind 1 :content (14) :location -1}`: C's `READ_NODE_FIELD`
+/// builds a generic `List` of Integer VALUE nodes and `outNode` prints it back
+/// as `(14)`; the pgrust port stores Integer nodes in a NodeList and its
+/// writer ALWAYS emits the int-list marker, so it prints `(i 14)`. The port is
+/// lossy for "generic List of Integer nodes" in this field.
+///
+/// Why it is gated rather than reported: PG's own writer never emits that
+/// form HERE — the rewriter stores an `IntList` in `GroupingSet.content`, so
+/// outfuncs writes `(i ...)`, which round-trips identically on both sides (the
+/// `groupingset-intlist` seed covers it). The `(14)` spelling is only reachable
+/// from hand-edited catalog bytes. Fixing it properly means giving the
+/// vocabulary an IntList-vs-List distinction in that field, which is a port
+/// change outside this lane's mandate — hence a RULING, not a silent carve.
+///
+/// Table form (label, field, required list marker) so the rule is data, not a
+/// special case buried in the walker.
+const WRITER_LIST_MARKERS: &[(&str, &str, &str)] = &[("GROUPINGSET", "content", "i")];
+
+fn writer_list_markers_respected(text: &str) -> bool {
+    let toks = pg_strtok_all(text);
+    let mut k = 0;
+    while k < toks.len() {
+        if toks[k] == "{" {
+            let label = toks.get(k + 1).copied().unwrap_or("");
+            let mut j = k + 2;
+            while j < toks.len() && toks[j] != "}" {
+                if let Some(f) = toks[j].strip_prefix(':') {
+                    if let Some((_, _, marker)) = WRITER_LIST_MARKERS
+                        .iter()
+                        .find(|(l, fld, _)| *l == label && *fld == f)
+                    {
+                        if toks.get(j + 1).copied() == Some("(")
+                            && toks.get(j + 2).copied() != Some(*marker)
+                        {
+                            return false;
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        k += 1;
+    }
+    true
+}
+
 fn is_well_formed(text: &str) -> bool {
+    if !writer_list_markers_respected(text) {
+        return false;
+    }
     if !const_datums_are_well_formed(text) {
         return false;
     }
