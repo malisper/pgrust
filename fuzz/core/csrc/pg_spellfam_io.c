@@ -4163,6 +4163,24 @@ pg_spf_reset(void)
 {
 	size_t		i;
 
+	/* Free the regex-engine memory that pg_regcomp malloc'd OUTSIDE the
+	 * tracked arena (spell.c stores it in AFFIX.reg.pregex for the
+	 * !issimple && !isregis condition arm and relies on MemoryContextDelete
+	 * to reclaim it — which this TU's context shim no-ops). Without this
+	 * every affix carrying a regex condition (e.g. hunspell "[^E]") leaks
+	 * its compiled NFA per exec (the CI cluster LSan abort class). The regis and
+	 * simple arms allocate only through the arena and need no engine free. */
+	if (spf_conf != NULL && spf_conf->Affix != NULL)
+	{
+		for (i = 0; i < (size_t) spf_conf->naffixes; i++)
+		{
+			AFFIX	   *a = spf_conf->Affix + i;
+
+			if (!a->issimple && !a->isregis && a->reg.pregex != NULL)
+				pg_regfree(a->reg.pregex);
+		}
+	}
+
 	for (i = 0; i < spf_nallocs; i++)
 		free(spf_allocs[i]);	/* header base pointers */
 	spf_nallocs = 0;
