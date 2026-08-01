@@ -273,7 +273,7 @@ fn rust_build<'mcx>(
 /// and the assert says whether the Rust side, the C side, or neither is the
 /// nondeterministic one. Flip to false once div5 is adjudicated (it roughly
 /// doubles per-exec cost, so it must not ride the 10M floor).
-const DECODE_CROSS_EXEC: bool = true;
+const DECODE_CROSS_EXEC: bool = false;
 
 /// Observable-output fingerprint of ONE side for one input, WITHOUT asserting
 /// anything cross-side. Used only by the decode leg.
@@ -418,6 +418,32 @@ pub fn spellfam_diff(data: &[u8]) {
     // tests::interior_nul_* and the banked CI-div-encord seeds.
     if core::str::from_utf8(&aff).is_err() || core::str::from_utf8(&dict).is_err() {
         return;
+    }
+
+    // DOMAIN CARVE (C-UB boundary — verbatim spell.c has NO DEFINED ANSWER;
+    // upstream bug, pgrust correct). NIImportAffixes declares `char
+    // flag[BUFSIZ]` UNINITIALIZED (spell.c:1426) and writes it ONLY inside the
+    // `flag` directive branch (1519-1520), yet passes it unconditionally to
+    // NIAddAffix (1543), which cpstrdup's it — strlen/strcpy over
+    // uninitialized stack. So an affix file with an old-format
+    // prefixes/suffixes SECTION and a parseable affix ENTRY but NO `flag`
+    // directive makes C's affix flag whatever the stack held (a fresh process
+    // reads zeros and matches pgrust; a long-running one reads garbage and
+    // does not — this is div5, decoded in
+    // scratchpad/needs-decode/README-div5.md). pgrust deterministically uses
+    // an EMPTY flag. There is no defined C value to compare against, so the
+    // slice leaves the domain (same rule as wparserfam's uninitialized-wchar
+    // carve); valid old-format files keep their `flag` directives and stay
+    // fully in domain (e.g. the ispell_sample.affix fixture: `flag *A:`).
+    {
+        let lower: Vec<u8> = aff.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let has_old_section = lower
+            .split(|&b| b == b'\n')
+            .any(|l| l.starts_with(b"prefixes") || l.starts_with(b"suffixes"));
+        let has_flag_directive = lower.split(|&b| b == b'\n').any(|l| l.starts_with(b"flag"));
+        if has_old_section && !has_flag_directive {
+            return;
+        }
     }
 
     // DECODE LEG: per-side in-exec reproducibility (see DECODE_CROSS_EXEC).
@@ -751,17 +777,9 @@ mod corpus_replay {
         let mut n = 0;
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
-                // `decode-*` seeds are UNDER ADJUDICATION on the Linux oracle
-                // (the pinned platform). div5 is a deterministic C-side
-                // difference on macOS but the Linux CI cluster replayed it clean, so
-                // macOS cannot adjudicate it (ground-truth law) — it must stay
-                // in the CORPUS (libFuzzer replays it on the CI cluster) while being
-                // skipped by this macOS-side rail. Remove the seed, or this
-                // skip, once the Linux verdict lands.
-                let name = e.file_name();
-                if cfg!(target_os = "macos") && name.to_string_lossy().starts_with("decode-") {
-                    continue;
-                }
+                // decode-div5 stays in the corpus as a REGRESSION seed for the
+                // uninitialized-`flag[BUFSIZ]` C-UB carve (README-div5.md): it
+                // must keep landing in the carve, on every platform.
                 let data = std::fs::read(e.path()).unwrap();
                 super::spellfam_diff(&data);
                 n += 1;
@@ -773,6 +791,33 @@ mod corpus_replay {
 
 #[cfg(test)]
 mod fleet_repro {
+    /// div5 REGRESSION: the uninitialized-`flag[BUFSIZ]` C-UB class
+    /// (README-div5.md). Asserts the carve DETECTS the shape — an old-format
+    /// section with no `flag` directive — so the input can never reach the
+    /// comparison planes on any platform, while a file that DOES carry a
+    /// `flag` directive stays in domain.
+    #[test]
+    fn div5_uninit_flag_carve() {
+        fn carved(aff: &[u8]) -> bool {
+            let lower: Vec<u8> = aff.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let sect = lower
+                .split(|&b| b == b'\n')
+                .any(|l| l.starts_with(b"prefixes") || l.starts_with(b"suffixes"));
+            let flg = lower.split(|&b| b == b'\n').any(|l| l.starts_with(b"flag"));
+            sect && !flg
+        }
+        // the div5 affix image: `suffixes` section, `nlag` (not `flag`)
+        assert!(carved(b"COMPOUNDWORDS l 1\nsuffixes\nnlag Z:\n . > S\n"), "div5 must be carved");
+        assert!(carved(b"prefixes\n . > X\n"), "no-flag prefixes must be carved");
+        // valid old-format files keep their flag directive and stay in domain
+        assert!(!carved(b"prefixes\n\nflag *A:\n . > RE\n"), "flag directive => in domain");
+        assert!(!carved(b"SFX T Y 1\nSFX T 0 s .\n"), "new format => in domain");
+        // and the banked seed itself must be carved (reaches the planes = red)
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/decode-div5-c9e14135")).unwrap();
+        let p = super::parse_input(&data).unwrap();
+        assert!(carved(&p.aff), "banked div5 seed must be carved");
+        super::spellfam_diff(&data);
+    }
     #[test]
     fn segv2_4525b7a1() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/CI-div-segv2-4525b7a1")).unwrap();
