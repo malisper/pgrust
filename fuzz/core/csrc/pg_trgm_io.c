@@ -2138,6 +2138,68 @@ pg_diff_trgm_enter(int locale_arm)
 	}
 }
 
+/* ---- bridge exports for the trgm_regexp oracle TU ----
+ * pg_trgm_regexp_io.c (compiled in the trgmrxfam cc build, where the regex
+ * engine's include tree lives) shares THIS TU's arena, longjmp channel and
+ * locale/encoding/signedness pins, so a raise inside a shared verbatim unit
+ * (str_tolower, t_isalnum) lands in whichever entry is live and its
+ * allocations are reset by that entry. Thin wrappers only — the statics
+ * stay static. */
+
+void
+pg_diff_trgm_bridge_enter(int locale_arm)
+{
+	pg_diff_trgm_enter(locale_arm);
+}
+
+jmp_buf *
+pg_diff_trgm_bridge_jmp(void)
+{
+	return &pg_diff_trgm_jmp;
+}
+
+void
+pg_diff_trgm_bridge_raise(int code)
+{
+	pg_diff_trgm_raise(code);
+}
+
+int
+pg_diff_trgm_bridge_pending_set(int code)
+{
+	return trgmf_errcode_set(code);
+}
+
+int
+pg_diff_errcode_pending_fetch(void)
+{
+	return pg_diff_trgm_pending;
+}
+
+void *
+pg_diff_trgm_bridge_palloc(size_t n)
+{
+	return trgmf_palloc(n);
+}
+
+void *
+pg_diff_trgm_bridge_palloc0(size_t n)
+{
+	return trgmf_palloc0(n);
+}
+
+void *
+pg_diff_trgm_bridge_repalloc(void *p, size_t n)
+{
+	return trgmf_repalloc(p, n);
+}
+
+void
+pg_diff_trgm_bridge_pfree(void *p)
+{
+	trgmf_pfree(p);
+}
+
 /* copy a TRGM's trigram array bytes out, in stored order */
 static int
 trgmf_copy_out(TRGM *trg, uint8_t *out, int cap, int32_t *n)

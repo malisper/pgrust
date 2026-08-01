@@ -157,6 +157,30 @@ extern "C" {
     fn pg_diff_trgm_trgm2int(t: *const u8) -> u32;
     fn pg_diff_trgm_compact(s: *const u8, len: c_int, out: *mut u8);
     fn pg_diff_trgm_cmp(a: *const u8, b: *const u8, is_signed: c_int) -> c_int;
+    // arm 9 (pg_trgm_regexp_io.c)
+    fn pg_diff_trgm_regexp(
+        pat: *const u8,
+        len: c_int,
+        trg_out: *mut u8,
+        trg_cap: c_int,
+        ntrgms: *mut i32,
+        groups_out: *mut i32,
+        groups_cap: c_int,
+        ngroups: *mut i32,
+        states_out: *mut i32,
+        states_cap: c_int,
+        nstates: *mut i32,
+        arcs_out: *mut i32,
+        arcs_cap: c_int,
+        narcs: *mut i32,
+    ) -> c_int;
+    fn pg_diff_trgm_regexp_matches(
+        pat: *const u8,
+        len: c_int,
+        check: *const u8,
+        ncheck: c_int,
+        out_match: *mut i32,
+    ) -> c_int;
 }
 
 const MAX_STR: usize = 2048;
@@ -594,6 +618,256 @@ fn arm_cmp(payload: &[u8]) {
     assert_eq!(r, c.signum(), "cmp_trgm vs CMPTRGM_SIGNED diverged");
 }
 
+// ---------------------------------------------------------------------------
+// Arm 9: trgm_regexp.c (createTrgmNFA / trigramsMatchGraph), phase B.
+//
+// LOCALE: arm 9 always pins locale arm 0 (database ctype "C") and collation
+// C (950) on BOTH sides — the C oracle's regex engine is the regexfam build
+// with the C-collation strategy pin; the builtin-C.UTF-8 colormap strategy
+// is a NAMED RESIDUAL of this increment (oracle TU header).
+//
+// PLANES (tiered; the C-vs-Rust ORDER couplings are pre-audited, see the
+// lane notes: dynahash hash_seq iteration order + PG-qsort penalty ties +
+// memcmp-vs-numeric ColorTrgm order make raw ARRAY ORDER differ even for
+// semantically identical extractions):
+//   a. verdict (HARD): error(class) / NULL-fallback / success must match.
+//      Rust maps: Err => error; Ok(None) => fallback; Ok(Some) => success.
+//      C maps: rc>0 error class; rc -1 fallback; rc 0 success.
+//   b. trigram MULTISET (HARD): both sides' trigram arrays sorted under one
+//      harness comparator, compared byte-for-byte.
+//   c. graph semantics (HARD): 32 deterministic pseudo-random subsets of
+//      the common trigram VALUE set (FNV-1a(pattern) seeded xorshift64,
+//      plus all-true / all-false); each subset is translated to each
+//      side's own check-vector layout by value membership and evaluated
+//      through the REAL evaluators (C trigramsMatchGraph vs Rust
+//      TrgmPackedGraph::matches). Duplicated trigram values mark all their
+//      positions on both sides, so membership semantics are well-defined.
+//   d. order witness (SOFT): counters, printed by the unit tests — the
+//      evidence base for the pending order ruling; never fails the target.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU64, Ordering as AtOrd};
+
+pub static REGEXP_ORDER_EQ: AtomicU64 = AtomicU64::new(0);
+pub static REGEXP_ORDER_DIFF: AtomicU64 = AtomicU64::new(0);
+pub static REGEXP_SUCCESS: AtomicU64 = AtomicU64::new(0);
+pub static REGEXP_FALLBACK: AtomicU64 = AtomicU64::new(0);
+pub static REGEXP_ERR: AtomicU64 = AtomicU64::new(0);
+
+const REGEXP_MAX_PAT: usize = 128; // regexfam recursion-soundness cap
+const RX_TRG_CAP: usize = 3 * 1024;
+const RX_GROUPS_CAP: usize = 1024;
+const RX_STATES_CAP: usize = 1024; // (off,len) pairs for <=130 states
+const RX_ARCS_CAP: usize = 8192; // (target,ctrgm) pairs for <=1024 arcs
+
+struct CRegexpOut {
+    trg: Vec<u8>,
+    groups: Vec<i32>,
+    states: Vec<(i32, i32)>,
+    arcs: Vec<(i32, i32)>,
+}
+
+/// rc semantics: Ok(Some) success, Ok(None) fallback, Err(class) error.
+fn c_regexp(pat: &[u8]) -> Result<Option<CRegexpOut>, i32> {
+    let mut trg = vec![0u8; RX_TRG_CAP];
+    let mut groups = vec![0i32; RX_GROUPS_CAP];
+    let mut states = vec![0i32; 2 * RX_STATES_CAP];
+    let mut arcs = vec![0i32; 2 * RX_ARCS_CAP];
+    let (mut ntrgms, mut ngroups, mut nstates, mut narcs) = (0i32, 0i32, 0i32, 0i32);
+    let rc = unsafe {
+        pg_diff_trgm_regexp(
+            pat.as_ptr(),
+            pat.len() as c_int,
+            trg.as_mut_ptr(),
+            RX_TRG_CAP as c_int,
+            &mut ntrgms,
+            groups.as_mut_ptr(),
+            RX_GROUPS_CAP as c_int,
+            &mut ngroups,
+            states.as_mut_ptr(),
+            (2 * RX_STATES_CAP) as c_int,
+            &mut nstates,
+            arcs.as_mut_ptr(),
+            (2 * RX_ARCS_CAP) as c_int,
+            &mut narcs,
+        )
+    };
+    match rc {
+        0 => {
+            trg.truncate(3 * ntrgms as usize);
+            groups.truncate(ngroups as usize);
+            let states = (0..nstates as usize)
+                .map(|i| (states[2 * i], states[2 * i + 1]))
+                .collect();
+            let arcs = (0..narcs as usize).map(|i| (arcs[2 * i], arcs[2 * i + 1])).collect();
+            Ok(Some(CRegexpOut { trg, groups, states, arcs }))
+        }
+        -1 => Ok(None),
+        cls => Err(cls),
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// arm 9 serialization: the vendored dynahash keeps its per-BACKEND
+/// hash_seq_search scan registry in process-global statics (verbatim;
+/// real PG is one backend per process). The fuzz runtime is
+/// single-threaded, but `cargo test` runs tests in parallel threads —
+/// concurrent arm-9 execs would race the registry and fabricate
+/// "too many active hash_seq_search scans" oracle errors.
+static REGEXP_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn arm_regexp(payload: &[u8]) {
+    if payload.len() > REGEXP_MAX_PAT || !utf8_ok(payload) {
+        return;
+    }
+    let _serial = REGEXP_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    pin_locale_arm(0); // arm 9 is locale-arm-0 only (header)
+    let env = pg_trgm::harness_env();
+
+    let c = c_regexp(payload);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pg_trgm::regexp::create_trgm_nfa(
+            payload,
+            types_core::C_COLLATION_OID,
+            &env,
+            &crc,
+        )
+    }));
+
+    // Plane a: verdict. A Rust panic that is not one of OUR assert panics
+    // is a finding — surface it (re-panic) rather than classifying it.
+    let r = match r {
+        Ok(v) => v,
+        Err(e) => std::panic::resume_unwind(e),
+    };
+    match (&r, &c) {
+        (Err(re), Err(ccls)) => {
+            // Both errored. C class 4 = ERRCODE_INVALID_REGULAR_EXPRESSION
+            // (the only ereport in the vendored file); the Rust side's
+            // create_trgm_nfa maps compile failure to the same sqlstate.
+            assert_eq!(*ccls, 4, "unexpected C error class {ccls} pat={payload:02x?}");
+            assert_eq!(
+                re.sqlstate(),
+                types_error::ERRCODE_INVALID_REGULAR_EXPRESSION,
+                "rust regexp error is not invalid-regular-expression: {re:?} pat={payload:02x?}"
+            );
+            REGEXP_ERR.fetch_add(1, AtOrd::Relaxed);
+            return;
+        }
+        (Err(re), _) => panic!(
+            "verdict diverged: rust Err({re:?}) vs C {:?} pat={payload:02x?}",
+            c.as_ref().map(|o| o.is_some())
+        ),
+        (_, Err(ccls)) => panic!(
+            "verdict diverged: rust {:?} vs C error class {ccls} pat={payload:02x?}",
+            r.as_ref().map(|o| o.is_some())
+        ),
+        _ => {}
+    }
+    let r = r.unwrap();
+    let c = c.unwrap();
+
+    // NULL-fallback plane. Rust Ok(Some((trg, _))) with EMPTY trg is the
+    // lib.rs fallback condition; C returns NULL. Fold both to "fallback".
+    let r_success = r.as_ref().is_some_and(|(trg, _)| !trg.is_empty());
+    let c_success = c.as_ref().is_some_and(|o| !o.trg.is_empty());
+    assert_eq!(
+        r_success, c_success,
+        "fallback verdict diverged (rust {:?} vs C {:?}) pat={payload:02x?}",
+        r.as_ref().map(|(t, _)| t.len()),
+        c.as_ref().map(|o| o.trg.len() / 3)
+    );
+    if !r_success {
+        REGEXP_FALLBACK.fetch_add(1, AtOrd::Relaxed);
+        return;
+    }
+    REGEXP_SUCCESS.fetch_add(1, AtOrd::Relaxed);
+    let (rtrg, mut rgraph) = r.unwrap();
+    let cout = c.unwrap();
+
+    // Plane b: trigram multiset.
+    let rflat = flat(&rtrg);
+    if rflat == cout.trg {
+        REGEXP_ORDER_EQ.fetch_add(1, AtOrd::Relaxed);
+    } else {
+        REGEXP_ORDER_DIFF.fetch_add(1, AtOrd::Relaxed);
+    }
+    let mut rsorted: Vec<Trgm> = rtrg.clone();
+    rsorted.sort_unstable();
+    let mut csorted: Vec<Trgm> = cout
+        .trg
+        .chunks_exact(3)
+        .map(|ch| [ch[0], ch[1], ch[2]])
+        .collect();
+    csorted.sort_unstable();
+    assert_eq!(
+        rsorted, csorted,
+        "trigram MULTISET diverged (rust {} vs C {} trigrams) pat={payload:02x?}",
+        rtrg.len(),
+        cout.trg.len() / 3
+    );
+
+    // Plane c: graph semantics over shared value subsets.
+    let ctrg: Vec<Trgm> = cout.trg.chunks_exact(3).map(|ch| [ch[0], ch[1], ch[2]]).collect();
+    let mut values: Vec<Trgm> = rsorted.clone();
+    values.dedup();
+    let mut seed = fnv1a64(payload) | 1;
+    for round in 0..32 {
+        let member = |t: &Trgm, sel: &dyn Fn(usize) -> bool| -> bool {
+            match values.binary_search(t) {
+                Ok(i) => sel(i),
+                Err(_) => unreachable!("trigram not in value set"),
+            }
+        };
+        // rounds 0/1 = all-false / all-true; the rest pseudo-random
+        let bits: Vec<bool> = match round {
+            0 => vec![false; values.len()],
+            1 => vec![true; values.len()],
+            _ => values
+                .iter()
+                .map(|_| xorshift64(&mut seed) & 1 == 1)
+                .collect(),
+        };
+        let sel = |i: usize| bits[i];
+        let rcheck: Vec<bool> = rtrg.iter().map(|t| member(t, &sel)).collect();
+        let ccheck: Vec<u8> = ctrg.iter().map(|t| member(t, &sel) as u8).collect();
+        let rmatch = rgraph.matches(&rcheck);
+        let mut cmatch: i32 = -1;
+        let rc = unsafe {
+            pg_diff_trgm_regexp_matches(
+                payload.as_ptr(),
+                payload.len() as c_int,
+                ccheck.as_ptr(),
+                ccheck.len() as c_int,
+                &mut cmatch,
+            )
+        };
+        assert_eq!(rc, 0, "C re-extraction changed verdict (rc {rc}) pat={payload:02x?}");
+        assert_eq!(
+            rmatch,
+            cmatch == 1,
+            "graph semantics diverged (round {round}, subset {bits:?}) pat={payload:02x?}"
+        );
+    }
+}
+
 fn split_two(payload: &[u8]) -> (&[u8], &[u8]) {
     match payload.iter().position(|&b| b == 0xFF) {
         Some(i) => (&payload[..i], &payload[i + 1..]),
@@ -648,7 +922,8 @@ pub fn trgm_diff(data: &[u8]) {
         }
         7 => arm_compact(payload),
         8 => arm_cmp(payload),
-        _ => {} // 9..=15 reserved (9 = regexp arm, second lane half)
+        9 => arm_regexp(payload),
+        _ => {} // 10..=15 reserved
     }
 }
 
@@ -920,5 +1195,172 @@ mod tests {
             visited += 1;
         }
         assert_eq!(visited, 1 << 24, "domain not fully enumerated");
+    }
+}
+
+#[cfg(test)]
+mod regexp_tests {
+    use super::*;
+
+    fn rx(pat: &[u8]) {
+        let mut input = vec![9u8];
+        input.extend_from_slice(pat);
+        trgm_diff(&input);
+    }
+
+    /// exploratory dump helper (not a plane): C-side extraction summary
+    fn c_dump(pat: &[u8]) -> String {
+        init_env();
+        pin_locale_arm(0);
+        match c_regexp(pat) {
+            Err(cls) => format!("ERR({cls})"),
+            Ok(None) => "FALLBACK".into(),
+            Ok(Some(o)) => {
+                let trgs: Vec<String> = o
+                    .trg
+                    .chunks_exact(3)
+                    .map(|t| {
+                        if t.iter().all(|&b| (0x20..0x7f).contains(&b)) {
+                            format!("{:?}", String::from_utf8_lossy(t))
+                        } else {
+                            format!("0x{:02x}{:02x}{:02x}", t[0], t[1], t[2])
+                        }
+                    })
+                    .collect();
+                format!(
+                    "n={} groups={:?} states={} arcs={} trgs={}",
+                    o.trg.len() / 3,
+                    o.groups,
+                    o.states.len(),
+                    o.arcs.len(),
+                    trgs.join(",")
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn regexp_explore_dump() {
+        for pat in [
+            &b"abc"[..], b"a", b"", b"a|b", b"(a|b)cd", b".*", b"^abc$",
+            b"[a-z]foo", b"ab{2,4}c", b"(abc)+", b"(a|b)(c|d)(e|f)(g|h)(i|j)",
+            b"abc|def|ghi|jkl|mno|pqr", b"(", b"a{2,1}", b"[z-a]",
+        ] {
+            eprintln!("{:24} -> {}", String::from_utf8_lossy(pat), c_dump(pat));
+        }
+    }
+
+    /// Limit-path WITNESSES (not exec-count hopes): sweep a family that
+    /// crosses the expansion caps and require BOTH a success and a
+    /// fallback inside the bracket — every point runs the full
+    /// differential, so the limit paths are COMPARED, not just reached.
+    /// (MAX_EXPANDED_STATES=128 / MAX_EXPANDED_ARCS=1024 / MAX_TRGM_COUNT
+    /// =256 / WISH_TRGM_PENALTY=16 all live inside this bracket family.)
+    #[test]
+    fn regexp_limit_boundary_witness() {
+        let mut verdicts = Vec::new();
+        for n in 1..=10 {
+            let pat: Vec<u8> = (0..n)
+                .flat_map(|i| {
+                    let a = b'a' + (2 * i) as u8 % 26;
+                    let b = b'a' + (2 * i + 1) as u8 % 26;
+                    vec![b'(', a, b'|', b, b')']
+                })
+                .collect();
+            let before = REGEXP_SUCCESS.load(AtOrd::Relaxed);
+            rx(&pat);
+            let after = REGEXP_SUCCESS.load(AtOrd::Relaxed);
+            verdicts.push(after > before);
+        }
+        assert!(
+            verdicts.iter().any(|&v| v) && verdicts.iter().any(|&v| !v),
+            "alternation-product sweep never crossed a limit: {verdicts:?}"
+        );
+
+        // Big-class sweep: the >COLOR_COUNT_LIMIT (256-char) class goes
+        // unexpandable on both sides; the bracket witnesses the transition.
+        let mut class_verdicts = Vec::new();
+        for &n in &[8usize, 64, 255, 257, 300] {
+            let mut pat = b"foo[".to_vec();
+            for c in 0..n {
+                let ch = char::from_u32(0x100 + c as u32).unwrap();
+                let mut buf = [0u8; 4];
+                pat.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+            pat.extend_from_slice(b"]bar");
+            let before = REGEXP_SUCCESS.load(AtOrd::Relaxed);
+            rx(&pat);
+            class_verdicts.push(REGEXP_SUCCESS.load(AtOrd::Relaxed) > before);
+        }
+        // every point compared; record the shape for the report
+        eprintln!("class-size sweep verdicts: {class_verdicts:?}");
+    }
+
+    /// Oracle-derived pins (eyeballed against the trigram-extraction
+    /// contract — the required trigrams are ones every matching string
+    /// must contain): regenerate with regexp_explore_dump.
+    #[test]
+    fn regexp_oracle_pins() {
+        init_env();
+        pin_locale_arm(0);
+        let pins: &[(&[u8], &str)] = &[
+            (b"(a|b)cd", r#"n=2 trgs="acd","bcd""#),
+            (b"^abc$", r#"n=2 trgs="abc"," ab""#),
+            (b"ab{2,4}c", r#"n=3 trgs="abb","bbb","bbc""#),
+            (b"(abc)+", r#"n=3 trgs="abc","bca","cab""#),
+            (b"abc|def|ghi|jkl|mno|pqr", r#"n=6 trgs="abc","def","ghi","jkl","mno","pqr""#),
+        ];
+        for (pat, expect) in pins {
+            let got = c_dump(pat);
+            for frag in expect.split(" trgs=") {
+                assert!(
+                    got.contains(frag),
+                    "pin drift for {:?}: expected fragment {frag:?} in {got}",
+                    String::from_utf8_lossy(pat)
+                );
+            }
+            rx(pat); // and the full differential agrees
+        }
+    }
+
+    #[test]
+    fn regexp_seed_corpus_replay() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
+        let mut n = 0;
+        for e in std::fs::read_dir(dir).expect("corpus dir") {
+            let p = e.unwrap().path();
+            if p.file_name().unwrap().to_string_lossy().starts_with("regexp-") {
+                trgm_diff(&std::fs::read(&p).unwrap());
+                n += 1;
+            }
+        }
+        assert!(n >= 25, "regexp seed corpus went missing (found {n})");
+        eprintln!(
+            "regexp corpus replay: {n} seeds; order witness eq={} diff={} succ={} fb={} err={}",
+            REGEXP_ORDER_EQ.load(AtOrd::Relaxed),
+            REGEXP_ORDER_DIFF.load(AtOrd::Relaxed),
+            REGEXP_SUCCESS.load(AtOrd::Relaxed),
+            REGEXP_FALLBACK.load(AtOrd::Relaxed),
+            REGEXP_ERR.load(AtOrd::Relaxed),
+        );
+    }
+
+    #[test]
+    fn regexp_smoke_seeds() {
+        for pat in [
+            &b"abc"[..], b"a", b"", b"a|b", b"(a|b)cd", b".*", b"^abc$",
+            b"[a-z]foo", b"ab{2,4}c", b"(abc)+", b"(a|b)(c|d)(e|f)(g|h)(i|j)",
+            b"abc|def|ghi|jkl|mno|pqr", b"(", b"a{2,1}", b"[z-a]",
+        ] {
+            rx(pat);
+        }
+        eprintln!(
+            "order witness: eq={} diff={} success={} fallback={} err={}",
+            REGEXP_ORDER_EQ.load(AtOrd::Relaxed),
+            REGEXP_ORDER_DIFF.load(AtOrd::Relaxed),
+            REGEXP_SUCCESS.load(AtOrd::Relaxed),
+            REGEXP_FALLBACK.load(AtOrd::Relaxed),
+            REGEXP_ERR.load(AtOrd::Relaxed),
+        );
     }
 }
