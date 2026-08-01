@@ -924,10 +924,13 @@ fn main() {
     // SYMBOL ISOLATION: every extern this family exports (207 symbols:
     // bms_*, list machinery, stringToNode/nodeToString/copyObjectImpl/
     // equal, palloc shims, pg_snprintf, pg_bitutils, ...) is renamed
-    // nf_* at compile time from csrc/nodesfam/rename_syms.txt — several
-    // (pg_popcount64, pg_strtok-adjacent helpers, palloc) already have
-    // verbatim definitions in other family archives. Driver entries keep
-    // their unique pg_nf_ prefix.
+    // ndf_* at compile time from csrc/nodesfam/rename_syms.txt — several
+    // (pg_popcount64, the stringinfo layer, palloc) already have verbatim
+    // definitions in other family archives, and NETFAM already owns the
+    // `nf_`/`pg_nf_` prefixes (its stringinfo copies collided on the first
+    // build: macOS ld64 only WARNS on duplicate symbols, GNU ld on the CI cluster
+    // hard-errors, so this had to be caught before submitting). Driver
+    // entries use the unique pg_ndf_ prefix.
     let mut nodesfam = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         nodesfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
@@ -935,7 +938,7 @@ fn main() {
     let rename_syms = std::fs::read_to_string("csrc/nodesfam/rename_syms.txt")
         .expect("csrc/nodesfam/rename_syms.txt");
     for s in rename_syms.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        nodesfam.define(s, format!("nf_{s}").as_str());
+        nodesfam.define(s, format!("ndf_{s}").as_str());
     }
     // -O2 PIN: production PostgreSQL builds at -O2; keep the oracle there
     // (same rationale as the contribb pin above).

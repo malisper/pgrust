@@ -49,12 +49,12 @@
  *     built by stringToNode can never see them (readfuncs.c _readConst).
  *   - hash_bytes aborts: bms_hash_value is unreachable from
  *     read/out/copy/equal (link-only dependency of bitmapset.c).
- *   - stack guard: REAL vendored stack_depth.c. pg_nf_init() records the
+ *   - stack guard: REAL vendored stack_depth.c. pg_ndf_init() records the
  *     stack base and fixes max_stack_depth at the server default 2048kB
  *     (what a real postmaster computes from an 8MB rlimit; the Rust side
  *     of the driver pins the identical value).
  *
- * Driver entries (SECTION D, pg_nf_ prefix) are fuzz plumbing, NOT
+ * Driver entries (SECTION D, pg_ndf_ prefix) are fuzz plumbing, NOT
  * Postgres code.
  */
 
@@ -79,26 +79,26 @@ extern char *nodeToString(const void *obj);
  * Bump arena, reset per exec. 256 MiB virtual cap; the depth guard and
  * MaxAllocSize fire long before it fills for any input libFuzzer can make.
  */
-#define NF_ARENA_CAP (256u * 1024 * 1024)
-static char *nf_arena;
-static size_t nf_arena_used;
+#define NDF_ARENA_CAP (256u * 1024 * 1024)
+static char *ndf_arena;
+static size_t ndf_arena_used;
 
 static void *
-nf_arena_alloc(size_t size)
+ndf_arena_alloc(size_t size)
 {
 	size_t		aligned = MAXALIGN(size + MAXIMUM_ALIGNOF);
 	char	   *p;
 
-	if (nf_arena == NULL)
+	if (ndf_arena == NULL)
 	{
-		nf_arena = malloc(NF_ARENA_CAP);
-		if (nf_arena == NULL)
+		ndf_arena = malloc(NDF_ARENA_CAP);
+		if (ndf_arena == NULL)
 			abort();
 	}
-	if (aligned > NF_ARENA_CAP - nf_arena_used)
-		abort();				/* arena exhausted: raise NF_ARENA_CAP */
-	p = nf_arena + nf_arena_used;
-	nf_arena_used += aligned;
+	if (aligned > NDF_ARENA_CAP - ndf_arena_used)
+		abort();				/* arena exhausted: raise NDF_ARENA_CAP */
+	p = ndf_arena + ndf_arena_used;
+	ndf_arena_used += aligned;
 	/* size header for repalloc, one MAXALIGN quantum before the chunk */
 	*(size_t *) p = size;
 	return p + MAXIMUM_ALIGNOF;
@@ -109,13 +109,13 @@ MemoryContext CurrentMemoryContext = (MemoryContext) 1;
 void *
 palloc(Size size)
 {
-	return nf_arena_alloc(size);
+	return ndf_arena_alloc(size);
 }
 
 void *
 palloc0(Size size)
 {
-	void	   *p = nf_arena_alloc(size);
+	void	   *p = ndf_arena_alloc(size);
 
 	memset(p, 0, size);
 	return p;
@@ -124,7 +124,7 @@ palloc0(Size size)
 void *
 palloc_extended(Size size, int flags)
 {
-	void	   *p = nf_arena_alloc(size);
+	void	   *p = ndf_arena_alloc(size);
 
 	if (flags & MCXT_ALLOC_ZERO)
 		memset(p, 0, size);
@@ -135,7 +135,7 @@ void *
 repalloc(void *pointer, Size size)
 {
 	size_t		old = *(size_t *) ((char *) pointer - MAXIMUM_ALIGNOF);
-	void	   *p = nf_arena_alloc(size);
+	void	   *p = ndf_arena_alloc(size);
 
 	memcpy(p, pointer, old < size ? old : size);
 	return p;
@@ -151,7 +151,7 @@ char *
 pstrdup(const char *in)
 {
 	size_t		len = strlen(in) + 1;
-	char	   *p = nf_arena_alloc(len);
+	char	   *p = ndf_arena_alloc(len);
 
 	memcpy(p, in, len);
 	return p;
@@ -161,7 +161,7 @@ void *
 MemoryContextAlloc(MemoryContext context, Size size)
 {
 	(void) context;
-	return nf_arena_alloc(size);
+	return ndf_arena_alloc(size);
 }
 
 MemoryContext
@@ -173,16 +173,16 @@ GetMemoryChunkContext(void *pointer)
 
 /* ====================== SECTION B: ereport capture ===================== */
 
-static jmp_buf nf_jmp;
-static int	nf_jmp_armed;
-static int	nf_errcode_val;		/* packed sqlstate from errcode() */
+static jmp_buf ndf_jmp;
+static int	ndf_jmp_armed;
+static int	ndf_errcode_val;		/* packed sqlstate from errcode() */
 
 bool
 errstart(int elevel, const char *domain)
 {
 	(void) domain;
 	/* elog.c: ERROR-level reports default to XX000 unless errcode() runs */
-	nf_errcode_val = (elevel >= 20 /* ERROR */ ) ?
+	ndf_errcode_val = (elevel >= 20 /* ERROR */ ) ?
 		MAKE_SQLSTATE('X', 'X', '0', '0', '0') : 0;
 	return true;
 }
@@ -199,15 +199,15 @@ errfinish(const char *filename, int lineno, const char *funcname)
 	(void) filename;
 	(void) lineno;
 	(void) funcname;
-	if (!nf_jmp_armed)
+	if (!ndf_jmp_armed)
 		abort();
-	longjmp(nf_jmp, 1);
+	longjmp(ndf_jmp, 1);
 }
 
 int
 errcode(int sqlerrcode)
 {
-	nf_errcode_val = sqlerrcode;
+	ndf_errcode_val = sqlerrcode;
 	return 0;
 }
 
@@ -218,7 +218,7 @@ errcode(int sqlerrcode)
  * comparison (campaign rule: value + verdict + errcode only).
  */
 static void
-nf_debug_msg(const char *fmt, va_list ap)
+ndf_debug_msg(const char *fmt, va_list ap)
 {
 	static int	on = -1;
 
@@ -238,7 +238,7 @@ errmsg(const char *fmt,...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	nf_debug_msg(fmt, ap);
+	ndf_debug_msg(fmt, ap);
 	va_end(ap);
 	return 0;
 }
@@ -249,7 +249,7 @@ errmsg_internal(const char *fmt,...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	nf_debug_msg(fmt, ap);
+	ndf_debug_msg(fmt, ap);
 	va_end(ap);
 	return 0;
 }
@@ -381,10 +381,10 @@ pg_qsort(void *base, size_t nel, size_t elsize,
  * Verdicts. OK = the pipeline stage succeeded; ERROR = ereport(ERROR)
  * captured (nf_errcode holds the packed sqlstate).
  */
-#define NF_OK 0
-#define NF_ERROR 1
+#define NDF_OK 0
+#define NDF_ERROR 1
 
-typedef struct NfOut
+typedef struct NdfOut
 {
 	int			verdict;
 	int			errcode;		/* packed sqlstate (MAKE_SQLSTATE encoding) */
@@ -392,12 +392,12 @@ typedef struct NfOut
 	const char *copy_text;		/* nodeToString(copyObject(read(input))) */
 	int			equal_ok;		/* equal(node, copy) */
 	int			reread_ok;		/* out(read(out_text)) == out_text */
-} NfOut;
+} NdfOut;
 
-static NfOut nf_result;
+static NdfOut ndf_result;
 
 void
-pg_nf_init(void)
+pg_ndf_init(void)
 {
 	set_stack_base();
 	/* server default: postmaster raises 100kB -> 2048kB given >=2.5MB rlimit */
@@ -410,8 +410,8 @@ pg_nf_init(void)
  * Any ereport(ERROR) longjmps here and reports the stage's verdict.
  * Input must be NUL-terminated; the arena is reset on entry.
  */
-const NfOut *
-pg_nf_exec(const char *input)
+const NdfOut *
+pg_ndf_exec(const char *input)
 {
 	void	   *node;
 	void	   *copy;
@@ -420,20 +420,20 @@ pg_nf_exec(const char *input)
 	char	   *out3;
 	void	   *reread;
 
-	nf_arena_used = 0;
-	nf_result.verdict = NF_ERROR;
-	nf_result.errcode = 0;
-	nf_result.out_text = NULL;
-	nf_result.copy_text = NULL;
-	nf_result.equal_ok = -1;
-	nf_result.reread_ok = -1;
+	ndf_arena_used = 0;
+	ndf_result.verdict = NDF_ERROR;
+	ndf_result.errcode = 0;
+	ndf_result.out_text = NULL;
+	ndf_result.copy_text = NULL;
+	ndf_result.equal_ok = -1;
+	ndf_result.reread_ok = -1;
 
-	nf_jmp_armed = 1;
-	if (setjmp(nf_jmp) != 0)
+	ndf_jmp_armed = 1;
+	if (setjmp(ndf_jmp) != 0)
 	{
-		nf_jmp_armed = 0;
-		nf_result.errcode = nf_errcode_val;
-		return &nf_result;
+		ndf_jmp_armed = 0;
+		ndf_result.errcode = ndf_errcode_val;
+		return &ndf_result;
 	}
 
 	node = stringToNode(input);
@@ -441,16 +441,16 @@ pg_nf_exec(const char *input)
 	out1 = nodeToString(node);
 	copy = copyObjectImpl(node);
 	out2 = nodeToString(copy);
-	nf_result.out_text = out1;
-	nf_result.copy_text = out2;
-	nf_result.equal_ok = (node == NULL && copy == NULL) ||
+	ndf_result.out_text = out1;
+	ndf_result.copy_text = out2;
+	ndf_result.equal_ok = (node == NULL && copy == NULL) ||
 		(node != NULL && copy != NULL && equal(node, copy));
 
 	reread = stringToNode(out1);
 	out3 = nodeToString(reread);
-	nf_result.reread_ok = strcmp(out1, out3) == 0;
+	ndf_result.reread_ok = strcmp(out1, out3) == 0;
 
-	nf_jmp_armed = 0;
-	nf_result.verdict = NF_OK;
-	return &nf_result;
+	ndf_jmp_armed = 0;
+	ndf_result.verdict = NDF_OK;
+	return &ndf_result;
 }

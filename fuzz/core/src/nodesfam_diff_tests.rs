@@ -721,35 +721,47 @@ fn custom_reader_labels_match_the_c_source() {
 }
 
 /// The well-formedness gate is LIVE and correctly scoped: it rejects the
-/// truncated CreateStmt that SIGSEGV'd the C oracle, and accepts every
-/// committed (C-validated) seed.
+/// truncated CreateStmt that SIGSEGV'd the C oracle, rejects the stray-token
+/// shape that C's non-verifying READ macros swallow, and accepts every
+/// well-formed committed seed (which then reaches a full P1..P4 comparison).
+///
+/// NOTE the test itself must never hand un-gated text to the C oracle — an
+/// earlier version of this test did and SIGSEGV'd on fuzzer-grown corpus
+/// entries, which is precisely the hazard the gate exists to contain.
 #[test]
 fn wellformedness_gate_is_live() {
     // the witness that motivated the gate: 1-of-13 fields present
     assert!(!run_text(b"{CREATESTMT :relation <>}"), "gate let the segv shape through");
-    // and it must not reject the corpus (which C validated)
+    // the stray-token witness: `K:location` is ONE pg_strtok token, so the
+    // field-name slot does not hold `:location`; C skips the name without
+    // comparing and accepts, the port verifies and panics
+    assert!(
+        !run_text(b"{GROUPINGSET :kind 0 :content <> K:location -1 }"),
+        "gate let the stray-token shape through"
+    );
+    // a well-formed GROUPINGSET must still be compared
+    assert!(
+        run_text(b"{GROUPINGSET :kind 0 :content <> :location -1 }"),
+        "gate rejected a well-formed GROUPINGSET"
+    );
+
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
     let mut compared = 0;
-    let mut gated = Vec::new();
+    let mut gated = 0;
     for e in std::fs::read_dir(&dir).expect("corpus") {
         let p = e.expect("dirent").path();
-        let data = std::fs::read(&p).expect("seed");
-        let body = if data.first() == Some(&0) { &data[1..] } else { &data[..] };
-        let Ok(text) = std::str::from_utf8(body) else { continue };
-        if text.is_empty() {
+        if !p.is_file() {
             continue;
         }
-        // a seed whose C verdict is Ok must pass the gate
-        if matches!(c_exec(text.as_bytes()), COut::Ok { .. }) {
-            if run_text(body) {
-                compared += 1;
-            } else if !text.contains(':') && !text.starts_with('{') {
-                // value-token / list-only seeds legitimately do not reach P1
-            } else {
-                gated.push(p.file_name().unwrap().to_string_lossy().into_owned());
-            }
+        let data = std::fs::read(&p).expect("seed");
+        // route through the driver ONLY (never c_exec directly on un-gated
+        // text — that segfaults the verbatim C readers by design)
+        if run_text(if data.first() == Some(&0) { &data[1..] } else { &data[..] }) {
+            compared += 1;
+        } else {
+            gated += 1;
         }
     }
-    println!("gate: {compared} seeds fully compared, {} carved/gated", gated.len());
-    assert!(compared >= 60, "only {compared} seeds reached a full comparison");
+    println!("gate: {compared} corpus inputs fully compared, {gated} gated/carved");
+    assert!(compared >= 60, "only {compared} corpus inputs reached a full comparison");
 }

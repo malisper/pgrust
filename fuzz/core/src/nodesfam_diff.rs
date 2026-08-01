@@ -80,7 +80,7 @@ fn intern<'m>(m: Mcx<'m>, s: &str) -> PgResult<&'m str> {
 }
 
 #[repr(C)]
-struct NfOut {
+struct NdfOut {
     verdict: c_int,   // 0 ok, 1 ereport(ERROR) captured
     errcode: c_int,   // packed sqlstate (MAKE_SQLSTATE encoding)
     out_text: *const c_char,
@@ -90,8 +90,8 @@ struct NfOut {
 }
 
 extern "C" {
-    fn pg_nf_init();
-    fn pg_nf_exec(input: *const c_char) -> *const NfOut;
+    fn pg_ndf_init();
+    fn pg_ndf_exec(input: *const c_char) -> *const NdfOut;
 }
 
 /// C oracle verdict for one input text.
@@ -105,7 +105,7 @@ fn c_exec(input: &[u8]) -> COut {
     rust_stack_init();
     let cs = CString::new(input).expect("caller truncates at NUL");
     unsafe {
-        let r = &*pg_nf_exec(cs.as_ptr());
+        let r = &*pg_ndf_exec(cs.as_ptr());
         if r.verdict != 0 {
             return COut::Err { errcode: r.errcode };
         }
@@ -157,19 +157,51 @@ fn rust_stack_init() {
 /// deep on a 2 MiB test-harness thread would be armed BEYOND the real stack
 /// end — which is exactly how a "guard" silently becomes a stack overflow.
 pub fn rearm_stack_bases() {
-    unsafe { pg_nf_init() };
+    unsafe { pg_ndf_init() };
     ARMED.set(true);
     stack_depth_core::set_stack_base();
     stack_depth_core::set_max_stack_depth(2048);
     stack_depth_core::assign_max_stack_depth(2048);
 }
 
+thread_local! {
+    /// True only while the CHARTERED walker region is executing, i.e. while a
+    /// loud-panic-by-charter is an EXPECTED outcome being classified.
+    static IN_CHARTERED_REGION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// libfuzzer-sys installs a panic hook that calls `process::abort()` on EVERY
+/// panic (lib.rs:92, so libFuzzer can walk the frames), which pre-empts
+/// `catch_unwind` — under the fuzzer, the scoped ports' chartered loud panics
+/// therefore killed the process instead of being classified. Witnessed on the
+/// first local smoke leg: the committed value-token seed aborted at exec ~0
+/// even though `cargo test` classified it as a carve.
+///
+/// Fix: a hook that stays silent ONLY inside the chartered region. Real
+/// divergences panic OUTSIDE it, so they hit the default hook, print, and
+/// still abort through libfuzzer-sys's own `catch_unwind` — a divergence is
+/// still a crash artifact, exactly as the campaign requires.
+fn install_chartered_panic_hook() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if IN_CHARTERED_REGION.get() {
+                return; // expected, being classified by the caller
+            }
+            default_hook(info);
+        }));
+    });
+}
+
 fn rust_exec(input: &str) -> ROut {
     rust_stack_init();
+    install_chartered_panic_hook();
     let input = input.to_owned();
     // The scoped ports panic BY CHARTER outside the catalog node universe;
     // comparator failures live OUTSIDE this catch so a divergence still
     // aborts the exec (fuzz artifact).
+    IN_CHARTERED_REGION.set(true);
     let caught = std::panic::catch_unwind(move || -> Result<Option<(Vec<u8>, Vec<u8>, bool)>, Box<PgError>> {
         let cx = mcx::MemoryContext::new("nodesfam_fuzz");
         let m = cx.mcx();
@@ -195,6 +227,7 @@ fn rust_exec(input: &str) -> ROut {
             reread_ok,
         )))
     });
+    IN_CHARTERED_REGION.set(false);
     match caught {
         Ok(Ok(Some((out, copy, reread_ok)))) => ROut::Ok { out, copy, reread_ok },
         Ok(Ok(None)) => ROut::NullNode,
@@ -347,9 +380,6 @@ fn expected_fields() -> &'static std::collections::HashMap<String, Vec<String>> 
     })
 }
 
-/// Split node text into `{LABEL field-name...}` blocks and check each against
-/// C's expected field sequence. Returns false when the text is outside the
-/// trusted-input contract (and therefore outside the compared domain).
 /// The 6 node labels whose C reader is HAND-WRITTEN (not generated) and whose
 /// field sequence is therefore CONDITIONAL — `_readRangeTblEntry` switches on
 /// rtekind, `_readA_Expr` on kind, `_readConst`/`_readBoolExpr`/`_readA_Const`/
@@ -375,7 +405,6 @@ fn custom_shapes() -> &'static std::collections::HashMap<String, Vec<Vec<String>
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 let Ok(data) = std::fs::read(e.path()) else { continue };
-                // seeds carry the arm selector byte
                 let body = if data.first() == Some(&0) { &data[1..] } else { &data[..] };
                 let Ok(text) = std::str::from_utf8(body) else { continue };
                 for (label, fields) in text_blocks(text) {
@@ -393,44 +422,35 @@ fn custom_shapes() -> &'static std::collections::HashMap<String, Vec<Vec<String>
     })
 }
 
-/// Every `{LABEL :field ... }` block in the text as (label, field-name-seq).
-/// Nested blocks are reported separately; a field whose value is a nested
-/// block does not contaminate the parent's sequence.
+/// Every `{LABEL :field ... }` block in the text as (label, field-name-seq),
+/// over the pg_strtok token stream. A field is a token starting with `:`
+/// IMMEDIATELY at a field slot; nested blocks are reported separately.
 fn text_blocks(text: &str) -> Vec<(String, Vec<String>)> {
-    let b = text.as_bytes();
+    let toks = pg_strtok_all(text);
     let mut done: Vec<(String, Vec<String>)> = Vec::new();
     let mut stack: Vec<(String, Vec<String>)> = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'{' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'}' {
-                    j += 1;
-                }
-                stack.push((text[start..j].to_owned(), Vec::new()));
-                i = j;
-            }
-            b'}' => {
-                if let Some(done_block) = stack.pop() {
-                    done.push(done_block);
-                }
-                i += 1;
-            }
-            b':' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
-                    j += 1;
-                }
-                if let Some(top) = stack.last_mut() {
-                    top.1.push(text[start..j].to_owned());
-                }
-                i = j;
-            }
-            _ => i += 1,
+    let mut k = 0;
+    while k < toks.len() {
+        let t = toks[k];
+        if t == "{" {
+            let label = toks.get(k + 1).copied().unwrap_or("");
+            stack.push((label.to_owned(), Vec::new()));
+            k += 2;
+            continue;
         }
+        if t == "}" {
+            if let Some(b) = stack.pop() {
+                done.push(b);
+            }
+            k += 1;
+            continue;
+        }
+        if let Some(name) = t.strip_prefix(':') {
+            if let Some(top) = stack.last_mut() {
+                top.1.push(name.to_owned());
+            }
+        }
+        k += 1;
     }
     done
 }
@@ -445,64 +465,135 @@ fn is_well_formed(text: &str) -> bool {
             }
         }
     }
-    is_well_formed_generated(text)
+    well_formed_token_stream(text)
 }
 
-fn is_well_formed_generated(text: &str) -> bool {
-    let b = text.as_bytes();
+/// TOKEN-STREAM well-formedness: walk the stream the way C's readers do and
+/// require that at every field slot the token is EXACTLY `:expected`.
+///
+/// This models what C's `READ_*_FIELD` macros actually do — they `pg_strtok`
+/// once to SKIP the field name WITHOUT COMPARING IT (readfuncs.c macro
+/// bodies: `/* skip :fldname */`) and once to take the value. So C blindly
+/// accepts any garbage token in a field-name slot, while the Rust port
+/// verifies the name and panics on a mismatch. That asymmetry is a real
+/// permissiveness delta, but it is only reachable from text no PG writer
+/// emits, so the compared domain excludes it (finding recorded in the lane
+/// report; witnessed by `{GROUPINGSET :kind 0 :content <> K:location -1 }`).
+fn well_formed_token_stream(text: &str) -> bool {
     let exp = expected_fields();
-    let mut i = 0;
-    // stack of (label, next expected field index)
+    let toks = pg_strtok_all(text);
+    // stack of (expected field list, next index)
     let mut stack: Vec<(Option<&Vec<String>>, usize)> = Vec::new();
-    while i < b.len() {
-        match b[i] {
-            b'{' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'}' {
-                    j += 1;
-                }
-                let label = &text[start..j];
-                // custom readers are gated by shape above, not by sequence
-                let e = if CUSTOM_READER_LABELS.contains(&label) {
-                    None
-                } else {
-                    exp.get(label)
-                };
-                stack.push((e, 0));
-                i = j;
-            }
-            b'}' => {
-                if let Some((Some(fields), n)) = stack.pop() {
-                    // every field the reader will consume must have been named
-                    if n != fields.len() {
-                        return false;
-                    }
-                }
-                i += 1;
-            }
-            b':' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
-                    j += 1;
-                }
-                let name = &text[start..j];
-                if let Some((Some(fields), n)) = stack.last_mut().map(|e| (e.0, &mut e.1)) {
-                    match fields.get(*n) {
-                        Some(expected) if expected == name => *n += 1,
-                        // C's READ macros compare the token to the field name
-                        // and elog on mismatch ONLY in some readers; treat any
-                        // deviation as out-of-domain.
-                        _ => return false,
-                    }
-                }
-                i = j;
-            }
-            _ => i += 1,
+    let mut k = 0;
+    while k < toks.len() {
+        let t = toks[k];
+        if t == "{" {
+            let Some(&label) = toks.get(k + 1) else { return false };
+            let e = if CUSTOM_READER_LABELS.contains(&label) {
+                None
+            } else {
+                exp.get(label)
+            };
+            stack.push((e, 0));
+            k += 2;
+            continue;
         }
+        if t == "}" {
+            match stack.pop() {
+                Some((Some(fields), n)) if n != fields.len() => return false,
+                Some(_) => {}
+                None => return false,
+            }
+            k += 1;
+            continue;
+        }
+        // inside a generated-reader block, the next non-structural token at a
+        // field slot must be exactly the expected field name
+        if let Some((Some(fields), n)) = stack.last().map(|e| (e.0, e.1)) {
+            if n < fields.len() {
+                if t != format!(":{}", fields[n]) {
+                    return false;
+                }
+                if let Some(top) = stack.last_mut() {
+                    top.1 += 1;
+                }
+                k += 1;
+                // consume this field's VALUE: either a nested block/list
+                // (handled by the loop) or a single token
+                match toks.get(k).copied() {
+                    Some("{") | Some("(") => {
+                        // let the structural walk handle it; find the match
+                        let open = toks[k];
+                        let close = if open == "{" { "}" } else { ")" };
+                        let mut depth = 0usize;
+                        while k < toks.len() {
+                            if toks[k] == open {
+                                depth += 1;
+                            } else if toks[k] == close {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            } else if toks[k] == "{" || toks[k] == "(" {
+                                // mixed nesting inside a value: validate it
+                                // by recursing over the whole remaining text
+                                // is unnecessary — nested blocks are visited
+                                // by text_blocks/this walk on their own.
+                            }
+                            k += 1;
+                        }
+                        // re-walk nested blocks for their own field checks
+                        continue;
+                    }
+                    Some(_) => {
+                        k += 1;
+                        continue;
+                    }
+                    None => return false,
+                }
+            }
+        }
+        k += 1;
     }
     stack.is_empty()
+}
+
+
+/// Faithful port of C `pg_strtok` (read.c) token splitting: whitespace
+/// separates, `(){}` are single-character tokens, and a backslash escapes the
+/// next byte inside a token. The gate MUST tokenize exactly as C does — the
+/// first gate parsed field names with a naive `:`-scan and missed
+/// `{GROUPINGSET :kind 0 :content <> K:location -1 }`, where `K:location` is
+/// ONE token, not the field name.
+fn pg_strtok_all(text: &str) -> Vec<&str> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        while i < b.len() && matches!(b[i], b' ' | b'\n' | b'\t') {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        let start = i;
+        if matches!(b[i], b'(' | b')' | b'{' | b'}') {
+            i += 1;
+        } else {
+            while i < b.len()
+                && !matches!(b[i], b' ' | b'\n' | b'\t' | b'(' | b')' | b'{' | b'}')
+            {
+                if b[i] == b'\\' && i + 1 < b.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        out.push(&text[start..i]);
+    }
+    out
 }
 
 /// Every `{LABEL`-shaped token in the input. Uppercase-or-underscore runs
