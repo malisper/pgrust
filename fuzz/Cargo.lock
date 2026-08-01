@@ -1721,6 +1721,7 @@ dependencies = [
  "adt_mac",
  "adt_mac8",
  "adt_multirangetypes",
+ "adt_network",
  "adt_numeric",
  "adt_oracle_compat",
  "adt_pg_lsn",
