@@ -68,6 +68,12 @@ fn main() {
         // SCAFFOLD-TODO #error paste site in csrc/pg_pg_prng_io.c is filled
         // with verbatim vendored C (README-TODO-pg_prng_diff.md step 1).
         .file("csrc/pg_pg_prng_io.c")
+        // miscfam_diff oracle (p1-mb-miscfam): verbatim 18.3 cmdtag.c +
+        // pg_class.c errdetail_relkind + earthdistance.c +
+        // pg_rusage.c show + xlogstats.c + common/stringinfo.c core
+        // (see pg_miscfam_io.c header; cmdtaglist.h vendored under
+        // csrc/miscfam/tcop/).
+        .file("csrc/pg_miscfam_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
@@ -93,6 +99,7 @@ fn main() {
         .include("csrc/shim")
         .include("csrc/pgdt")
         .include("csrc")
+        .include("csrc/miscfam")
         .include("csrc/ryu")
         // pg_enc_tables.c includes the SAME generated kwlist_d.h the
         // shipped keywords crate's build.rs transcribes (table parity by

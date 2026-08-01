@@ -134,6 +134,14 @@ regexp_alt = { path = "../../crates/backend/utils/adt/regexp_alt" }  # regexp_di
 regex_core = { path = "../../crates/backend/regex/regex_core" }  # regexp_diff: install the Spencer engine seams
 # pg_locale (like_diff C_LOCALE direct-kernel arms) — already declared above for jsonpath_diff
 types_nodes = { path = "../../crates/_support/types/nodes" }  # like_diff: NodeTag for the prosupport unhandled-tag plane
+# miscfam_diff (p1-mb-miscfam); stringinfo/mcx/types_* already above
+cmdtag = { path = "../../crates/backend/tcop/cmdtag" }
+pg_class = { path = "../../crates/backend/catalog/pg_class" }
+contrib_earthdistance = { path = "../../crates/contrib/earthdistance" }
+pg_rusage = { path = "../../crates/backend/utils/misc/pg_rusage" }
+xlogstats = { path = "../../crates/backend/access/transam/xlogstats" }
+types_portal = { path = "../../crates/_support/types/portal" }
+dfmgr = { path = "../../crates/backend/utils/fmgr/dfmgr" }
 
 [build-dependencies]
 cc = "1"
