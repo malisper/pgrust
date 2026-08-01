@@ -494,6 +494,25 @@ pub fn spellfam_diff(data: &[u8]) {
 
     let ctx = MemoryContext::new("spellfam");
     let r = rust_build(&ctx, ap.as_bytes(), dp.as_bytes());
+
+    // DOMAIN CARVE (C-UB, task #83 — no defined C answer, so this slice must
+    // never reach the C side AT ALL). NISortAffixes pallocs CompoundAffix with
+    // exactly `naffixes` elements (spell.c:1987) but writes its terminator at
+    // `ptr` (:2015) before repalloc'ing to collected+1 (:2016), so when EVERY
+    // affix is collected the terminator lands one element past the array —
+    // real, allocator-detected heap corruption (macOS libmalloc: "Heap
+    // corruption detected, free list is damaged"; see
+    // scratchpad/needs-decode/TASK-83-SEVERITY.md). Bounding the ncompound
+    // accessor fixed the observable COUNT but not the write, so the oracle's
+    // heap stays corrupted for these inputs — the C side must not run at all.
+    // The trigger is computed from the SAFE pgrust build (which performs no
+    // OOB): collected == naffixes with at least one affix.
+    if let Ok(obj) = &r {
+        if !obj.affixes.is_empty() && obj.compound_affix.len() == obj.affixes.len() {
+            return;
+        }
+    }
+
     let c_rc = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
 
     let dbg = || {
@@ -885,7 +904,7 @@ mod fleet_repro {
     #[test]
     #[ignore = "task #83: aborts the process with allocator-detected heap corruption (by design)"]
     fn task83_min_oob_trigger() {
-        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/min83-oob-naffixes1")).unwrap();
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scratchpad/needs-decode/min83-oob-naffixes1")).unwrap();
         super::spellfam_diff(&data);
     }
     #[test]
