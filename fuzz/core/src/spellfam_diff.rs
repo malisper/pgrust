@@ -876,6 +876,32 @@ mod fleet_repro {
     /// repalloc drops it and the walk read heap garbage (ncomp=137 then 109
     /// for naffixes==1). The oracle now bounds the scan by naffixes, which is
     /// exact in both cases. Upstream OOB write recorded as its own finding.
+    /// TASK #83 MINIMIZED REPRO + TRIGGER-DETECTION TEST.
+    /// A 4-line .affix reaching the OOB condition: naffixes == 1 (a power of
+    /// two, so 16*naffixes is exactly a chunk size) AND that single affix
+    /// collected into CompoundAffix (so `ptr` ends at index naffixes and
+    /// spell.c:2015 writes the terminator one element past the array).
+    /// `flag ~Z:` supplies FF_COMPOUNDONLY, which NIAddAffix promotes to
+    /// FF_COMPOUNDFLAG; `compoundwords controlled Z` registers the compound
+    /// flag; `foo/Z` in the .dict puts flag "Z" in AffixData so isAffixInUse
+    /// passes. Asserts the trigger is REACHED (ncomp == naffixes == 1), which
+    /// is what makes the terminator write out-of-bounds.
+    ///
+    /// VERDICT: this input produces REAL, ALLOCATOR-DETECTED HEAP CORRUPTION.
+    /// On macOS libmalloc the run aborts with
+    ///   `malloc: Heap corruption detected, free list is damaged at 0x...`
+    /// and the abort surfaces at the NEXT allocation (mkANode -> spf_palloc,
+    /// pg_spellfam_io.c:205, reached from NISortAffixes) — the classic delayed
+    /// corruption signature: the OOB terminator write clobbers adjacent heap
+    /// metadata and the allocator only notices when it next walks its free
+    /// list. #[ignore]d because it ABORTS THE PROCESS (it cannot share a test
+    /// binary); run it explicitly to reproduce the corruption.
+    #[test]
+    #[ignore = "task #83: aborts the process with allocator-detected heap corruption (by design)"]
+    fn task83_min_oob_trigger() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/min83-oob-naffixes1")).unwrap();
+        super::spellfam_diff(&data);
+    }
     #[test]
     fn div7_compound_4e2fe0d5() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/open-div7-compound-4e2fe0d5")).unwrap();
