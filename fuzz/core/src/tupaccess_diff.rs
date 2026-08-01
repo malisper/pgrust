@@ -41,6 +41,11 @@
 //!     is exercised by the DEDICATED op 1 spot-check (natts = 1665), not by
 //!     the generator (preferred option per charter).
 //!
+//! No dictionary file: the input is a dense binary spec (op/menu/flag bytes,
+//! no magic tokens); libFuzzer's CMP tracing finds the few interesting
+//! constants (menu indexes, natts boundaries), and the seed corpus pins the
+//! bitmap/width/witness shapes directly.
+//!
 //! INJECTION SWEEP AT CREATION (2026-08-01, scratchpad inject.py; every
 //! planted defect FAILED the seed-replay test, then was reverted;
 //! plane -> planted defect -> verdict):
