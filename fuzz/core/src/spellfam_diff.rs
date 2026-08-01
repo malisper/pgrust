@@ -229,6 +229,19 @@ fn rust_build<'mcx>(
 }
 
 pub fn spellfam_diff(data: &[u8]) {
+    // Free the C arena at BOTH ends of the exec: at entry (defensive) and, via
+    // the guard below, at return — otherwise the current exec's palloc'd
+    // dictionary is still live when libFuzzer's recoverable leak check runs
+    // (a reset-at-start-only arena reads as a per-exec leak; the CI cluster's LSan
+    // aborted at exec 48 on exactly this before the fix).
+    struct ResetGuard;
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            unsafe { pg_spf_reset() };
+        }
+    }
+    let _reset = ResetGuard;
+
     let Some(parsed) = parse_input(data) else {
         return;
     };
