@@ -104,15 +104,8 @@ fn fc_spg_kd_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
         sorted.push((unsafe { point_at(d) }, i as i32));
     }
 
-    // C's x_cmp/y_cmp under qsort (unstable); stable sort here — equal-coord
-    // points at the median may map to the other node than C's, which the C
-    // header comment declares acceptable (inner_consistent visits both sides).
     let by_x = input.level % 2 != 0;
-    if by_x {
-        sorted.sort_by(|a, b| cmp_coord(a.0.x, b.0.x));
-    } else {
-        sorted.sort_by(|a, b| cmp_coord(a.0.y, b.0.y));
-    }
+    kd_split_sort(&mut sorted, by_x);
     let middle = n >> 1;
     let coord = if by_x { sorted[middle].0.x } else { sorted[middle].0.y };
 
@@ -136,15 +129,33 @@ fn fc_spg_kd_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     Ok(Datum::null())
 }
 
-// C comparator shape: 0 on ==, 1 on >, else -1 (NaNs sort low).
+// C's x_cmp/y_cmp: 0 on ==, 1 on >, else -1. Non-total over NaN coordinates
+// (NaN vs anything compares -1 BOTH ways). C runs this under qsort — which
+// port.h maps to pg_qsort — and pg_qsort tolerates a non-total comparator,
+// producing a valid permutation. Rust's std sort instead DETECTS the broken
+// ordering and panics, which made CREATE INDEX ... USING spgist over NaN
+// points a SQL-reachable backend abort. Route through the canonical
+// pg_qsort crate (bit-exact port of port/qsort.c): same comparator + same
+// input => the same permutation as C, including on NaN input, so the built
+// index layout matches C's byte-for-byte.
 #[inline]
-fn cmp_coord(a: f64, b: f64) -> core::cmp::Ordering {
+fn coord_cmp_c(a: f64, b: f64) -> i32 {
     if a == b {
-        core::cmp::Ordering::Equal
+        0
     } else if a > b {
-        core::cmp::Ordering::Greater
+        1
     } else {
-        core::cmp::Ordering::Less
+        -1
+    }
+}
+
+/// The picksplit sort: C's `qsort(sorted, n, sizeof(*sorted), x_cmp|y_cmp)`.
+#[inline]
+pub fn kd_split_sort(sorted: &mut [(Point, i32)], by_x: bool) {
+    if by_x {
+        ::pg_qsort::pg_qsort(sorted, |a, b| coord_cmp_c(a.0.x, b.0.x));
+    } else {
+        ::pg_qsort::pg_qsort(sorted, |a, b| coord_cmp_c(a.0.y, b.0.y));
     }
 }
 
@@ -312,3 +323,118 @@ pub const SPGIST_KD_BUILTINS: &[FmgrBuiltin] = &[
     b(4025, "spg_kd_picksplit", 2, fc_spg_kd_picksplit),
     b(4026, "spg_kd_inner_consistent", 2, fc_spg_kd_inner_consistent),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pts(xs: &[f64]) -> Vec<(Point, i32)> {
+        xs.iter()
+            .enumerate()
+            .map(|(i, &x)| (Point { x, y: 0.0 }, i as i32))
+            .collect()
+    }
+
+    fn perm(v: &[(Point, i32)]) -> Vec<i32> {
+        v.iter().map(|e| e.1).collect()
+    }
+
+    /// The deterministic NaN-bearing 64-point input of record (LCG keys, NaN
+    /// every 5th slot). Shared by the C-parity pin and the negative control.
+    fn big64_xs() -> [f64; 64] {
+        let mut s = 0x5eed1234u64;
+        let mut xs = [0f64; 64];
+        for (i, slot) in xs.iter_mut().enumerate() {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *slot = if i % 5 == 4 { f64::NAN } else { ((s >> 33) % 1000) as f64 };
+        }
+        xs
+    }
+
+    /// Regression for the NaN-picksplit release blocker: sorting points with
+    /// NaN coordinates must NOT panic and must produce the exact permutation
+    /// C's pg_qsort produces under x_cmp/y_cmp. Expected permutations were
+    /// generated from PostgreSQL's own port/qsort.c (lib/sort_template.h
+    /// instantiation) compiled with the verbatim spgkdtreeproc.c comparator
+    /// over these same inputs. Note the C behavior being pinned: NaN pairs
+    /// compare -1 both ways, so NaN-peppered inputs with no adjacent
+    /// non-NaN descent pass the presorted check and come back unpermuted.
+    #[test]
+    fn kd_split_sort_nan_matches_c_pg_qsort() {
+        // n=5: insertion-sort branch (n<7). C: identity.
+        let mut small = pts(&[3.0, f64::NAN, 1.0, f64::NAN, 2.0]);
+        kd_split_sort(&mut small, true);
+        assert_eq!(perm(&small), vec![0, 1, 2, 3, 4]);
+
+        // n=13: presorted-scan branch. C: identity (every adjacent pair
+        // involves a NaN or an ascent, so the scan sees no descent).
+        let mut mid = pts(&[
+            5.0,
+            f64::NAN,
+            3.0,
+            7.0,
+            f64::NAN,
+            1.0,
+            9.0,
+            f64::NAN,
+            2.0,
+            8.0,
+            f64::NAN,
+            4.0,
+            6.0,
+        ]);
+        kd_split_sort(&mut mid, true);
+        assert_eq!(perm(&mid), (0..13).collect::<Vec<i32>>());
+
+        // n=64: full partition path (med3-of-med3, n>40) with real descents.
+        let mut big = pts(&big64_xs());
+        kd_split_sort(&mut big, true);
+        assert_eq!(
+            perm(&big),
+            vec![
+                44, 24, 59, 29, 4, 19, 34, 39, 54, 9, 49, 14, 21, 31, 55, 63, 45, 58, 41, 0, 6,
+                5, 16, 23, 40, 20, 43, 37, 53, 33, 18, 30, 13, 62, 12, 32, 52, 28, 36, 17, 46,
+                7, 60, 10, 2, 27, 26, 38, 42, 57, 22, 47, 25, 61, 35, 48, 15, 8, 1, 51, 3, 56,
+                11, 50
+            ]
+        );
+
+        // y-axis arm takes the same route; same input as y coords, same C pin.
+        let mut big_y: Vec<(Point, i32)> = big64_xs()
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (Point { x: 0.0, y: v }, i as i32))
+            .collect();
+        kd_split_sort(&mut big_y, false);
+        assert_eq!(perm(&big_y), perm(&big));
+    }
+
+    /// Negative control: the pre-fix code path (std slice sort with the same
+    /// comparator mapped to Ordering) PANICS on this exact input — Rust's
+    /// sort driver detects the NaN-broken total order. Proves the regression
+    /// test above would have failed before the pg_qsort routing, and that
+    /// the panic path is gone from the product code (which no longer calls
+    /// any std sort). Release-effective: plain assert, no debug_assert.
+    #[test]
+    fn nan_input_negative_control_std_sort_panics() {
+        let panicked = std::panic::catch_unwind(|| {
+            let mut v = pts(&big64_xs());
+            // The exact pre-fix comparator shape (cmp_coord -> Ordering).
+            v.sort_by(|a, b| {
+                if a.0.x == b.0.x {
+                    core::cmp::Ordering::Equal
+                } else if a.0.x > b.0.x {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Less
+                }
+            });
+            v
+        })
+        .is_err();
+        assert!(
+            panicked,
+            "std sort no longer panics on the NaN witness; the negative control lost its teeth"
+        );
+    }
+}

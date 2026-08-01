@@ -16595,6 +16595,7 @@ dependencies = [
  "adt_geo",
  "datum",
  "mcx",
+ "pg_qsort",
  "spgist_proc",
  "types_core",
  "types_error",
