@@ -254,6 +254,15 @@ pg_diff_hll_estimate(void)
 	return estimateHyperLogLog(&pg_diff_hll_state);
 }
 
+/* Single register readback (per-add touched-register plane). */
+int
+pg_diff_hll_reg_at(int idx)
+{
+	if (idx < 0 || (Size) idx >= pg_diff_hll_state.nRegisters)
+		return -1;
+	return pg_diff_hll_state.hashesArr[idx];
+}
+
 /* Copy out the register file (the full observable state). Returns the
  * register count (hashesArr's trailing +1 byte is C's historical alloc
  * quirk, never read). */

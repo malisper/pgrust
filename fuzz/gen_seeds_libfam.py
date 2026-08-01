@@ -121,6 +121,8 @@ IS_NUM = bytes([5]); IS_ITER = bytes([6]); IS_NEXT = lambda k: bytes([7, k])
 body = bytearray()
 body += is_run(255) + is_run(255) + is_run(255)  # >482 forces a flush
 body += IS_NUM + is_probe_rel(0) + is_probe_rel(1) + is_probe_rel(2)
+# absolute probes INTO packed mode-0 codewords (simple8b_contains bits==0 arm)
+body += is_probe_abs(100) + is_probe_abs(101) + is_probe_abs(241) + is_probe_abs(300)
 body += IS_ITER + IS_NEXT(255) + IS_NEXT(255)
 w("intset_mode0_runs", 4, body)
 
@@ -155,6 +157,27 @@ body = bytearray()
 body += is_probe_abs(0) + is_probe_abs(2**63) + IS_NUM + IS_ITER + IS_NEXT(3)
 body += is_abs(0) + is_probe_abs(0)            # 0 as the very first member
 w("intset_empty_and_zero", 4, body)
+
+# widths 4 and 6 (alpha-table 16/64-register arms; valid generic
+# instantiations on both sides)
+for wb, tag in [(2, "b4"), (3, "b6")]:
+    body = bytearray([wb])
+    for i in range(48):
+        body += bytes([0]) + u32((i * 0x9E3779B9) & 0xFFFFFFFF)
+    body += bytes([6])
+    w(f"hll_{tag}_dense", 0, body)
+
+# 3-level tree: ~8450 adds of gap 2^31 -> mode-15 items (2 values each)
+# -> >4096 leaf items -> 65+ leaves -> internal-root split (update_upper
+# recursion + internal downlink_key arm), then below-min + spot probes.
+def is_burst(n, k): return bytes([8, n - 1, k])
+body = bytearray()
+body += is_abs(1 << 20)                       # min member well above 0
+for _ in range(41):
+    body += is_burst(256, 31)
+body += IS_NUM + is_probe_abs(5) + is_probe_abs(0) + is_probe_rel(0) + is_probe_rel(2)
+body += IS_ITER + IS_NEXT(50)
+w("intset_three_levels", 4, body)
 
 # hll estimate branch seeds (small-range-with-zeros is everywhere above;
 # these force the other three estimate() arms):

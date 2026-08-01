@@ -77,6 +77,7 @@ extern "C" {
     fn pg_diff_hll_init(bwidth: i32) -> i32;
     fn pg_diff_hll_add(hash: u32);
     fn pg_diff_hll_estimate() -> f64;
+    fn pg_diff_hll_reg_at(idx: i32) -> i32;
     fn pg_diff_hll_regs(out: *mut u8, cap: i32) -> i32;
 
     fn pg_diff_bh_create(capacity: i32);
@@ -182,27 +183,35 @@ pub fn libfam_diff(data: &[u8]) {
 // ---------------------------------------------------------------------------
 
 enum Hll {
-    B10(Box<HyperLogLog>),
+    B4(Box<hyperloglog::Hll<16>>),
     B5(Box<HyperLogLog32>),
+    B6(Box<hyperloglog::Hll<64>>),
+    B10(Box<HyperLogLog>),
 }
 
 impl Hll {
     fn add(&mut self, h: u32) {
         match self {
-            Hll::B10(s) => s.add(h),
+            Hll::B4(s) => s.add(h),
             Hll::B5(s) => s.add(h),
+            Hll::B6(s) => s.add(h),
+            Hll::B10(s) => s.add(h),
         }
     }
     fn estimate(&self) -> f64 {
         match self {
-            Hll::B10(s) => s.estimate(),
+            Hll::B4(s) => s.estimate(),
             Hll::B5(s) => s.estimate(),
+            Hll::B6(s) => s.estimate(),
+            Hll::B10(s) => s.estimate(),
         }
     }
     fn registers(&self) -> &[u8] {
         match self {
-            Hll::B10(s) => s.registers(),
+            Hll::B4(s) => s.registers(),
             Hll::B5(s) => s.registers(),
+            Hll::B6(s) => s.registers(),
+            Hll::B10(s) => s.registers(),
         }
     }
 }
@@ -216,19 +225,34 @@ fn hll_compare_regs(rust: &Hll) {
 
 fn hll_arm(r: &mut R) {
     let Some(b) = r.u8() else { return };
-    let (bwidth, mut rust) = if b & 1 != 0 {
-        (5, Hll::B5(Box::new(HyperLogLog32::new(5))))
-    } else {
-        (10, Hll::B10(Box::new(HyperLogLog::new(10))))
+    // Widths 5 and 10 are the live consumers; 4 and 6 are valid generic
+    // instantiations exercising the alpha table's 16/64-register arms.
+    let (bwidth, mut rust) = match b % 4 {
+        0 => (10u32, Hll::B10(Box::new(HyperLogLog::new(10)))),
+        1 => (5u32, Hll::B5(Box::new(HyperLogLog32::new(5)))),
+        2 => (4u32, Hll::B4(Box::new(hyperloglog::Hll::<16>::new(4)))),
+        _ => (6u32, Hll::B6(Box::new(hyperloglog::Hll::<64>::new(6)))),
     };
-    assert_eq!(unsafe { pg_diff_hll_init(bwidth) }, 0, "hll init");
+    assert_eq!(unsafe { pg_diff_hll_init(bwidth as i32) }, 0, "hll init");
 
+    let mut adds = 0u32;
     while let Some(op) = r.u8() {
         if op % 8 < 6 {
             let Some(h) = r.u32() else { break };
             rust.add(h);
             unsafe { pg_diff_hll_add(h) };
-            hll_compare_regs(&rust);
+            // Per-add plane: the touched register, exactly (index formula is
+            // the shared C/Rust contract); full register file every 64 adds.
+            let idx = (h >> (32 - bwidth)) as usize;
+            assert_eq!(
+                rust.registers()[idx] as i32,
+                unsafe { pg_diff_hll_reg_at(idx as i32) },
+                "hll touched register {idx}"
+            );
+            adds += 1;
+            if adds % 64 == 0 {
+                hll_compare_regs(&rust);
+            }
         } else {
             let re = rust.estimate();
             let ce = unsafe { pg_diff_hll_estimate() };
@@ -416,7 +440,9 @@ fn ph_arm(r: &mut R) {
                     unsafe { pg_diff_ph_is_singular() } != 0,
                     "ph is_singular"
                 );
-                if !live.is_empty() {
+                if live.is_empty() {
+                    assert!(rust.first().is_none(), "ph first on empty");
+                } else {
                     ph_root_pair_check(&rust, &live);
                 }
             }
@@ -526,7 +552,10 @@ fn bloom_arm(r: &mut R) {
 // arm 4: integerset
 // ---------------------------------------------------------------------------
 
-const INTSET_MAX_ADDS: usize = 4000;
+// High enough that a deliberate burst seed can force a 3-level tree
+// (>64 internal downlinks => ~8200 two-value leaf items); random inputs
+// rarely approach it.
+const INTSET_MAX_ADDS: usize = 18000;
 
 fn intset_arm(r: &mut R) {
     let cx = MemoryContext::new("libfam_fuzz");
@@ -547,7 +576,25 @@ fn intset_arm(r: &mut R) {
     };
 
     while let Some(op) = r.u8() {
-        match op % 8 {
+        match op % 9 {
+            8 => {
+                // Gap burst: count adds of gap 2^k each — fills leaf items
+                // fast (few values per item), the road to deep trees.
+                let Some(nb) = r.u8() else { break };
+                let Some(kb) = r.u8() else { break };
+                let g = 1u64 << (kb % 32);
+                let n = (1 + nb as usize).min(INTSET_MAX_ADDS.saturating_sub(adds));
+                for _ in 0..n {
+                    let next = last.wrapping_add(g);
+                    if do_add(&mut rust, next) {
+                        last = next;
+                        adds += 1;
+                        iter_active = false;
+                    } else {
+                        break;
+                    }
+                }
+            }
             0 => {
                 // Consecutive run — drives simple8b mode-0/1 codewords.
                 let Some(nb) = r.u8() else { break };
