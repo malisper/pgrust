@@ -8709,6 +8709,7 @@ dependencies = [
  "mcx",
  "pqformat",
  "reloptions",
+ "stack_depth",
  "stringinfo",
  "ts_locale",
  "types_core",
