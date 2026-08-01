@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  p1-microbatch miscfam_diff 10M CONFIRM (resubmit after dup-symbol fix)
+
+job_name: pgrust-fuzz-campaign-1785566859-127e-14554
+job_type: fuzz-campaign
+git_ref: cc62060a57dcc6331d2097a89f1916c89548f3da
+repo_url: https://github.com/malisper/pgrust.git
+build_kind: fast
+sha: cc62060a57dc
+started_utc: 2026-08-01T06:49:14Z
+hostname: pgrust-fuzz-campaign-1785566859-127e-14554-dlf4d

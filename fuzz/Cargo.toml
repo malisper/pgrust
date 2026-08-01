@@ -395,3 +395,30 @@ path = "fuzz_targets/regexp_diff.rs"
 test = false
 doc = false
 bench = false
+
+# libfam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-libfam_diff.md.
+[[bin]]
+name = "libfam_diff"
+path = "fuzz_targets/libfam_diff.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "miscfam_diff"
+path = "fuzz_targets/miscfam_diff.rs"
+test = false
+doc = false
+# portfam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-portfam_diff.md.
+[[bin]]
+name = "portfam_diff"
+path = "fuzz_targets/portfam_diff.rs"
+# tzfam_diff (p1-mb-tzfam): strftime + tzparser + ts_locale family.
+[[bin]]
+name = "tzfam_diff"
+path = "fuzz_targets/tzfam_diff.rs"
+[[bin]]
+name = "netfam_diff"
+path = "fuzz_targets/netfam_diff.rs"
+test = false
+doc = false
+bench = false

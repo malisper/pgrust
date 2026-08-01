@@ -1233,3 +1233,9 @@ wfam_x_valid_server_encoding(const char *name)
 {
 	return pg_valid_server_encoding(name);
 }
+
+/* pg_wchar_strlen: both p1-mb-miscfam and p1-mb-portfam independently fixed
+ * the missing-definition link break; the merge keeps ONE definition — the
+ * verbatim TU csrc/wcharfam/wstrncmp.c (registered in build.rs) — because a
+ * second in-file copy here is a duplicate symbol under Linux ld (the exact
+ * failure class that broke the CI cluster fuzz build at 2c0bf108f008). */

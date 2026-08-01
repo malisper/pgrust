@@ -214,6 +214,15 @@ pub struct ZoneAbbrevTable {
     dynamic: &'static [DynamicZoneAbbrev],
 }
 
+impl ZoneAbbrevTable {
+    /// Differential-test accessor (tzfam_diff): the zone name behind a
+    /// DYNTZ token's `value` index. C stores a byte offset into the same
+    /// guc_malloc chunk; here `value` indexes `dynamic` directly.
+    pub fn dynamic_zone(&self, value: i32) -> &[u8] {
+        self.dynamic[value as usize].zone
+    }
+}
+
 thread_local! {
     static ZONEABBREVTBL: Cell<Option<&'static ZoneAbbrevTable>> = const { Cell::new(None) };
 }

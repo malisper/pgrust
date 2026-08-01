@@ -5,12 +5,12 @@ use core::fmt::Write;
 
 #[derive(Clone, Copy, Default)]
 pub struct PgRUsage {
-    tv_sec: i64,
-    tv_usec: i64,
-    ru_utime_sec: i64,
-    ru_utime_usec: i64,
-    ru_stime_sec: i64,
-    ru_stime_usec: i64,
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+    pub ru_utime_sec: i64,
+    pub ru_utime_usec: i64,
+    pub ru_stime_sec: i64,
+    pub ru_stime_usec: i64,
 }
 
 // C's getrusage(RUSAGE_SELF) measures the backend process; one backend here is
@@ -66,8 +66,12 @@ impl Write for RUsageShow {
 }
 
 pub fn pg_rusage_show(ru0: &PgRUsage) -> RUsageShow {
-    let mut ru1 = pg_rusage_init();
+    pg_rusage_show_delta(ru0, pg_rusage_init())
+}
 
+// The pure delta-formatting core of C pg_rusage_show (everything after its
+// pg_rusage_init(&ru1) clock read, which the caller supplies here).
+pub fn pg_rusage_show_delta(ru0: &PgRUsage, mut ru1: PgRUsage) -> RUsageShow {
     if ru1.tv_usec < ru0.tv_usec {
         ru1.tv_sec -= 1;
         ru1.tv_usec += 1_000_000;

@@ -1,0 +1,11 @@
+gentina Summer Time (obsolete)
+BOT    -14400    # Bolivia Time (obsolete)
+BRA    -05400    # Brazil Time (not in IANA database)
+BRST    -7200 D  # Brasil Summer Time (obsolete)
+BRT    -10800    # Brasil Time (obsol/ete  # Fernando de Noronha Time (obsolete)
+FNST    -3600 D  # Fernando de Noronha Summer Time (obsolete)
+GFT    -10800    # French Guiana Time (obsolete)
+GYT    America/Guyana  # Guyana Time (obsolete)
+MDT    -21600 D  # Mexico Mountain Daylight Time
+MST    -25200    # Mexico Mountain Standard Time
+N60abc abc D

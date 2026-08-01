@@ -92,6 +92,17 @@ where
     callback(addr, mask);
 }
 
+/// Fuzz-only conduit (100%-coverage campaign, lane p1-mb-netfam): drives the
+/// private mask-substitution logic differentially against C's
+/// run_ifaddr_callback. Behavior-identical passthrough.
+#[doc(hidden)]
+pub fn run_ifaddr_callback_for_fuzz<F>(callback: &mut F, addr: IpAddr, mask: Option<IpAddr>)
+where
+    F: FnMut(IpAddr, IpAddr),
+{
+    run_ifaddr_callback(callback, addr, mask)
+}
+
 fn mask_is_valid_for_addr(addr: &IpAddr, mask: &IpAddr) -> bool {
     match (addr, mask) {
         (IpAddr::V4(_), IpAddr::V4(m)) => *m != Ipv4Addr::UNSPECIFIED,

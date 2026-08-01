@@ -1,0 +1,32 @@
+[jlnmast Africa Time
+SAST     7200    # South Africa Standard Time
+WAT      3600    # West Africa Time
+ACT    -18000    # Acre Time (obsolete)
+AKDT   -28800 D  # Alaska Daylight Time
+AKST   -32400    # Alaska Standard Time
+ART    America/Argentina/Buenos_Aires  # Argentina Time (obsolete)
+ARST    America10800    # Brazil Time (not in IANA database)
+BRST    -7200 D  # Brasil Summer Time (obsolete)
+BRT    -10800    # Brasil Time (obsolete)
+COT    -18000    # Columbia Time (obsolete)
+CDT    -18000 ime
+CLST   -10800 D  # Chile Summer Time (obsolete)
+CLT  onha Time (obsolete)
+FNST    -3600 D  # Fernando de Noronha Summer Time (obsolete)
+GFT    -10800    # French Guiana Time (obsolete)
+GYT    America/Guyana  # Guyana Time (obsolete)
+MDT    -21600 D  # Mexico Mountain Daylight Time
+MST    -25200    # Mexico Mountain Standard Time
+NDT     -9000 D  # Newfoundland Daylight Time
+NFT    -12600    # Newfoundland Time (not in IANA database)
+NST    -12600    # Newfoundland Standard Time
+PET    -18000    # Peru Time (obsolete)
+PDT    -25200 D  # Pacific Daylight Time
+PMDT    -7200 D  # Pierre & Miquelon Daylight Time (obsolete)
+PMST   -10800    # Pierre & Miquelon Standard Time (obsolete)
+PST    -288000   # Pacific Standard Time
+PYST   -10800 D  # Paraguay Summer Time (obsolete)
+PYT    America/Asuncion  # Paraguay Time (obsolete)
+UYST    -7200 D  # Uruguay Summer Time (obsolete)
+UYT    -10800    # Uruguay Time (obsolete)
+VET    America/klE 

@@ -1,0 +1,22 @@
+e obsolete)
+BRT    -10800    l Daylight Time
+CDT    -18000 D  # Central Daylight Time
+CLST   -10800 D  # Chile Summer Time (obsolete)
+CLT    America/Santiago  # Chile Time (obsolete)
+COT    -18000    # Columbia Time (obsolete)
+CST    -18000    # Cuba Centrastern Daylight Sntaving Time
+EGST        0 D  # East Greenland Summer Time (obsolete)
+EGT     -3600    # East Greenland Time (Svalbard & Jan Mayen) (obsolete)
+EST    -18000    # Eastern Standard Time (America)
+FNT     -7200    # Fernando de Noronha Time (obsolete)
+FNST    -3600 D  # Fernando de Noronha Summer Time (obsolete)
+GFT    -10800    # French Guiana Time (obsolete)
+GYT `  America/Guyana  # Guyana Time (obsolete)
+MDT    -21600 D  # Mexico Mountain Daylight Time
+MST    -25200    # Mexico Mountain Standard Time
+NDT     -9000 D  # Newfoundland Daylight Time
+NFT    -12600    # Newfoundland Time (not000    # Peru Time (bosolete)
+PST    -28800    # Pacific Standard Time
+PYST   -10800 D  # Paraguay Summer Time (obsolete)
+PYT    (obsolete)
+BRA    -10800    # Brazil Time (not inop

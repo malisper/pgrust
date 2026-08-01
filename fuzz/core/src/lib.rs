@@ -480,4 +480,22 @@ pub use like_diff::like_diff;
 
 // regexp_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-regexp_diff.md.
 pub mod regexp_diff;
+// miscfam_diff (p1-mb-miscfam): cmdtag/pg_class/earthdistance/pg_rusage/
+// xlogstats/stringinfo six-crate family.
+pub mod miscfam_diff;
+pub use miscfam_diff::miscfam_diff;
 pub use regexp_diff::regexp_diff;
+
+// libfam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-libfam_diff.md.
+pub mod libfam_diff;
+pub use libfam_diff::libfam_diff;
+// portfam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-portfam_diff.md.
+pub mod portfam_diff;
+pub use portfam_diff::portfam_diff;
+// tzfam_diff: p1-mb-tzfam (strftime + tzparser + ts_locale vs vendored
+// 18.3 C) — see core/src/tzfam_diff.rs.
+pub mod tzfam_diff;
+pub use tzfam_diff::tzfam_diff;
+// netfam_diff (p1-mb-netfam): libpq ifaddr + pqformat two-crate family.
+pub mod netfam_diff;
+pub use netfam_diff::netfam_diff;
