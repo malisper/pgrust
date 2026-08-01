@@ -522,6 +522,33 @@ pub fn spellfam_diff(data: &[u8]) {
             return;
         }
 
+        // DOMAIN CARVE (unguarded trie-builder recursion — SHARED by both
+        // sides, so there is no differential signal here, only a crash).
+        // mkSPNode/mkANode recurse once per CHARACTER of the longest word, and
+        // spell.c has exactly ONE check_stack_depth in the whole file (in
+        // SplitToVariants, :2387) — the trie builders have none, and neither
+        // does the port. A single ~3300-byte whitespace-free run in the .dict
+        // therefore drives ~3300 frames and overflows the stack on whichever
+        // side is built with larger frames (observed: Rust-side
+        // "thread has overflowed its stack" at CI cluster exec 4,548,361, seed
+        // probe-stackov-c47645d6). Cap the longest token at MAXNORMLEN (256),
+        // which is the length bound spell.c itself uses for normalization, so
+        // the builders stay in a depth region both sides survive.
+        // NOTE — this is a real robustness gap, not just a harness limit, and
+        // it is WORSE in pgrust than in C: PostgreSQL loses one backend (then
+        // crash-recovers), while pgrust's thread-per-backend model loses the
+        // whole server process. Recorded in the evidence bank as a product
+        // finding recommending a depth guard in the port's mk_sp_node/mk_a_node
+        // even though C lacks one.
+        const MAX_TOKEN: usize = 256;
+        if aff
+            .split(|b: &u8| b.is_ascii_whitespace())
+            .chain(dict.split(|b: &u8| b.is_ascii_whitespace()))
+            .any(|t| t.len() > MAX_TOKEN)
+        {
+            return;
+        }
+
         // DOMAIN CARVE (C-UB, task #80 — the whole AF-alias surface, by a
         // PRESENCE test, applied before either side runs). C fills AffixData
         // slots lazily in FILE ORDER, so an affix line referencing an alias whose
@@ -1174,6 +1201,11 @@ mod fleet_repro {
         let probe = std::env::temp_dir().join("spellfam-fdprobe");
         assert!(std::fs::File::create(&probe).is_ok(), "fd exhaustion (EMFILE)");
         let _ = std::fs::remove_file(&probe);
+    }
+    #[test]
+    fn stackov_c47645d6() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-stackov-c47645d6")).unwrap();
+        super::spellfam_diff(&data);
     }
     #[test]
     fn div7_compound_4e2fe0d5() {
