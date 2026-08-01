@@ -1074,3 +1074,22 @@ fn stray_token_in_a_custom_block_is_gated() {
                :rtekind 8 :lateral false :inFromCl true :securityQuals <>}";
     assert!(!run_text(bad.as_bytes()), "stray token in a custom block reached the oracle");
 }
+
+/// A Bitmapset with a huge member index needs a ~TB word array. PG's palloc
+/// REFUSES it (ERRCODE_PROGRAM_LIMIT_EXCEEDED) rather than attempting it, so
+/// the oracle raises instead of aborting the process, and the verdict stays
+/// comparable with pgrust's.
+#[test]
+fn huge_bitmapset_raises_on_both_sides() {
+    let text = "(b 0 00800000000000)";
+    match c_exec(text.as_bytes()) {
+        COut::Err { errcode } => assert_eq!(
+            errcode,
+            types_error::make_sqlstate(*b"54000").0,
+            "C should raise 54000 for an over-MaxAllocSize bitmapset"
+        ),
+        COut::Ok { .. } => panic!("C accepted a ~TB bitmapset"),
+    }
+    // and the comparator handles it without killing the process
+    let _ = run_text(text.as_bytes());
+}

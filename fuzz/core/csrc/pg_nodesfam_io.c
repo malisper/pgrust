@@ -95,8 +95,20 @@ ndf_arena_alloc(size_t size)
 		if (ndf_arena == NULL)
 			abort();
 	}
-	if (aligned > NDF_ARENA_CAP - ndf_arena_used)
-		abort();				/* arena exhausted: raise NDF_ARENA_CAP */
+	/*
+	 * PG's palloc REFUSES a request over MaxAllocSize with
+	 * ERRCODE_PROGRAM_LIMIT_EXCEEDED rather than attempting it, and the
+	 * pgrust side does the same — so the oracle must raise, not abort.
+	 * (Found at ~25M local execs: `(b 0 00800000000000)` is a Bitmapset with
+	 * a member index near 2^47, whose word array is ~1 TB; the arena aborted
+	 * where both real PG and pgrust raise.) Requests that fit MaxAllocSize
+	 * but not this arena are a HARNESS limit and raise the same way, which
+	 * keeps the verdict comparable rather than killing the process.
+	 */
+	if (!AllocSizeIsValid(size) || aligned > NDF_ARENA_CAP - ndf_arena_used)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("invalid memory alloc request size %zu", size)));
 	p = ndf_arena + ndf_arena_used;
 	ndf_arena_used += aligned;
 	/* size header for repalloc, one MAXALIGN quantum before the chunk */
