@@ -972,3 +972,25 @@ fn nested_blocks_inside_custom_blocks_are_validated() {
                :tablesample <> :lateral false :inFromCl true :securityQuals <>}";
     assert!(!run_text(bad.as_bytes()), "nested misspelled field slipped through");
 }
+
+/// The unported-shape carve is REACHED and is the ONLY such shape today.
+#[test]
+fn unported_shape_carve_is_live_and_singular() {
+    let before = UNPORTED_CARVES.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(!run_text(b"(x)"), "XID list should not reach a full comparison");
+    assert!(
+        UNPORTED_CARVES.load(std::sync::atomic::Ordering::Relaxed) > before,
+        "XID list was not charged to the unported carve"
+    );
+    // the port must not grow new "unported" PANICS unnoticed. Three exist:
+    //   - `(x ...)` XID lists (this test's witness)
+    //   - parseNodeString's out-of-charter label arm (the OutOfCharter class)
+    //   - _readRangeTblEntry's out-of-charter rtekind arm
+    // (a fourth "unported" mention is a comment, not a panic).
+    let src = include_str!("../../../crates/backend/nodes/readfuncs/src/lib.rs");
+    let n = src
+        .lines()
+        .filter(|l| l.contains("unported") && l.contains("panic!") || l.contains("arm unported"))
+        .count();
+    assert_eq!(n, 3, "the read port now has {n} unported panics — record them");
+}

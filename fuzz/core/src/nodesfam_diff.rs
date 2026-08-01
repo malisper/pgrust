@@ -1032,6 +1032,16 @@ pub static ENUM_CARVES: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub static VALUE_TOKEN_CARVES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// UNPORTED-SHAPE CARVE (recorded scope gap): shapes the port rejects with an
+/// explicit "unported" panic naming the C reader. Exactly one today —
+/// `(x ...)`, the XID list — which the READ port does not implement at all
+/// (`nodeRead (read.c): xid list unported`), though copyfuncs does dispatch
+/// T_XidList. XID lists never appear in the catalog-stored node universe this
+/// family is chartered for; recorded here so the gap is visible rather than
+/// silently absorbed by another class.
+pub static UNPORTED_CARVES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// C `nodeTokenType`'s integer-vs-float decision, verbatim: strip one leading
 /// sign, require a digit (or `.digit`), then C's `strtoint` must consume the
 /// entire token without ERANGE to call it T_Integer. Anything else numeric is
@@ -1061,6 +1071,8 @@ enum PanicClass {
     EnumDomain,
     /// bare Boolean/Float/BitString value token (read-set carve)
     ValueToken,
+    /// an explicitly unported shape (XID lists)
+    Unported,
     /// anything else with every label in scope: a real divergence
     Divergence,
 }
@@ -1069,6 +1081,9 @@ fn classify_panic(text: &str, msg: &str, labels: &[&str]) -> PanicClass {
     let port = port_read_labels();
     if !labels.iter().all(|l| port.binary_search(l).is_ok()) {
         return PanicClass::OutOfCharter;
+    }
+    if msg.contains("unported") {
+        return PanicClass::Unported;
     }
     if ENUM_DOMAIN_VALIDATORS
         .iter()
@@ -1217,6 +1232,9 @@ pub fn run_text(input_bytes: &[u8]) -> bool {
                 }
                 PanicClass::ValueToken => {
                     VALUE_TOKEN_CARVES.fetch_add(1, Relaxed);
+                }
+                PanicClass::Unported => {
+                    UNPORTED_CARVES.fetch_add(1, Relaxed);
                 }
                 PanicClass::Divergence => panic!(
                     "IN-SCOPE PANIC DIVERGENCE on {text:?}: C accepted, Rust panicked \
