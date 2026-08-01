@@ -358,8 +358,17 @@ pub fn spellfam_diff(data: &[u8]) {
         .collect();
     let mut c_sets: Vec<Vec<Vec<u8>>> = (0..nad)
         .map(|i| {
+            // C's AffixData is palloc0'd, so an unfilled alias-table slot is
+            // NULL (getAffixFlagSet returns "" for it and never dereferences
+            // it); the Rust port stores an empty PgVec for the same slot.
+            // NULL == empty here — treat it so (a raw CStr::from_ptr(NULL)
+            // would strlen(NULL) and SEGV in the harness).
             let cptr = unsafe { pg_spf_affixdata(i) };
-            let cbytes = unsafe { std::ffi::CStr::from_ptr(cptr) }.to_bytes();
+            let cbytes: &[u8] = if cptr.is_null() {
+                &[]
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(cptr) }.to_bytes()
+            };
             canon_flags(cbytes, fm, enc)
         })
         .collect();
@@ -388,7 +397,11 @@ pub fn spellfam_diff(data: &[u8]) {
     for i in 0..ncomp {
         let (mut clen, mut cissuf): (c_int, c_int) = (0, 0);
         let cptr = unsafe { pg_spf_compound(i, &mut clen, &mut cissuf) };
-        let cbytes = unsafe { std::ffi::CStr::from_ptr(cptr) }.to_bytes();
+        let cbytes: &[u8] = if cptr.is_null() {
+            &[]
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(cptr) }.to_bytes()
+        };
         let ca = &obj.compound_affix[i as usize];
         assert_eq!(ca.affix.as_slice(), cbytes, "CompoundAffix[{i}].affix ({})", dbg());
         assert_eq!(ca.len, clen, "CompoundAffix[{i}].len ({})", dbg());
@@ -409,7 +422,11 @@ pub fn spellfam_diff(data: &[u8]) {
                 for i in 0..cn {
                     let (mut nv, mut fl): (c_int, c_int) = (0, 0);
                     let cptr = unsafe { pg_spf_lex(i, &mut nv, &mut fl) };
-                    let cbytes = unsafe { std::ffi::CStr::from_ptr(cptr) }.to_bytes();
+                    let cbytes: &[u8] = if cptr.is_null() {
+                        &[]
+                    } else {
+                        unsafe { std::ffi::CStr::from_ptr(cptr) }.to_bytes()
+                    };
                     let rl = &rlex[i as usize];
                     assert_eq!(rl.lexeme.as_slice(), cbytes, "lexeme[{i}] bytes ({})", wdbg());
                     assert_eq!(rl.nvariant as i32, nv, "lexeme[{i}] nvariant ({})", wdbg());
@@ -596,5 +613,18 @@ mod corpus_replay {
             }
         }
         assert!(n >= 30, "expected the committed corpus, saw {n}");
+    }
+}
+
+#[cfg(test)]
+mod fleet_repro {
+    #[test]
+    fn segv_acad8fe4() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../corpus/spellfam_diff/CI-div-segv-acad8fe4"
+        ))
+        .unwrap();
+        super::spellfam_diff(&data);
     }
 }
