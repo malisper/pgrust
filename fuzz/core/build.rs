@@ -910,4 +910,61 @@ fn main() {
         .compile("pg_difffuzz_contribb");
     println!("cargo:rerun-if-changed=csrc/pg_contribb_io.c");
     println!("cargo:rerun-if-changed=csrc/contribb");
+
+    // nodesfam_diff oracle (p1-nodes): verbatim 18.3 node walkers —
+    // outfuncs.c / readfuncs.c / copyfuncs.c (+ equalfuncs.c as the
+    // C-side structural-equality witness) with read/value/list/bitmapset,
+    // datum.c, stack_depth.c and the generated node-support files
+    // (gen_node_support.pl et al., committed under csrc/nodesfam/gen with
+    // provenance; csrc/nodesfam/assemble.sh re-vendors the whole family).
+    // Own cc::Build: the family vendors the real src/include closure
+    // (csrc/nodesfam/include) + a fabricated pg_config shim
+    // (csrc/nodesfam/shim), which must never leak into other families.
+    //
+    // SYMBOL ISOLATION: every extern this family exports (207 symbols:
+    // bms_*, list machinery, stringToNode/nodeToString/copyObjectImpl/
+    // equal, palloc shims, pg_snprintf, pg_bitutils, ...) is renamed
+    // nf_* at compile time from csrc/nodesfam/rename_syms.txt — several
+    // (pg_popcount64, pg_strtok-adjacent helpers, palloc) already have
+    // verbatim definitions in other family archives. Driver entries keep
+    // their unique pg_nf_ prefix.
+    let mut nodesfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        nodesfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    let rename_syms = std::fs::read_to_string("csrc/nodesfam/rename_syms.txt")
+        .expect("csrc/nodesfam/rename_syms.txt");
+    for s in rename_syms.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        nodesfam.define(s, format!("nf_{s}").as_str());
+    }
+    // -O2 PIN: production PostgreSQL builds at -O2; keep the oracle there
+    // (same rationale as the contribb pin above).
+    nodesfam.opt_level(2);
+    nodesfam.file("csrc/pg_nodesfam_io.c");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    for f in std::fs::read_dir("csrc/nodesfam/src").expect("csrc/nodesfam/src") {
+        let p = f.expect("dirent").path();
+        if p.extension().is_some_and(|e| e == "c") {
+            // strlcpy/strlcat: only where libc lacks them (glibc < 2.38);
+            // on macOS the SDK both declares and fortify-macroizes them.
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if (name == "strlcpy.c" || name == "strlcat.c") && target_os != "linux" {
+                continue;
+            }
+            nodesfam.file(p);
+        }
+    }
+    nodesfam
+        .include("csrc/nodesfam/shim")
+        .include("csrc/nodesfam/gen")
+        .include("csrc/nodesfam/include")
+        .include("csrc/nodesfam/src")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_nodesfam");
+    println!("cargo:rerun-if-changed=csrc/pg_nodesfam_io.c");
+    println!("cargo:rerun-if-changed=csrc/nodesfam");
 }
