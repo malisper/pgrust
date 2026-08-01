@@ -8,6 +8,8 @@
 mod bcrypt;
 mod cryptdes;
 mod desc;
+#[cfg(test)]
+mod divergence_witness;
 mod shacrypt;
 
 use pg_md5::Md5;

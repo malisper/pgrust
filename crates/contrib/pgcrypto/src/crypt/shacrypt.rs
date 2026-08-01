@@ -1,4 +1,14 @@
-//! SHA-256 / SHA-512 crypt (`$5$` / `$6$`, `crypt-sha.c`).
+//! SHA-256 / SHA-512 crypt (`$5$` / `$6$`) — a NATIVE port of PostgreSQL
+//! 18.3's `px_crypt_shacrypt` (contrib/pgcrypto/crypt-sha.c), not a shim.
+//!
+//! Lane p1-pgcrypto proved the previous 47-line shim over an external crate
+//! CANNOT be repaired by pre-validation: crypt-sha.c skips a leading `$` in
+//! the salt while building the CLEANED salt (`decoded_salt`), but then feeds
+//! digest B (step 6) and digest DS (step 18) from the RAW pointer
+//! (`dec_salt_binary`), so C's answer for `$5$$abc` differs from C's own
+//! answer for `$5$abc` (verified live, twice, on stock 18.3). That raw-vs-
+//! cleaned pointer asymmetry IS the contract and is reproduced structurally
+//! here (`salt_raw` vs `salt_clean`).
 //!
 //! The rounds option is parsed with C's exact `strtoint` semantics
 //! (src/common/string.c: `strtol`, truncate long->int, errno IGNORED), so
@@ -7,23 +17,28 @@
 //! Parsing into a wider type and clamping to the local max turned a 13-byte
 //! setting string into a 999,999,999-round DoS (lane p1-pgcrypto, D12).
 //!
-//! The digest loop itself is the `pwhash` crate's sha2_crypt algorithm,
-//! carried in-tree verbatim over pg_sha2 so the per-round
-//! CHECK_FOR_INTERRUPTS that C has (crypt-sha.c step-21 loop) can run —
-//! an external crate's loop is not cancellable (D19). Salt handling
-//! (truncate to 16, hash64 alphabet check, `$`-delimited) keeps pwhash's
-//! behavior bit-for-bit; the crypt-sha.c-native salt semantics are the
-//! separate native-port task (#71).
+//! Error identities (message AND SQLSTATE) are what stock 18.3 raises,
+//! captured by execution 2026-08-01 (twice, independent containers):
+//!   - 22023 "invalid character in salt string: \"<mb char>\""
+//!   - 42601 "could not parse salt options"
+//!   - XX000 "bogus magic byte found in salt string"           (elog)
+//!   - XX000 "invalid rounds option specified in salt string"  (elog)
+//!   - NOTICE 22003 on rounds clamp, C's exact text
+//!
+//! C operates on NUL-terminated strings; Rust `&str` can embed NUL (not
+//! reachable from SQL `text`). We reproduce C's strlen/strstr semantics by
+//! truncating the setting at the first NUL byte up front.
 
 use super::CryptError;
 use types_error::PgError;
 
-const ROUNDS_MIN: i32 = 1000;
-const ROUNDS_MAX: i32 = 999_999_999;
-const ROUNDS_DEFAULT: u32 = 5000;
-const MAX_SALT_LEN: usize = 16;
+const ROUNDS_MIN: i32 = 1000; // PX_SHACRYPT_ROUNDS_MIN
+const ROUNDS_MAX: i32 = 999_999_999; // PX_SHACRYPT_ROUNDS_MAX
+const ROUNDS_DEFAULT: u32 = 5000; // PX_SHACRYPT_ROUNDS_DEFAULT
+const SALT_MAX_LEN: usize = 16; // PX_SHACRYPT_SALT_MAX_LEN
 
-// crypt-sha.c's rounds-clamp diagnostics: a non-throwing client NOTICE.
+// crypt-sha.c's rounds-clamp diagnostics: a non-throwing client NOTICE
+// (18.3 raises it with SQLSTATE 22003, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE).
 fn notice(msg: &str) {
     let _ = elog::ereport(types_error::NOTICE)
         .errcode(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
@@ -31,8 +46,22 @@ fn notice(msg: &str) {
         .finish(types_error::ErrorLocation { filename: None, lineno: 0, funcname: None });
 }
 
-fn null_err() -> CryptError {
-    CryptError::Message("crypt(3) returned NULL".to_string())
+// ereport(ERROR, errcode(ERRCODE_INVALID_PARAMETER_VALUE), ...) — 22023.
+fn err_22023(msg: String) -> CryptError {
+    CryptError::Pg(
+        PgError::error(msg)
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .into(),
+    )
+}
+
+// elog(ERROR, ...) — no errcode, so XX000 (verified live on 18.3).
+fn err_elog(msg: &str) -> CryptError {
+    CryptError::Pg(
+        PgError::error(msg.to_string())
+            .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+            .into(),
+    )
 }
 
 /// C `strtol(str, &endp, 10)` over bytes: skip isspace, optional sign,
@@ -73,22 +102,29 @@ fn strtol10(s: &[u8]) -> (i64, usize) {
     (if neg { val } else { -val }, i)
 }
 
-// pwhash's CRYPT_HASH64 alphabet (same table as crypt.rs ITOA64).
-const HASH64: &[u8; 64] = super::ITOA64;
+// _crypt_itoa64 (crypt-sha.c:62) — same table as crypt.rs ITOA64.
+const ITOA64: &[u8; 64] = super::ITOA64;
 
-/// pwhash `bcrypt_hash64_decode`'s validity net over the salt (its decode
-/// output is discarded by sha2_crypt — only the error matters): every byte
-/// must map through the bcrypt hash64 alphabet.
-fn salt_chars_valid(salt: &[u8]) -> bool {
-    const BCRYPT_HASH64: &[u8; 64] =
-        b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    salt.iter().all(|&b| {
-        let v = (b as u32).wrapping_sub(0x20);
-        v <= 0x60 && BCRYPT_HASH64.contains(&b)
-    })
+/// `pg_mblen`-alike for the error message's `%.*s`: byte length of the
+/// (assumed UTF-8) character starting at `s[0]`, clamped to the slice.
+fn mb_char(s: &[u8]) -> String {
+    let n = match s[0] {
+        b if b < 0x80 => 1,
+        b if b >= 0xf0 => 4,
+        b if b >= 0xe0 => 3,
+        b if b >= 0xc0 => 2,
+        _ => 1,
+    }
+    .min(s.len());
+    String::from_utf8_lossy(&s[..n]).into_owned()
 }
 
-/// pwhash `md5_sha2_hash64_encode` replica.
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// pwhash-lineage hash64 encoder, audited byte-exact against C's
+/// b64_from_24bit emission order via the transpose tables below.
 fn hash64_encode(bs: &[u8]) -> String {
     let ngroups = bs.len().div_ceil(3);
     let mut out = String::with_capacity(ngroups * 4);
@@ -102,7 +138,7 @@ fn hash64_encode(bs: &[u8]) -> String {
             g_idx += 1;
         }
         for _ in 0..4 {
-            out.push(HASH64[(enc & 0x3f) as usize] as char);
+            out.push(ITOA64[(enc & 0x3f) as usize] as char);
             enc >>= 6;
         }
     }
@@ -162,26 +198,40 @@ const SHA512_TRANSPOSE: &[u8] = b"\x2a\x15\x00\x01\x2b\x16\x17\x02\x2c\x2d\x18\x
       \x1f\x20\x0b\x35\x36\x21\x0c\x0d\x37\x22\x23\x0e\x38\x39\x24\x0f\
       \x10\x3a\x25\x26\x11\x3b\x3c\x27\x12\x13\x3d\x28\x29\x14\x3e\x3f";
 
-/// pwhash `sha2_crypt` computation (Drepper's algorithm), CHECK_FOR_INTERRUPTS
-/// per round exactly where C's crypt-sha.c step-21 loop has it.
+/// crypt-sha.c steps 1-21 (Drepper's algorithm), CHECK_FOR_INTERRUPTS per
+/// round exactly where C's step-21 loop has it.
+///
+/// THE QUIRK OF RECORD (D14): `salt_clean` is C's `decoded_salt->data`
+/// (leading `$`s skipped); `salt_raw` is C's `dec_salt_binary` — the raw
+/// post-options bytes, same LENGTH as the cleaned salt but possibly
+/// different CONTENT. C feeds digest A (step 3) and byte sequence S's
+/// length from the cleaned salt, but digest B (step 6) and digest DS
+/// (step 18) from the raw pointer. Both slices here have identical length
+/// (`salt_len`); only their bytes may differ.
 fn sha2_crypt<C: ShaCtx>(
     pass: &[u8],
-    salt: &[u8],
+    salt_clean: &[u8],
+    salt_raw: &[u8],
     rounds: u32,
     trn_table: &[u8],
 ) -> Result<Vec<u8>, CryptError> {
+    debug_assert_eq!(salt_clean.len(), salt_raw.len());
     let dsize = C::DSIZE;
+    let salt_len = salt_clean.len();
 
+    // Steps 4-8: digest B = H(pw || RAW salt || pw).
     let mut dgst_b = C::init();
     dgst_b.update(pass);
-    dgst_b.update(salt);
+    dgst_b.update(salt_raw);
     dgst_b.update(pass);
     let mut hash_b = dgst_b.finish();
 
+    // Steps 1-3: digest A starts with pw || CLEANED salt.
     let mut dgst_a = C::init();
     dgst_a.update(pass);
-    dgst_a.update(salt);
+    dgst_a.update(salt_clean);
 
+    // Steps 9-10.
     let plen = pass.len();
     let mut p = plen;
     while p > 0 {
@@ -192,6 +242,7 @@ fn sha2_crypt<C: ShaCtx>(
         p -= dsize;
     }
 
+    // Step 11.
     p = plen;
     while p > 0 {
         if p & 1 == 0 {
@@ -202,14 +253,16 @@ fn sha2_crypt<C: ShaCtx>(
         p >>= 1;
     }
 
+    // Step 12.
     let mut hash_a = dgst_a.finish();
 
+    // Steps 13-16: byte sequence P.
     let mut dgst_b = C::init();
     for _ in 0..plen {
         dgst_b.update(pass);
     }
     hash_b = dgst_b.finish();
-    let mut seq_p = Vec::<u8>::with_capacity(plen.div_ceil(dsize) * dsize);
+    let mut seq_p = Vec::<u8>::with_capacity(plen.div_ceil(dsize.max(1)) * dsize);
     p = plen;
     while p > 0 {
         seq_p.extend(&hash_b[..p.min(dsize)]);
@@ -219,17 +272,20 @@ fn sha2_crypt<C: ShaCtx>(
         p -= dsize;
     }
 
+    // Steps 17-20: byte sequence S — digest DS over the RAW salt,
+    // 16 + A[0] times (crypt-sha.c:455), then the first salt_len bytes.
     let mut dgst_b = C::init();
-    for _ in 0..MAX_SALT_LEN + (hash_a[0] as usize) {
-        dgst_b.update(salt);
+    for _ in 0..SALT_MAX_LEN + (hash_a[0] as usize) {
+        dgst_b.update(salt_raw);
     }
     hash_b = dgst_b.finish();
-    let mut seq_s = Vec::<u8>::with_capacity(MAX_SALT_LEN);
-    seq_s.extend(&hash_b[..salt.len()]);
+    let mut seq_s = Vec::<u8>::with_capacity(SALT_MAX_LEN);
+    seq_s.extend(&hash_b[..salt_len]);
 
+    // Step 21.
     for r in 0..rounds {
         // C runs CHECK_FOR_INTERRUPTS() at the top of every round so large
-        // "rounds" stay cancellable (crypt-sha.c). A raised cancel/die
+        // "rounds" stay cancellable (crypt-sha.c:498). A raised cancel/die
         // propagates out as the error.
         postgres_seams::check_for_interrupts::call().map_err(CryptError::Pg)?;
 
@@ -261,59 +317,122 @@ fn sha2_crypt<C: ShaCtx>(
     Ok(out)
 }
 
+/// Native `px_crypt_shacrypt` (crypt-sha.c:68). The dispatcher only routes
+/// `$5$`/`$6$`-prefixed settings here, but the C entry checks are ported for
+/// direct callers.
 pub fn crypt_sha(pw: &str, setting: &str) -> Result<String, CryptError> {
-    let is_512 = setting.as_bytes().starts_with(b"$6$");
-    let after = &setting[3..];
+    let full = setting.as_bytes();
+    // C sees a NUL-terminated string: strlen/strstr stop at the first NUL.
+    // SQL `text` cannot carry NUL; this matters only for direct Rust callers.
+    let s = &full[..full.iter().position(|&b| b == 0).unwrap_or(full.len())];
 
-    // Rounds option: C parity (crypt-sha.c px_crypt_shacrypt rounds branch).
-    let (rounds, rounds_custom, salt_rest): (u32, bool, &[u8]) =
-        if let Some(rest) = after.strip_prefix("rounds=") {
-            let rb = rest.as_bytes();
-            let (lval, end) = strtol10(rb);
-            // C strtoint: truncate long -> int; overflow/errno ignored.
-            let mut srounds = lval as i32;
-            if rb.get(end) != Some(&b'$') {
-                return Err(CryptError::Pg(
-                    PgError::error("could not parse salt options".to_string())
-                        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
-                        .into(),
-                ));
-            }
-            if srounds > ROUNDS_MAX {
-                notice(&format!(
-                    "rounds={srounds} exceeds maximum supported value ({ROUNDS_MAX}), using {ROUNDS_MAX} instead"
-                ));
-                srounds = ROUNDS_MAX;
-            } else if srounds < ROUNDS_MIN {
-                notice(&format!(
-                    "rounds={srounds} is below supported value ({ROUNDS_MIN}), using {ROUNDS_MIN} instead"
-                ));
-                srounds = ROUNDS_MIN;
-            }
-            (srounds as u32, true, &rb[end + 1..])
-        } else {
-            (ROUNDS_DEFAULT, false, after.as_bytes())
-        };
-
-    // Salt: up to the next '$', truncated to 16 bytes, hash64-alphabet only
-    // (pwhash hash_with behavior, kept bit-for-bit).
-    let salt_field = match salt_rest.iter().position(|&b| b == b'$') {
-        Some(i) => &salt_rest[..i],
-        None => salt_rest,
-    };
-    let salt = &salt_field[..salt_field.len().min(MAX_SALT_LEN)];
-    if !salt_chars_valid(salt) {
-        return Err(null_err());
+    // crypt-sha.c:137 — strlen(salt) < 3.
+    if s.len() < 3 {
+        return Err(err_22023("invalid salt".to_string()));
     }
-    let salt_str = core::str::from_utf8(salt).map_err(|_| null_err())?;
+    // crypt-sha.c:146 — magic byte enclosure.
+    if s[0] != b'$' || s[2] != b'$' {
+        return Err(CryptError::Pg(
+            PgError::error("invalid format of salt".to_string())
+                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .with_hint("magic byte format for shacrypt is either \"$5$\" or \"$6$\"")
+                .into(),
+        ));
+    }
+    // crypt-sha.c:158-167 magic match; :273 unknown identifier (elog).
+    // C parses a rounds option before raising this, but with salt[0]=='$'
+    // the "rounds=" strncmp can never match first — erroring here is C-exact.
+    let is_512 = match s[1] {
+        b'5' => false,
+        b'6' => true,
+        c => {
+            return Err(err_elog(&format!(
+                "unknown crypt identifier \"{}\"",
+                // C prints the raw byte via %c.
+                c as char
+            )))
+        }
+    };
+
+    // Rounds option (crypt-sha.c:184-230).
+    let mut rest: &[u8] = &s[3..];
+    let mut rounds: u32 = ROUNDS_DEFAULT;
+    let mut rounds_custom = false;
+    if rest.starts_with(b"rounds=") {
+        let num = &rest[b"rounds=".len()..];
+        let (lval, end) = strtol10(num);
+        // C strtoint: truncate long -> int; overflow/errno ignored.
+        let mut srounds = lval as i32;
+        if num.get(end) != Some(&b'$') {
+            return Err(CryptError::Pg(
+                PgError::error("could not parse salt options".to_string())
+                    .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
+                    .into(),
+            ));
+        }
+        rest = &num[end + 1..];
+        if srounds > ROUNDS_MAX {
+            notice(&format!(
+                "rounds={srounds} exceeds maximum supported value ({ROUNDS_MAX}), using {ROUNDS_MAX} instead"
+            ));
+            srounds = ROUNDS_MAX;
+        } else if srounds < ROUNDS_MIN {
+            notice(&format!(
+                "rounds={srounds} is below supported value ({ROUNDS_MIN}), using {ROUNDS_MIN} instead"
+            ));
+            srounds = ROUNDS_MIN;
+        }
+        rounds = srounds as u32;
+        rounds_custom = true;
+    }
+
+    // Salt scan (crypt-sha.c:293-347): walk at most SALT_MAX_LEN bytes.
+    // C re-runs whole-remaining-string strstr guards for "$5$"/"$6$"/
+    // "rounds=" on EVERY iteration — observably identical to running them
+    // once per entered loop body, and like C they never run if the loop
+    // body never executes (empty remainder ⇒ empty salt is legal, D13).
+    let mut decoded: Vec<u8> = Vec::with_capacity(SALT_MAX_LEN);
+    let mut i = 0usize;
+    while i < rest.len() && i < SALT_MAX_LEN {
+        if contains(rest, b"$5$") || contains(rest, b"$6$") {
+            return Err(err_elog("bogus magic byte found in salt string"));
+        }
+        if contains(rest, b"rounds=") {
+            return Err(err_elog("invalid rounds option specified in salt string"));
+        }
+        let c = rest[i];
+        if c != b'$' {
+            if ITOA64.contains(&c) {
+                decoded.push(c);
+            } else {
+                return Err(err_22023(format!(
+                    "invalid character in salt string: \"{}\"",
+                    mb_char(&rest[i..])
+                )));
+            }
+        } else if !decoded.is_empty() {
+            // '$' after at least one absorbed byte terminates the salt;
+            // anything after is an (ignored) attached password hash.
+            break;
+        }
+        // A '$' with nothing absorbed yet is SKIPPED in the cleaned salt —
+        // but the raw pointer below still sees it (D14).
+        i += 1;
+    }
+    let salt_len = decoded.len();
+    // C's dec_salt_binary: digest B and DS read salt_len bytes from the RAW
+    // post-options string, NOT the cleaned salt (crypt-sha.c:377,456).
+    let salt_raw = &rest[..salt_len];
 
     let raw = if is_512 {
-        sha2_crypt::<Ctx512>(pw.as_bytes(), salt, rounds, SHA512_TRANSPOSE)?
+        sha2_crypt::<Ctx512>(pw.as_bytes(), &decoded, salt_raw, rounds, SHA512_TRANSPOSE)?
     } else {
-        sha2_crypt::<Ctx256>(pw.as_bytes(), salt, rounds, SHA256_TRANSPOSE)?
+        sha2_crypt::<Ctx256>(pw.as_bytes(), &decoded, salt_raw, rounds, SHA256_TRANSPOSE)?
     };
     let magic = if is_512 { "$6$" } else { "$5$" };
     let encoded = hash64_encode(&raw);
+    // The result string carries the CLEANED salt (C appends decoded_salt).
+    let salt_str = core::str::from_utf8(&decoded).expect("itoa64 subset is ASCII");
     Ok(if rounds_custom {
         format!("{magic}rounds={rounds}${salt_str}${encoded}")
     } else {

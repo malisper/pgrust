@@ -28,6 +28,14 @@ fn crypt_err(e: crypt::CryptError) -> Box<PgError> {
         crypt::CryptError::Unsupported(what) => PgError::error(format!("pgcrypto: {what} not yet ported"))
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
             .into(),
+        // C's genuine-NULL path is pgcrypto.c:234: px_crypt returned NULL and
+        // pg_crypt raises 39000 (ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION)
+        // — EXECUTED on stock 18.3 (crypt('foox','$2$') => ERROR 39000),
+        // captured twice 2026-08-01. Every other crypt/gen_salt message
+        // ("invalid salt", "gen_salt: ...") is 22023 in C, which px_err gives.
+        crypt::CryptError::Message(m) if m == "crypt(3) returned NULL" => PgError::error(m)
+            .with_sqlstate(ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION)
+            .into(),
         crypt::CryptError::Message(m) => px_err(m),
         // Interrupts / C-parity ereports pass through with their own SQLSTATE.
         crypt::CryptError::Pg(e) => e,
@@ -703,5 +711,29 @@ mod armor_header_tests {
         let out = pgp::armor::armor_encode(b"x", &keys, &values);
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("Comment: pgcrypto\n"), "{s}");
+    }
+
+    // D15 (crypt SQLSTATE map): C's genuine-NULL path (pgcrypto.c:234) is
+    // 39000, NOT the 22023 px_err stamps on everything else. EXECUTED on
+    // stock 18.3 twice (2026-08-01): crypt('foox','$2$') => ERROR 39000
+    // "crypt(3) returned NULL"; crypt('foox','') => ERROR 22023 "invalid
+    // salt"; gen_salt bounds errors are 22023 ("gen_salt: %s", 22023).
+    #[test]
+    fn crypt_err_maps_null_path_to_39000_and_rest_to_22023() {
+        assert_eq!(
+            crypt_err(crypt::CryptError::Message("crypt(3) returned NULL".to_string())).sqlstate,
+            ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION
+        );
+        assert_eq!(
+            crypt_err(crypt::CryptError::Message("invalid salt".to_string())).sqlstate,
+            ERRCODE_INVALID_PARAMETER_VALUE
+        );
+        assert_eq!(
+            crypt_err(crypt::CryptError::Message(
+                "gen_salt: Incorrect number of rounds".to_string()
+            ))
+            .sqlstate,
+            ERRCODE_INVALID_PARAMETER_VALUE
+        );
     }
 }
