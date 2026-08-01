@@ -12340,6 +12340,7 @@ dependencies = [
  "dfmgr",
  "gin_trgm_seams",
  "gin_vocab",
+ "gistproc",
  "guc",
  "mbutils",
  "mcx",

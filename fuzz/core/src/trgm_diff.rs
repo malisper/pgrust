@@ -835,13 +835,22 @@ fn arm_regexp(payload: &[u8]) {
     let (rtrg, mut rgraph) = r.unwrap();
     let cout = c.unwrap();
 
-    // Plane b: trigram multiset.
+    // Plane b: trigram array, ORDER INCLUDED — HARD since the order-exact
+    // ruling (Michael 2026-08-01): regexp.rs now reproduces C's memcmp ctrgm
+    // ordering and pg_qsort penalty-tie eviction order, so the returned
+    // array must be byte-identical, not merely multiset-equal. The counters
+    // stay as cheap telemetry (diff>0 now means a REAL divergence was about
+    // to be reported by the assert below).
     let rflat = flat(&rtrg);
     if rflat == cout.trg {
         REGEXP_ORDER_EQ.fetch_add(1, AtOrd::Relaxed);
     } else {
         REGEXP_ORDER_DIFF.fetch_add(1, AtOrd::Relaxed);
     }
+    assert_eq!(
+        rflat, cout.trg,
+        "trigram ARRAY (order included) diverged pat={payload:02x?}"
+    );
     let mut rsorted: Vec<Trgm> = rtrg.clone();
     rsorted.sort_unstable();
     let mut csorted: Vec<Trgm> = cout
@@ -1529,15 +1538,20 @@ mod repro_tests {
     /// sort over state-insertion order. Both extractions are sound
     /// (recheck-protected; NOT SQL-result-visible) — pending ruling:
     /// order-exact port vs certified value-equal relaxation (multirange
-    /// precedent). This test asserts the divergence EXISTS so a product
-    /// fix or ratified relaxation flips it loudly.
+    /// precedent). RESOLVED by the order-exact-port ruling (Michael,
+    /// 2026-08-01): regexp.rs now uses colorTrgmInfoCmp's memcmp byte order
+    /// for every ctrgm sort/bsearch and evicts equal-penalty color trigrams
+    /// in the exact pg_qsort permutation C produces (shared gistproc
+    /// pg_qsort port over (penalty, index) proxies). The historical repro is
+    /// kept as a REGRESSION equality assertion — if either side's tie
+    /// behavior drifts, this fires first.
     #[test]
-    fn known_divergence_penalty_tie_order() {
+    fn resolved_penalty_tie_order_regression() {
         let pat = format!("({}a|b)(c|d)(e|f)(g|h)(i|j)", "\x16".repeat(31));
         let pat = pat.replace("\\x16", "\x16");
         let (r, c) = dump_both(pat.as_bytes());
         assert!(r.starts_with("n=16") && c.starts_with("n=16"), "shape drift: {r} vs {c}");
-        assert_ne!(r, c, "penalty-tie divergence RESOLVED — retire this test and unblock the arm-9 multiset plane");
+        assert_eq!(r, c, "penalty-tie eviction order regressed vs C (order-exact ruling 2026-08-01)");
     }
 
     #[test]

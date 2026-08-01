@@ -206,6 +206,40 @@ fn convert_pg_wchar(
     Ok(Some(mb))
 }
 
+// colorTrgmInfoCmp is memcmp() over ColorTrgm ({int32;3}) — BYTEWISE in the
+// struct's native (little-endian) representation, NOT numeric i32 order:
+// negative colors (COLOR_BLANK = -4) sort AFTER small positives under memcmp.
+// Order-exact-port ruling (Michael 2026-08-01): the returned trigram array
+// order and the eviction input order are downstream of this comparator, so it
+// must be C-exact. All pgrust targets are little-endian; to_le_bytes makes
+// the representation explicit.
+#[inline]
+fn ctrgm_memcmp(a: &ColorTrgm, b: &ColorTrgm) -> core::cmp::Ordering {
+    let ab = |c: &ColorTrgm| -> [u8; 12] {
+        let mut out = [0u8; 12];
+        for (i, v) in c.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        out
+    };
+    ab(a).cmp(&ab(b))
+}
+
+// colorTrgmInfoPenaltyCmp: descending by penalty, EQUAL PENALTIES COMPARE
+// EQUAL (no tiebreak) — which survivor gets evicted at equal penalty is then
+// decided by pg_qsort's (unstable, deterministic) permutation of the
+// memcmp-ascending input, exactly as in C.
+#[inline]
+fn penalty_cmp(p1: f32, p2: f32) -> i32 {
+    if p1 < p2 {
+        1
+    } else if p1 == p2 {
+        0
+    } else {
+        -1
+    }
+}
+
 fn prefix_contains(p1: [TrgmColor; 2], p2: [TrgmColor; 2]) -> bool {
     if p1[1] == COLOR_UNKNOWN {
         true
@@ -436,8 +470,10 @@ impl Nfa<'_> {
             }
         }
 
-        // Dedup, merging arc lists.
-        ctrgms.sort_by(|a, b| a.ctrgm.cmp(&b.ctrgm));
+        // Dedup, merging arc lists. memcmp order (colorTrgmInfoCmp) — this is
+        // also the input order of the penalty sort below, so it is
+        // order-of-record, not just a dedup convenience.
+        ctrgms.sort_by(|a, b| ctrgm_memcmp(&a.ctrgm, &b.ctrgm));
         let mut merged: Vec<ColorTrgmInfo> = Vec::with_capacity(ctrgms.len());
         for ct in ctrgms {
             match merged.last_mut() {
@@ -468,7 +504,31 @@ impl Nfa<'_> {
 
         // Remove highest-penalty trigrams while over budget, merging the
         // states their arcs connect — unless that would merge INIT with FIN.
-        ctrgms.sort_by(|a, b| b.penalty.partial_cmp(&a.penalty).unwrap());
+        //
+        // ORDER-EXACT (ruling 2026-08-01): C qsorts with a penalty-ONLY
+        // comparator, so the relative order of equal-penalty entries — which
+        // decides WHICH of them is evicted first when the budget is met
+        // mid-tie — is pg_qsort's deterministic permutation of the
+        // memcmp-ascending input. Reproduce it exactly: pg_qsort (the shared
+        // gistproc port of src/port/qsort.c, pending the qsort consolidation
+        // crate) over Copy (penalty, index) proxies — the comparator sees the
+        // same penalty sequence C's sees, so the output permutation is
+        // identical — then apply the permutation. Common no-tie path pays one
+        // O(n) permute over a Vec move; the comparator stays monomorphized.
+        {
+            let mut proxy: Vec<(f32, u32)> = ctrgms
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.penalty, i as u32))
+                .collect();
+            gistproc::qsort::pg_qsort(&mut proxy, |a, b| penalty_cmp(a.0, b.0));
+            let mut permuted: Vec<ColorTrgmInfo> = Vec::with_capacity(ctrgms.len());
+            let mut slots: Vec<Option<ColorTrgmInfo>> = ctrgms.drain(..).map(Some).collect();
+            for &(_, idx) in &proxy {
+                permuted.push(slots[idx as usize].take().expect("pg_qsort permutation"));
+            }
+            ctrgms = permuted;
+        }
         for i in 0..ctrgms.len() {
             if total_penalty <= WISH_TRGM_PENALTY {
                 break;
@@ -553,7 +613,8 @@ impl Nfa<'_> {
         }
 
         // ctrgm order (for the pack-stage bsearch); number the survivors.
-        ctrgms.sort_by(|a, b| a.ctrgm.cmp(&b.ctrgm));
+        // memcmp order — this is the returned-trigram-array expansion order.
+        ctrgms.sort_by(|a, b| ctrgm_memcmp(&a.ctrgm, &b.ctrgm));
         let mut cnumber = 0;
         for info in &mut ctrgms {
             if info.expanded {
@@ -621,7 +682,7 @@ impl Nfa<'_> {
                 let target = self.resolve(*tgt) as usize;
                 if self.states[source].snumber != self.states[target].snumber {
                     let idx = ctrgms
-                        .binary_search_by(|probe| probe.ctrgm.cmp(ctrgm))
+                        .binary_search_by(|probe| ctrgm_memcmp(&probe.ctrgm, ctrgm))
                         .expect("pg_trgm regexp: arc color trigram not found");
                     debug_assert!(ctrgms[idx].expanded);
                     arcs.push((
