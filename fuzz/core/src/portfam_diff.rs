@@ -77,7 +77,9 @@
 //!     an unclamped uint16 reads past the page on BOTH sides (OOB in C,
 //!     panic in Rust) — a caller contract, not a behavior difference.
 //!     mask_unused_space's own validity check is NOT carved: its error
-//!     verdict is a compared plane.
+//!     verdict is a compared plane (see arm_maskunused for the one HARNESS
+//!     carve — libfuzzer-sys's abort-on-panic hook, which moves the Rust
+//!     half of that plane into the `cargo test` build).
 //!   - crc32c hardware arms: armv8/sse42 run only where the host CPU has the
 //!     feature; the portable sb8 arm is the oracle everywhere, and every
 //!     host compares at least sb8 + the shipped dispatch entry.
@@ -558,19 +560,52 @@ fn arm_maskhdr(payload: &[u8]) {
     }
 }
 
+/// The invalid-page predicate, transcribed from the vendored C
+/// `mask_unused_space` sanity check (bufmask.c) — an INDEPENDENT third
+/// statement of the condition, so asserting C's raise against it is a real
+/// comparison of C's check and not a tautology.
+fn page_is_invalid(p: &AlignedPage) -> bool {
+    let lo = get_hdr_u16(p, core::mem::offset_of!(PageHeaderData, pd_lower)) as usize;
+    let up = get_hdr_u16(p, core::mem::offset_of!(PageHeaderData, pd_upper)) as usize;
+    let sp = get_hdr_u16(p, core::mem::offset_of!(PageHeaderData, pd_special)) as usize;
+    lo > up || sp < up || lo < SizeOfPageHeaderData || sp > BLCKSZ
+}
+
 fn arm_maskunused(payload: &[u8]) {
     let mut r = build_page(payload);
     let mut c = r.clone_box();
+    let expect_raise = page_is_invalid(&r);
     // SAFETY: c.0 is a full BLCKSZ MAXALIGNed page image.
     let c_raised = unsafe { pg_diff_pf_mask_unused_space(c.0.as_mut_ptr()) } != 0;
 
-    // ERROR VERDICT plane: the Rust port asserts exactly where C elog(ERROR)s.
-    let r_raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        bufmask::mask_unused_space(&mut r.0)
-    }))
-    .is_err();
-    assert_eq!(r_raised, c_raised, "mask_unused_space error verdict");
-    if !r_raised {
+    // ERROR VERDICT plane, half 1 (runs in EVERY build, fuzz included):
+    // the vendored C raise must agree with the independently transcribed
+    // predicate on every input.
+    assert_eq!(c_raised, expect_raise, "C mask_unused_space raise verdict");
+
+    // ERROR VERDICT plane, half 2: the Rust port must raise on exactly the
+    // same inputs. HARNESS CARVE (2026-08-01): libfuzzer-sys installs a
+    // panic hook that ABORTS the process, so catch_unwind cannot observe a
+    // Rust panic under `cargo fuzz` — the abort is reported as a crash even
+    // though raising IS the correct C-parity behavior. The unwinding
+    // comparison therefore runs under `cargo test` (where it is exact) over
+    // the committed corpus and the witness pairs; the fuzz build compares
+    // the C half and the value plane, and skips the raising inputs.
+    #[cfg(not(fuzzing))]
+    {
+        let r_raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bufmask::mask_unused_space(&mut r.0)
+        }))
+        .is_err();
+        assert_eq!(r_raised, c_raised, "mask_unused_space error verdict");
+        if !r_raised {
+            assert!(r.0 == c.0, "mask_unused_space page image");
+        }
+        return;
+    }
+    #[cfg(fuzzing)]
+    if !expect_raise {
+        bufmask::mask_unused_space(&mut r.0);
         assert!(r.0 == c.0, "mask_unused_space page image");
     }
 }
