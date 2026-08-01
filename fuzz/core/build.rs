@@ -50,10 +50,12 @@ fn main() {
         // oracle-serialization holder check (fuzz plumbing; see the
         // file header + scripts/lint-oracle-serial.py)
         .file("csrc/pg_oracle_guard.c")
-        // COMPILE GATE (trgm_diff, scaffold.py): uncomment ONLY after every
-        // SCAFFOLD-TODO #error paste site in csrc/pg_trgm_io.c is filled
-        // with verbatim vendored C (README-TODO-trgm_diff.md step 1).
-        // .file("csrc/pg_trgm_io.c")
+        // trgm_diff oracle (p1-trgm): verbatim 18.3 trgm_op.c + locale/case
+        // units (see pg_trgm_io.c header for provenance + shims); mblen +
+        // pg_utf_mblen resolve to the wfam_ copies in pg_wcharfam.c, pg_u_*
+        // to tablesfam's unicode_category.c, unicode_strlower to the
+        // whole-file vendored csrc/trgmfam/unicode_case.c below.
+        .file("csrc/pg_trgm_io.c")
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         .file("csrc/pg_libfam_io.c")
@@ -676,6 +678,22 @@ fn main() {
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-Wno-unused-function")
         .compile("pg_difffuzz_cryptbe");
+
+    // trgm_diff oracle (p1-trgm): the builtin-provider Unicode lowercase
+    // engine, whole-file VERBATIM src/common/unicode_case.c @ 62d6c7d3df,
+    // under its own shim include tree (csrc/trgmfam/include). Exported
+    // symbols are trgmf_-prefixed via the shim postgres.h; pg_u_* resolve
+    // at link to tablesfam's verbatim unicode_category.c.
+    let mut trgmfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        trgmfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    trgmfam
+        .file("csrc/trgmfam/unicode_case.c")
+        .include("csrc/trgmfam/include")
+        .warnings(false)
+        .compile("pg_difffuzz_trgmfam");
+>>>>>>> f553adeccca (trgm_diff: vendor 18.3 trgm_op.c C oracle + two-locale-arm environment (C-ctype / builtin C.UTF-8) + unicode_case engine)
 
     // tablesfam_diff oracle (p1-lanef): verbatim 18.3 kwlookup/keywords/
     // unicode_category, FRONTEND arms, own shim include tree.
