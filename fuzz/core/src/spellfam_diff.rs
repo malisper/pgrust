@@ -303,8 +303,8 @@ pub fn spellfam_diff(data: &[u8]) {
     let dict: Vec<u8> = parsed.dict.iter().copied().filter(|&b| b != 0).collect();
 
     // DOMAIN CARVE (divergence-of-record, ts_locale read layer — NOT this
-    // crate): under UTF8 an INVALID multibyte sequence in a FILE line makes
-    // the two sides report DIFFERENT errors because their line readers differ
+    // crate): an INVALID multibyte sequence in a FILE line makes the two
+    // sides report DIFFERENT errors because their line readers differ
     // architecturally — pgrust's tsearch_readlines reads+encoding-validates
     // the WHOLE file eagerly (so a bad byte on a late line is caught first,
     // sqlstate 22021), while C's tsearch_readline is a LAZY per-line iterator
@@ -312,14 +312,16 @@ pub fn spellfam_diff(data: &[u8]) {
     // format-mix config error F0000, fires before the bad line is ever read).
     // Same eager-vs-lazy class as the interior-NUL divergence-of-record
     // (p1-microbatch owns the ts_locale read layer; match-or-fix owed).
-    // Require valid UTF-8 file bytes so both sides read identical, well-
-    // encoded lines and the spell PARSER logic is what's compared; valid
-    // multibyte (accented/CJK) stays in the domain. SQL_ASCII validates every
-    // byte trivially and needs no gate. Witness: tests::interior_nul_* and the
-    // banked CI-div seeds.
-    if enc == wchar::PG_UTF8
-        && (core::str::from_utf8(&aff).is_err() || core::str::from_utf8(&dict).is_err())
-    {
+    // The validation is against UTF-8 for BOTH selector encodings, because
+    // tsearch_readline hardcodes the SOURCE encoding PG_UTF8 (pg_any_to_server
+    // then validates as UTF-8 regardless of the DB encoding) — so the gate
+    // applies to SQL_ASCII too; the DB-encoding selector still varies the
+    // parsers' single- vs multi-byte pg_mblen arm over the well-encoded
+    // bytes. Require valid UTF-8 file bytes so both sides read identical,
+    // well-encoded lines and the spell PARSER logic is what's compared; valid
+    // multibyte (accented/CJK) stays in the domain. Witness:
+    // tests::interior_nul_* and the banked CI-div-encord seeds.
+    if core::str::from_utf8(&aff).is_err() || core::str::from_utf8(&dict).is_err() {
         return;
     }
 
