@@ -859,3 +859,28 @@ fn int32_min_token_is_a_c_float_node() {
          LIVE text-plane divergence and must be reported, not recorded"
     );
 }
+
+/// The datum-payload gate is LIVE: it rejects the short `[...]` payload that
+/// NULL-dereferenced C's readDatum (atoi(NULL) inside strtol), and still
+/// accepts a well-formed byval Const.
+#[test]
+fn const_datum_payload_gate_is_live() {
+    // one token short (`0alias0` is ONE pg_strtok token) -> C segfaults
+    assert!(
+        !run_text(
+            b"{CONST :consttype 16 :consttypmod -1 :constcollid 0 :constlen 1 \
+              :constbyval true :constisnull false :location -1 :constvalue 1 \
+              [ 1 0 0 0alias0 0 ]}"
+        ),
+        "gate let the readDatum NULL-deref payload through"
+    );
+    // and the well-formed 8-token byval payload is compared
+    assert!(
+        run_text(
+            b"{CONST :consttype 16 :consttypmod -1 :constcollid 0 :constlen 1 \
+              :constbyval true :constisnull false :location -1 :constvalue 1 \
+              [ 1 0 0 0 0 0 0 0 ]}"
+        ),
+        "gate rejected a well-formed byval Const"
+    );
+}

@@ -481,7 +481,93 @@ fn text_blocks(text: &str) -> Vec<(String, Vec<String>)> {
     done
 }
 
+/// C `readDatum` (readfuncs.c) token grammar, modelled so the gate can reject
+/// payloads that NULL-deref the verbatim C reader.
+///
+/// readDatum reads `<length>` then `[`, then — for a BYVAL datum —
+/// `sizeof(Datum)` = 8 byte tokens regardless of length, or `length` tokens
+/// for byref, then `]`. Every byte token goes through `atoi(token)` with NO
+/// NULL CHECK, so a payload with fewer tokens than required makes pg_strtok
+/// return NULL and C segfaults inside strtol (witnessed:
+/// `... :constvalue 1 [ 1 0 0 0alias0 0 ]}` — `0alias0` is one token, so the
+/// stream runs one byte short). Third instance of the un-hardened-C-reader
+/// class in this family, after the truncated-CreateStmt SEGV and the
+/// non-verifying field-name slots.
+fn datum_payload_is_well_formed(toks: &[&str], start: usize, byval: bool, length: i64) -> bool {
+    // toks[start] is the token AFTER :constvalue's length token, i.e. `[`
+    if toks.get(start).copied() != Some("[") {
+        return false;
+    }
+    let want = if byval {
+        8 // sizeof(Datum) on LP64, read unconditionally
+    } else if length <= 0 {
+        0
+    } else {
+        length as usize
+    };
+    let mut k = start + 1;
+    for _ in 0..want {
+        match toks.get(k) {
+            // C does atoi(token) with no NULL check; the writer emits decimals
+            Some(t) if t.bytes().all(|b| b.is_ascii_digit() || b == b'-') && !t.is_empty() => {}
+            _ => return false,
+        }
+        k += 1;
+    }
+    toks.get(k).copied() == Some("]")
+}
+
+/// Locate every CONST block and validate its datum payload against
+/// `readDatum`'s grammar. Uses the block's own :constbyval / :constlen /
+/// :constisnull tokens, exactly as C's `_readConst` does.
+fn const_datums_are_well_formed(text: &str) -> bool {
+    let toks = pg_strtok_all(text);
+    let mut k = 0;
+    while k < toks.len() {
+        if toks[k] == "{" && toks.get(k + 1).copied() == Some("CONST") {
+            // scan this block's field tokens
+            let mut byval = None;
+            let mut isnull = None;
+            let mut j = k + 2;
+            let mut depth = 1usize;
+            while j < toks.len() {
+                match toks[j] {
+                    "{" => depth += 1,
+                    "}" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    ":constbyval" => byval = toks.get(j + 1).map(|t| *t == "true"),
+                    ":constisnull" => isnull = toks.get(j + 1).map(|t| *t == "true"),
+                    ":constvalue" => {
+                        // NULL datums write "<>" and read no payload
+                        if isnull == Some(true) {
+                            break;
+                        }
+                        let Some(lt) = toks.get(j + 1) else { return false };
+                        let Ok(len) = lt.parse::<i64>() else { return false };
+                        let Some(bv) = byval else { return false };
+                        if !datum_payload_is_well_formed(&toks, j + 2, bv, len) {
+                            return false;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        k += 1;
+    }
+    true
+}
+
 fn is_well_formed(text: &str) -> bool {
+    if !const_datums_are_well_formed(text) {
+        return false;
+    }
     // custom-reader labels: shape must match a corpus-validated sequence
     for (label, fields) in text_blocks(text) {
         if CUSTOM_READER_LABELS.contains(&label.as_str()) {
