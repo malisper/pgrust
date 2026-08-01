@@ -61,6 +61,29 @@
  *     (catalog/pg_type_d.h).
  */
 
+/*
+ * FAMILY SYMBOL ISOLATION (central symfix lane, 2026-08-01): this TU landed
+ * with unprefixed verbatim-C exports that collide under GNU ld with the
+ * incumbent oracle families (pg_numutils.c: pg_itoa/pg_ltoa/pg_ultoa_n/
+ * pg_strtoint16_safe/pg_strtoint32_safe; pg_fmt_dch_io.c: int4out/pg_ltoa/
+ * pg_ultoa_n; tsvec: pq_getmsgint). Apple ld64 only warns (first-definition-
+ * wins member pull), so local checks passed while EVERY Linux CI cluster fuzz
+ * build hard-errored (ld.lld duplicate symbols, first witnessed by
+ * gram_core job -2ab6-60592). Preprocessor-layer rename ONLY — every C body
+ * below stays verbatim (wcharfam/contribafam in-file-prefix precedent;
+ * in-file rather than build.rs .define() because this TU shares the
+ * pg_difffuzz_oracle cc::Build with pg_numutils.c, whose SAME-NAMED exports
+ * must keep their unprefixed names). Durable lesson: verbatim oracle TUs
+ * MUST ship with family symbol prefixes — ld64 warnings are ld.lld errors.
+ */
+#define int4out intio_int4out
+#define pg_itoa intio_pg_itoa
+#define pg_ltoa intio_pg_ltoa
+#define pg_strtoint16_safe intio_pg_strtoint16_safe
+#define pg_strtoint32_safe intio_pg_strtoint32_safe
+#define pg_ultoa_n intio_pg_ultoa_n
+#define pq_getmsgint intio_pq_getmsgint
+
 #include "postgres.h"
 
 #include <ctype.h>

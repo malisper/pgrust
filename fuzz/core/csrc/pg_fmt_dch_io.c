@@ -77,6 +77,61 @@
  *   - Assert = no-op (release-build parity).
  */
 
+/*
+ * FAMILY SYMBOL ISOLATION (central symfix lane, 2026-08-01): this TU landed
+ * with unprefixed verbatim-C exports that collide under GNU ld with the
+ * incumbent oracle families (pg_miscfam_io.c: pg_strcasecmp; pg_numutils.c:
+ * pg_ltoa/pg_lltoa/pg_ultoa_n/pg_ulltoa_n; pg_int_io.c: int4out; dtio
+ * family pg_datetime_io_io.c: the datetime helper cone below; tsvec:
+ * pg_mblen_cstr/pg_mblen_range). Apple ld64 only warns, so local checks
+ * passed while EVERY Linux CI cluster fuzz build hard-errored (ld.lld duplicate
+ * symbols, first witnessed by gram_core job -2ab6-60592). Preprocessor-layer
+ * rename ONLY — every C body stays verbatim (wcharfam/contribafam
+ * in-file-prefix precedent; in-file rather than build.rs .define() because
+ * this TU shares the pg_difffuzz_oracle cc::Build with pg_numutils.c/
+ * pg_miscfam_io.c/pg_int_io.c, whose same-named exports must not be renamed
+ * with it). The NINE numeric.c-extract exports of pg_numeric_deps_18_3.inc
+ * (numeric_in/out/out_sci/round/mul/mul_opt_error/power/int4_opt_error/
+ * int64_to_numeric, colliding with the numericfam oracle) are renamed
+ * fmtdch_* by build.rs .define() instead — hunk adopted verbatim from
+ * proofs/p1-queryjumble 9e61831839 so that lane rebases cleanly; ONE prefix
+ * scheme (fmtdch_) for the whole family. Durable lesson: verbatim oracle
+ * TUs MUST ship with family symbol prefixes — ld64 warnings are ld.lld
+ * errors.
+ */
+#define AdjustTimeForTypmod fmtdch_AdjustTimeForTypmod
+#define DateTimeParseError fmtdch_DateTimeParseError
+#define DecodeTimezoneAbbrevPrefix fmtdch_DecodeTimezoneAbbrevPrefix
+#define DetermineTimeZoneAbbrevOffset fmtdch_DetermineTimeZoneAbbrevOffset
+#define DetermineTimeZoneOffset fmtdch_DetermineTimeZoneOffset
+#define ValidateDate fmtdch_ValidateDate
+#define date2isoweek fmtdch_date2isoweek
+#define date2isoyear fmtdch_date2isoyear
+#define date2isoyearday fmtdch_date2isoyearday
+#define date2j fmtdch_date2j
+#define day_tab fmtdch_day_tab
+#define days fmtdch_days
+#define int4out fmtdch_int4out
+#define interval2itm fmtdch_interval2itm
+#define isoweek2date fmtdch_isoweek2date
+#define isoweek2j fmtdch_isoweek2j
+#define isoweekdate2date fmtdch_isoweekdate2date
+#define j2date fmtdch_j2date
+#define j2day fmtdch_j2day
+#define months fmtdch_months
+#define pg_lltoa fmtdch_pg_lltoa
+#define pg_ltoa fmtdch_pg_ltoa
+#define pg_mblen_cstr fmtdch_pg_mblen_cstr
+#define pg_mblen_range fmtdch_pg_mblen_range
+#define pg_strcasecmp fmtdch_pg_strcasecmp
+#define pg_tolower fmtdch_pg_tolower
+#define pg_toupper fmtdch_pg_toupper
+#define pg_ulltoa_n fmtdch_pg_ulltoa_n
+#define pg_ultoa_n fmtdch_pg_ultoa_n
+#define timestamp2tm fmtdch_timestamp2tm
+#define tm2time fmtdch_tm2time
+#define tm2timetz fmtdch_tm2timetz
+
 #include <ctype.h>
 #include <errno.h>
 #include <float.h>

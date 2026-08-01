@@ -162,10 +162,12 @@ palloc0
 parseNodeString
 pfree
 pg_clean_ascii
+pg_database_encoding_max_length
 pg_detoast_datum_packed
 pg_fprintf
 pg_is_ascii
 pg_leftmost_one_pos
+pg_mbcliplen
 pg_number_of_ones
 pg_popcount_masked_optimized
 pg_popcount_optimized

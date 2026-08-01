@@ -225,6 +225,23 @@ fn main() {
                 "-fno-strict-aliasing" // harmless repeat when not fuzzing
             },
         )
+        // fmt_dch numeric-deps rename (p1-queryjumble CI-link fix,
+        // 2026-08-01): csrc/pg_numeric_deps_18_3.inc (verbatim numeric.c
+        // extract #included by pg_fmt_dch_io.c, landed 20f9593a88) exports
+        // these unprefixed, colliding with the numericfam family oracle's
+        // verbatim numeric.c under one bin — ld.lld duplicate-symbol hard
+        // error on every CI cluster fuzz build (first witnessed by the
+        // queryjumble_diff campaign; macOS ld tolerated it by member-pull
+        // luck). Same wave-3 rename pattern as the hashfn.c cases.
+        .define("numeric_in", "fmtdch_numeric_in")
+        .define("numeric_out", "fmtdch_numeric_out")
+        .define("numeric_out_sci", "fmtdch_numeric_out_sci")
+        .define("numeric_round", "fmtdch_numeric_round")
+        .define("numeric_mul", "fmtdch_numeric_mul")
+        .define("numeric_mul_opt_error", "fmtdch_numeric_mul_opt_error")
+        .define("numeric_power", "fmtdch_numeric_power")
+        .define("numeric_int4_opt_error", "fmtdch_numeric_int4_opt_error")
+        .define("int64_to_numeric", "fmtdch_int64_to_numeric")
         .compile("pg_difffuzz_oracle");
 
     // tsvec oracle family (p1-laneae, tsvector_core_diff + tsrank_diff):
@@ -237,6 +254,25 @@ fn main() {
     let mut tsvec = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         tsvec.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // FAMILY SYMBOL ISOLATION (central symfix lane, 2026-08-01): the tsvec
+    // family landed with unprefixed verbatim-C exports colliding under GNU
+    // ld with incumbent oracle TUs (pg_arrayutils_io.c: ArrayGetNItems/
+    // ArrayGetNItemsSafe; pg_int_io.c/pg_fmt_dch_io.c: pq_getmsgint/
+    // pg_mblen_cstr/pg_mblen_range). Apple ld64 only warns; ld.lld
+    // hard-errors (gram_core job -2ab6-60592). Build-level macro renames
+    // (jsonbfam precedent) — safe here because this cc::Build is the whole
+    // family, so definitions in pg_ts*_io.c and uses in tsvec/*.c rename
+    // consistently. tsvio_ = symbols defined by pg_tsvector_core_io.c,
+    // tsrio_ = symbols defined by pg_tsrank_io.c. C bodies stay verbatim.
+    for (s, r) in [
+        ("pq_getmsgint", "tsvio_pq_getmsgint"),
+        ("pg_mblen_cstr", "tsvio_pg_mblen_cstr"),
+        ("pg_mblen_range", "tsvio_pg_mblen_range"),
+        ("ArrayGetNItems", "tsrio_ArrayGetNItems"),
+        ("ArrayGetNItemsSafe", "tsrio_ArrayGetNItemsSafe"),
+    ] {
+        tsvec.define(s, r);
     }
     tsvec
         // VERBATIM 18.3 C under csrc/tsvec/ (tsvector.c, tsvector_parser.c,
