@@ -71,6 +71,18 @@
  *     the defval plane is compared through the descriptor field-plane
  *     serializer + equalTupleDescs instead.
  *
+ * RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+ * bits (C fetch_att `*((char *) T)`, tupmacs.h; char signedness is
+ * platform-defined — signed macOS-aarch64/x86_64-Linux, unsigned
+ * Linux-aarch64; consumers truncate via DatumGetChar). Both datum
+ * serializers mask width-1 words to the low 8 bits; found by the first
+ * CI cluster CONFIRM on Linux-aarch64 (local macOS matched only because its char
+ * is signed like the Rust port's i8). Widths 2/4/8 are signed on all
+ * platforms and are NOT masked. The equalTupleDescs missing-value plane
+ * needs no mask: datumIsEqual's byval word compare runs same-side only
+ * (C-vs-C, Rust-vs-Rust) over stagings that are injective in the low byte,
+ * so the verdict is platform-stable.
+ *
  * Errcode classes (shared TLS pg_diff_errcode, defined in pg_float_io.c):
  * same numbering as pg_rowtypes_io.c (see that header); this family uses
  * 3 = ERRCODE_DATATYPE_MISMATCH, 6 = ERRCODE_TOO_MANY_COLUMNS, 7 = internal.
@@ -5629,6 +5641,13 @@ pg_ta_put_u64(PgTaW *w, uint64 v)
 /* serialize one fetched attribute value: [isnull u8] then for byval a
  * bit-exact u64 Datum word, for byref the pointed-to bytes per attlen
  * semantics */
+/* RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+ * bits. fetch_att for attlen==1 is `*((char *) T)` (tupmacs.h) and C char
+ * signedness is platform-defined (signed on macOS-aarch64/x86_64-Linux,
+ * unsigned on Linux-aarch64), so this TU itself produces different upper
+ * Datum bits per platform; consumers truncate via DatumGetChar. Width-1
+ * words are therefore serialized masked to the low 8 bits on BOTH sides.
+ * Widths 2/4/8 use int16/int32/int64 (signed everywhere): NOT masked. */
 static void
 pg_ta_put_datum(PgTaW *w, Datum d, bool isnull, int16 attlen, bool attbyval)
 {
@@ -5638,7 +5657,7 @@ pg_ta_put_datum(PgTaW *w, Datum d, bool isnull, int16 attlen, bool attbyval)
 	if (attbyval)
 	{
 		pg_ta_put_u8(w, 0);
-		pg_ta_put_u64(w, (uint64) d);
+		pg_ta_put_u64(w, attlen == 1 ? ((uint64) d & 0xff) : (uint64) d);
 	}
 	else
 	{

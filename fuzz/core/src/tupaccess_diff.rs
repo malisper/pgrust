@@ -27,6 +27,18 @@
 //!     resolution; also satisfies the C-side live asserts),
 //!   - dynahash missing_cache -> linear table (C side).
 //!
+//! RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+//! bits (C fetch_att `*((char *) T)`, tupmacs.h; char signedness is
+//! platform-defined — signed on macOS-aarch64/x86_64-Linux, UNSIGNED on
+//! Linux-aarch64 — consumers truncate via DatumGetChar). Both datum
+//! serializers and the round-trip self-check compare width-1 words masked
+//! to the low 8 bits; found by the first CI cluster CONFIRM (Linux-aarch64,
+//! input 000100000000 0001ff). Widths 2/4/8 are signed on all platforms:
+//! NOT masked. The equalTupleDescs missing-value plane needs no mask or
+//! generator constraint: datumIsEqual's byval word compare runs same-side
+//! only (C-vs-C / Rust-vs-Rust) over stagings injective in the low byte,
+//! so its verdict is platform-stable.
+//!
 //! CARVES (documented; each has a reason):
 //!   - heap_getsysattr / attnum <= 0: system columns need xact state; the
 //!     driver never passes attnum <= 0.
@@ -61,6 +73,8 @@
 //!   equal/hash verdicts -> invert Rust equalRowTypes verdict       -> CAUGHT
 //!   attmap              -> add 1 to every Rust attmap entry        -> CAUGHT
 //!   error-verdict       -> map DATATYPE_MISMATCH to class 1        -> CAUGHT
+//! Post-carve re-check (width-1 mask must hide ONLY the upper 56 bits):
+//!   deform width-1 low byte -> xor 1 into the masked byval word     -> CAUGHT
 
 use alloc::format;
 use alloc::string::String;
@@ -675,6 +689,23 @@ impl<'a> Rd<'a> {
     }
 }
 
+/// RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+/// bits. PG's fetch_att for attlen==1 is `*((char *) T)` (tupmacs.h) and C
+/// `char` signedness is platform-defined — SIGNED on macOS-aarch64 /
+/// x86_64-Linux (0xFF sign-extends), UNSIGNED on Linux-aarch64 (0xFF
+/// zero-extends) — so the vendored C itself produces different upper Datum
+/// bits per platform; within C every consumer truncates via DatumGetChar or
+/// a 1-byte store. Widths 2/4/8 use int16/int32/int64 (signed everywhere)
+/// and are NOT masked.
+#[inline]
+fn byval_word(d: Datum, attlen: i16) -> u64 {
+    if attlen == 1 {
+        d.as_u64() & 0xff
+    } else {
+        d.as_u64()
+    }
+}
+
 /// serialize a fetched datum exactly like C pg_ta_put_datum
 fn ser_datum(w: &mut Vec<u8>, d: Datum, isnull: bool, attlen: i16, attbyval: bool) {
     w.push(u8::from(isnull));
@@ -683,7 +714,8 @@ fn ser_datum(w: &mut Vec<u8>, d: Datum, isnull: bool, attlen: i16, attbyval: boo
     }
     if attbyval {
         w.push(0);
-        w.extend_from_slice(&d.as_u64().to_le_bytes());
+        // width-1 masked: see byval_word (platform non-surface carve)
+        w.extend_from_slice(&byval_word(d, attlen).to_le_bytes());
     } else {
         let p = d.as_usize() as *const u8;
         // SAFETY: a live by-ref datum fetched from a tuple image or a
@@ -994,9 +1026,11 @@ fn op_form(cur: &mut Cursor<'_>) {
                 let m = &MENU[spec.atts[i].menu as usize];
                 if m.attbyval {
                     let expect = stage_datum(mcx, m.attlen, m.attbyval, b);
+                    // width-1 compared under the byval_word mask (platform
+                    // non-surface carve; see ser_datum)
                     assert_eq!(
-                        dv[i].as_u64(),
-                        expect.as_u64(),
+                        byval_word(dv[i], m.attlen),
+                        byval_word(expect, m.attlen),
                         "byval round-trip datum mismatch (att {i}, width {})",
                         m.attlen
                     );
@@ -1835,6 +1869,23 @@ mod seedgen {
             put(&format!("byval_allff_w{w}"),
                 B::new(0).desc(1, 0).att(*menu, 0, i as u8, 0).nonnull().vbyval(&alloc::vec![0xFF; *w]).0);
         }
+
+        // CI cluster Linux-aarch64 char-signedness regression (the exact crash
+        // input) + multi-attribute width-1 high-bit siblings
+        put("seed-w1-highbit-linux-char",
+            B::new(0).desc(1, 0).att(0, 0, 0, 0).nonnull().vbyval(&[0xFF]).0);
+        put("seed-w1-highbit-multi",
+            B::new(0).desc(3, 0).att(0, 0, 0, 0).att(2, 0, 1, 0).att(0, 0, 2, 0)
+                .nonnull().vbyval(&[0x80])
+                .nonnull().vbyval(&[1, 2, 3, 4])
+                .nonnull().vbyval(&[0xFF])
+                .0);
+        put("seed-w1-highbit-getattr",
+            B::new(3).desc(2, 0).att(0, 0, 0, 0).att(0, 0, 1, 0)
+                .u8(2).u8(0) // src_natts=2, attnum=1
+                .nonnull().vbyval(&[0xFF])
+                .nonnull().vbyval(&[0x80])
+                .0);
 
         // NULL-bitmap byte boundaries, with one null to force the bitmap,
         // plus all-null / none-null / exactly-one-null shapes
