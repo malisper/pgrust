@@ -1487,6 +1487,15 @@ impl fmt::Debug for Mcx<'_> {
     }
 }
 
+/// C mcxt.c: `palloc` rejects any request above `MaxAllocSize` before the
+/// context sees it ("invalid memory alloc request size"). Out-of-line so the
+/// allocate/grow fast paths carry only a compare + never-taken branch.
+#[cold]
+#[inline(never)]
+fn alloc_ceiling_exceeded() -> AllocError {
+    AllocError
+}
+
 // SAFETY contract for callers: one-statement &mut, never re-entered; one context, one thread.
 #[inline(always)]
 unsafe fn aset_mut(set: &core::cell::UnsafeCell<aset::AllocSet>) -> &mut aset::AllocSet {
@@ -1509,38 +1518,14 @@ unsafe impl Allocator for Mcx<'_> {
     // always-inline: out-of-line, the fast lanes grow a fat frame + call (measured +12 instr/op).
     #[inline(always)]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        self.0.is_reset.set(false);
-        match &self.0.backend {
-            Backend::Aset(set) => {
-                self.0.charge(layout.size())?;
-                // SAFETY: single-statement borrow, never re-entered (aset_mut).
-                let result = unsafe { aset_mut(set) }.alloc(layout);
-                if result.is_err() {
-                    self.0.uncharge(layout.size());
-                }
-                result
-            }
-            Backend::Malloc => {
-                self.0.charge(layout.size())?;
-                let result = Global.allocate(layout);
-                if result.is_err() {
-                    self.0.uncharge(layout.size());
-                }
-                result
-            }
-            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
-                // SAFETY: single-statement borrow, never re-entered (bump_mut).
-                unsafe { bump_mut(a) }.alloc(layout, &self.0.acct)
-            }
-            Backend::Generation(a) => {
-                // SAFETY: single-statement borrow, never re-entered (as bump_mut).
-                unsafe { &mut *a.get() }.alloc(layout, &self.0.acct)
-            }
-            Backend::Slab(a) => {
-                // SAFETY: single-statement borrow, never re-entered (as bump_mut).
-                unsafe { &mut *a.get() }.alloc(layout, &self.0.acct)
-            }
+        // C palloc's MaxAllocSize admission, enforced by the allocator so it
+        // holds no matter which helper (or bare PgVec growth) the caller used.
+        // Huge (>1GB) requests must opt out via `alloc_uninit_bytes_huge` /
+        // the `*_huge` helpers, mirroring C's palloc vs palloc_extended(HUGE).
+        if layout.size() > MAX_ALLOC_SIZE {
+            return Err(alloc_ceiling_exceeded());
         }
+        self.allocate_unchecked(layout)
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
@@ -1575,6 +1560,12 @@ unsafe impl Allocator for Mcx<'_> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
+        // C repalloc's MaxAllocSize admission: unbounded growth (PgVec::push,
+        // try_reserve) reallocates through here, so the ceiling must hold on
+        // grow as well as allocate. Huge growth opts out via vec_reserve_huge.
+        if new_layout.size() > MAX_ALLOC_SIZE {
+            return Err(alloc_ceiling_exceeded());
+        }
         self.0.is_reset.set(false);
         match &self.0.backend {
             Backend::Aset(set) => {
@@ -1683,6 +1674,66 @@ unsafe impl Allocator for Mcx<'_> {
                 }
             }
         }
+    }
+    // `shrink` needs no ceiling: it never increases the request, and a
+    // legitimately-huge allocation (hash bucket arrays) may shrink to a size
+    // that is still above MaxAllocSize.
+}
+
+// Ceiling-exempt entry points. A separate inherent block placed AFTER the
+// Allocator impl on purpose: pulling the backend dispatch out of the trait
+// impl itself would strand deallocate/grow/shrink (they pattern-match the
+// same backends), so the trait keeps its methods and only delegates here.
+impl Mcx<'_> {
+    /// The backend dispatch `Allocator::allocate` runs after its MaxAllocSize
+    /// admission. Private: huge callers go through
+    /// [`Mcx::alloc_uninit_bytes_huge`], which admits against
+    /// `MAX_ALLOC_HUGE_SIZE` instead.
+    #[inline(always)]
+    fn allocate_unchecked(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.0.is_reset.set(false);
+        match &self.0.backend {
+            Backend::Aset(set) => {
+                self.0.charge(layout.size())?;
+                // SAFETY: single-statement borrow, never re-entered (aset_mut).
+                let result = unsafe { aset_mut(set) }.alloc(layout);
+                if result.is_err() {
+                    self.0.uncharge(layout.size());
+                }
+                result
+            }
+            Backend::Malloc => {
+                self.0.charge(layout.size())?;
+                let result = Global.allocate(layout);
+                if result.is_err() {
+                    self.0.uncharge(layout.size());
+                }
+                result
+            }
+            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
+                // SAFETY: single-statement borrow, never re-entered (bump_mut).
+                unsafe { bump_mut(a) }.alloc(layout, &self.0.acct)
+            }
+            Backend::Generation(a) => {
+                // SAFETY: single-statement borrow, never re-entered (as bump_mut).
+                unsafe { &mut *a.get() }.alloc(layout, &self.0.acct)
+            }
+            Backend::Slab(a) => {
+                // SAFETY: single-statement borrow, never re-entered (as bump_mut).
+                unsafe { &mut *a.get() }.alloc(layout, &self.0.acct)
+            }
+        }
+    }
+
+    /// C `MemoryContextAllocExtended(.., MCXT_ALLOC_HUGE)`: the explicit
+    /// huge-allocation opt-out, admitted against `MAX_ALLOC_HUGE_SIZE`
+    /// (SIZE_MAX/2) instead of the 1GB `MAX_ALLOC_SIZE`.
+    #[inline(never)]
+    pub fn alloc_uninit_bytes_huge(self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+        if layout.size() > MAX_ALLOC_HUGE_SIZE {
+            return Err(alloc_ceiling_exceeded());
+        }
+        self.allocate_unchecked(layout).map(|p| p.cast::<u8>())
     }
 }
 
@@ -1919,9 +1970,68 @@ pub fn vec_with_capacity_huge_in<'mcx, T>(
     if request > MAX_ALLOC_HUGE_SIZE {
         return Err(invalid_alloc_size(request));
     }
-    let mut v = PgVec::new_in(mcx);
-    v.try_reserve_exact(cap).map_err(|_| mcx.oom(request))?;
-    Ok(v)
+    if cap == 0 || core::mem::size_of::<T>() == 0 {
+        return Ok(PgVec::new_in(mcx));
+    }
+    // Thin shell mirroring `vec_with_capacity_in`: the huge entry point plus
+    // from_raw_parts_in, so it never funnels through the ceiling-checked
+    // `Allocator::allocate`.
+    let layout = core::alloc::Layout::array::<T>(cap).map_err(|_| mcx.oom(request))?;
+    let p = mcx.alloc_uninit_bytes_huge(layout).map_err(|_| mcx.oom(request))?;
+    // SAFETY: `p` is a fresh allocation of exactly `Layout::array::<T>(cap)`
+    // bytes from `mcx`; len 0 with capacity `cap` (the same layout Vec
+    // recomputes on grow/drop), matching this allocator.
+    Ok(unsafe { PgVec::from_raw_parts_in(p.cast::<T>().as_ptr(), 0, cap, mcx) })
+}
+
+/// C `repalloc_huge` / simplehash `SH_GROW` sizing rules for an existing
+/// vector: ensure capacity for `len + additional` elements, admitted against
+/// `MaxAllocHugeSize` rather than palloc's 1GB `MaxAllocSize` (which
+/// `Allocator::grow` now enforces). Grows alloc-new + copy + free, exactly
+/// simplehash's grow shape; amortized doubling is the CALLER's job (C's
+/// grow_memtuples / SH_GROW both compute the new size themselves).
+pub fn vec_reserve_huge<'mcx, T>(v: &mut PgVec<'mcx, T>, additional: usize) -> PgResult<()> {
+    const { assert!(!core::mem::needs_drop::<T>()) };
+    use allocator_api2::alloc::Allocator;
+    let len = v.len();
+    let mcx = *v.allocator();
+    let need = len
+        .checked_add(additional)
+        .ok_or_else(|| invalid_alloc_size(usize::MAX))?;
+    if need <= v.capacity() {
+        return Ok(());
+    }
+    let request = need.saturating_mul(core::mem::size_of::<T>());
+    if request > MAX_ALLOC_HUGE_SIZE {
+        return Err(invalid_alloc_size(request));
+    }
+    debug_assert!(core::mem::size_of::<T>() != 0, "huge reserve of a ZST cannot fail");
+    let new_layout = core::alloc::Layout::array::<T>(need).map_err(|_| mcx.oom(request))?;
+    let p = mcx.alloc_uninit_bytes_huge(new_layout).map_err(|_| mcx.oom(request))?;
+    let old_cap = v.capacity();
+    let old_vec = core::mem::replace(v, PgVec::new_in(mcx));
+    let (old_ptr, old_len, _old_cap, _mcx) = split_vec_raw_parts(old_vec);
+    debug_assert_eq!(old_len, len);
+    // SAFETY: `p` is a fresh `need`-element allocation (need > old_cap >= len),
+    // disjoint from the old buffer; `len` initialized elements are copied and
+    // the old buffer is returned to the same allocator with its true layout.
+    unsafe {
+        core::ptr::copy_nonoverlapping(old_ptr, p.cast::<T>().as_ptr(), len);
+        if old_cap != 0 {
+            let old_layout = core::alloc::Layout::array::<T>(old_cap)
+                .expect("existing capacity has a valid layout");
+            Allocator::deallocate(&mcx, NonNull::new_unchecked(old_ptr as *mut u8), old_layout);
+        }
+        *v = PgVec::from_raw_parts_in(p.cast::<T>().as_ptr(), len, need, mcx);
+    }
+    Ok(())
+}
+
+/// Decompose a `PgVec` without dropping it (no `Vec::into_raw_parts` on
+/// allocator_api2's stable surface).
+fn split_vec_raw_parts<'mcx, T>(v: PgVec<'mcx, T>) -> (*mut T, usize, usize, Mcx<'mcx>) {
+    let mut v = core::mem::ManuallyDrop::new(v);
+    (v.as_mut_ptr(), v.len(), v.capacity(), *v.allocator())
 }
 
 /// Aborts on failure (C palloc never returns NULL); droppy `T` allowed.

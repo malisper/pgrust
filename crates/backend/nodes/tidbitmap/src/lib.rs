@@ -155,7 +155,16 @@ impl TbmIterateResult<'_> {
 pub fn tbm_calculate_entries(maxbytes: usize) -> i32 {
     let nbuckets = maxbytes
         / (core::mem::size_of::<PagetableEntry>() + 2 * core::mem::size_of::<*const u8>());
-    nbuckets.clamp(16, (i32::MAX - 1) as usize) as i32
+    // C DIVERGENCE (documented): C's pagetable is simplehash with
+    // SH_ALLOCATE = MCXT_ALLOC_HUGE, so with work_mem > 1GB it may exceed
+    // MaxAllocSize. Our PgFxHashMap grows through the (now ceilinged)
+    // allocator, so clamp maxentries such that the table stays under the
+    // ceiling; past it the bitmap lossifies earlier than C would (a
+    // performance difference, never a results difference). /2 leaves room
+    // for hashbrown's power-of-two bucket rounding + load factor.
+    let ceiling = (::mcx::MAX_ALLOC_SIZE / 2)
+        / (core::mem::size_of::<PagetableEntry>() + 2 * core::mem::size_of::<*const u8>());
+    nbuckets.clamp(16, ceiling.min((i32::MAX - 1) as usize)) as i32
 }
 
 #[cold]

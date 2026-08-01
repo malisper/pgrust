@@ -815,7 +815,12 @@ impl<'m> TuplestoreData<'m> {
         }
 
         self.avail_mem += aset_chunk_space(memtupsize * PTR_SIZE);
-        self.memtuples.reserve_exact(newmemtupsize - self.memtuples.len());
+        // C grow_memtuples: repalloc_huge — memtuples may legally exceed
+        // MaxAllocSize (1GB), so this must bypass the allocator's palloc
+        // ceiling via the explicit huge entry point.
+        let add = newmemtupsize - self.memtuples.len();
+        ::mcx::vec_reserve_huge(&mut self.memtuples, add)
+            .expect("grow_memtuples: huge memtuples repalloc failed");
         self.avail_mem -= aset_chunk_space(self.memtuples.capacity() * PTR_SIZE);
         assert!(self.avail_mem >= 0, "unexpected out-of-memory situation in tuplestore");
         true

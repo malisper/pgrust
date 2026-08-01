@@ -79,7 +79,14 @@ pub(crate) fn spi_printtup(slot: &mut SlotData<'_>) -> PgResult<bool> {
             // SAFETY: image just copied into this arena, live until the
             // tuptable context drops.
             let tuple = unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, oid) };
-            data.vals.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<usize>()))?;
+            // C spi.c: `tuptable->vals = repalloc_huge(...)` when full — the
+            // vals array may legally exceed MaxAllocSize (1GB), so growth
+            // must bypass the allocator's palloc ceiling via the huge entry
+            // point (doubling here, as C does with alloced *= 2).
+            if data.vals.len() == data.vals.capacity() {
+                let add = data.vals.capacity().max(128);
+                ::mcx::vec_reserve_huge(&mut data.vals, add)?;
+            }
             data.vals.push(tuple);
             Ok(())
         })?;

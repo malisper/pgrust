@@ -952,9 +952,11 @@ impl<'mcx> TupleHashTable<'mcx> {
         let ix = self.entries.len() as u32;
         if self.entries.len() == self.entries.capacity() {
             let add = self.entries.capacity().max(16);
-            self.entries
-                .try_reserve(add)
-                .map_err(|_| oom_entries(*self.entries.allocator(), add))?;
+            // C simplehash SH_GROW allocates the new element array via
+            // SH_ALLOCATE = MCXT_ALLOC_HUGE: the entry array may legally
+            // exceed MaxAllocSize (1GB), so growth must bypass the
+            // allocator's palloc ceiling via the explicit huge entry point.
+            ::mcx::vec_reserve_huge(&mut self.entries, add)?;
         }
         self.entries.push(TupleHashEntryData { first_tuple, hash, key_isnull, key });
         let entries = &self.entries;
@@ -1333,9 +1335,3 @@ fn hashint8_fold(key: Datum) -> u32 {
     lohalf ^ if val >= 0 { hihalf } else { !hihalf }
 }
 
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn oom_entries(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
-    Box::new(mcx.oom(add * core::mem::size_of::<TupleHashEntryData>()))
-}

@@ -2474,7 +2474,12 @@ impl<'m> TuplesortData<'m> {
         }
 
         self.avail_mem += (memtupsize * mem::size_of::<SortTuple>()) as i64;
-        self.memtuples.reserve_exact(newmemtupsize - self.memtuples.len());
+        // C grow_memtuples: repalloc_huge — memtuples may legally exceed
+        // MaxAllocSize (1GB), so this must bypass the allocator's palloc
+        // ceiling via the explicit huge entry point.
+        let add = newmemtupsize - self.memtuples.len();
+        ::mcx::vec_reserve_huge(&mut self.memtuples, add)
+            .expect("grow_memtuples: huge memtuples repalloc failed");
         self.avail_mem -= (self.memtuples.capacity() * mem::size_of::<SortTuple>()) as i64;
         debug_assert!(!self.lackmem());
         true

@@ -1308,3 +1308,73 @@ mod local_stack {
 
 
 }
+
+// ---------------------------------------------------------------------------
+// Allocation ceiling in the ALLOCATOR (C palloc's MaxAllocSize admission).
+// Pre-fix, every one of these over-ceiling requests actually allocated >1GB
+// and returned Ok — the ceiling lived only in opt-in wrapper helpers, so
+// PgVec::push / try_reserve growth slipped past it (boundary-guard audit
+// finding 7, the mechanism behind the nested-ROW() memory blowup).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn allocator_rejects_over_ceiling_allocate() {
+    use allocator_api2::alloc::Allocator;
+    let layout = core::alloc::Layout::from_size_align(MAX_ALLOC_SIZE + 1, 1).unwrap();
+    for ctx in [MemoryContext::new("t"), MemoryContext::new_bump("t")] {
+        let mcx = ctx.mcx();
+        assert!(
+            Allocator::allocate(&mcx, layout).is_err(),
+            "allocate above MaxAllocSize must fail deterministically"
+        );
+        assert_eq!(ctx.used(), 0, "the refused request must not be charged");
+        // At the ceiling itself the request is admitted (parity: palloc
+        // accepts MaxAllocSize exactly).
+        let ok = core::alloc::Layout::from_size_align(MAX_ALLOC_SIZE, 1).unwrap();
+        let p = Allocator::allocate(&mcx, ok).expect("MaxAllocSize itself is admitted");
+        // SAFETY: freeing the allocation just made, same layout.
+        unsafe { Allocator::deallocate(&mcx, p.cast::<u8>(), ok) };
+    }
+}
+
+#[test]
+fn allocator_rejects_over_ceiling_grow() {
+    // PgVec growth reallocates through Allocator::grow, the path the
+    // nested-ROW() finding rode: a check only in `allocate` would miss it.
+    let ctx = MemoryContext::new("t");
+    let mut v: PgVec<u8> = vec_with_capacity_in(ctx.mcx(), 16).unwrap();
+    v.extend_from_slice(b"payload");
+    assert!(
+        v.try_reserve(MAX_ALLOC_SIZE + 1).is_err(),
+        "growth above MaxAllocSize must fail deterministically"
+    );
+    assert_eq!(&v[..], b"payload", "failed growth leaves the vec intact");
+}
+
+#[test]
+fn huge_entry_points_bypass_ceiling() {
+    // C palloc_extended(MCXT_ALLOC_HUGE): the explicit opt-out still admits
+    // requests above MaxAllocSize (hash bucket arrays, memtuples).
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut v: PgVec<u8> = vec_with_capacity_huge_in(mcx, MAX_ALLOC_SIZE + 2).unwrap();
+    assert!(v.capacity() > MAX_ALLOC_SIZE);
+    v.extend_from_slice(b"xyz");
+
+    // Huge GROWTH (C repalloc_huge / simplehash SH_GROW): starts under the
+    // ceiling, crosses it, keeps its contents.
+    let mut g: PgVec<u64> = vec_with_capacity_in(mcx, 4).unwrap();
+    g.extend_from_slice(&[1, 2, 3]);
+    vec_reserve_huge(&mut g, MAX_ALLOC_SIZE / 8 + 16).unwrap();
+    assert!(g.capacity() * 8 > MAX_ALLOC_SIZE);
+    assert_eq!(&g[..], &[1, 2, 3]);
+    g.push(4);
+    assert_eq!(&g[..], &[1, 2, 3, 4]);
+
+    // ... but even huge requests are admitted against MaxAllocHugeSize.
+    let mut w: PgVec<u64> = vec_with_capacity_in(mcx, 4).unwrap();
+    let err = vec_reserve_huge(&mut w, MAX_ALLOC_HUGE_SIZE).unwrap_err();
+    assert!(err.message().starts_with("invalid memory alloc request size"));
+    let err = vec_with_capacity_huge_in::<u64>(mcx, MAX_ALLOC_HUGE_SIZE).unwrap_err();
+    assert!(err.message().starts_with("invalid memory alloc request size"));
+}

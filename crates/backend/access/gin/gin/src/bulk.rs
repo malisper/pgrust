@@ -193,7 +193,12 @@ impl<'s> BuildAccumulator<'s> {
             let e = &mut self.entries[idx as usize];
             if e.list.len() == e.list.capacity() {
                 self.allocated_memory -= chunk_space(e.list.capacity() * 6);
-                e.list.try_reserve_exact(e.list.capacity()).map_err(|_| crate::oom(e.list.capacity() * 6))?;
+                // C ginCombineData: `repalloc_huge(eo->list, ...)` — the TID
+                // list of a very common key may legally exceed MaxAllocSize
+                // (1GB), so growth must bypass the allocator's palloc ceiling
+                // via the huge entry point (doubling, as C's 2 * maxcount).
+                let add = e.list.capacity();
+                ::mcx::vec_reserve_huge(&mut e.list, add)?;
                 self.allocated_memory += chunk_space(e.list.capacity() * 6);
             }
             if !e.should_sort {
