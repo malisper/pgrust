@@ -763,27 +763,48 @@ fn parse_block(toks: &[&str], k: usize) -> Option<usize> {
         // elogs before touching a field, a compared error verdict): consume
         // the block, keeping brace/paren balance.
         let known_label = CUSTOM_READER_LABELS.contains(&label);
+        // STRICT ALTERNATION at this level: every token is either `:field`
+        // followed by exactly one value, or the closing `}`. A stray token
+        // shifts C's token stream by one, so C then reads a field NAME as a
+        // VALUE (its READ macros never verify names) and walks off into a NULL
+        // deref — witnessed: `... :colnames ("a")}2 :rtekind 8 ...` SEGVs
+        // inside strtoul. Values may be nested structures, which recurse.
         loop {
             match toks.get(j).copied()? {
-                // RECURSE into nested blocks so their own field sequences are
-                // validated (a nested ALIAS inside a RANGETBLENTRY used to be
-                // skipped by a depth counter, letting `:colna-es` through)
-                "{" => j = parse_block(toks, j)?,
                 "}" => return Some(j + 1),
-                "(" => j = parse_list(toks, j)?,
                 t => {
+                    let fname = t.strip_prefix(':')?;
+                    j += 1;
+                    // constvalue's payload is validated by
+                    // const_datums_are_well_formed (it is not a single value)
+                    if fname == "constvalue" {
+                        // skip the length token, `[`, the bytes and `]`
+                        while !matches!(toks.get(j).copied(), Some("]") | Some("}") | None) {
+                            j += 1;
+                        }
+                        if toks.get(j).copied() == Some("]") {
+                            j += 1;
+                        }
+                        continue;
+                    }
                     if known_label {
-                        if let Some(fname) = t.strip_prefix(':') {
-                            if let Some(kind) = custom_field_kinds().get(fname) {
-                                let v = toks.get(j + 1).copied()?;
-                                // constvalue's payload: const_datums_are_well_formed
-                                if fname != "constvalue" && !value_token_matches_kind(v, kind) {
-                                    return None;
-                                }
+                        if let Some(kind) = custom_field_kinds().get(fname) {
+                            let v = toks.get(j).copied()?;
+                            if !value_token_matches_kind(v, kind) {
+                                return None;
                             }
                         }
                     }
-                    j += 1;
+                    // a field VALUE is a nested structure or ONE token; unlike
+                    // a list element it may be a bare word (CHAR/STRING kinds:
+                    // outToken writes `r`, `c`, escaped words), so this must
+                    // NOT go through the list-element producibility rule.
+                    match toks.get(j).copied()? {
+                        "{" => j = parse_block(toks, j)?,
+                        "(" => j = parse_list(toks, j)?,
+                        ")" | "}" => return None,
+                        _ => j += 1,
+                    }
                 }
             }
         }

@@ -1064,3 +1064,13 @@ fn every_rtekind_branch_has_a_seed_and_is_compared() {
         UNPORTED_RTEKINDS
     );
 }
+
+/// A stray token inside a custom block shifts C's token stream by one, so C
+/// reads a field NAME as a VALUE (its READ macros never verify names) and
+/// walks off into a NULL deref. Strict `:field value` alternation gates it.
+#[test]
+fn stray_token_in_a_custom_block_is_gated() {
+    let bad = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colnames (\"a\")}2 \
+               :rtekind 8 :lateral false :inFromCl true :securityQuals <>}";
+    assert!(!run_text(bad.as_bytes()), "stray token in a custom block reached the oracle");
+}
