@@ -693,7 +693,6 @@ fn main() {
         .include("csrc/trgmfam/include")
         .warnings(false)
         .compile("pg_difffuzz_trgmfam");
->>>>>>> f553adeccca (trgm_diff: vendor 18.3 trgm_op.c C oracle + two-locale-arm environment (C-ctype / builtin C.UTF-8) + unicode_case engine)
 
     // tablesfam_diff oracle (p1-lanef): verbatim 18.3 kwlookup/keywords/
     // unicode_category, FRONTEND arms, own shim include tree.

@@ -1,13 +1,22 @@
-# trgm_diff dictionary (scaffolded by fuzz/scaffold.py).
-# TODO(scaffold): add multi-byte tokens the parsers compare against —
-# keywords, unit suffixes, type-name literals, format tokens — harvested
-# mechanically from the vendored regress SQL literals (gen_seeds.sh pattern)
-# plus every past divergence. CmpLog + dictionary is day-one for
-# parser-shaped targets (fuzzuproof-crate skill).
-# arm selectors
-"\x00"
-"\x01"
-"\x02"
-"\x03"
-"\x04"
-"\x05"
+# trgm_diff dictionary: wildcard metas, escapes, multibyte word chars,
+# common trigrams, selector-relevant tokens.
+"%"
+"_"
+"\\"
+"\\%"
+"\\_"
+"  a"
+" ab"
+"ab "
+"abc"
+" 20"
+"\xff"
+"\xc3\xa9"
+"\xe2\x82\xac"
+"\xf0\x9d\x84\x9e"
+"\xd0\xbf\xd1\x80\xd0\xb8"
+"\xd0\xaf"
+"\xd1\x91"
+"\xe6\xbc\xa2\xe5\xad\x97"
+" "
+"0x"

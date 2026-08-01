@@ -254,6 +254,26 @@ pub fn set_default_locale_c_for_tests() {
     DEFAULT_LOCALE.with(|d| d.set(Some(&C_LOCALE)));
 }
 
+// Test-only: builtin-provider C.UTF-8 default without a catalog (what
+// `initdb --locale-provider=builtin --builtin-locale=C.UTF-8` records:
+// collate C, ctype NOT C, simple casemap — pg_locale_builtin.c:160 gives
+// casemap_full only to PG_UNICODE_FAST). Verification harnesses only.
+pub static BUILTIN_C_UTF8_LOCALE: PgLocale = PgLocale {
+    provider: COLLPROVIDER_BUILTIN,
+    deterministic: true,
+    collate_is_c: true,
+    ctype_is_c: false,
+    is_default: true,
+    builtin_locale: Some("C.UTF-8"),
+    builtin_casemap_full: false,
+    lt: libc_locale::LibcLocale::NONE,
+    icu: icu::IcuLocale::NONE,
+};
+
+pub fn set_default_locale_builtin_utf8_for_tests() {
+    DEFAULT_LOCALE.with(|d| d.set(Some(&BUILTIN_C_UTF8_LOCALE)));
+}
+
 /// Non-panicking probe: init_database_collation has run (fail-closed gates
 /// that would otherwise trip the DEFAULT_COLLATION expect in test/boot envs).
 pub fn default_locale_installed() -> bool {

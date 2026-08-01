@@ -54,6 +54,14 @@ fn legacy_crc32(bytes: &[u8]) -> u32 {
     crc32c::legacy_crc32_lexeme(bytes)
 }
 
+/// The production TrgmEnv every fc_* entry builds — exposed for the
+/// verification harness (fuzz/core trgm_diff), which must exercise the
+/// SHIPPED environment wiring, never a test stub. Not part of the SQL
+/// surface.
+pub fn harness_env() -> TrgmEnv<'static> {
+    make_env()
+}
+
 fn make_env() -> TrgmEnv<'static> {
     TrgmEnv {
         max_encoding_len: mbutils::pg_database_encoding_max_length(),
@@ -114,22 +122,34 @@ fn text_args<'a>(fcinfo: &'a Fcinfo) -> PgResult<(&'a [u8], &'a [u8])> {
     Ok((a.data(), b.data()))
 }
 
+/// show_trgm's element rendering (trgm_op.c show_trgm minus the array
+/// construction): each array element's text bytes, in array order. Factored
+/// out behavior-identically so the verification harness (fuzz/core
+/// trgm_diff) compares the SHIPPED formatting, not a re-implementation.
+pub fn show_trgm_elements(input: &[u8]) -> Vec<Vec<u8>> {
+    let env = make_env();
+    let trg = generate_trgm(input, &env, &legacy_crc32);
+    let multibyte = mbutils::pg_database_encoding_max_length() > 1;
+    trg.iter()
+        .map(|t| {
+            if multibyte && !is_printable_trgm(t) {
+                format!("0x{:06x}", trgm2int(t)).into_bytes()
+            } else {
+                t.to_vec()
+            }
+        })
+        .collect()
+}
+
 fn fc_show_trgm(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg is a non-null text varlena (strict fn).
     let input = unsafe { fcinfo.arg_varlena_packed(0)? };
-    let env = make_env();
-    let trg = generate_trgm(input.data(), &env, &legacy_crc32);
+    let rendered = show_trgm_elements(input.data());
 
-    let multibyte = mbutils::pg_database_encoding_max_length() > 1;
     let mcx = fcinfo.result_mcx();
-    let mut elems: Vec<Datum> = Vec::with_capacity(trg.len());
-    for t in &trg {
-        let bytes: Vec<u8> = if multibyte && !is_printable_trgm(t) {
-            format!("0x{:06x}", trgm2int(t)).into_bytes()
-        } else {
-            t.to_vec()
-        };
-        let v = varlena::cstring_to_text(mcx, &bytes)?;
+    let mut elems: Vec<Datum> = Vec::with_capacity(rendered.len());
+    for bytes in &rendered {
+        let v = varlena::cstring_to_text(mcx, bytes)?;
         elems.push(varlena_result(v));
     }
     let image = arrayfuncs::construct::construct_array(
