@@ -519,6 +519,39 @@ pub fn spellfam_diff(data: &[u8]) {
             return;
         }
 
+        // DOMAIN CARVE (C-UB: union type confusion guarded only by a
+        // release-compiled-out Assert). NIImportOOAffixes processes COMPOUND*
+        // directives and the `FLAG` mode selector in ONE pass in FILE ORDER, so
+        // a COMPOUND* line before `FLAG num`/`FLAG long` is registered under the
+        // then-current mode while later ones use the new mode. The resulting
+        // CompoundAffixFlags array holds MIXED modes, and C's cmpcmdflag
+        // (spell.c:211-227) then reads `union { char *s; int i; }` as whichever
+        // type fv1's mode says — reading a pointer field as an int or vice
+        // versa. Its only guard is `Assert(fv1->flagMode == fv2->flagMode)`,
+        // which is compiled out in release, so release C has undefined
+        // behaviour here; the port's faithful debug_assert_eq! documents the
+        // same precondition and fires under cargo-fuzz's debug assertions
+        // (CI cluster exec 134975, left: Num / right: Char). The hunspell format puts
+        // FLAG first, so this is also a malformed-file shape. No defined C
+        // answer => out of domain; FLAG-before-COMPOUND* files (e.g. the
+        // hunspell_sample_long fixture) stay fully in domain.
+        {
+            let mut seen_compound = false;
+            for line in lower.split(|&b| b == b'\n') {
+                let Some(i) = line.iter().position(|b| !b.is_ascii_whitespace()) else { continue };
+                let t = &line[i..];
+                if t.starts_with(b"compound") || t.starts_with(b"onlyincompound") {
+                    seen_compound = true;
+                } else if t.starts_with(b"flag") && seen_compound {
+                    let rest = &t[4..];
+                    let r: Vec<u8> = rest.iter().copied().skip_while(|b| b.is_ascii_whitespace()).collect();
+                    if r.starts_with(b"num") || r.starts_with(b"long") {
+                        return; // mixed-mode CompoundAffixFlags reachable
+                    }
+                }
+            }
+        }
+
         // DOMAIN CARVE (C-UB, SECOND REACH-SITE of the AffixData NULL-slot
         // defect already tracked as task #80 — pgrust robust, C undefined).
         // An `AF <n>` header palloc0's n+1 alias slots; slot 0 is set to
