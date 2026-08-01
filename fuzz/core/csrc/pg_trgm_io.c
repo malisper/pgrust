@@ -2118,9 +2118,13 @@ pg_diff_trgm_enter(int locale_arm)
 	pg_diff_trgm_arena_reset();
 	pg_diff_errcode = 0;
 	pg_diff_trgm_pending = 0;
-	wfam_x_set_db_encoding(PG_UTF8);
+	/* locale_arm 2 = SQL_ASCII single-byte database (pg_enc value 0):
+	 * pg_database_encoding_max_length() == 1, so make_trigrams takes its
+	 * single-byte fast path and no multibyte walker is reachable; ctype
+	 * model is the C-locale byte model, as for arm 0. */
+	wfam_x_set_db_encoding(locale_arm == 2 ? 0 : PG_UTF8);
 	CMPTRGM = CMPTRGM_CHOOSE;
-	if (locale_arm == 0)
+	if (locale_arm == 0 || locale_arm == 2)
 	{
 		/* database ctype C */
 		database_ctype_is_c = true;

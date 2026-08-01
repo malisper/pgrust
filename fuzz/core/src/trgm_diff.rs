@@ -2,10 +2,12 @@
 //! (trgm_op.c half) against the vendored 18.3 C oracle in
 //! `csrc/pg_trgm_io.c`. 100%-coverage campaign, lane p1-trgm.
 //!
-//! INPUT SHAPE: byte0 = selector — low nibble = arm (0..=8; 9..=15
-//! reserved, 9 will be the trgm_regexp arm), bit 4 = locale_arm. The rest
-//! is payload; two-string arms split on the FIRST 0xFF byte (0xFF is never
-//! valid UTF-8, so it cannot collide with the domain gate below).
+//! INPUT SHAPE: byte0 = selector — low nibble = arm (0..=9; 10..=15
+//! reserved; 9 = the trgm_regexp arm), bits 4-5 = locale_arm (0/1/2; 3
+//! reserved). The rest is payload; two-string arms split on the FIRST
+//! 0xFF byte (0xFF is never valid UTF-8, so it cannot collide with the
+//! domain gate below; under arm 2's raw-byte domain the split is simply
+//! defined at the first 0xFF).
 //!
 //! DOMAIN GATE: every string payload must be valid UTF-8 — the server
 //! invariant for `text` under a UTF-8 database (the C oracle's
@@ -32,6 +34,15 @@
 //!           vendored src/common/unicode_case.c — a REAL differential).
 //!           PLATFORM CARVE: macOS libc wctype tables differ from glibc in
 //!           spots; the Linux CI cluster run is the record for arm 1.
+//!   arm 2 = SQL_ASCII single-byte database (locale "C"): encoding pinned
+//!           pg_enc 0 on both sides — pg_database_encoding_max_length()==1
+//!           reaches make_trigrams' single-byte fast path, unreachable
+//!           under UTF-8. ctype model = arm 0's byte model. DOMAIN = raw
+//!           bytes (every byte string is valid SQL_ASCII; no mb walker is
+//!           reachable — verified: find_word/make_trigrams take the
+//!           1-byte-per-char rows). Interior NUL truncation parity
+//!           (C strlen(lowered) vs Rust nul_pos) is IN and compared.
+//!           Ground truth: live 18.3 SQL_ASCII/C database (arm2 pins).
 //!
 //! COMPARISON PLANES (per arm): value bytes — trigram arrays compared
 //! byte-for-byte INCLUDING order (comparator-order surface); floats by
@@ -69,6 +80,19 @@
 //!      KILLED: compact_trigram raw-byte arm + arm-1 CRC trigram seeds.
 //!   i5 get_wildcard_part drop trailing-pad push (product trgm.rs)
 //!      KILLED: generate_wildcard_trgm value plane (pct20/esc seeds).
+//! ARM-9 (regexp) SWEEP (2026-08-01, same protocol, seeds-only kills):
+//!   r1 PENALTIES[6] 25.0 -> 2.0 (product regexp.rs)
+//!      KILLED: trigram-multiset plane (^abc$ seed: rust 3 vs C 2).
+//!   r2 valid_arc_label nonblank-blank rule dropped (product regexp.rs)
+//!      KILLED: trigram-multiset plane (bigclass seed: rust 5 vs C 4).
+//!   r3 enter_keys prefix_contains dedup skipped (product regexp.rs)
+//!      KILLED-BY-HANG: key-queue explosion — seed replay wedges >150s
+//!      where the C side terminates (bounded-replay divergence).
+//!   r4 expand_color_trigrams emits one extra trigram (product regexp.rs)
+//!      KILLED: trigram-multiset plane ('abc': rust 2 vs C 1).
+//!   r5 TrgmPackedGraph::matches treats unset check bits as set
+//!      (product gin_vocab)
+//!      KILLED: graph-semantics plane (round 0 all-false subset).
 //!
 //! Ground-truth pins (live postgres:18.3 docker, aarch64 Debian,
 //! 2026-08-01): the arm-tagged unit tests at the bottom.
@@ -196,10 +220,8 @@ fn init_env() {
         let _seams = std::panic::catch_unwind(mbutils::init_seams);
     });
     // Thread-locals: per-exec/per-thread, never once per process.
+    // (The encoding pin itself is per locale-arm: see pin_locale_arm.)
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).expect("UTF8 pin");
-    // ENCODING PIN ASSERT (harness law): both sides must agree what a byte
-    // sequence means. C side is pinned inside every pg_diff_trgm_* entry.
-    assert_eq!(mbutils::pg_database_encoding_max_length(), 4, "UTF8 pin");
 }
 
 /// Thread LC_CTYPE for the arm, via uselocale(3) — the honest model of
@@ -235,13 +257,24 @@ fn thread_ctype(locale_arm: i32) {
 }
 
 fn pin_locale_arm(locale_arm: i32) {
-    thread_ctype(locale_arm);
-    if locale_arm == 0 {
-        pg_locale::set_database_ctype_is_c(true);
-        pg_locale::set_default_locale_c_for_tests();
-    } else {
+    // arm 2 keeps the C-ctype thread locale (byte isalnum); arms 0/2 differ
+    // only in database encoding (UTF-8 vs SQL_ASCII single-byte).
+    thread_ctype(if locale_arm == 2 { 0 } else { locale_arm });
+    let enc = if locale_arm == 2 { wchar::PG_SQL_ASCII } else { wchar::PG_UTF8 };
+    mbutils::SetDatabaseEncoding(enc).expect("encoding pin");
+    // ENCODING PIN ASSERT (harness law): both sides must agree what a byte
+    // sequence means. C side is pinned inside every pg_diff_trgm_* entry.
+    assert_eq!(
+        mbutils::pg_database_encoding_max_length(),
+        if locale_arm == 2 { 1 } else { 4 },
+        "encoding pin"
+    );
+    if locale_arm == 1 {
         pg_locale::set_database_ctype_is_c(false);
         pg_locale::set_default_locale_builtin_utf8_for_tests();
+    } else {
+        pg_locale::set_database_ctype_is_c(true);
+        pg_locale::set_default_locale_c_for_tests();
     }
 }
 
@@ -884,13 +917,19 @@ pub fn trgm_diff(data: &[u8]) {
         return;
     };
     let arm = sel & 0x0F;
-    let locale_arm = i32::from(sel >> 4 & 1);
+    let locale_arm = i32::from(sel >> 4 & 3);
+    if locale_arm == 3 {
+        return; // reserved
+    }
     init_env();
     pin_locale_arm(locale_arm);
 
     match arm {
         0 | 1 | 4 => {
-            if !utf8_ok(payload) {
+            if locale_arm != 2 && !utf8_ok(payload) {
+                return;
+            }
+            if payload.len() > MAX_STR {
                 return;
             }
             match arm {
@@ -901,7 +940,10 @@ pub fn trgm_diff(data: &[u8]) {
         }
         2 | 5 | 6 => {
             let (a, b) = split_two(payload);
-            if !utf8_ok(a) || !utf8_ok(b) {
+            if locale_arm != 2 && (!utf8_ok(a) || !utf8_ok(b)) {
+                return;
+            }
+            if a.len() > MAX_STR || b.len() > MAX_STR {
                 return;
             }
             match arm {
@@ -915,7 +957,10 @@ pub fn trgm_diff(data: &[u8]) {
                 return;
             };
             let (a, b) = split_two(rest);
-            if !utf8_ok(a) || !utf8_ok(b) {
+            if locale_arm != 2 && (!utf8_ok(a) || !utf8_ok(b)) {
+                return;
+            }
+            if a.len() > MAX_STR || b.len() > MAX_STR {
                 return;
             }
             arm_word_similarity(locale_arm, flags, a, b);
@@ -1362,5 +1407,83 @@ mod regexp_tests {
             REGEXP_FALLBACK.load(AtOrd::Relaxed),
             REGEXP_ERR.load(AtOrd::Relaxed),
         );
+    }
+}
+
+#[cfg(test)]
+mod arm2_tests {
+    use super::*;
+
+    fn run(sel: u8, pay: &[u8]) {
+        let mut v = vec![sel];
+        v.extend_from_slice(pay);
+        trgm_diff(&v);
+    }
+
+    /// Ground-truth pins from a live postgres:18.3 SQL_ASCII/C database
+    /// (docker aarch64, 2026-08-01): show_trgm('a b c') =
+    /// {"  a","  b","  c"," a "," b "," c "}; show_trgm('café') =
+    /// {"  c"," ca","af ",caf}; similarity('café','cafe') = 0.5;
+    /// word_similarity('Sunday','Saturday') = 0.2857143;
+    /// show_trgm('abc\xc3\x9f') = {"  a"," ab",abc,"bc "}.
+    #[test]
+    fn pins_sqlascii_arm2() {
+        init_env();
+        pin_locale_arm(2);
+        let show = |s: &[u8]| -> Vec<Vec<u8>> { pg_trgm::show_trgm_elements(s) };
+        // Rust side pins (the differential below then proves C agrees):
+        let e: Vec<Vec<u8>> =
+            [b"  a", b"  b", b"  c", b" a ", b" b ", b" c "].iter().map(|s| s.to_vec()).collect();
+        assert_eq!(show(b"a b c"), e);
+        let e: Vec<Vec<u8>> =
+            [&b"  c"[..], b" ca", b"af ", b"caf"].iter().map(|s| s.to_vec()).collect();
+        assert_eq!(show("café".as_bytes()), e);
+        let e: Vec<Vec<u8>> =
+            [&b"  a"[..], b" ab", b"abc", b"bc "].iter().map(|s| s.to_vec()).collect();
+        assert_eq!(show(b"abc\xc3\x9f"), e);
+        let env = pg_trgm::harness_env();
+        let t1 = generate_trgm("café".as_bytes(), &env, &crc);
+        let t2 = generate_trgm(b"cafe", &env, &crc);
+        assert_eq!(cnt_sml(&t1, &t2, false).to_bits(), 0.5f32.to_bits());
+        let ws = calc_word_similarity(b"Sunday", b"Saturday", 0, &env, &crc, 0.6, 0.5);
+        assert_eq!(ws.to_bits(), 0.2857143f32.to_bits());
+        // full differential on the same inputs (raw-byte domain incl. the
+        // 0xfe high-bit and interior-NUL truncation parity seeds)
+        for (arm, pay) in [
+            (1u8, &b"a b c"[..]),
+            (0, "café".as_bytes()),
+            (0, b"abc\xc3\x9f"),
+            (0, b"ab\x00cd"),
+            (0, b"ab\xc3\x9fcd\xfe"),
+        ] {
+            run(0x20 | arm, pay);
+        }
+        run(0x22, &[b'c', b'a', b'f', 0xc3, 0xa9, 0xFF, b'c', b'a', b'f', b'e']);
+        run(0x23, b"\x00Sunday\xffSaturday");
+    }
+
+    /// Line-101 witness (make_trigrams multibyte-branch early return,
+    /// trgm.rs:100-102): a wildcard part that is a SINGLE unpadded
+    /// multibyte word char has bytelen == lenfirst, so the branch returns
+    /// with zero trigrams — the pattern extracts an EMPTY required set.
+    /// The padded variants ('%一a%') extract non-empty. Both sides must
+    /// agree on all of it (differential), and the empty/non-empty split
+    /// witnesses the branch fired.
+    #[test]
+    fn wildcard_mb_line101_witness() {
+        init_env();
+        pin_locale_arm(1);
+        let env = pg_trgm::harness_env();
+        let lone = generate_wildcard_trgm("%一%".as_bytes(), &env, &crc);
+        assert!(lone.is_empty(), "single-mb-char wildcard part must yield no trigrams");
+        // "%一a%" = 2-char unpadded word: the SECOND early return
+        // (ptr+lenfirst+lenmiddle >= bytelen) — also zero trigrams.
+        let two = generate_wildcard_trgm("%一a%".as_bytes(), &env, &crc);
+        assert!(two.is_empty(), "2-char mb wildcard part must also yield no trigrams");
+        let three = generate_wildcard_trgm("%一ab%".as_bytes(), &env, &crc);
+        assert!(!three.is_empty(), "3-char variant must yield a trigram");
+        for pat in ["%一%", "%一a%", "%一ab%", "%ж%", "%жa%", "%жab%", "%𠀀%"] {
+            run(0x14, pat.as_bytes());
+        }
     }
 }
