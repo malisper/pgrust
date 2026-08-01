@@ -403,6 +403,11 @@ pub use wcharfam::wcharfam_diff;
 // rowtypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-rowtypes_diff.md.
 pub mod rowtypes_diff;
 pub use rowtypes_diff::rowtypes_diff;
+// stub:* — shared constructed-state builder facilities (fuzz/stub-constructed):
+// state-shaped inputs built identically on the Rust and C-oracle sides from
+// the same fuzz bytes. See fuzz/STUBS.md.
+pub mod stub_tupdesc;
+
 // tupaccess_diff: heaptuple/tupdesc/attmap/tupconvert differential (p1-tupaccess).
 pub mod tupaccess_diff;
 pub use tupaccess_diff::tupaccess_diff;
