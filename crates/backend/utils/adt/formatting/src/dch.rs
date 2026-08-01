@@ -640,7 +640,14 @@ pub fn dch_to_char<'mcx>(
             DCH_WW => {
                 let width = if s_fm(suffix) { 0 } else { 2 };
                 let start = out.len();
-                pg_append(&mut out, fmt_0d(width, ((tm.tm_yday - 1) / 7 + 1) as i64).as_bytes());
+                // C: `(tm->tm_yday - 1) / 7 + 1` bare under -fwrapv; interval
+                // tm_yday is caller-unbounded (real 18.3 wraps: to_char(
+                // interval '-2147483648 days','WW') docker-confirmed;
+                // found by the fmt_dch_diff FLEET campaign 2026-07-31).
+                pg_append(
+                    &mut out,
+                    fmt_0d(width, (tm.tm_yday.wrapping_sub(1) / 7 + 1) as i64).as_bytes(),
+                );
                 apply_thth(&mut out, start, suffix)?;
             }
             DCH_IW => {
@@ -781,7 +788,13 @@ pub fn dch_to_char<'mcx>(
             }
             DCH_W => {
                 let start = out.len();
-                pg_append(&mut out, fmt_d(((tm.tm_mday - 1) / 7 + 1) as i64).as_bytes());
+                // C computes `(tm->tm_mday - 1) / 7 + 1` bare under -fwrapv:
+                // interval tm_mday = INT_MIN wraps (real 18.3 prints
+                // 306783379, docker-confirmed; found by fmt_dch_diff).
+                pg_append(
+                    &mut out,
+                    fmt_d(((tm.tm_mday.wrapping_sub(1)) / 7 + 1) as i64).as_bytes(),
+                );
                 apply_thth(&mut out, start, suffix)?;
             }
             DCH_J => {

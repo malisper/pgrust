@@ -1709,6 +1709,7 @@ dependencies = [
  "adt_datetime",
  "adt_encode",
  "adt_float",
+ "adt_formatting",
  "adt_geo",
  "adt_int",
  "adt_int8",

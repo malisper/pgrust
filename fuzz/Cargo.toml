@@ -277,6 +277,22 @@ test = false
 doc = false
 bench = false
 
+# fmt_dch_diff: scaffolded by fuzz/scaffold.py — see README-TODO-fmt_dch_diff.md.
+[[bin]]
+name = "fmt_dch_diff"
+path = "fuzz_targets/fmt_dch_diff.rs"
+test = false
+doc = false
+bench = false
+
+# fmt_num_diff: scaffolded by fuzz/scaffold.py — see README-TODO-fmt_num_diff.md.
+[[bin]]
+name = "fmt_num_diff"
+path = "fuzz_targets/fmt_num_diff.rs"
+test = false
+doc = false
+bench = false
+
 # geo_io_diff: geo text-I/O family differential (p1-laner).
 [[bin]]
 name = "geo_io_diff"
