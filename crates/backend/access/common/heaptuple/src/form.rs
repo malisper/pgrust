@@ -471,7 +471,13 @@ unsafe fn expand_fill_tail(
             ),
         }
     }
-    debug_assert_eq!(off, plan.target_data_len);
+    // C expand_tuple sizes the missing tail with att_addlength (the datum's
+    // nominal size), but fill_val then SHORT-CONVERTS packable 4B-header
+    // missing values — so the fill can legitimately come up short of the
+    // plan; the image keeps C's zeroed slack bytes and t_len (upstream
+    // behaves identically). Strict equality here was a ported-in constraint
+    // that panicked debug builds on ADD COLUMN DEFAULT '<short text>' scans.
+    debug_assert!(off <= plan.target_data_len);
 }
 
 /// Widen a tuple to `tupleDesc.natts` attributes, filling missing values or nulls.
