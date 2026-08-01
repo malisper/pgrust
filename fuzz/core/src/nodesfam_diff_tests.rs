@@ -961,3 +961,14 @@ fn custom_block_values_are_kind_checked() {
                 :securityQuals <>}";
     assert!(run_text(good.as_bytes()), "gate rejected a valid RANGETBLENTRY");
 }
+
+/// Nested blocks inside a CUSTOM-reader block get their own field-sequence
+/// validation (a depth counter used to skip them, letting a misspelled nested
+/// field name reach the oracle).
+#[test]
+fn nested_blocks_inside_custom_blocks_are_validated() {
+    let bad = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colna-es (\"a\")} \
+               :rtekind 0 :relid 1 :inh false :relkind r :rellockmode 1 :perminfoindex 0 \
+               :tablesample <> :lateral false :inFromCl true :securityQuals <>}";
+    assert!(!run_text(bad.as_bytes()), "nested misspelled field slipped through");
+}

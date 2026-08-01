@@ -748,35 +748,30 @@ fn parse_block(toks: &[&str], k: usize) -> Option<usize> {
         // elogs before touching a field, a compared error verdict): consume
         // the block, keeping brace/paren balance.
         let known_label = CUSTOM_READER_LABELS.contains(&label);
-        let mut depth = 1usize;
-        while let Some(t) = toks.get(j).copied() {
-            match t {
-                "{" => depth += 1,
-                "}" => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(j + 1);
-                    }
-                }
-                // inside a CUSTOM reader the field SEQUENCE is conditional but
-                // each field's KIND is fixed, so check the value by kind
-                _ if known_label && depth == 1 => {
-                    if let Some(fname) = t.strip_prefix(':') {
-                        if let Some(kind) = custom_field_kinds().get(fname) {
-                            let v = toks.get(j + 1).copied()?;
-                            // constvalue's payload is checked by
-                            // const_datums_are_well_formed
-                            if fname != "constvalue" && !value_token_matches_kind(v, kind) {
-                                return None;
+        loop {
+            match toks.get(j).copied()? {
+                // RECURSE into nested blocks so their own field sequences are
+                // validated (a nested ALIAS inside a RANGETBLENTRY used to be
+                // skipped by a depth counter, letting `:colna-es` through)
+                "{" => j = parse_block(toks, j)?,
+                "}" => return Some(j + 1),
+                "(" => j = parse_list(toks, j)?,
+                t => {
+                    if known_label {
+                        if let Some(fname) = t.strip_prefix(':') {
+                            if let Some(kind) = custom_field_kinds().get(fname) {
+                                let v = toks.get(j + 1).copied()?;
+                                // constvalue's payload: const_datums_are_well_formed
+                                if fname != "constvalue" && !value_token_matches_kind(v, kind) {
+                                    return None;
+                                }
                             }
                         }
                     }
+                    j += 1;
                 }
-                _ => {}
             }
-            j += 1;
         }
-        return None;
     }
     let fields = expected_fields().get(label)?;
     for (fname, kind) in fields {
