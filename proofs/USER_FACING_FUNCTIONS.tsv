@@ -2127,8 +2127,8 @@ oid	name	source_file	status	class	notes
 3595	event_trigger_out	crates/backend/utils/adt/pseudotypes/src/builtins.rs	proved(err-parity: verdict+sqlstate+level; all args ignored)	fast	~0.6s default solver; proofs/pseudotypes eq_event_trigger_out; wrapper-level via LocalFcinfo (call1, null Datum); C MAKE_SQLSTATE computed vs shipped with_sqlstate — 0A000 encoding in-theorem; message text/location out of proof; Err-arm cover! + shell_in must-fail control
 3610	tsvectorin	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
 3611	tsvectorout	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
-3612	tsqueryin	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3613	tsqueryout	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
+3612	tsqueryin	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3613	tsqueryout	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
 3616	tsvector_lt	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
 3617	tsvector_le	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
 3618	tsvector_eq	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
@@ -2143,8 +2143,8 @@ oid	name	source_file	status	class	notes
 3635	ts_match_qv	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
 3638	tsvectorsend	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
 3639	tsvectorrecv	crates/backend/utils/adt/tsvector_core/src/builtins.rs	excluded(engine)	-	tsvector parse/serialize engine
-3640	tsquerysend	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3641	tsqueryrecv	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
+3640	tsquerysend	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3641	tsqueryrecv	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
 3646	gtsvectorin	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3647	gtsvectorout	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3648	gtsvector_compress	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
@@ -2154,24 +2154,24 @@ oid	name	source_file	status	class	notes
 3652	gtsvector_same	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3653	gtsvector_penalty	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3654	gtsvector_consistent	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
-3662	tsquery_lt	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3663	tsquery_le	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3664	tsquery_eq	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3665	tsquery_ne	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3666	tsquery_ge	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3667	tsquery_gt	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3668	tsquery_cmp	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3669	tsquery_and	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3670	tsquery_or	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3671	tsquery_not	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3672	tsquery_numnode	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3673	tsquerytree	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3684	tsquery_rewrite	crates/backend/utils/adt/tsquery_rewrite/src/lib.rs	excluded(engine)	-	tsquery rewrite engine
+3662	tsquery_lt	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3663	tsquery_le	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3664	tsquery_eq	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3665	tsquery_ne	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3666	tsquery_ge	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3667	tsquery_gt	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3668	tsquery_cmp	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3669	tsquery_and	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3670	tsquery_or	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3671	tsquery_not	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3672	tsquery_numnode	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3673	tsquerytree	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3684	tsquery_rewrite	crates/backend/utils/adt/tsquery_rewrite/src/lib.rs	tested(differential: tsqrw_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561091-3d07-99982 @213fabcd64; planes tsquery-varlena-image+verdict+errclass+fc-wrapper; measured at lane tip proofs/p1-tsquery)	-	tsquery rewrite engine
 3685	tsquery_rewrite_query	crates/backend/utils/adt/tsquery_rewrite/src/lib.rs	excluded(engine)	-	tsquery rewrite engine
 3689	ts_stat1	crates/backend/utils/adt/tsvector_stat/src/lib.rs	excluded(state)	-	executes SQL (ts_stat)
 3690	ts_stat2	crates/backend/utils/adt/tsvector_stat/src/lib.rs	excluded(state)	-	executes SQL (ts_stat)
-3691	tsq_mcontains	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-3692	tsq_mcontained	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
+3691	tsq_mcontains	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+3692	tsq_mcontained	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
 3695	gtsquery_compress	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
 3696	text_starts_with	crates/backend/utils/adt/varlena/src/builtins.rs	proved(len<=8 both encodings; valid-UTF8+NUL-free datatype-invariant fence, fence proven load-bearing by unfenced control)	slow	2.5s latin1 / 52.4s utf8; len<=8 fully symbolic; enc fence {UTF8,LATIN1}; C-collation; inline images; wrapper-level (LocalFcinfo); value+verdict+sqlstate-class parity; modulo static-buffer allocator model; proofs/text-slice
 3701	gtsquery_consistent	crates/backend/utils/adt/tsgistidx/src/lib.rs	excluded(engine)	-	tsearch GiST signature engine
@@ -2884,8 +2884,8 @@ oid	name	source_file	status	class	notes
 4640	brin_minmax_multi_summary_recv	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	proved(error-class-only: verdict+level+sqlstate 0A000; message text out of proof)	fast	1.82s default; dist_proofs::eq_summary_recv; w2-brin 2026-07-30
 4641	brin_minmax_multi_summary_send	crates/backend/access/brin/brin_minmax_multi/src/builtins.rs	proved(byteasend-delegation identity cells len 0/8, symbolic content; modulo static-buffer allocator model)	ladder	126.5s/134.9s default solver (calibration); wrapper-level via MINMAX_MULTI_BUILTINS; send control must-fail verified; proofs/brin-minmax send_proofs; w2-brin 2026-07-30
 5001	phraseto_tsquery	crates/backend/tsearch/to_tsany/src/builtins.rs	excluded(engine)	-	tsearch parser+config engine
-5003	tsquery_phrase	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
-5004	tsquery_phrase_distance	crates/backend/utils/adt/tsquery_core/src/builtins.rs	excluded(engine)	-	tsquery parse/exec engine
+5003	tsquery_phrase	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
+5004	tsquery_phrase_distance	crates/backend/utils/adt/tsquery_core/src/builtins.rs	tested(differential: tsquery_core_diff CI cluster 10.0M execs 0 div pgrust-fuzz-campaign-1785561085-0570-99881 @213fabcd64; planes image-bytes+text-out+wire+verdict+errclass+fc-wrapper+soft-error+notice; measured at lane tip proofs/p1-tsquery)	-	tsquery parse/exec engine
 5006	phraseto_tsquery_byid	crates/backend/tsearch/to_tsany/src/builtins.rs	excluded(engine)	-	tsearch parser+config engine
 5007	websearch_to_tsquery_byid	crates/backend/tsearch/to_tsany/src/builtins.rs	excluded(engine)	-	tsearch parser+config engine
 5009	websearch_to_tsquery	crates/backend/tsearch/to_tsany/src/builtins.rs	excluded(engine)	-	tsearch parser+config engine
