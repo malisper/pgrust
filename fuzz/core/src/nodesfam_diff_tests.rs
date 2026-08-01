@@ -23,6 +23,16 @@
 
 use super::*;
 
+// SERIAL REQUIREMENT (2026-08-01): every test here takes
+// `crate::c_oracle_serial()` (the family's established guard, uuid_diff
+// pattern). The C oracle is process-global-stateful (stack_base_ptr is a
+// process static armed per-thread by rearm_stack_bases; C error state is
+// unsynchronized), so parallel test threads racing the oracle SIGABRT/SIGBUS
+// nondeterministically — witnessed as a silent SIGABRT of the shared test
+// binary with `cargo test nodesfam_diff::` at default --test-threads.
+// Census-only tests take it too: the guard is cheap and a blanket rule
+// cannot silently rot as tests gain oracle calls.
+
 // ===================== source-of-truth dispatch parsers =====================
 
 /// C outfuncs switch tags (generated) + the hand-written value/list arms in
@@ -163,6 +173,7 @@ const READ_PORT_LABELS_EXPECTED: usize = 80;
 
 #[test]
 fn c_hand_tags_are_real() {
+    let _serial = crate::c_oracle_serial();
     // the hand-written arms really exist in the vendored C (never assumed)
     let outfuncs_c = include_str!("../csrc/nodesfam/src/outfuncs.c");
     let copyfuncs_c = include_str!("../csrc/nodesfam/src/copyfuncs.c");
@@ -186,6 +197,7 @@ fn c_hand_tags_are_real() {
 
 #[test]
 fn copyfuncs_tag_census_is_exact() {
+    let _serial = crate::c_oracle_serial();
     let c = c_copy_tags();
     let r = rust_copy_tags();
 
@@ -220,6 +232,7 @@ fn copyfuncs_tag_census_is_exact() {
 
 #[test]
 fn outfuncs_tag_census_is_exact() {
+    let _serial = crate::c_oracle_serial();
     let c = c_out_tags();
     let r = rust_out_tags();
     let extra: Vec<_> = r.iter().filter(|t| !c.contains(t)).collect();
@@ -240,6 +253,7 @@ fn outfuncs_tag_census_is_exact() {
 
 #[test]
 fn readfuncs_label_census_is_exact() {
+    let _serial = crate::c_oracle_serial();
     let c = c_read_labels();
     let r = port_read_labels();
     let extra: Vec<_> = r.iter().filter(|l| !c.contains(l)).collect();
@@ -262,6 +276,7 @@ fn readfuncs_label_census_is_exact() {
 /// something — a dispatched label with no seed is an unexercised arm.
 #[test]
 fn every_port_read_label_has_a_seed() {
+    let _serial = crate::c_oracle_serial();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
     let mut have = Vec::new();
     for e in std::fs::read_dir(&dir).expect("corpus/nodesfam_diff missing") {
@@ -300,6 +315,7 @@ const SEED_CONST: &str = "{CONST :consttype 16 :consttypmod -1 :constcollid 0 :c
 
 #[test]
 fn planes_are_live_on_real_seeds() {
+    let _serial = crate::c_oracle_serial();
     // baseline: the comparison really happens (returns true = P1..P4 ran)
     assert!(run_text(SEED_BOOLEXPR.as_bytes()), "BOOLEXPR seed did not compare");
     assert!(run_text(SEED_CONST.as_bytes()), "CONST seed did not compare");
@@ -307,6 +323,7 @@ fn planes_are_live_on_real_seeds() {
 
 #[test]
 fn injection_accept_plane_fires() {
+    let _serial = crate::c_oracle_serial();
     // C rejects an unknown label; if the Rust side ever accepted it, the
     // ACCEPT-DIVERGENCE arm must fire. Simulate by asserting C rejects and
     // the arm is reachable: drive a label C rejects and Rust panics on
@@ -321,6 +338,7 @@ fn injection_accept_plane_fires() {
 
 #[test]
 fn injection_out_text_plane_fires() {
+    let _serial = crate::c_oracle_serial();
     // Perturb the C-side text by one byte and confirm the P1 comparison
     // rejects it — proves the out-text plane compares bytes, not lengths.
     expect_divergence("OUT-TEXT plane", || {
@@ -342,6 +360,7 @@ fn injection_out_text_plane_fires() {
 
 #[test]
 fn value_node_arm_compares() {
+    let _serial = crate::c_oracle_serial();
     // every value/list selector arm reaches a real comparison
     for sel in 0u8..8 {
         let data = [sel, 3, b'a', b'b', b'c', 1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -354,6 +373,7 @@ fn value_node_arm_compares() {
 
 #[test]
 fn null_node_marker() {
+    let _serial = crate::c_oracle_serial();
     // "<>" is C's NULL node: stringToNode returns NULL, nodeToString prints
     // "<>" — the NULL-vs-empty-list distinction the charter calls out.
     assert!(!run_text(b"<>"));
@@ -365,6 +385,7 @@ fn null_node_marker() {
 
 #[test]
 fn empty_list_is_not_null() {
+    let _serial = crate::c_oracle_serial();
     // C: "()" reads as NIL, which nodeToString ALSO prints as "<>" — the
     // two are genuinely indistinguishable in the text language. Pin it.
     let nil = c_exec(b"()");
@@ -389,6 +410,7 @@ fn on_backend_sized_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'sta
 
 #[test]
 fn deep_nesting_hits_the_guard_on_both_sides() {
+    let _serial = crate::c_oracle_serial();
     on_backend_sized_stack(deep_nesting_body);
 }
 
@@ -431,6 +453,7 @@ fn deep_nesting_body() {
 /// oracle by the seeds; this test drives the Rust renderer through it.
 #[test]
 fn string_escaping_round_trips() {
+    let _serial = crate::c_oracle_serial();
     // outToken's escaping surface: quotes, backslashes, the specials, and
     // the tokens that look like markers.
     for s in [
@@ -464,6 +487,7 @@ fn string_escaping_round_trips() {
 
 #[test]
 fn max_length_string() {
+    let _serial = crate::c_oracle_serial();
     // a long token: exercises stringinfo enlargement on both sides
     let s = "x".repeat(64 * 1024);
     let cx = mcx::MemoryContext::new("nodesfam_long");
@@ -479,6 +503,7 @@ fn max_length_string() {
 
 #[test]
 fn every_committed_seed_replays_clean() {
+    let _serial = crate::c_oracle_serial();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
     let mut n = 0;
     for e in std::fs::read_dir(&dir).expect("corpus") {
@@ -497,6 +522,7 @@ fn every_committed_seed_replays_clean() {
 /// the empty list, and what does it print?
 #[test]
 fn probe_empty_list_representation() {
+    let _serial = crate::c_oracle_serial();
     let cx = mcx::MemoryContext::new("probe");
     let m = cx.mcx();
     let r = readfuncs::stringToNodeNullable(m, "()").expect("read ()");
@@ -515,6 +541,7 @@ fn probe_empty_list_representation() {
 /// port without a row here turns this red (no silent carve growth).
 #[test]
 fn nonnull_carves_match_the_port() {
+    let _serial = crate::c_oracle_serial();
     let src = include_str!("../../../crates/backend/nodes/readfuncs/src/lib.rs");
     // label of the enclosing read_* fn, from the dispatch table
     let mut fn_label = std::collections::HashMap::new();
@@ -574,6 +601,7 @@ fn nonnull_carves_match_the_port() {
 /// untested.
 #[test]
 fn nonnull_carve_arm_is_live() {
+    let _serial = crate::c_oracle_serial();
     let before = NONNULL_CARVES.load(std::sync::atomic::Ordering::Relaxed);
     let text = "{RETURNINGEXPR :retlevelsup 0 :retold false :retexpr <> }";
     assert!(!run_text(text.as_bytes()));
@@ -585,6 +613,7 @@ fn nonnull_carve_arm_is_live() {
 /// from its panic messages. A new validator without a row here turns red.
 #[test]
 fn enum_carves_match_the_port() {
+    let _serial = crate::c_oracle_serial();
     let src = include_str!("../../../crates/backend/nodes/readfuncs/src/lib.rs");
     let mut found = Vec::new();
     for line in src.lines() {
@@ -622,6 +651,7 @@ fn enum_carves_match_the_port() {
 /// (initializers it will not model), where the gate is permissive by design.
 #[test]
 fn port_enum_validators_equal_the_c_domains() {
+    let _serial = crate::c_oracle_serial();
     let src = include_str!("../../../crates/backend/nodes/readfuncs/src/lib.rs");
     let lines: Vec<&str> = src.lines().collect();
     let mut checked = 0;
@@ -678,6 +708,7 @@ fn port_enum_validators_equal_the_c_domains() {
 /// silently over- or under-gating.
 #[test]
 fn custom_reader_labels_match_the_c_source() {
+    let _serial = crate::c_oracle_serial();
     let hand = include_str!("../csrc/nodesfam/src/readfuncs.c");
     let mut fns = Vec::new();
     for line in hand.lines() {
@@ -724,6 +755,7 @@ fn custom_reader_labels_match_the_c_source() {
 /// entries, which is precisely the hazard the gate exists to contain.
 #[test]
 fn wellformedness_gate_is_live() {
+    let _serial = crate::c_oracle_serial();
     // the witness that motivated the gate: 1-of-13 fields present
     assert!(!run_text(b"{CREATESTMT :relation <>}"), "gate let the segv shape through");
     // the stray-token witness: `K:location` is ONE pg_strtok token, so the
@@ -767,6 +799,7 @@ fn wellformedness_gate_is_live() {
 /// ("stringToNode: empty input") where C accepted.
 #[test]
 fn empty_and_whitespace_input_is_the_null_node() {
+    let _serial = crate::c_oracle_serial();
     for text in ["", " ", "\t", "\n", "   \t\n  "] {
         match c_exec(text.as_bytes()) {
             COut::Ok { out, .. } => assert_eq!(
@@ -795,6 +828,7 @@ fn empty_and_whitespace_input_is_the_null_node() {
 /// carve precisely when C would have built a Float node instead.
 #[test]
 fn integer_vs_float_token_rule_matches_c() {
+    let _serial = crate::c_oracle_serial();
     // C: T_Integer (strtoint consumes all, in range)
     for t in ["0", "-1", "2147483647", "-2147483647", "+7"] {
         assert!(!c_reads_as_float(t), "{t:?} should be T_Integer");
@@ -830,6 +864,7 @@ fn integer_vs_float_token_rule_matches_c() {
 /// chartered T_Float panic and the tag divergence is gone.
 #[test]
 fn int32_min_token_follows_cs_magnitude_rule() {
+    let _serial = crate::c_oracle_serial();
     let text = "-2147483648";
     // C: text-stable, and classified as a Float node
     match c_exec(text.as_bytes()) {
@@ -851,6 +886,7 @@ fn int32_min_token_follows_cs_magnitude_rule() {
 /// accepts a well-formed byval Const.
 #[test]
 fn const_datum_payload_gate_is_live() {
+    let _serial = crate::c_oracle_serial();
     // one token short (`0alias0` is ONE pg_strtok token) -> C segfaults
     assert!(
         !run_text(
@@ -876,6 +912,7 @@ fn const_datum_payload_gate_is_live() {
 /// chartered read set), i.e. a value-token carve, not a divergence.
 #[test]
 fn bitstring_token_rule_covers_b_and_x() {
+    let _serial = crate::c_oracle_serial();
     for t in [&b"b"[..], b"b1010", b"x", b"xdeadbeef"] {
         let before = VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed);
         assert!(!run_text(t), "{:?} should not reach a full comparison", t);
@@ -895,6 +932,7 @@ fn bitstring_token_rule_covers_b_and_x() {
 /// magnitude) and takes its chartered loud panic for T_Float tokens.
 #[test]
 fn out_of_range_integer_token_does_not_wrap() {
+    let _serial = crate::c_oracle_serial();
     for t in [&b"9992999999"[..], b"2147483648", b"-2147483648", b"99999999999999999999"] {
         let text = std::str::from_utf8(t).unwrap();
         // C keeps the text verbatim (Float node stores the token)
@@ -930,6 +968,7 @@ fn out_of_range_integer_token_does_not_wrap() {
 /// where the port expects a list.
 #[test]
 fn node_field_value_must_be_node_shaped() {
+    let _serial = crate::c_oracle_serial();
     assert!(
         !run_text(b"{FROMEXPR :fromlist 2> :quals <> }"),
         "gate let a non-node token into a node field"
@@ -950,6 +989,7 @@ fn node_field_value_must_be_node_shaped() {
 /// 0, the port panics on the bad integer token.
 #[test]
 fn custom_block_values_are_kind_checked() {
+    let _serial = crate::c_oracle_serial();
     let bad = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colnames (\"a\")} \
                :rtekind \u{6} :relid 1 :inh false :relkind r :rellockmode 1 \
                :perminfoindex 0 :tablesample <> :lateral false :inFromCl true \
@@ -967,6 +1007,7 @@ fn custom_block_values_are_kind_checked() {
 /// field name reach the oracle).
 #[test]
 fn nested_blocks_inside_custom_blocks_are_validated() {
+    let _serial = crate::c_oracle_serial();
     let bad = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colna-es (\"a\")} \
                :rtekind 0 :relid 1 :inh false :relkind r :rellockmode 1 :perminfoindex 0 \
                :tablesample <> :lateral false :inFromCl true :securityQuals <>}";
@@ -976,6 +1017,7 @@ fn nested_blocks_inside_custom_blocks_are_validated() {
 /// The unported-shape carve is REACHED and is the ONLY such shape today.
 #[test]
 fn unported_shape_carve_is_live_and_singular() {
+    let _serial = crate::c_oracle_serial();
     let before = UNPORTED_CARVES.load(std::sync::atomic::Ordering::Relaxed);
     assert!(!run_text(b"(x)"), "XID list should not reach a full comparison");
     assert!(
@@ -1000,6 +1042,7 @@ fn unported_shape_carve_is_live_and_singular() {
 /// the marker. Gated as not writer-producible.
 #[test]
 fn null_const_value_must_be_the_marker() {
+    let _serial = crate::c_oracle_serial();
     let bad = "{CONST :consttype 16 :consttypmod -1 :constcollid 0 :constlen 1 \
                :constbyval true :constisnull true :location -1 :constvalue <,}";
     assert!(!run_text(bad.as_bytes()), "gate let a non-marker NULL Const value through");
@@ -1014,6 +1057,7 @@ fn null_const_value_must_be_the_marker() {
 /// seeded rtekind must still be compared.
 #[test]
 fn custom_shape_key_includes_discriminants() {
+    let _serial = crate::c_oracle_serial();
     let cte_shaped_wrong = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r \
         :colnames (\"a\")} :rtekind 6 :relid 1 :inh false :relkind r :rellockmode 1 \
         :perminfoindex 0 :tablesample <> :lateral false :inFromCl true :securityQuals <>}";
@@ -1038,6 +1082,7 @@ const UNPORTED_RTEKINDS: &[i64] = &[8];
 
 #[test]
 fn every_rtekind_branch_has_a_seed_and_is_compared() {
+    let _serial = crate::c_oracle_serial();
     let c_kinds = enum_domains()
         .get("RTEKind")
         .and_then(|v| v.clone())
@@ -1070,6 +1115,7 @@ fn every_rtekind_branch_has_a_seed_and_is_compared() {
 /// walks off into a NULL deref. Strict `:field value` alternation gates it.
 #[test]
 fn stray_token_in_a_custom_block_is_gated() {
+    let _serial = crate::c_oracle_serial();
     let bad = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colnames (\"a\")}2 \
                :rtekind 8 :lateral false :inFromCl true :securityQuals <>}";
     assert!(!run_text(bad.as_bytes()), "stray token in a custom block reached the oracle");
@@ -1081,6 +1127,7 @@ fn stray_token_in_a_custom_block_is_gated() {
 /// comparable with pgrust's.
 #[test]
 fn huge_bitmapset_raises_on_both_sides() {
+    let _serial = crate::c_oracle_serial();
     let text = "(b 0 00800000000000)";
     match c_exec(text.as_bytes()) {
         COut::Err { errcode } => assert_eq!(
@@ -1098,6 +1145,7 @@ fn huge_bitmapset_raises_on_both_sides() {
 /// (C's atoi("-") is 0, the port rejects the token).
 #[test]
 fn datum_byte_tokens_must_be_decimals() {
+    let _serial = crate::c_oracle_serial();
     let bad = "{CONST :consttype 8 :consttypmod -1 :constcollid 0 :constlen 1 \
                :constbyval true :constisnull false :location -1 :constvalue 1 \
                [ 1 0 0 - 0 0 0 0 ]}";
@@ -1118,6 +1166,7 @@ fn datum_byte_tokens_must_be_decimals() {
 #[test]
 #[ignore]
 fn list_gated_corpus() {
+    let _serial = crate::c_oracle_serial();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
     for e in std::fs::read_dir(&dir).expect("corpus") {
         let p = e.expect("dirent").path();
@@ -1140,6 +1189,7 @@ fn list_gated_corpus() {
 /// `:arg\n\n\n <>` and reported the carve as a divergence).
 #[test]
 fn nonnull_carve_is_whitespace_insensitive() {
+    let _serial = crate::c_oracle_serial();
     for text in [
         "{COLLATEEXPR :arg <> :collOid 0 :location 1 }",
         "{COLLATEEXPR :arg\n\n\n <> :collOid 0 :location 1 }",
@@ -1159,6 +1209,7 @@ fn nonnull_carve_is_whitespace_insensitive() {
 /// that SEGV'd _readRangeTblEntry (witness from a 25M local leg).
 #[test]
 fn corrupted_constvalue_payload_is_gated() {
+    let _serial = crate::c_oracle_serial();
     let bad = "{RANGETBLENTRY :alisa <> :eref {ALIAS :aliasname s :colnames (\"a\")} \
                :qtekind 0 :relidONST \u{1}T :constvalue -$qqqqelid 1 :i{CONCT :c:ae 1 \
                [ 1e :serityQuals <s}";
@@ -1171,6 +1222,7 @@ fn corrupted_constvalue_payload_is_gated() {
 /// field (the rewriter stores an IntList), which DOES round-trip identically.
 #[test]
 fn groupingset_content_list_marker_divergence_is_recorded() {
+    let _serial = crate::c_oracle_serial();
     // the writer-produced form must round-trip on both sides
     assert!(
         run_text(b"{GROUPINGSET :kind 1 :content (i 14) :location -1 }"),
@@ -1219,6 +1271,7 @@ fn groupingset_content_list_marker_divergence_is_recorded() {
 /// text written by pgrust differed from C. Now via the verified ryu port.
 #[test]
 fn float_fields_use_shortest_decimal() {
+    let _serial = crate::c_oracle_serial();
     let text = "{SUBPLAN :subLinkType 0 :testexpr <> :paramIds <> :plan_id 0 \
         :plan_name << :firstColType 0 :firstColTypmod 0 :firstColCollation 0 \
         :useHashTable false :unknownEqFalse false :parallel_safe false \

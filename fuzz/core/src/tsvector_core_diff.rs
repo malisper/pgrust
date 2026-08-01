@@ -228,6 +228,9 @@ fn pin_utf8() {
     static SEAMS: std::sync::Once = std::sync::Once::new();
     SEAMS.call_once(|| {
         let _ = std::panic::catch_unwind(mbutils::init_seams);
+        // Arm 7 (match) reaches the TS_execute CHECK_FOR_INTERRUPTS calls
+        // (tsvector_core::execute); shared no-op install, first-wins.
+        crate::install_check_for_interrupts_seam_once();
     });
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).expect("UTF8 is a valid be-encoding");
 }
@@ -1439,5 +1442,27 @@ mod tests {
             run(7, &mk(b"cat:1A dog:2 abc:3,4B", &[qseed, qseed ^ 0x5a, 3, 7, qseed]));
         }
         run(7, &mk(b"a:1 b:2 c:3", &[31])); // empty tsquery -> false
+    }
+
+    /// Filtered-run regression (2026-08-01): 229915b8d7 restored the
+    /// TS_execute CHECK_FOR_INTERRUPTS calls and this target relied on
+    /// OTHER modules in the shared test binary installing the seam first —
+    /// a filtered run (`--exact smoke_match`, the CI cluster fuzz-binary
+    /// posture) panicked "seam not installed" at exec of arm 7. Re-exec
+    /// the test binary with ONLY smoke_match selected so no benefactor
+    /// module can mask a dropped install (stack_depth.rs precedent).
+    #[test]
+    fn smoke_match_survives_filtered_run() {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(&exe)
+            .args(["--exact", "tsvector_core_diff::tests::smoke_match"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "filtered smoke_match failed (check_for_interrupts seam install dropped?):\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

@@ -252,6 +252,9 @@ fn is_f_variant(variant: u8) -> bool {
 }
 
 pub fn tsrank_diff(data: &[u8]) {
+    // The rank_cd cover walks reach the TS_execute CHECK_FOR_INTERRUPTS
+    // calls (tsvector_core::execute); shared no-op install, first-wins.
+    crate::install_check_for_interrupts_seam_once();
     if data.len() < 23 {
         return;
     }
@@ -431,6 +434,27 @@ mod tests {
             run(2, 2, 0, method, V, &[0x81, 3, 9, 1]);
             run(6, 2, 0, method, V, &[0x81, 3, 9, 1]);
         }
+    }
+
+    /// Filtered-run regression (2026-08-01): the rank_cd cover walks reach
+    /// the TS_execute CHECK_FOR_INTERRUPTS calls restored by 229915b8d7;
+    /// this target relied on other modules installing the seam first, so a
+    /// filtered run (the CI cluster fuzz-binary posture) panicked "seam not
+    /// installed". Re-exec with ONLY smoke_methods selected so no
+    /// benefactor module can mask a dropped install.
+    #[test]
+    fn smoke_methods_survives_filtered_run() {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(&exe)
+            .args(["--exact", "tsrank_diff::tests::smoke_methods"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "filtered smoke_methods failed (check_for_interrupts seam install dropped?):\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

@@ -491,6 +491,28 @@ pub fn install_detoast_seam_once() {
         }
     });
 }
+
+/// SHARED check_for_interrupts-seam installer (no-op impl: fuzz harnesses
+/// have no interrupt plane).
+///
+/// The tsvec targets (tsvector_core_diff arm 7 match, tsrank_diff cover
+/// walks) reach the CHECK_FOR_INTERRUPTS calls restored in
+/// tsvector_core::execute (229915b8d7); without an installed seam every
+/// such exec panics "seam not installed". In the shared test binary the
+/// panic hid behind other modules (regexp_diff/jsonpathexec_diff/...)
+/// installing the seam first — filtered runs and the standalone fuzz
+/// binaries had no such benefactor. Same first-wins/no-poison discipline
+/// as install_detoast_seam_once above.
+pub fn install_check_for_interrupts_seam_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !postgres_seams::check_for_interrupts::is_installed() {
+            let _ = std::panic::catch_unwind(|| {
+                postgres_seams::check_for_interrupts::set(|| Ok(()))
+            });
+        }
+    });
+}
 // numericfam (p1-laneu adt/numeric campaign): whole-numeric.c oracle,
 // two targets (io + ops) over one pg_diff_num_call ABI.
 pub mod numericfam;
