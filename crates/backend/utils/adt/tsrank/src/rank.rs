@@ -101,7 +101,7 @@ fn sort_and_uniq_items<'mcx>(
     // flags feed find_wordentry and the rank scalar) is decided by pg_qsort's
     // exact equal-key output order. Stable sort here is a REAL divergence
     // (tsrank_diff DIVERGENCE-2); use the verbatim pg_qsort port.
-    crate::qsort::pg_qsort(&mut res, |a, b| {
+    pg_qsort::pg_qsort(&mut res, |a, b| {
         ts_compare_string(
             &pool[a.distance..a.distance + a.length],
             &pool[b.distance..b.distance + b.length],

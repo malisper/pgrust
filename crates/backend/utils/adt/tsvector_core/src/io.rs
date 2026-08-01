@@ -17,7 +17,7 @@ pub fn unique_pos(a: &mut PgVec<'_, WordEntryPos>) {
     if a.len() <= 1 {
         return;
     }
-    crate::qsort::pg_qsort(a, |&x, &y| {
+    pg_qsort::pg_qsort(a, |&x, &y| {
         let (px, py) = (wep_getpos(x) as i32, wep_getpos(y) as i32);
         if px == py {
             0
@@ -125,7 +125,7 @@ pub fn tsvector_in_core<'mcx>(
         // (same comparisons at the same positions => same final permutation).
         let mut idx: PgVec<usize> = vec_with_capacity_in(mcx, arr.len())?;
         idx.extend(0..arr.len());
-        crate::qsort::pg_qsort(&mut idx, |&x, &y| {
+        pg_qsort::pg_qsort(&mut idx, |&x, &y| {
             ts_compare_string(&arr[x].word, &arr[y].word, false)
         });
         let mut sorted: PgVec<EntryIn> = PgVec::new_in(mcx);
@@ -321,7 +321,7 @@ pub fn tsvector_recv_core<'mcx>(
         let off = ENTRIES_AT + i * 4;
         entries.push(WordEntry(u32::from_ne_bytes(img[off..off + 4].try_into().unwrap())));
     }
-    crate::qsort::pg_qsort(&mut entries, |&ea, &eb| {
+    pg_qsort::pg_qsort(&mut entries, |&ea, &eb| {
         let la = &img[str_at + ea.pos()..str_at + ea.pos() + ea.len()];
         let lb = &img[str_at + eb.pos()..str_at + eb.pos() + eb.len()];
         ts_compare_string(la, lb, false)
