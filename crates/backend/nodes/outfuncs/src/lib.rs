@@ -45,6 +45,18 @@ macro_rules! w {
     };
 }
 
+// C outfuncs.c outDouble: WRITE_FLOAT_FIELD prints through PostgreSQL's Ryu
+// shortest-decimal (double_to_shortest_decimal_buf), NOT printf %g and NOT
+// Rust's Display — the three notations disagree (e.g. 4.44...e113: Ryu writes
+// "4.4444444444444444e+113", Rust Display writes 115 expanded digits). Found
+// by nodesfam_diff's CI cluster CONFIRM; the pg_ryu port is byte-identical to C's.
+fn out_double(out: &mut PgString<'_>, d: f64) {
+    let mut buf = [0u8; ryu::DOUBLE_SHORTEST_DECIMAL_LEN];
+    let n = ryu::double_to_shortest_decimal_bufn(d, &mut buf);
+    w!(out, "{}", core::str::from_utf8(&buf[..n]).expect("ryu emits ASCII"));
+}
+
+
 fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
     // C outfuncs.c outNode: "Guard against stack overflow due to overly
     // complex expressions" (check_stack_depth at entry).
@@ -715,8 +727,10 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_int_list(out, &sp.parParam);
             w!(out, " :args ");
             out_list(out, &sp.args)?;
-            w!(out, " :startup_cost {}", sp.startup_cost);
-            w!(out, " :per_call_cost {}", sp.per_call_cost);
+            w!(out, " :startup_cost ");
+            out_double(out, sp.startup_cost);
+            w!(out, " :per_call_cost ");
+            out_double(out, sp.per_call_cost);
             w!(out, "}}");
         }
         NodeTag::T_AlternativeSubPlan => {
@@ -1466,7 +1480,9 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
         RTEKind::RTE_NAMEDTUPLESTORE => {
             w!(out, " :enrname ");
             out_str(out, r.enrname);
-            w!(out, " :enrtuples {} :coltypes ", r.enrtuples);
+            w!(out, " :enrtuples ");
+            out_double(out, r.enrtuples);
+            w!(out, " :coltypes ");
             out_oid_list(out, &r.coltypes);
             w!(out, " :coltypmods ");
             out_int_list(out, &r.coltypmods);

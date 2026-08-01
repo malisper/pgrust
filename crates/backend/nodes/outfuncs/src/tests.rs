@@ -502,3 +502,26 @@ fn relpartbound_range_capture_roundtrips() {
     let written = nodeToString(mcx, node).unwrap();
     assert_eq!(written.as_str(), RELPARTBOUND_MEASUREMENT_2024);
 }
+
+// ---- lane p1-nodes fix witness: float fields are Ryu shortest-decimal ----
+// C's WRITE_FLOAT_FIELD goes through double_to_shortest_decimal_buf; Rust's
+// `{}` Display uses a different NOTATION for large exponents (115 expanded
+// digits vs "4.4444444444444444e+113"), so catalog text written by pgrust
+// differed from C. Found by the nodesfam_diff CI cluster CONFIRM at 2.09M execs.
+#[test]
+fn float_fields_are_shortest_decimal() {
+    let cx = mcx::MemoryContext::new("t");
+    let m = cx.mcx();
+    let text = "{SUBPLAN :subLinkType 0 :testexpr <> :paramIds <> :plan_id 0 \
+        :plan_name a :firstColType 0 :firstColTypmod 0 :firstColCollation 0 \
+        :useHashTable false :unknownEqFalse false :parallel_safe false \
+        :setParam <> :parParam <> :args <> \
+        :startup_cost 4.4444444444444444e+113 :per_call_cost 0 }";
+    let node = readfuncs::stringToNode(m, text).unwrap();
+    let out = crate::nodeToString(m, node).unwrap();
+    assert!(
+        out.as_str().contains(":startup_cost 4.4444444444444444e+113 "),
+        "float field must print in Ryu shortest-decimal notation, got: {}",
+        out.as_str()
+    );
+}

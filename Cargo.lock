@@ -10562,6 +10562,7 @@ dependencies = [
  "datum",
  "mcx",
  "readfuncs",
+ "ryu",
  "stack_depth_core",
  "types_core",
  "types_error",
