@@ -89,6 +89,7 @@ adt_int = { path = "../../crates/backend/utils/adt/int" }    # arrayfuncs_diff e
 fmgr_core = { path = "../../crates/backend/utils/fmgr/fmgr_core" }        # arrayfuncs_diff width_bucket cmp finfo
 syscache_seams = { path = "../../crates/backend/utils/cache/syscache_seams" }  # arrayfuncs_diff pinned typcache fixture
 indexcmds_seams = { path = "../../crates/backend/commands/indexcmds_seams" }   # arrayfuncs_diff pinned opclass fixture
+types_snapshot = { path = "../../crates/_support/types/snapshot" }  # stub:snapshot builder
 types_tuple = { path = "../../crates/_support/types/types_tuple" }        # NameData for the fixture
 # numutils_diff (p1-laneaj adt/numutils batch):
 numutils = { path = "../../crates/backend/utils/adt/numutils" }

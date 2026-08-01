@@ -120,6 +120,17 @@ fn c_exec(input: &[u8]) -> COut {
     }
 }
 
+/// stub:nodes CONTROL HOOK (tests only): the C oracle's re-out of a node
+/// text — the controls feed it a text describing a DIFFERENT tree than the
+/// Rust builder produced and prove the re-out plane sees the difference.
+#[cfg(test)]
+pub(crate) fn c_reout_control(text: &[u8]) -> Result<Vec<u8>, i32> {
+    match c_exec(text) {
+        COut::Ok { out, .. } => Ok(out),
+        COut::Err { errcode } => Err(errcode),
+    }
+}
+
 /// Rust pipeline verdict for one input text.
 enum ROut {
     Ok { out: Vec<u8>, copy: Vec<u8>, reread_ok: bool },

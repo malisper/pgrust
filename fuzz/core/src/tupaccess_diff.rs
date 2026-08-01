@@ -442,6 +442,33 @@ fn run_c(
     (st, c_errcode(), out)
 }
 
+/// stub:tupdesc CONTROL HOOK (tests only): C descriptor field-plane built
+/// from an arbitrary WIRE vs the Rust plane built from `spec` — the wire may
+/// deliberately differ from the spec so the must-fail controls can plant a
+/// ONE-SIDE-ONLY construction difference and prove the differential sees it.
+#[cfg(test)]
+pub(crate) fn desc_control_planes(wire: &[u8], spec: &DescSpec) -> (Vec<u8>, Vec<u8>) {
+    // SAFETY: buffers live for the call.
+    let (st, _, cbuf) = run_c(|o, cap, ol| unsafe {
+        pg_ta_desc_copy(wire.as_ptr(), wire.len() as c_int, 0, 0, 0, o, cap, ol)
+    });
+    assert_eq!(st, 0);
+    let ctx = mcx::MemoryContext::new("stub_tupdesc_control");
+    let mcx = ctx.mcx();
+    let d = build_rust_desc(mcx, spec);
+    let r = tupdesc::CreateTupleDescCopy(mcx, &d).expect("copy");
+    let mut rser = Vec::new();
+    ser_desc_plane(&mut rser, &r);
+    rser.push(u8::from(tupdesc::equalTupleDescs(&d, &r)));
+    rser.push(u8::from(tupdesc::equalRowTypes(&d, &r)));
+    (rser, cbuf)
+}
+
+#[cfg(test)]
+pub(crate) fn control_install() -> bool {
+    install()
+}
+
 fn op_form(cur: &mut Cursor<'_>) {
     let spec = decode_desc(cur);
     let vals = decode_values(cur, &spec, spec.natts());

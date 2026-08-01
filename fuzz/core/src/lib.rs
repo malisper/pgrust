@@ -406,7 +406,11 @@ pub use rowtypes_diff::rowtypes_diff;
 // stub:* — shared constructed-state builder facilities (fuzz/stub-constructed):
 // state-shaped inputs built identically on the Rust and C-oracle sides from
 // the same fuzz bytes. See fuzz/STUBS.md.
+pub mod stub_encoding;
+#[cfg(test)]
+mod stub_controls_tests;
 pub mod stub_nodes;
+pub mod stub_snapshot;
 pub mod stub_tupdesc;
 
 // tupaccess_diff: heaptuple/tupdesc/attmap/tupconvert differential (p1-tupaccess).
