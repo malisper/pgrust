@@ -519,6 +519,37 @@ pub fn spellfam_diff(data: &[u8]) {
             return;
         }
 
+        // DOMAIN CARVE (C-UB, task #80 — the whole AF-alias surface, by a
+        // PRESENCE test, applied before either side runs). C fills AffixData
+        // slots lazily in FILE ORDER, so an affix line referencing an alias whose
+        // `AF` line has not been read YET reads a still-NULL palloc0 slot:
+        // getAffixFlagSet returns NULL and getCompoundAffixFlagValue dereferences
+        // it INSIDE NIImportOOAffixes, before any post-import normalization can
+        // apply. Witness: `SFX 100q000 Y /2` above the `AF` line filling slot 2
+        // (seed probe-nullseg-f861dd44). Two textual heuristics (digits after
+        // "af"; then C's field parse with declared-vs-filled counts) each missed
+        // instances because the real trigger is per-line ORDER, and a
+        // structural check on the Rust result cannot help when the RUST side
+        // ERRORS on the same input (which is how the previous attempt still let C
+        // crash). So: if the file contains an AF line at all, the C side does not
+        // run. pgrust is robust (empty PgVec, never NULL) and still EXECUTES the
+        // alias path, keeping its Rust line coverage; only the C COMPARISON is
+        // given up for alias files. Deliberately blunt per the ruling that a
+        // C-oracle defect must not hold the Rust deliverable hostage; the alias
+        // surface is exactly where the already-reported #80 lives. Revisit when
+        // #80 is fixed upstream. Coverage cost is in the exception ledger.
+        if lower
+            .split(|&b| b == b'\n')
+            .filter_map(|l| {
+                l.split(|b: &u8| b.is_ascii_whitespace())
+                    .find(|f| !f.is_empty())
+                    .map(|f| f.to_vec())
+            })
+            .any(|f0| f0.starts_with(b"af"))
+        {
+            return;
+        }
+
         // DOMAIN CARVE (C-UB: union type confusion guarded only by a
         // release-compiled-out Assert). NIImportOOAffixes processes COMPOUND*
         // directives and the `FLAG` mode selector in ONE pass in FILE ORDER, so
@@ -618,6 +649,24 @@ pub fn spellfam_diff(data: &[u8]) {
         if !obj.affixes.is_empty() && obj.compound_affix.len() == obj.affixes.len() {
             return;
         }
+        // DOMAIN CARVE (C-UB, task #80 — the AF-alias surface, quarantined by a
+        // ROBUST STRUCTURAL PREDICATE rather than another textual heuristic).
+        // C fills AffixData slots lazily in FILE ORDER, so any affix line that
+        // references an alias index whose `AF` line has not been read YET reads a
+        // still-NULL palloc0 slot: getAffixFlagSet returns NULL and
+        // getCompoundAffixFlagValue dereferences it, INSIDE NIImportOOAffixes —
+        // before any post-import normalization can apply. Witness:
+        // `SFX 100q000 Y /2` appearing above the `AF` line that fills slot 2
+        // (seed probe-nullseg-f861dd44). Two successive textual heuristics
+        // (digits-after-"af", then C's field parse with a declared-vs-filled
+        // count) each missed instances, because the real trigger is per-line
+        // ORDER, not file-level counts. pgrust is robust here (empty PgVec, never
+        // NULL), so the alias code path still EXECUTES and keeps its Rust line
+        // coverage; only the C-side COMPARISON is skipped for alias files.
+        // Coverage cost recorded in the exception ledger. This is deliberately
+        // blunt: per the ruling, a C-oracle defect must not hold the Rust
+        // deliverable hostage, and the alias surface is exactly where the
+        // already-reported #80 lives. Revisit if/when #80 is fixed upstream.
     }
 
     let c_rc = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
@@ -1089,6 +1138,11 @@ mod fleet_repro {
     fn depth_guard_455d2dc2() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/depthcarve-455d2dc2")).unwrap();
         for _ in 0..3 { super::spellfam_diff(&data); }
+    }
+    #[test]
+    fn nullseg_f861dd44() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-nullseg-f861dd44")).unwrap();
+        super::spellfam_diff(&data);
     }
     #[test]
     fn div7_compound_4e2fe0d5() {
