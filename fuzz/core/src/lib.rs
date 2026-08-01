@@ -481,3 +481,7 @@ pub use like_diff::like_diff;
 // regexp_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-regexp_diff.md.
 pub mod regexp_diff;
 pub use regexp_diff::regexp_diff;
+
+// libfam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-libfam_diff.md.
+pub mod libfam_diff;
+pub use libfam_diff::libfam_diff;

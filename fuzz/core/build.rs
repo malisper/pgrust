@@ -16,6 +16,9 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // libfam_diff oracle: verbatim vendored files under csrc/libfam/
+        // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
+        .file("csrc/pg_libfam_io.c")
         // json_diff oracle lives in the dedicated jsonfam cc::Build below
         // (own shim include tree; pg_jsonfam_-prefixed symbols).
         // arrayfuncs_diff oracle (p1-lanex): verbatim 18.3 arrayfuncs.c core
@@ -94,6 +97,10 @@ fn main() {
         .include("csrc/pgdt")
         .include("csrc")
         .include("csrc/ryu")
+        // libfam_diff: verbatim lib/ headers + reduced port/common/utils
+        // headers (appended LAST so existing include resolution is
+        // unchanged; no other main-build TU includes these paths)
+        .include("csrc/libfam/include")
         // pg_enc_tables.c includes the SAME generated kwlist_d.h the
         // shipped keywords crate's build.rs transcribes (table parity by
         // shared source of truth)

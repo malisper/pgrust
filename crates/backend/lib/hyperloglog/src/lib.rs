@@ -48,6 +48,13 @@ impl<const N: usize> Hll<N> {
         }
     }
 
+    /// The raw register file (C: hyperLogLogState.hashesArr). Read-only
+    /// observability accessor for tests/differential harnesses; the C
+    /// struct exposes the same bytes to its consumers.
+    pub fn registers(&self) -> &[u8] {
+        &self.registers
+    }
+
     pub fn estimate(&self) -> f64 {
         let mut sum = 0.0;
         for &r in &self.registers {

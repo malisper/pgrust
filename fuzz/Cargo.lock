@@ -1150,10 +1150,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "binaryheap"
+version = "0.1.0"
+
+[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+
+[[package]]
+name = "bloomfilter"
+version = "0.1.0"
+dependencies = [
+ "hashfn",
+ "mcx",
+ "types_error",
+]
 
 [[package]]
 name = "brin_pageops"
@@ -1656,6 +1669,8 @@ dependencies = [
  "array_userfuncs",
  "arrayfuncs",
  "arrayutils",
+ "binaryheap",
+ "bloomfilter",
  "cc",
  "conv",
  "crc32c",
@@ -1670,7 +1685,9 @@ dependencies = [
  "guc_tables",
  "hashfn",
  "heaptuple",
+ "hyperloglog",
  "indexcmds_seams",
+ "integerset",
  "keywords",
  "libc",
  "lsyscache",
@@ -1681,6 +1698,7 @@ dependencies = [
  "namespace_seams",
  "nbt_compare",
  "numutils",
+ "pairingheap",
  "percentrepl",
  "pg_b64",
  "pg_hmac",
@@ -2501,6 +2519,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "integerset"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
+]
+
+[[package]]
 name = "interrupt"
 version = "0.0.0"
 dependencies = [
@@ -3275,6 +3301,10 @@ dependencies = [
  "types_error",
  "types_nodes",
 ]
+
+[[package]]
+name = "pairingheap"
+version = "0.1.0"
 
 [[package]]
 name = "parallel_seams"

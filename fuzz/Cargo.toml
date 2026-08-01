@@ -395,3 +395,11 @@ path = "fuzz_targets/regexp_diff.rs"
 test = false
 doc = false
 bench = false
+
+# libfam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-libfam_diff.md.
+[[bin]]
+name = "libfam_diff"
+path = "fuzz_targets/libfam_diff.rs"
+test = false
+doc = false
+bench = false
