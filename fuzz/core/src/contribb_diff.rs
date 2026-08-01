@@ -459,7 +459,41 @@ fn arm_seg_out_on(img: &[u8; 12], ctx: &dyn std::fmt::Debug) {
     let d = fc.result.as_ref().unwrap_or_else(|e| {
         panic!("seg_out rust errored ({}) ctx={ctx:?}", e.message)
     });
-    assert_eq!(datum_cstr(*d), cs, "seg_out text diverged ctx={ctx:?}");
+    let rs = datum_cstr(*d);
+
+    // LIBC-SPELLING CARVE (macOS host only, two-sided): the ratified oracle
+    // platform is Linux/aarch64 glibc, whose printf spells sign-bit NaNs
+    // "-nan"; Darwin libc omits the sign, and the local oracle links Darwin
+    // libc (the -funsigned-char pin cannot reach printf). The crate follows
+    // glibc, so on a macOS host we canonicalize "-nan" -> "nan" on BOTH
+    // sides before comparing; the CI cluster (Linux) comparison stays exact.
+    #[cfg(target_os = "macos")]
+    let (rs, cs) = (
+        canon_darwin_nan(rs),
+        canon_darwin_nan(cs),
+    );
+    #[cfg(target_os = "macos")]
+    let (rs, cs) = (rs.as_slice(), cs.as_slice());
+
+    assert_eq!(rs, cs, "seg_out text diverged ctx={ctx:?}");
+}
+
+/// Rewrite every "-nan" to "nan" (Darwin-host canonicalization; see the
+/// carve comment in `arm_seg_out_on`).
+#[cfg(target_os = "macos")]
+fn canon_darwin_nan(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == b'-' && s[i + 1..].starts_with(b"nan") {
+            out.extend_from_slice(b"nan");
+            i += 4;
+        } else {
+            out.push(s[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn arm_seg_out(r: &mut Rdr) {
@@ -1039,6 +1073,25 @@ mod tests {
         let mut v = vec![sel];
         v.extend_from_slice(body);
         contribb_diff(&v);
+    }
+
+    #[test]
+    fn seg_out_signbit_nan() {
+        // CI cluster regression (asan-treewide pass, 19 hits): a sign-bit NaN
+        // boundary prints "-nan" under the ratified glibc oracle; the Rust
+        // side used to drop the sign. Corpus seed
+        // 010799a828f11daebc4210d799e387007afdaef9. On a macOS host the
+        // driver canonicalizes the Darwin libc spelling on both sides.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0xFFC0_0000u32.to_le_bytes()); // lower = -NaN
+        body.extend_from_slice(&1.0f32.to_le_bytes()); // upper = 1.0
+        body.extend_from_slice(&[1, 1, 0, 0]); // sigd/ext
+        run(1, &body);
+        // positive-NaN and quiet-payload variants
+        body[0..4].copy_from_slice(&0x7FC0_0001u32.to_le_bytes());
+        run(1, &body);
+        body[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // upper -NaN too
+        run(1, &body);
     }
 
     #[test]

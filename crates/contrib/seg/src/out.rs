@@ -11,7 +11,10 @@ pub const FLT_DIG: i32 = 6;
 /// correctly rounded, same as glibc's.
 pub fn c_sprintf_e(val: f64, prec: usize) -> String {
     if val.is_nan() {
-        return "nan".to_string();
+        // glibc printf spells a NaN with the sign bit set "-nan" (the
+        // ratified oracle platform is Linux/aarch64 glibc); Darwin libc
+        // omits the sign. C restore() passes this straight through.
+        return if val.is_sign_negative() { "-nan" } else { "nan" }.to_string();
     }
     if val.is_infinite() {
         return if val < 0.0 { "-inf" } else { "inf" }.to_string();
@@ -32,7 +35,8 @@ pub fn c_sprintf_e(val: f64, prec: usize) -> String {
 pub fn c_format_g(val: f64) -> String {
     const PREC: i32 = 6;
     if val.is_nan() {
-        return "nan".to_string();
+        // sign-bit NaN prints "-nan" under glibc; see c_sprintf_e.
+        return if val.is_sign_negative() { "-nan" } else { "nan" }.to_string();
     }
     if val.is_infinite() {
         return if val < 0.0 { "-inf" } else { "inf" }.to_string();
@@ -275,6 +279,12 @@ mod tests {
         assert_eq!(r(-0.02, 1), "-0.02");
         // n <= 0 falls back to FLT_DIG.
         assert_eq!(r(1.5, 0), "1.50000");
+        // glibc printf carries the NaN sign bit through %e ("-nan"); the
+        // punt path returns it verbatim, any n.
+        assert_eq!(r(f32::NAN, 1), "nan");
+        assert_eq!(r(-f32::NAN, 1), "-nan");
+        assert_eq!(r(f32::from_bits(0xFFC0_0000), 3), "-nan");
+        assert_eq!(r(f32::from_bits(0x7FC0_0001), 6), "nan");
     }
 
     #[test]
@@ -301,6 +311,8 @@ mod tests {
         assert_eq!(c_format_g(0.00001), "1e-05");
         assert_eq!(c_format_g(123456789.0), "1.23457e+08");
         assert_eq!(c_format_g(0.0), "0");
+        assert_eq!(c_format_g(f64::NAN), "nan");
+        assert_eq!(c_format_g(-f64::NAN), "-nan");
     }
 
     #[test]
