@@ -13,12 +13,12 @@ datum = { path = "../../_support/types/datum" }
 mcx = { path = "../../_support/mcx" }
 types_core = { path = "../../_support/types/types_core" }
 types_error = { path = "../../_support/types/types_error" }
+pg_qsort = { path = "../../_support/pg_qsort" }
 types_fmgr = { path = "../../_support/types/fmgr" }
 types_gist = { path = "../../_support/types/gist" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 detoast = { path = "../../backend/access/common/detoast" }
-gistproc = { path = "../../backend/access/gist/gistproc" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }
 varlena = { path = "../../backend/utils/adt/varlena" }
 varchar = { package = "adt_varchar", path = "../../backend/utils/adt/varchar" }

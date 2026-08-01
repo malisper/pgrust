@@ -311,7 +311,7 @@ pub fn picksplit<T: VarOps>(
 
     {
         let ctx_cell = core::cell::RefCell::new(&mut *ctx);
-        gistproc::qsort::pg_qsort(&mut arr, |a, b| {
+        ::pg_qsort::pg_qsort(&mut arr, |a, b| {
             let ar = key_readable(a.1);
             let br = key_readable(b.1);
             let mut c = ctx_cell.borrow_mut();

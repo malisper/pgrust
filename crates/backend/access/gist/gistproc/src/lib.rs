@@ -6,8 +6,6 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-pub mod qsort;
-
 use ::adt_float::float8_cmp_internal;
 use ::adt_geo::{adjust_box, box_contain_box, box_ov, point_eq_point, rt_box_union, FPeq, FPge, FPgt, FPle, FPlt, PolyRef};
 use ::datum::Datum;
@@ -17,7 +15,7 @@ use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{byref_result, datum_varlena_packed, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use ::types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
 
-use qsort::pg_qsort;
+use ::pg_qsort::pg_qsort;
 
 const LIMIT_RATIO: f64 = 0.3;
 

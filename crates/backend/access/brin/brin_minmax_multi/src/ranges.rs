@@ -6,7 +6,7 @@ use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_tuple::varatt::varsize_any;
 
-use crate::qsort::pg_qsort_arg;
+use ::pg_qsort::pg_qsort_arg;
 use crate::{
     minmax_multi_get_procinfo, minmax_multi_get_strategy_procinfo, BTEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessStrategyNumber, MINMAX_BUFFER_LOAD_FACTOR, PROCNUM_DISTANCE,
@@ -552,7 +552,7 @@ pub fn build_distances<'mcx>(
     // compare_distances: descending by value. C's qsort call here is pg_qsort
     // (port.h:478 remaps qsort to pg_qsort), so pg_qsort_arg tie order is the
     // parity requirement — which equal-distance gaps survive reduction.
-    pg_qsort_arg(&mut distances, |da, db| {
+    pg_qsort_arg(&mut distances, |da, db| -> PgResult<i32> {
         Ok(if da.value < db.value {
             1
         } else if da.value > db.value {

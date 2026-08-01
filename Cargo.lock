@@ -2423,6 +2423,7 @@ dependencies = [
  "fmgr_core",
  "lsyscache",
  "mcx",
+ "pg_qsort",
  "reloptions",
  "types_brin",
  "types_core",
@@ -2546,9 +2547,9 @@ dependencies = [
  "detoast",
  "dfmgr",
  "format_type",
- "gistproc",
  "mbutils",
  "mcx",
+ "pg_qsort",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -3622,6 +3623,7 @@ dependencies = [
  "pg_enum_seams",
  "pg_inherits",
  "pg_prng",
+ "pg_qsort",
  "pg_sema_seams",
  "pgstat",
  "planner",
@@ -6820,6 +6822,7 @@ dependencies = [
  "adt_geo",
  "datum",
  "gist",
+ "pg_qsort",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -12075,6 +12078,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_qsort"
+version = "0.0.0"
+
+[[package]]
 name = "pg_range"
 version = "0.0.0"
 dependencies = [
@@ -14348,6 +14355,7 @@ dependencies = [
  "datum",
  "detoast_seams",
  "mcx",
+ "pg_qsort",
  "typcache",
  "types_core",
  "types_error",
@@ -17031,6 +17039,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "nodes_core",
+ "pg_qsort",
  "readfuncs",
  "statscmds",
  "table",
@@ -18489,6 +18498,7 @@ dependencies = [
  "mcx",
  "nbtree",
  "pg_locale",
+ "pg_qsort",
  "pglz",
  "pgstat_seams",
  "postgres_seams",

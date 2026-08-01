@@ -3,7 +3,6 @@
 //! range key machinery — a multirange is approximated by its union range).
 #![allow(non_upper_case_globals)]
 
-mod qsort;
 #[cfg(test)]
 mod tests;
 
@@ -24,7 +23,9 @@ use ::types_fmgr::{
 };
 use ::types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
 
-pub use qsort::pg_qsort_arg;
+// Canonical shared port (crates/_support/pg_qsort); re-exported for
+// rangetypes_spgist, which shares the range-bound sort machinery.
+pub use ::pg_qsort::pg_qsort_arg;
 
 // stratnum.h RANGESTRAT_* (via RT*StrategyNumber).
 pub const RANGESTRAT_BEFORE: u16 = 1;
@@ -1162,7 +1163,7 @@ fn double_sorting_split<'m>(
     }
 
     if !common_entries.is_empty() {
-        pg_qsort_arg(&mut common_entries, |a, b| {
+        pg_qsort_arg(&mut common_entries, |a, b| -> PgResult<i32> {
             Ok(if a.delta < b.delta {
                 -1
             } else if a.delta > b.delta {

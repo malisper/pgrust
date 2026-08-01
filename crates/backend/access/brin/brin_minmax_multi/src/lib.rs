@@ -20,7 +20,6 @@ use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 use ::types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varsize_any};
 
 mod builtins;
-mod qsort;
 mod ranges;
 
 pub use builtins::MINMAX_MULTI_BUILTINS;

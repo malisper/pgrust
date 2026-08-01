@@ -145,7 +145,7 @@ pub fn picksplit<T: NumOps>(
     // mirror the shim convention (unwind carries the PgError verbatim).
     {
         let ctx_cell = core::cell::RefCell::new(&mut *ctx);
-        gistproc::qsort::pg_qsort(&mut arr, |a, b| {
+        ::pg_qsort::pg_qsort(&mut arr, |a, b| {
             match T::key_cmp(a.1, b.1, &mut ctx_cell.borrow_mut()) {
                 Ok(r) => r,
                 Err(e) => std::panic::panic_any(e),

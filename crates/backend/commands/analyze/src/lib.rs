@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
 
 mod array_typanalyze;
-mod qsort;
 mod range_typanalyze;
 mod ts_typanalyze;
 pub mod sampling;
@@ -2355,7 +2354,7 @@ fn compute_scalar_stats<'mcx>(
         // be intransitive (contrib cube's cube_cmp over mixed-dimension
         // values is) — C produces an arbitrary-but-safe order where std's
         // driver panics with "does not correctly implement a total order".
-        qsort::pg_qsort(&mut values, |a, b| {
+        ::pg_qsort::pg_qsort(&mut values, |a, b| {
             match cmp(a.0, b.0) {
                 core::cmp::Ordering::Less => -1,
                 core::cmp::Ordering::Greater => 1,
