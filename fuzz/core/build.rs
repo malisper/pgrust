@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // portfam_diff oracle (p1-microbatch PORTFAM) compiles in its OWN
+        // cc::Build below (pg_difffuzz_portfam): it needs the
+        // csrc/portfam/{shim,include} tree, whose c.h/postgres.h must not
+        // leak into this build's TUs.
         // json_diff oracle lives in the dedicated jsonfam cc::Build below
         // (own shim include tree; pg_jsonfam_-prefixed symbols).
         // arrayfuncs_diff oracle (p1-lanex): verbatim 18.3 arrayfuncs.c core
@@ -662,4 +666,78 @@ fn main() {
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-ffp-contract=off")
         .compile("pg_difffuzz_dtclo");
+
+    // portfam_diff oracle (p1-microbatch PORTFAM: pg_bitutils, crc32c,
+    // pgstrcasecmp, pg_path, bufmask). OWN cc::Build: its shim c.h /
+    // postgres.h / postgres_fe.h tree (csrc/portfam/shim) must never shadow
+    // — or be shadowed by — csrc/shim's, and its verbatim pg_bitutils.h /
+    // pg_crc32c.h / storage headers are a full vendored include tree.
+    //
+    // SYMBOL ISOLATION: several oracle families already vendor pg_crc.c,
+    // pg_crc32c_sb8.c and friends (hashenc, cryptofam). Every extern this
+    // family's TUs export is renamed portfam_* at compile time so the
+    // duplicate definitions never cross-bind under one binary (the Linux
+    // GNU-ld hard-error class that Apple ld64 silently tolerates locally).
+    // strlcpy is renamed too: the platform libc supplies one on macOS/BSD.
+    const PORTFAM_SYMS: &[&str] = &[
+        // pg_bitutils.c / pg_popcount_aarch64.c
+        "pg_leftmost_one_pos", "pg_rightmost_one_pos", "pg_number_of_ones",
+        "pg_popcount32", "pg_popcount64", "pg_popcount_optimized",
+        "pg_popcount_masked_optimized",
+        // pg_crc32c_sb8.c / pg_crc.c
+        "pg_comp_crc32c_sb8", "pg_crc32_table", "crc32_bytea", "crc32c_bytea",
+        // pgstrcasecmp.c
+        "pg_strcasecmp", "pg_strncasecmp", "pg_toupper", "pg_tolower",
+        "pg_ascii_toupper", "pg_ascii_tolower",
+        // (strlcpy is renamed inside csrc/portfam/shim/c.h instead — a
+        // command-line -D loses to Apple <string.h>'s _FORTIFY re-#define.)
+        // path.c
+        "has_drive_prefix", "first_dir_separator", "first_path_var_separator",
+        "last_dir_separator", "make_native_path", "cleanup_path",
+        "join_path_components", "canonicalize_path", "canonicalize_path_enc",
+        "path_contains_parent_reference", "path_is_relative_and_below_cwd",
+        "path_is_prefix_of_path", "get_progname", "make_absolute_path",
+        "get_share_path", "get_etc_path", "get_include_path",
+        "get_pkginclude_path", "get_includeserver_path", "get_lib_path",
+        "get_pkglib_path", "get_locale_path", "get_doc_path", "get_html_path",
+        "get_man_path", "get_home_path", "get_parent_directory",
+        // bufmask.c
+        "mask_page_lsn_and_checksum", "mask_page_hint_bits",
+        "mask_unused_space", "mask_lp_flags", "mask_page_content",
+    ];
+    let mut portfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        portfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in PORTFAM_SYMS {
+        portfam.define(s, format!("portfam_{s}").as_str());
+    }
+    for f in [
+        "pg_portfam_io.c",
+        "portfam/pg_bitutils.c",
+        "portfam/pg_popcount_aarch64.c",
+        "portfam/pg_crc32c_sb8.c",
+        "portfam/pg_crc.c",
+        "portfam/pgstrcasecmp.c",
+        "portfam/path.c",
+        "portfam/strlcpy.c",
+        "portfam/bufmask.c",
+    ] {
+        portfam.file(format!("csrc/{f}"));
+    }
+    portfam
+        // path.c's FRONTEND arm: identical pure-path logic; the arms that
+        // differ live only in make_absolute_path's OOM/cwd error legs, which
+        // the driver never calls (cwd-reading carve).
+        .define("FRONTEND", None)
+        .include("csrc/portfam/shim")
+        .include("csrc/portfam/include")
+        .include("csrc/portfam")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_portfam");
+    println!("cargo:rerun-if-changed=csrc/pg_portfam_io.c");
+    println!("cargo:rerun-if-changed=csrc/portfam");
 }

@@ -134,6 +134,11 @@ regexp_alt = { path = "../../crates/backend/utils/adt/regexp_alt" }  # regexp_di
 regex_core = { path = "../../crates/backend/regex/regex_core" }  # regexp_diff: install the Spencer engine seams
 # pg_locale (like_diff C_LOCALE direct-kernel arms) — already declared above for jsonpath_diff
 types_nodes = { path = "../../crates/_support/types/nodes" }  # like_diff: NodeTag for the prosupport unhandled-tag plane
+pg_bitutils = { path = "../../crates/port/pg_bitutils" }  # portfam_diff (scaffold.py)
+# crc32c (portfam_diff) — already declared above
+pgstrcasecmp = { path = "../../crates/port/pgstrcasecmp" }  # portfam_diff
+pg_path = { path = "../../crates/port/pg_path" }  # portfam_diff
+bufmask = { path = "../../crates/backend/access/common/bufmask" }  # portfam_diff
 
 [build-dependencies]
 cc = "1"
