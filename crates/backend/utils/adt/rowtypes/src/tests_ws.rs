@@ -299,3 +299,46 @@ fn c_locale_isspace_set_is_exact() {
     assert!(!0x0bu8.is_ascii_whitespace());
     assert!(isspace_c_locale(0x0b));
 }
+
+/// Boundary-guard audit finding 5: nested/huge ROW output grew into an
+/// unceilinged PgVec — gigabytes of RSS from one statement where C's
+/// enlargeStringInfo raises "string buffer exceeds maximum allowed length
+/// (1073741823 bytes)" immediately. record_out now builds in the StringInfo
+/// port; pre-fix this test FAILS because the over-ceiling output succeeds.
+/// (~537MB of '"' doubles under record_out quoting, crossing 1GB.)
+#[test]
+fn record_out_over_ceiling_output_raises_c_stringinfo_error() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let typmod = ct_typmod(mcx);
+    let tupdesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, RECORDOID, typmod).unwrap();
+
+    let n = ::mcx::MAX_ALLOC_SIZE / 2 + 16;
+    let total = ::datum::VARHDRSZ + n;
+    let mut img: Vec<u8> = Vec::with_capacity(total);
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
+    img.resize(total, b'"');
+    let d = Datum::from_usize(img.as_ptr() as usize);
+
+    let tuple =
+        ::heaptuple::heap_form_tuple(mcx, &tupdesc, &[d, Datum::null()], &[false, true])
+            .unwrap();
+    let rec = Datum::from_usize(tuple.image().as_ptr() as usize);
+    core::mem::forget(tuple);
+    drop(img);
+
+    let mut fci = LocalFcinfo::<1>::new(0);
+    unsafe { fci.set_result_mcx(mcx) };
+    fci.set_arg(0, rec);
+    let mut flinfo = FmgrInfo::new(fc_record_out, 0, 1, true, false);
+    let err = fc_record_out(Some(&mut flinfo), &mut fci)
+        .expect_err("record_out output above MaxAllocSize must raise C's StringInfo ceiling error");
+    assert_eq!(
+        err.message(),
+        std::format!(
+            "string buffer exceeds maximum allowed length ({} bytes)",
+            ::mcx::MAX_ALLOC_SIZE
+        )
+    );
+}

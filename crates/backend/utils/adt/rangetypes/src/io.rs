@@ -243,52 +243,70 @@ fn parse_bound<'m>(
     Ok(Some((Some(buf), false)))
 }
 
-/// range_deparse (rangetypes.c): NUL-terminated cstring image.
+/// range_deparse (rangetypes.c): NUL-terminated cstring image. C builds this
+/// in a StringInfo, so bound strings above the 1GB ceiling (composite bound
+/// types amplify like nested ROW) raise enlargeStringInfo's catchable error
+/// instead of growing an unceilinged buffer.
 pub fn range_deparse<'m>(
     mcx: Mcx<'m>,
     flags: u8,
     lbound: Option<&[u8]>,
     ubound: Option<&[u8]>,
 ) -> PgResult<PgVec<'m, u8>> {
-    let mut out: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, 32)?;
     if flags & RANGE_EMPTY != 0 {
+        let mut out: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, 32)?;
         ::mcx::vec_append_bytes(&mut out, RANGE_EMPTY_LITERAL.as_bytes())?;
         out.push(0);
         return Ok(out);
     }
-    out.push(if flags & RANGE_LB_INC != 0 { b'[' } else { b'(' });
+    let mut out = ::stringinfo::StringInfo::with_capacity_in(mcx, 32)?;
+    out.append_byte(if flags & RANGE_LB_INC != 0 { b'[' } else { b'(' })?;
     if range_has_lbound(flags) {
         bound_escape(&mut out, lbound.expect("lower bound string"))?;
     }
-    out.push(b',');
+    out.append_byte(b',')?;
     if range_has_ubound(flags) {
         bound_escape(&mut out, ubound.expect("upper bound string"))?;
     }
-    out.push(if flags & RANGE_UB_INC != 0 { b']' } else { b')' });
+    out.append_byte(if flags & RANGE_UB_INC != 0 { b']' } else { b')' })?;
+    // StringInfo keeps data[len] == NUL with capacity > len, so materializing
+    // the NUL into the cstring image never reallocates.
+    let mut out = out.into_vec();
     out.push(0);
     Ok(out)
 }
 
 // range_bound_escape (rangetypes.c).
-fn bound_escape(out: &mut PgVec<'_, u8>, value: &[u8]) -> PgResult<()> {
+fn bound_escape(out: &mut ::stringinfo::StringInfo<'_>, value: &[u8]) -> PgResult<()> {
     let nq = value.is_empty()
         || value.iter().any(|&ch| {
             matches!(ch, b'"' | b'\\' | b'(' | b')' | b'[' | b']' | b',') || is_space(ch)
         });
-    out.try_reserve(2 * value.len() + 2).map_err(|_| out.allocator().oom(2 * value.len() + 2))?;
-    if nq {
-        out.push(b'"');
-    }
-    for &ch in value {
-        if ch == b'"' || ch == b'\\' {
-            out.push(ch);
+    let extra = 2 * value.len() + 2;
+    out.append_written(extra, |dst| {
+        let mut w = 0usize;
+        // SAFETY: writes below total <= 2 * value.len() + 2 = `extra` bytes
+        // at `dst` (each byte emits at most twice, plus 2 quotes).
+        unsafe {
+            if nq {
+                *dst.add(w) = b'"';
+                w += 1;
+            }
+            for &ch in value {
+                if ch == b'"' || ch == b'\\' {
+                    *dst.add(w) = ch;
+                    w += 1;
+                }
+                *dst.add(w) = ch;
+                w += 1;
+            }
+            if nq {
+                *dst.add(w) = b'"';
+                w += 1;
+            }
         }
-        out.push(ch);
-    }
-    if nq {
-        out.push(b'"');
-    }
-    Ok(())
+        w
+    })
 }
 
 /// range_in body shared with fc_range_in; `Ok(None)` = soft error captured.

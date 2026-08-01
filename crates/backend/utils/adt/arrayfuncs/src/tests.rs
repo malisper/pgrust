@@ -2100,3 +2100,31 @@ mod p1_lanex_builtin_tables {
         assert_eq!(e.message(), "type 20 not supported by deconstruct_array_builtin()");
     }
 }
+
+/// Boundary-guard audit findings 5/7 (array arm): array_out accumulated into
+/// an unceilinged PgVec, so an over-1GB output consumed gigabytes and
+/// succeeded where C raises an immediate ERROR at the allocation ceiling.
+/// array_out now streams into the StringInfo port; pre-fix this test FAILS
+/// because the over-ceiling output succeeds. (~537MB of '"' doubles under
+/// array_out quoting, crossing 1GB.)
+#[test]
+fn array_out_over_ceiling_output_raises_stringinfo_error() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = ::mcx::MAX_ALLOC_SIZE / 2 + 16;
+    let payload = std::vec![b'"'; n];
+    let d = build_varlena(mcx, &payload).unwrap();
+    drop(payload);
+    let img = construct_array(mcx, &[d], TEXTOID, -1, false, TYPALIGN_INT).unwrap();
+    let m = meta_text();
+    let mut op = text_out();
+    let err = array_out(mcx, &img, &m, &mut op)
+        .expect_err("array_out output above MaxAllocSize must raise the StringInfo ceiling error");
+    assert_eq!(
+        err.message(),
+        std::format!(
+            "string buffer exceeds maximum allowed length ({} bytes)",
+            ::mcx::MAX_ALLOC_SIZE
+        )
+    );
+}

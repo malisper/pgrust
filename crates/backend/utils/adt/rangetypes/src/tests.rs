@@ -1032,3 +1032,25 @@ mod stack_guard {
         }
     }
 }
+
+/// Boundary-guard audit findings 5/7 (range arm): range_deparse escaped
+/// bounds into an unceilinged PgVec. C builds range output in a StringInfo,
+/// so an over-1GB bound raises "string buffer exceeds maximum allowed
+/// length" immediately. Pre-fix this test FAILS because the over-ceiling
+/// output succeeds. (~537MB of '"' doubles under bound quoting.)
+#[test]
+fn range_deparse_over_ceiling_bound_raises_stringinfo_error() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = ::mcx::MAX_ALLOC_SIZE / 2 + 16;
+    let huge = std::vec![b'"'; n];
+    let err = crate::io::range_deparse(mcx, RANGE_LB_INC, Some(&huge), Some(b"x"))
+        .expect_err("range output above MaxAllocSize must raise the StringInfo ceiling error");
+    assert_eq!(
+        err.message(),
+        std::format!(
+            "string buffer exceeds maximum allowed length ({} bytes)",
+            ::mcx::MAX_ALLOC_SIZE
+        )
+    );
+}

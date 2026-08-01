@@ -90,8 +90,14 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let mut nulls: PgVec<'_, bool> = vec_from_elem_in(mcx, true, ncolumns);
     ::types_tuple::heap_deform_tuple(&tuple, &tupdesc, &mut values, &mut nulls);
 
-    let mut buf: PgVec<'_, u8> = vec_with_capacity_in(mcx, 64)?;
-    buf.push(b'(');
+    // C record_out builds into a StringInfo, whose enlargeStringInfo raises
+    // "string buffer exceeds maximum allowed length" at MaxAllocSize. Nested
+    // ROW() output grows exponentially with depth, so this ceiling is the
+    // guard that stops one short statement from consuming gigabytes
+    // (boundary-guard audit finding 5) — the buffer must be the StringInfo
+    // port, not a raw PgVec whose growth path had no catchable ceiling.
+    let mut buf = ::stringinfo::StringInfo::with_capacity_in(mcx, 64)?;
+    buf.append_byte(b'(')?;
     let mut need_comma = false;
     for i in 0..ncolumns {
         let att = &tupdesc.attrs[i];
@@ -99,7 +105,7 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
             continue;
         }
         if need_comma {
-            ::mcx::vec_append_bytes(&mut buf, b",")?;
+            buf.append_byte(b',')?;
         }
         need_comma = true;
         if nulls[i] {
@@ -131,21 +137,36 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
                     || isspace_c_locale(ch)
             });
         let extra = 2 * value.len() + 2;
-        buf.try_reserve(extra).map_err(|_| mcx.oom(extra))?;
-        if nq {
-            buf.push(b'"');
-        }
-        for &ch in value {
-            if ch == b'"' || ch == b'\\' {
-                buf.push(ch);
+        buf.append_written(extra, |dst| {
+            let mut w = 0usize;
+            // SAFETY: writes below total <= 2 * value.len() + 2 = `extra`
+            // bytes at `dst` (each byte emits at most twice, plus 2 quotes).
+            unsafe {
+                if nq {
+                    *dst.add(w) = b'"';
+                    w += 1;
+                }
+                for &ch in value {
+                    if ch == b'"' || ch == b'\\' {
+                        *dst.add(w) = ch;
+                        w += 1;
+                    }
+                    *dst.add(w) = ch;
+                    w += 1;
+                }
+                if nq {
+                    *dst.add(w) = b'"';
+                    w += 1;
+                }
             }
-            buf.push(ch);
-        }
-        if nq {
-            buf.push(b'"');
-        }
+            w
+        })?;
     }
-    ::mcx::vec_append_bytes(&mut buf, b")\0")?;
+    buf.append_byte(b')')?;
+    // StringInfo keeps data[len] == NUL with capacity > len, so materializing
+    // the NUL into the cstring image never reallocates.
+    let mut buf = buf.into_vec();
+    buf.push(0);
     Ok(cstring_result(buf))
 }
 

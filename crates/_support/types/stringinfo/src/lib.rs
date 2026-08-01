@@ -23,7 +23,11 @@ impl<'mcx> StringInfo<'mcx> {
     }
 
     pub fn with_capacity_in(mcx: Mcx<'mcx>, initsize: usize) -> PgResult<Self> {
-        debug_assert!(initsize >= 1 && initsize <= MAX_ALLOC_SIZE);
+        debug_assert!(initsize >= 1);
+        // C initStringInfoOfSize sizes through palloc, whose MaxAllocSize
+        // admission raises "invalid memory alloc request size" — a
+        // release-effective ceiling, not a debug assertion.
+        mcx::check_alloc_size(initsize)?;
         let mut data = PgVec::new_in(mcx);
         data.try_reserve_exact(initsize).map_err(|_| mcx.oom(initsize))?;
         // SAFETY: capacity >= initsize >= 1.
@@ -205,6 +209,32 @@ impl<'mcx> StringInfo<'mcx> {
             *dst = ch;
             *dst.add(1) = 0;
             self.data.set_len(len + 1);
+        }
+        Ok(())
+    }
+
+    /// C's "enlargeStringInfo, then write at data + len" idiom, for callers
+    /// that emit with raw cursor writes (the tuned array/record out loops).
+    /// `f` receives the write cursor, must write at most `extra` bytes, and
+    /// returns the count actually written. The over-run check is
+    /// release-effective: a writer bug becomes a panic, not a heap overrun.
+    #[inline]
+    pub fn append_written(
+        &mut self,
+        extra: usize,
+        f: impl FnOnce(*mut u8) -> usize,
+    ) -> PgResult<()> {
+        self.enlarge(extra)?;
+        let len = self.data.len();
+        // SAFETY: capacity >= len + extra + 1 after enlarge; `f`'s contract
+        // (checked below) bounds its writes to `extra` bytes at the cursor.
+        let wrote = f(unsafe { self.data.as_mut_ptr().add(len) });
+        assert!(wrote <= extra, "append_written: writer overran its reservation");
+        // SAFETY: wrote <= extra, so len + wrote + 1 <= capacity; the first
+        // `wrote` bytes were just written by `f`.
+        unsafe {
+            self.data.set_len(len + wrote);
+            *self.data.as_mut_ptr().add(len + wrote) = 0;
         }
         Ok(())
     }

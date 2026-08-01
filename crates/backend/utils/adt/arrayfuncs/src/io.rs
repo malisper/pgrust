@@ -600,11 +600,24 @@ pub fn array_out<'mcx>(
     let (ndim, dims, lb) = read_dims_lbounds(array);
     let nitems = array_get_n_items(ndim, &dims)?;
 
-    let mut out: PgVec<u8> = vec_new_in(mcx);
     if nitems == 0 {
+        let mut out: PgVec<u8> = vec_new_in(mcx);
         ::mcx::vec_append_bytes(&mut out, b"{}\0")?;
         return Ok(out);
     }
+
+    // C DIVERGENCE (documented): C array_out precomputes every element
+    // string, sums the lengths, and pallocs the total, so an over-1GB output
+    // raises palloc's "invalid memory alloc request size <total>". This port
+    // streams elements into the StringInfo buffer instead (the out proc's
+    // returned cstring aliases reusable scratch, so precomputing would force
+    // a copy of every element), so the same over-ceiling output raises
+    // enlargeStringInfo's "string buffer exceeds maximum allowed length
+    // (1073741823 bytes)" — a deterministic catchable ERROR at the same
+    // 1GB ceiling, with C's other StringInfo wording. Before this, growth
+    // went through an unceilinged PgVec: gigabytes of memory from one
+    // statement (boundary-guard audit findings 5/7, array arm).
+    let mut out = StringInfo::new_in(mcx)?;
 
     let needdims = (0..ndim as usize).any(|i| lb[i] != 1);
     let (elems, elem_nulls) =
@@ -613,12 +626,12 @@ pub fn array_out<'mcx>(
     if needdims {
         for i in 0..ndim as usize {
             let s = alloc::format!("[{}:{}]", lb[i], lb[i] + dims[i] - 1);
-            ::mcx::vec_append_bytes(&mut out, s.as_bytes())?;
+            out.append_bytes(s.as_bytes())?;
         }
-        out.push(b'=');
+        out.append_byte(b'=')?;
     }
 
-    out.push(b'{');
+    out.append_byte(b'{')?;
     let ndim_u = ndim as usize;
     let nulls_s: &[bool] = &elem_nulls;
     let elems_s: &[Datum] = &elems;
@@ -647,63 +660,67 @@ pub fn array_out<'mcx>(
         let quote = !is_null && element_needs_quote(bytes, meta.typdelim);
         let n = bytes.len();
         let extra = 2 * n + 2 + 2 * ndim_u + 2;
-        if out.capacity() - out.len() < extra {
-            out.try_reserve(extra).map_err(|_| mcx.oom(extra))?;
-        }
-        // SAFETY: `extra` bounds every write below (braces/delims <= 2*ndim_u+1,
-        // element <= 2n+2); set_len covers exactly the bytes written.
-        unsafe {
-            let base = out.as_mut_ptr();
-            let mut w = out.len();
-            let mut i = j as usize;
-            while i < ndim_u - 1 {
-                *base.add(w) = b'{';
-                w += 1;
-                i += 1;
-            }
-            if quote {
-                *base.add(w) = b'"';
-                w += 1;
-                for &ch in bytes {
-                    if ch == b'"' || ch == b'\\' {
-                        *base.add(w) = b'\\';
+        // `extra` bounds every write in the closure (braces/delims <=
+        // 2*ndim_u + 1, element <= 2n + 2); append_written enlarges through
+        // the StringInfo ceiling and re-checks the returned count.
+        out.append_written(extra, |base| {
+            // SAFETY: writes below stay within `extra` bytes at `base`, per
+            // the bound above.
+            unsafe {
+                let mut w = 0usize;
+                let mut i = j as usize;
+                while i < ndim_u - 1 {
+                    *base.add(w) = b'{';
+                    w += 1;
+                    i += 1;
+                }
+                if quote {
+                    *base.add(w) = b'"';
+                    w += 1;
+                    for &ch in bytes {
+                        if ch == b'"' || ch == b'\\' {
+                            *base.add(w) = b'\\';
+                            w += 1;
+                        }
+                        *base.add(w) = ch;
                         w += 1;
                     }
-                    *base.add(w) = ch;
+                    *base.add(w) = b'"';
                     w += 1;
-                }
-                *base.add(w) = b'"';
-                w += 1;
-            } else {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(w), n);
-                w += n;
-            }
-            k += 1;
-
-            let mut ii = ndim - 1;
-            loop {
-                indx[ii as usize] += 1;
-                if indx[ii as usize] < dims[ii as usize] {
-                    *base.add(w) = meta.typdelim;
-                    w += 1;
-                    break;
                 } else {
-                    indx[ii as usize] = 0;
-                    *base.add(w) = b'}';
-                    w += 1;
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(w), n);
+                    w += n;
                 }
-                ii -= 1;
-                if ii < 0 {
-                    break;
+                k += 1;
+
+                let mut ii = ndim - 1;
+                loop {
+                    indx[ii as usize] += 1;
+                    if indx[ii as usize] < dims[ii as usize] {
+                        *base.add(w) = meta.typdelim;
+                        w += 1;
+                        break;
+                    } else {
+                        indx[ii as usize] = 0;
+                        *base.add(w) = b'}';
+                        w += 1;
+                    }
+                    ii -= 1;
+                    if ii < 0 {
+                        break;
+                    }
                 }
+                j = ii;
+                w
             }
-            j = ii;
-            out.set_len(w);
-        }
+        })?;
         if j == -1 {
             break;
         }
     }
+    // StringInfo keeps data[len] == NUL with capacity > len, so materializing
+    // the NUL into the cstring image never reallocates.
+    let mut out = out.into_vec();
     out.push(0);
     Ok(out)
 }

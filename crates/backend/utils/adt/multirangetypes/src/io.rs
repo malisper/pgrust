@@ -219,12 +219,15 @@ pub fn multirange_out<'m>(
     cache: &mut MultirangeIOData,
     mr: &[u8],
 ) -> PgResult<PgVec<'m, u8>> {
-    let mut out: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, 32)?;
-    out.push(b'{');
+    // C multirange_out builds into a StringInfo: member-range strings above
+    // the 1GB ceiling raise enlargeStringInfo's catchable error instead of
+    // growing an unceilinged buffer.
+    let mut out = ::stringinfo::StringInfo::with_capacity_in(mcx, 32)?;
+    out.append_byte(b'{')?;
     let ranges = multirange_deserialize(mcx, &cache.mi.rng, mr)?;
     for (i, r) in ranges.iter().enumerate() {
         if i > 0 {
-            out.push(b',');
+            out.append_byte(b',')?;
         }
         let d = function_call1_coll_in(
             &mut cache.typioproc,
@@ -239,10 +242,13 @@ pub fn multirange_out<'m>(
             while *p.add(n) != 0 {
                 n += 1;
             }
-            ::mcx::vec_append_bytes(&mut out, core::slice::from_raw_parts(p, n))?;
+            out.append_bytes(core::slice::from_raw_parts(p, n))?;
         }
     }
-    out.push(b'}');
+    out.append_byte(b'}')?;
+    // StringInfo keeps data[len] == NUL with capacity > len, so materializing
+    // the NUL into the cstring image never reallocates.
+    let mut out = out.into_vec();
     out.push(0);
     Ok(out)
 }

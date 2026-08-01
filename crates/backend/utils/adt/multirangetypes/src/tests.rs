@@ -256,3 +256,61 @@ mod recv_wire {
         recv(mcx, &wire).expect("well-formed one-element wire must receive");
     }
 }
+
+/// Boundary-guard audit findings 5/7 (multirange arm): multirange_out
+/// concatenated member-range strings into an unceilinged PgVec. C builds
+/// multirange output in a StringInfo, so an over-1GB output raises "string
+/// buffer exceeds maximum allowed length" immediately. Pre-fix this test
+/// FAILS because the over-ceiling output succeeds. (The stub range out proc
+/// returns a ~537MB cstring per member; two members cross 1GB.)
+mod out_ceiling {
+    use super::*;
+    use crate::io::{multirange_out, MultirangeIOData};
+
+    std::thread_local! {
+        static HUGE_CSTR: std::cell::RefCell<std::vec::Vec<u8>> =
+            const { std::cell::RefCell::new(std::vec::Vec::new()) };
+    }
+
+    /// range_out stand-in returning a huge NUL-terminated cstring.
+    fn fc_huge_range_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        HUGE_CSTR.with(|c| {
+            let mut b = c.borrow_mut();
+            if b.is_empty() {
+                let n = ::mcx::MAX_ALLOC_SIZE / 2 + 16;
+                b.resize(n, b'x');
+                b.push(0);
+            }
+            Ok(Datum::from_usize(b.as_ptr() as usize))
+        })
+    }
+
+    #[test]
+    fn multirange_out_over_ceiling_output_raises_stringinfo_error() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = MultirangeIOData {
+            mi: MultirangeInfo { pin: None, mltrngtypid: INT4MULTIRANGE, rng: int4_rng() },
+            typioproc: FmgrInfo::new(fc_huge_range_out, 3840, 1, true, false),
+            typioparam: INT4RANGE,
+        };
+        let mut rng = int4_rng();
+        let r1 = mk(mcx, &mut rng, 1, 9);
+        let r2 = mk(mcx, &mut rng, 20, 30);
+        let mut ranges: PgVec<'_, &[u8]> = ::mcx::vec_with_capacity_in(mcx, 2).unwrap();
+        ranges.push(&r1[..]);
+        ranges.push(&r2[..]);
+        let mr = crate::make_multirange(mcx, INT4MULTIRANGE, &mut cache.mi.rng, &mut ranges)
+            .unwrap();
+        let err = multirange_out(mcx, &mut cache, &mr).expect_err(
+            "multirange output above MaxAllocSize must raise the StringInfo ceiling error",
+        );
+        assert_eq!(
+            err.message(),
+            std::format!(
+                "string buffer exceeds maximum allowed length ({} bytes)",
+                ::mcx::MAX_ALLOC_SIZE
+            )
+        );
+    }
+}
