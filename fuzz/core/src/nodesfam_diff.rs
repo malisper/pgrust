@@ -72,6 +72,11 @@ use mcx::Mcx;
 use types_error::{PgError, PgResult};
 use types_nodes::Node;
 
+// stub:nodes — the bounded value/list node-tree builder is the shared
+// constructed-state facility (fuzz/core/src/stub_nodes.rs); this target is
+// the migration demo that consumes it.
+use crate::stub_nodes::build_value_node;
+
 /// Intern a &str into the context arena (the copyfuncs str_in shape).
 fn intern<'m>(m: Mcx<'m>, s: &str) -> PgResult<&'m str> {
     let v = mcx::slice_in(m, s.as_bytes())?;
@@ -1461,110 +1466,6 @@ pub fn run_value_nodes(data: &[u8]) -> bool {
                 "VALUE READ DIVERGENCE: C rejected rust-rendered {:?} ({errcode:#x})",
                 out1.as_str()
             );
-        }
-    }
-}
-
-/// Bounded value/list node builder over fuzz bytes. Emits every value-node
-/// tag the outfuncs port dispatches: String, Integer, Float, Boolean,
-/// List (nested), IntList, OidList. (T_BitString is NOT an outfuncs-port
-/// tag: catalog-stored expression trees never carry a BitString value node
-/// — it exists pre-parse-analysis only, in A_Const under the raw grammar —
-/// so it lives in the complement ledger; its copyfuncs arm is exercised by
-/// a direct unit test instead.)
-fn build_value_node<'m>(m: Mcx<'m>, data: &[u8]) -> Option<Node<'m>> {
-    let mut it = data.iter().copied();
-    build_value_inner(m, &mut it, 0)
-}
-
-fn build_value_inner<'m>(
-    m: Mcx<'m>,
-    it: &mut impl Iterator<Item = u8>,
-    depth: u32,
-) -> Option<Node<'m>> {
-    let sel = it.next()?;
-    // nodeRead token constraints: strings go through outToken escaping on
-    // write, so arbitrary ASCII (NUL-free) is legal; keep them short.
-    let mut take_str = |maxlen: usize| -> String {
-        let len = (it.next().unwrap_or(0) as usize) % (maxlen + 1);
-        let mut s = String::new();
-        for _ in 0..len {
-            let b = it.next().unwrap_or(b'a');
-            if b != 0 {
-                s.push(b as char);
-            }
-        }
-        s
-    };
-    match sel % 8 {
-        0 => {
-            let sval = take_str(24);
-            Node::mk(m, types_nodes::String { sval: intern(m, &sval).ok()? }).ok()
-        }
-        1 => {
-            let mut v = [0u8; 4];
-            for b in v.iter_mut() {
-                *b = it.next().unwrap_or(0);
-            }
-            Node::mk(m, types_nodes::Integer { ival: i32::from_le_bytes(v) }).ok()
-        }
-        2 => {
-            // Float carries its literal TEXT (C stores the token string):
-            // digits/.eE+- ; C nodeTokenType classifies by leading char, so
-            // force a numeric-looking literal.
-            let mut v = [0u8; 8];
-            for b in v.iter_mut() {
-                *b = it.next().unwrap_or(0);
-            }
-            let f = f64::from_le_bytes(v);
-            let lit = if f.is_finite() { format!("{f:?}") } else { "1e300".to_owned() };
-            Node::mk(m, types_nodes::Float { fval: intern(m, &lit).ok()? }).ok()
-        }
-        3 => Node::mk(m, types_nodes::Boolean { boolval: it.next()? & 1 == 1 }).ok(),
-        4 => {
-            // escaping-heavy strings: outToken's quote/backslash surface
-            let raw = take_str(16);
-            let mut s = String::new();
-            for (i, ch) in raw.chars().enumerate() {
-                s.push(match i % 4 {
-                    0 => '"',
-                    1 => '\\',
-                    _ => ch,
-                });
-            }
-            Node::mk(m, types_nodes::String { sval: intern(m, &s).ok()? }).ok()
-        }
-        5 if depth < 6 => {
-            let n = (it.next().unwrap_or(0) as usize) % 5;
-            let mut l = types_nodes::NodeList::with_capacity(m, n).ok()?;
-            for _ in 0..n {
-                l.lappend(m, build_value_inner(m, it, depth + 1)?).ok()?;
-            }
-            Node::mk_list(m, l).ok()
-        }
-        6 => {
-            let n = (it.next().unwrap_or(0) as usize) % 6;
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n {
-                let mut b4 = [0u8; 4];
-                for b in b4.iter_mut() {
-                    *b = it.next().unwrap_or(0);
-                }
-                v.push(i32::from_le_bytes(b4));
-            }
-            Node::mk_int_list(m, types_nodes::list::IntList::from_slice(m, &v).ok()?).ok()
-        }
-        _ => {
-            let n = (it.next().unwrap_or(0) as usize) % 6;
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n {
-                let mut b4 = [0u8; 4];
-                for b in b4.iter_mut() {
-                    *b = it.next().unwrap_or(0);
-                }
-                v.push(u32::from_le_bytes(b4)); // types_core::Oid = u32
-            }
-            Node::mk_oid_list(m, types_nodes::list::OidList::from_slice(m, &v).ok()?).ok()
         }
     }
 }
