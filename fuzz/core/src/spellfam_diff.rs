@@ -263,6 +263,101 @@ fn rust_build<'mcx>(
     Ok(obj)
 }
 
+/// DECODE LEG (p1-spell div5, lane-local diagnostic): when true, every exec
+/// additionally runs the SAME input's build+normalize TWICE inside one exec and
+/// asserts each SIDE reproduced its own answer, naming the side that changed.
+/// This converts the div5 CROSS-EXEC nondeterminism (CI cluster flagged it at exec
+/// 137 after 136 prior execs; a fresh single-run process replays clean, so the
+/// trigger is state accumulated by earlier execs) into an IN-EXEC, self-
+/// reporting witness: an in-exec repeat reproduces "one prior run's state",
+/// and the assert says whether the Rust side, the C side, or neither is the
+/// nondeterministic one. Flip to false once div5 is adjudicated (it roughly
+/// doubles per-exec cost, so it must not ride the 10M floor).
+const DECODE_CROSS_EXEC: bool = true;
+
+/// Observable-output fingerprint of ONE side for one input, WITHOUT asserting
+/// anything cross-side. Used only by the decode leg.
+fn side_fingerprints(aff: &[u8], dict: &[u8], words: &[&[u8]], enc: i32) -> (String, String) {
+    pin_env(enc);
+    unsafe { pg_spf_reset() };
+    let (ap, dp) = stage_files(aff, dict);
+
+    // --- Rust side ---
+    let ctx = MemoryContext::new("spellfam-fp");
+    let mut r = String::new();
+    match rust_build(&ctx, ap.as_bytes(), dp.as_bytes()) {
+        Err(e) => r.push_str(&format!("build-err:{}", e.sqlstate().0)),
+        Ok(obj) => {
+            r.push_str(&format!(
+                "ok naff={} nad={} uc={} fm={} ncomp={}",
+                obj.affixes.len(),
+                obj.affix_data.len(),
+                obj.usecompound as i32,
+                rust_flagmode(obj.flag_mode),
+                obj.compound_affix.len()
+            ));
+            for w in words {
+                let octx = MemoryContext::new("spellfam-fp-n");
+                {
+                    match obj.ni_normalize_word(octx.mcx(), w) {
+                        Err(e) => r.push_str(&format!(" [{:?} err:{}]", w, e.sqlstate().0)),
+                        Ok(lex) => {
+                            r.push_str(&format!(" [{:?} n={}", w, lex.len()));
+                            for l in lex.iter() {
+                                r.push_str(&format!(
+                                    " {}/{}/{}",
+                                    l.nvariant,
+                                    l.flags,
+                                    String::from_utf8_lossy(l.lexeme.as_slice())
+                                ));
+                            }
+                            r.push(']');
+                        }
+                    }
+                }
+                drop(octx);
+            }
+        }
+    }
+
+    // --- C side ---
+    let mut c = String::new();
+    if unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) } != 0 {
+        c.push_str(&format!("build-err:{}", unsafe { pg_spf_sqlstate() }));
+    } else {
+        let nad = unsafe { pg_spf_naffixdata() };
+        c.push_str(&format!(
+            "ok naff={} nad={} uc={} fm={} ncomp={}",
+            unsafe { pg_spf_naffixes() },
+            nad,
+            unsafe { pg_spf_usecompound() },
+            unsafe { pg_spf_flagmode() },
+            unsafe { pg_spf_ncompound() }
+        ));
+        for w in words {
+            let n = unsafe { pg_spf_normalize(w.as_ptr().cast(), w.len() as c_int) };
+            if n < 0 {
+                c.push_str(&format!(" [{:?} err:{}]", w, unsafe { pg_spf_sqlstate() }));
+            } else {
+                c.push_str(&format!(" [{:?} n={n}", w));
+                for i in 0..n {
+                    let (mut nv, mut fl): (c_int, c_int) = (0, 0);
+                    let p = unsafe { pg_spf_lex(i, &mut nv, &mut fl) };
+                    let b: &[u8] = if p.is_null() {
+                        &[]
+                    } else {
+                        unsafe { std::ffi::CStr::from_ptr(p) }.to_bytes()
+                    };
+                    c.push_str(&format!(" {}/{}/{}", nv, fl, String::from_utf8_lossy(b)));
+                }
+                c.push(']');
+            }
+        }
+    }
+    unsafe { pg_spf_reset() };
+    (r, c)
+}
+
 pub fn spellfam_diff(data: &[u8]) {
     // Free the C arena at BOTH ends of the exec: at entry (defensive) and, via
     // the guard below, at return — otherwise the current exec's palloc'd
@@ -323,6 +418,31 @@ pub fn spellfam_diff(data: &[u8]) {
     // tests::interior_nul_* and the banked CI-div-encord seeds.
     if core::str::from_utf8(&aff).is_err() || core::str::from_utf8(&dict).is_err() {
         return;
+    }
+
+    // DECODE LEG: per-side in-exec reproducibility (see DECODE_CROSS_EXEC).
+    if DECODE_CROSS_EXEC {
+        let (r1, c1) = side_fingerprints(&aff, &dict, &parsed.words, enc);
+        let (r2, c2) = side_fingerprints(&aff, &dict, &parsed.words, enc);
+        let ddbg = || {
+            format!(
+                "enc={encname} aff={:?} dict={:?}",
+                String::from_utf8_lossy(&aff[..aff.len().min(160)]),
+                String::from_utf8_lossy(&dict[..dict.len().min(160)])
+            )
+        };
+        assert_eq!(
+            r1, r2,
+            "CROSS-EXEC NONDETERMINISM on the RUST side ({})",
+            ddbg()
+        );
+        assert_eq!(
+            c1, c2,
+            "CROSS-EXEC NONDETERMINISM on the C side ({})",
+            ddbg()
+        );
+        // Both sides self-reproduced; if they disagree with each other the
+        // normal comparison planes below report it with full per-plane detail.
     }
 
     let (ap, dp) = stage_files(&aff, &dict);
@@ -631,6 +751,17 @@ mod corpus_replay {
         let mut n = 0;
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
+                // `decode-*` seeds are UNDER ADJUDICATION on the Linux oracle
+                // (the pinned platform). div5 is a deterministic C-side
+                // difference on macOS but the Linux CI cluster replayed it clean, so
+                // macOS cannot adjudicate it (ground-truth law) — it must stay
+                // in the CORPUS (libFuzzer replays it on the CI cluster) while being
+                // skipped by this macOS-side rail. Remove the seed, or this
+                // skip, once the Linux verdict lands.
+                let name = e.file_name();
+                if cfg!(target_os = "macos") && name.to_string_lossy().starts_with("decode-") {
+                    continue;
+                }
                 let data = std::fs::read(e.path()).unwrap();
                 super::spellfam_diff(&data);
                 n += 1;
