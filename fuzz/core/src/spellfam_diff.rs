@@ -88,6 +88,41 @@ const ENCODINGS: [(i32, &str); 2] = [
     (wchar::PG_SQL_ASCII, "SQL_ASCII"),
 ];
 
+/// One-time warmup: exercise a full build+normalize under BOTH encodings so
+/// every lazy per-encoding one-time allocation (mbutils conversion tables,
+/// the pg_locale collation cache + C-locale default, the wcharfam/regex
+/// C-collation engine init — session-root state that is intentionally never
+/// freed) happens during process startup, inside libFuzzer's leak baseline.
+/// Without this the second encoding's one-time init first fires mid-campaign
+/// and LSan aborts (the CI cluster aborted at ~exec 45 on exactly this — it is a
+/// one-time-per-encoding init, NOT a per-exec leak: the report shows exactly
+/// 2 objects per site, one per encoding).
+fn warmup() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = std::panic::catch_unwind(|| {
+            for &(enc, _) in &ENCODINGS {
+                pin_env(enc);
+                unsafe { pg_spf_reset() };
+                let (ap, dp) = stage_files(b"SFX T Y 1\nSFX T 0 s .\n", b"1\nbook/T\n");
+                let ctx = MemoryContext::new("spellfam-warm");
+                if let Ok(obj) = rust_build(&ctx, ap.as_bytes(), dp.as_bytes()) {
+                    let octx = MemoryContext::new("spellfam-warm-norm");
+                    let _ = obj.ni_normalize_word(octx.mcx(), b"books");
+                }
+                let _ = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
+                let mut nv = 0;
+                let mut fl = 0;
+                if unsafe { pg_spf_normalize(b"books".as_ptr().cast(), 5) } > 0 {
+                    let _ = unsafe { pg_spf_lex(0, &mut nv, &mut fl) };
+                }
+                unsafe { pg_spf_reset() };
+            }
+        });
+    });
+}
+
 fn pin_env(enc: i32) {
     // Both sides pin the SAME server encoding + the C-locale database default
     // (str_tolower/lowerstr -> asc_tolower arm; regex strategy PG_REGEX_C).
@@ -241,6 +276,7 @@ pub fn spellfam_diff(data: &[u8]) {
         }
     }
     let _reset = ResetGuard;
+    warmup();
 
     let Some(parsed) = parse_input(data) else {
         return;
