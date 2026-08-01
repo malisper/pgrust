@@ -137,6 +137,7 @@ types_nodes = { path = "../../crates/_support/types/nodes" }  # like_diff: NodeT
 integerset = { path = "../../crates/backend/lib/integerset" }  # libfam_diff (scaffold.py)
 hyperloglog = { path = "../../crates/backend/lib/hyperloglog" }  # libfam_diff
 binaryheap = { path = "../../crates/backend/lib/binaryheap" }  # libfam_diff
+radixtree = { path = "../../crates/backend/lib/radixtree" }  # radixtree_diff (p1-mb-lib)
 pairingheap = { path = "../../crates/backend/lib/pairingheap" }  # libfam_diff
 bloomfilter = { path = "../../crates/backend/lib/bloomfilter" }  # libfam_diff
 # miscfam_diff (p1-mb-miscfam); stringinfo/mcx/types_* already above

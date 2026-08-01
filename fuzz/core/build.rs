@@ -796,6 +796,23 @@ fn main() {
         "mask_page_lsn_and_checksum", "mask_page_hint_bits",
         "mask_unused_space", "mask_lp_flags", "mask_page_content",
     ];
+    // radixtree_diff oracle (p1-mb-lib) compiles in its OWN cc::Build:
+    // its shim utils/memutils.h (context-aware) must not be shadowed by
+    // csrc/libfam/include's macro-based memutils.h shim (both are found as
+    // "utils/memutils.h"), and its headers must not leak into other TUs.
+    let mut radixtree = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        radixtree.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    radixtree
+        .file("csrc/pg_radixtree_io.c")
+        .include("csrc/shim")
+        .include("csrc/radixtree/include")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .warnings(false)
+        .compile("pg_difffuzz_radixtree");
+
     let mut portfam = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         portfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");

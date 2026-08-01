@@ -489,6 +489,11 @@ pub use regexp_diff::regexp_diff;
 // libfam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-libfam_diff.md.
 pub mod libfam_diff;
 pub use libfam_diff::libfam_diff;
+
+// radixtree_diff (p1-mb-lib): backend/lib/radixtree vs verbatim 18.3
+// lib/radixtree.h template (two instantiations in csrc/pg_radixtree_io.c).
+pub mod radixtree_diff;
+pub use radixtree_diff::radixtree_diff;
 // portfam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-portfam_diff.md.
 pub mod portfam_diff;
 pub use portfam_diff::portfam_diff;
