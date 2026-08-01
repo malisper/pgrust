@@ -213,27 +213,49 @@ fn main() {
                 "-fno-strict-aliasing" // harmless repeat when not fuzzing
             },
         )
-        // tsrank_diff oracle (p1-laneae): VERBATIM 18.3 tsrank.c under
-        // csrc/tsvec/ (same shim web as tsvector_core_diff); driver entry +
-        // verbatim array helpers (ArrayGetNItems/array_contains_nulls) in
-        // pg_tsrank_io.c.
-        .file("csrc/pg_tsrank_io.c")
-        .file("csrc/tsvec/tsrank.c")
-        // tsvector_core_diff oracle (p1-laneae): runtime shims + driver
-        // entries in pg_tsvector_core_io.c; VERBATIM 18.3 C under
-        // csrc/tsvec/ (tsvector.c, tsvector_parser.c, tsvector_op.c with
-        // labeled carve blocks, pg_qsort/qsort_arg for tie-order parity).
+        .compile("pg_difffuzz_oracle");
+
+    // tsvec oracle family (p1-laneae, tsvector_core_diff + tsrank_diff):
+    // OWN cc::Build (landing-train reconcile): on the lane the shared build
+    // had few include dirs, but main's shared build now carries csrc/pgdt +
+    // csrc first, whose fmgr.h/postgres.h collide with the tsvec header web
+    // (redefinition of varlena/int32/Datum). The tsvec TUs resolve their own
+    // postgres.h/c.h same-directory (quote-include rule); pg_ts*_io.c pull
+    // "tsvec/postgres.h" relative to csrc/.
+    let mut tsvec = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        tsvec.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    tsvec
+        // VERBATIM 18.3 C under csrc/tsvec/ (tsvector.c, tsvector_parser.c,
+        // tsvector_op.c with labeled carve blocks, tsrank.c byte-identical,
+        // pg_qsort/qsort_arg for tie-order parity); runtime shims + driver
+        // entries in pg_tsvector_core_io.c / pg_tsrank_io.c.
         .file("csrc/pg_tsvector_core_io.c")
+        .file("csrc/pg_tsrank_io.c")
         .file("csrc/tsvec/tsvector.c")
         .file("csrc/tsvec/tsvector_parser.c")
         .file("csrc/tsvec/tsvector_op.c")
+        .file("csrc/tsvec/tsrank.c")
         .file("csrc/tsvec/qsort.c")
         .file("csrc/tsvec/qsort_arg.c")
-        // tsvec oracle header web: AFTER csrc/shim so ryu/other oracles
-        // keep resolving "postgres.h" to the shim one; the tsvec TUs find
-        // their own postgres.h/c.h same-directory (quote-include rule).
         .include("csrc/tsvec/include")
-        .compile("pg_difffuzz_oracle");
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        // SANCOV ON THE C SIDE under cargo-fuzz: union coverage retention
+        // (same rationale as the shared oracle build above).
+        .flag_if_supported(
+            if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
+                "-fsanitize=fuzzer-no-link"
+            } else {
+                "-fno-strict-aliasing"
+            },
+        )
+        .compile("pg_difffuzz_tsvec");
+    println!("cargo:rerun-if-changed=csrc/pg_tsvector_core_io.c");
+    println!("cargo:rerun-if-changed=csrc/pg_tsrank_io.c");
+    println!("cargo:rerun-if-changed=csrc/tsvec");
 
     // wcharfam oracle (p1-laneah): verbatim 18.3 wchar.c + encnames.c +
     // mbutils.c pure extracts, own include dir (its c.h shim must not leak
