@@ -642,8 +642,14 @@ pub fn portfam_diff(data: &[u8]) {
             arm_popcount(&payload[payload.len().min(2)..], skip, mask);
         }
         4 => {
+            // [init u32][skip][data...] — `skip` walks the buffer start
+            // through all 8 alignments so both the sb8 4-byte pre-align loop
+            // and the armv8 1/2/4-byte pre-align arms are reachable.
             let init = u32_at(payload, 0);
-            arm_crc32c(init, &payload[payload.len().min(4)..]);
+            let rest = &payload[payload.len().min(4)..];
+            let skip = p_get(rest, 0) as usize % 9;
+            let body = &rest[rest.len().min(1)..];
+            arm_crc32c(init, &body[body.len().min(skip)..]);
         }
         5 => arm_crc32_legacy(payload),
         6 => {
@@ -754,6 +760,13 @@ mod tests {
                 cimages.insert(crc32c::pg_comp_crc32c_sb8(crc32c::CRC32C_INIT, &v)),
                 "byte {i} delta not witnessed by crc32c"
             );
+        }
+        // crc: every buffer start alignment (the sb8 pre-align loop and the
+        // armv8 1/2/4-byte pre-align arms key off it).
+        let wide = [0x5Au8; 40];
+        for skip in 0..9usize {
+            arm_crc32c(crc32c::CRC32C_INIT, &wide[skip..]);
+            arm_crc32_legacy(&wide[skip..]);
         }
         // popcount: every byte position contributes independently, at every
         // start offset (the C word loop keys off buffer alignment).
