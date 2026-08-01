@@ -110,6 +110,15 @@ extern "C" {
     fn pg_nf_range_other() -> i32;
     fn pg_nf_cidr_mask(numbits: *const c_char, family_sel: i32, out: *mut u8) -> i32;
     fn pg_nf_foreach(out: *mut PgNfIfEntry, cap: i32) -> i32;
+    fn pg_nf_run_cb(
+        addr_family: i32,
+        addr: *const u8,
+        mask_kind: i32,
+        mask: *const u8,
+        out_fam: *mut u8,
+        out_addr: *mut u8,
+        out_mask: *mut u8,
+    ) -> i32;
 
     fn pg_nf_out_begin(kind: i32, msgtype: u8) -> i32;
     fn pg_nf_out_get(len: *mut i32, maxlen: *mut i32, cursor: *mut i32) -> *const c_char;
@@ -282,8 +291,81 @@ impl<'a> Rdr<'a> {
 
 // ---------------- arm 0: range_sockaddr ----------------
 
+/// kind 4: the run_ifaddr_callback mask-substitution differential (the
+/// Rust side goes through the crate's #[doc(hidden)] fuzz conduit).
+fn check_run_cb(r: &mut Rdr) {
+    let addr_v6 = r.u8() & 1 == 1;
+    let mask_kind = r.u8() % 4; // 0 none, 1 v4, 2 v6, 3 other-family
+    let ab: [u8; 16] = r.arr();
+    let mb: [u8; 16] = r.arr();
+    let addr = if addr_v6 {
+        IpAddr::V6(Ipv6Addr::from(ab))
+    } else {
+        let a4: [u8; 4] = ab[..4].try_into().unwrap();
+        IpAddr::V4(Ipv4Addr::from(a4))
+    };
+    let mask = match mask_kind {
+        0 => None,
+        1 => {
+            let m4: [u8; 4] = mb[..4].try_into().unwrap();
+            Some(IpAddr::V4(Ipv4Addr::from(m4)))
+        }
+        2 => Some(IpAddr::V6(Ipv6Addr::from(mb))),
+        _ => {
+            // C models this as an AF_UNSPEC mask; on the Rust side (IpAddr
+            // carries only v4/v6) the behavioral counterpart is a mask of
+            // the OTHER family — both are the family-mismatch -> fullmask
+            // arm of run_ifaddr_callback.
+            if addr_v6 {
+                let m4: [u8; 4] = mb[..4].try_into().unwrap();
+                Some(IpAddr::V4(Ipv4Addr::from(m4)))
+            } else {
+                Some(IpAddr::V6(Ipv6Addr::from(mb)))
+            }
+        }
+    };
+    let mut got: Option<(IpAddr, IpAddr)> = None;
+    ifaddr::run_ifaddr_callback_for_fuzz(
+        &mut |a, m| {
+            assert!(got.is_none(), "callback fired twice");
+            got = Some((a, m));
+        },
+        addr,
+        mask,
+    );
+    let (ra, rm) = got.expect("callback fired");
+
+    let (mut cf, mut ca, mut cm) = (0u8, [0u8; 16], [0u8; 16]);
+    let crc = unsafe {
+        pg_nf_run_cb(
+            addr_v6 as i32,
+            ab.as_ptr(),
+            mask_kind as i32,
+            mb.as_ptr(),
+            &mut cf,
+            ca.as_mut_ptr(),
+            cm.as_mut_ptr(),
+        )
+    };
+    assert_eq!(crc, 0, "C callback fired");
+    let (c_addr, c_mask) = if cf == 4 {
+        let a4: [u8; 4] = ca[..4].try_into().unwrap();
+        let m4: [u8; 4] = cm[..4].try_into().unwrap();
+        (
+            IpAddr::V4(Ipv4Addr::from(a4)),
+            IpAddr::V4(Ipv4Addr::from(m4)),
+        )
+    } else {
+        (
+            IpAddr::V6(Ipv6Addr::from(ca)),
+            IpAddr::V6(Ipv6Addr::from(cm)),
+        )
+    };
+    assert_eq!((ra, rm), (c_addr, c_mask), "run_ifaddr_callback (addr {addr:?} mask {mask:?})");
+}
+
 fn check_range(r: &mut Rdr) {
-    let kind = r.u8() % 4;
+    let kind = r.u8() % 5;
     match kind {
         0 => {
             // v4 same-family
@@ -326,7 +408,7 @@ fn check_range(r: &mut Rdr) {
             assert!(!rr, "mixed-family triple must not match");
             assert_eq!(cr, 0, "C non-IP family arm returns 0");
         }
-        _ => {
+        3 => {
             let a: [u8; 16] = r.arr();
             let n: [u8; 4] = r.arr();
             let m: [u8; 4] = r.arr();
@@ -337,6 +419,7 @@ fn check_range(r: &mut Rdr) {
             );
             assert!(!rr, "mixed-family triple must not match");
         }
+        _ => check_run_cb(r),
     }
 }
 
@@ -539,6 +622,10 @@ fn run_send(r: &mut Rdr) {
 
     compare_state!("init");
 
+    // end-of-stream choice read UP FRONT (the tail of the payload is often
+    // consumed by the op loop; a post-loop read would always see 0).
+    let end_reuse = r.u8() & 1 == 1;
+
     let mut total: usize = buf.len();
     while !r.done() && total <= SEND_CAP {
         let op = r.u8() % 16;
@@ -721,7 +808,7 @@ fn run_send(r: &mut Rdr) {
     // stream end
     if in_message {
         if seams_owned() {
-            let reuse = r.u8() & 1 == 1;
+            let reuse = end_reuse;
             let cst = unsafe { pg_nf_endmessage(reuse as i32) };
             let rres = if reuse {
                 pqformat::pq_endmessage_reuse(&buf)
@@ -1038,6 +1125,22 @@ mod tests {
     #[test]
     fn foreach_differential() {
         check_foreach();
+    }
+
+    /// run_ifaddr_callback: every (addr family x mask kind) cell incl. the
+    /// zero-mask (invalid -> fullmask) and family-mismatch arms.
+    #[test]
+    fn run_cb_cells() {
+        for addr_v6 in [0u8, 1] {
+            for mask_kind in 0..4u8 {
+                for mask_byte in [0u8, 0xff, 0xf0] {
+                    let mut p = vec![addr_v6, mask_kind];
+                    p.extend_from_slice(&[10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+                    p.extend_from_slice(&[mask_byte; 16]);
+                    check_run_cb(&mut Rdr::new(&p));
+                }
+            }
+        }
     }
 
     /// Deterministic seeds through every arm (smoke for the planes).

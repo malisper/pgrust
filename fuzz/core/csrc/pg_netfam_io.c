@@ -1793,6 +1793,48 @@ pg_nf_if_cb(struct sockaddr *addr, struct sockaddr *mask, void *cb_data)
 	acc->count++;
 }
 
+/*
+ * Drive the vendored run_ifaddr_callback directly (the Rust fuzz conduit
+ * run_ifaddr_callback_for_fuzz mirrors this). addr_family: 0 v4 / 1 v6;
+ * mask_kind: 0 = NULL mask, 1 = v4 mask, 2 = v6 mask, 3 = AF_UNSPEC mask
+ * (the family-mismatch arm). Returns the single collected entry.
+ */
+int
+pg_nf_run_cb(int addr_family, const uint8_t *addr, int mask_kind,
+			 const uint8_t *mask, uint8_t *out_fam, uint8_t *out_addr,
+			 uint8_t *out_mask)
+{
+	struct sockaddr_storage a, m;
+	pg_nf_if_entry ent;
+	pg_nf_if_acc acc;
+
+	pg_nf_mk_sockaddr(&a, addr_family, addr);
+	acc.ents = &ent;
+	acc.cap = 1;
+	acc.count = 0;
+	if (mask_kind == 0)
+		run_ifaddr_callback(pg_nf_if_cb, &acc, (struct sockaddr *) &a, NULL);
+	else if (mask_kind == 3)
+	{
+		memset(&m, 0, sizeof(m));
+		m.ss_family = AF_UNSPEC;
+		run_ifaddr_callback(pg_nf_if_cb, &acc, (struct sockaddr *) &a,
+							(struct sockaddr *) &m);
+	}
+	else
+	{
+		pg_nf_mk_sockaddr(&m, mask_kind == 1 ? 0 : 1, mask);
+		run_ifaddr_callback(pg_nf_if_cb, &acc, (struct sockaddr *) &a,
+							(struct sockaddr *) &m);
+	}
+	if (acc.count != 1)
+		return -1;
+	*out_fam = ent.fam;
+	memcpy(out_addr, ent.addr, 16);
+	memcpy(out_mask, ent.mask, 16);
+	return 0;
+}
+
 int
 pg_nf_foreach(pg_nf_if_entry *out, int cap)
 {
