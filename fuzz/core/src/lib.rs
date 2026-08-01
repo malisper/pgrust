@@ -496,3 +496,6 @@ pub use portfam_diff::portfam_diff;
 // 18.3 C) — see core/src/tzfam_diff.rs.
 pub mod tzfam_diff;
 pub use tzfam_diff::tzfam_diff;
+// netfam_diff (p1-mb-netfam): libpq ifaddr + pqformat two-crate family.
+pub mod netfam_diff;
+pub use netfam_diff::netfam_diff;

@@ -85,6 +85,11 @@ fn main() {
         // (see pg_miscfam_io.c header; cmdtaglist.h vendored under
         // csrc/miscfam/tcop/).
         .file("csrc/pg_miscfam_io.c")
+        // netfam_diff oracle (p1-mb-netfam): verbatim 18.3 ifaddr.c pure
+        // core + pqformat.c + pqformat.h inlines + common/stringinfo.c
+        // behind nf_-renames (see pg_netfam_io.c header for provenance +
+        // the encoding/putmessage seam shims).
+        .file("csrc/pg_netfam_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).

@@ -160,5 +160,9 @@ tzparser = { path = "../../crates/backend/utils/misc/tzparser" }
 ts_locale = { path = "../../crates/backend/tsearch/ts_locale" }
 guc = { path = "../../crates/backend/utils/misc/guc" }
 
+# netfam_diff (p1-mb-netfam); pqformat/mcx/stringinfo/types_error/mbutils/mbutils_seams/datum already above
+ifaddr = { path = "../../crates/backend/libpq/ifaddr" }
+pqcomm_seams = { path = "../../crates/backend/libpq/pqcomm_seams" }
+
 [build-dependencies]
 cc = "1"

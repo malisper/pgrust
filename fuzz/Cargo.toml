@@ -416,6 +416,9 @@ path = "fuzz_targets/portfam_diff.rs"
 [[bin]]
 name = "tzfam_diff"
 path = "fuzz_targets/tzfam_diff.rs"
+[[bin]]
+name = "netfam_diff"
+path = "fuzz_targets/netfam_diff.rs"
 test = false
 doc = false
 bench = false
