@@ -12521,6 +12521,7 @@ dependencies = [
  "pg_b64",
  "pg_hmac",
  "pg_md5",
+ "pg_strong_random",
  "postgres_seams",
  "saslprep",
  "scram_common",
