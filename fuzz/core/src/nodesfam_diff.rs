@@ -314,11 +314,12 @@ pub fn c_read_labels() -> &'static Vec<&'static str> {
 /// surface is. Unknown labels pass the gate untouched (C's parseNodeString
 /// elogs "badly formatted node string" before touching any field, which is a
 /// compared error-verdict, not a crash).
-fn expected_fields() -> &'static std::collections::HashMap<String, Vec<String>> {
-    static MAP: OnceLock<std::collections::HashMap<String, Vec<String>>> = OnceLock::new();
+fn expected_fields() -> &'static std::collections::HashMap<String, Vec<(String, String)>> {
+    static MAP: OnceLock<std::collections::HashMap<String, Vec<(String, String)>>> =
+        OnceLock::new();
     MAP.get_or_init(|| {
-        // fn name -> ordered field list
-        let mut bodies: std::collections::HashMap<String, Vec<String>> =
+        // fn name -> ordered (field, macro-kind) list
+        let mut bodies: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
         for src in [
             include_str!("../csrc/nodesfam/gen/readfuncs.funcs.c"),
@@ -342,13 +343,14 @@ fn expected_fields() -> &'static std::collections::HashMap<String, Vec<String>> 
                     if t.starts_with("READ_") && !t.starts_with("READ_LOCALS")
                         && !t.starts_with("READ_TEMP_LOCALS") && !t.starts_with("READ_DONE")
                     {
+                        let kind: String = t[..open].trim().to_owned();
                         let inner = &t[open + 1..];
                         let name: String = inner
                             .chars()
                             .take_while(|c| c.is_alphanumeric() || *c == '_')
                             .collect();
                         if !name.is_empty() {
-                            bodies.get_mut(f).expect("body").push(name);
+                            bodies.get_mut(f).expect("body").push((name, kind));
                         }
                     }
                 }
@@ -483,7 +485,7 @@ fn well_formed_token_stream(text: &str) -> bool {
     let exp = expected_fields();
     let toks = pg_strtok_all(text);
     // stack of (expected field list, next index)
-    let mut stack: Vec<(Option<&Vec<String>>, usize)> = Vec::new();
+    let mut stack: Vec<(Option<&Vec<(String, String)>>, usize)> = Vec::new();
     let mut k = 0;
     while k < toks.len() {
         let t = toks[k];
@@ -511,7 +513,8 @@ fn well_formed_token_stream(text: &str) -> bool {
         // field slot must be exactly the expected field name
         if let Some((Some(fields), n)) = stack.last().map(|e| (e.0, e.1)) {
             if n < fields.len() {
-                if t != format!(":{}", fields[n]) {
+                let (fname, kind) = (&fields[n].0, fields[n].1.as_str());
+                if t != format!(":{fname}") {
                     return false;
                 }
                 if let Some(top) = stack.last_mut() {
@@ -546,7 +549,10 @@ fn well_formed_token_stream(text: &str) -> bool {
                         // re-walk nested blocks for their own field checks
                         continue;
                     }
-                    Some(_) => {
+                    Some(v) => {
+                        if !value_token_matches_kind(v, kind) {
+                            return false;
+                        }
                         k += 1;
                         continue;
                     }
@@ -559,6 +565,41 @@ fn well_formed_token_stream(text: &str) -> bool {
     stack.is_empty()
 }
 
+
+/// Does a value token have the LEXICAL FORM C's reader macro for this field
+/// kind would produce on the writing side?
+///
+/// WHY THE GATE CHECKS THIS (finding of record): C's numeric READ macros use
+/// `atoi`/`atooid`/`atol`/`strtod`, which parse a PREFIX and silently ignore
+/// trailing garbage — `atoi("0`")` is 0 — while the Rust port validates the
+/// whole token and panics ("readfuncs.c: bad integer token"). Rather than let
+/// that permissiveness delta accumulate as carve after carve, the compared
+/// domain is restricted to tokens C's own writer could emit for the field's
+/// kind. The delta itself is recorded in the lane report.
+fn value_token_matches_kind(tok: &str, kind: &str) -> bool {
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let signed_int = |s: &str| {
+        let body = s.strip_prefix('-').unwrap_or(s);
+        all_digits(body)
+    };
+    match kind {
+        "READ_INT_FIELD" | "READ_LONG_FIELD" | "READ_INT64_FIELD" | "READ_ENUM_FIELD"
+        | "READ_LOCATION_FIELD" => signed_int(tok),
+        "READ_UINT_FIELD" | "READ_UINT64_FIELD" | "READ_OID_FIELD" => all_digits(tok),
+        "READ_BOOL_FIELD" => tok == "true" || tok == "false",
+        // outfuncs writes a char as one byte (or as \0-escaped); C reads
+        // token[0], so any single-byte token is writer-producible
+        "READ_CHAR_FIELD" => tok.len() == 1,
+        // outfuncs writes floats with %.*g / shortest-decimal; accept exactly
+        // what Rust and C both parse, plus C's spellings of the specials
+        "READ_FLOAT_FIELD" => {
+            tok.parse::<f64>().is_ok()
+                || matches!(tok, "Infinity" | "-Infinity" | "NaN" | "inf" | "-inf" | "nan")
+        }
+        // strings/nodes/bitmapsets/arrays: shape handled structurally
+        _ => true,
+    }
+}
 
 /// Faithful port of C `pg_strtok` (read.c) token splitting: whitespace
 /// separates, `(){}` are single-character tokens, and a backslash escapes the
