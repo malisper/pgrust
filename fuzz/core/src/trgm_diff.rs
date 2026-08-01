@@ -1487,3 +1487,74 @@ mod arm2_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod repro_tests {
+    use super::*;
+
+    fn dump_both(pat: &[u8]) -> (String, String) {
+        init_env();
+        pin_locale_arm(0);
+        let env = pg_trgm::harness_env();
+        let r = pg_trgm::regexp::create_trgm_nfa(pat, types_core::C_COLLATION_OID, &env, &crc);
+        let rs = match &r {
+            Err(e) => format!("ERR({e:?})"),
+            Ok(None) => "FALLBACK".into(),
+            Ok(Some((t, _))) => {
+                let mut v: Vec<String> = t.iter().map(|t| format!("{:02x}{:02x}{:02x}", t[0], t[1], t[2])).collect();
+                v.sort();
+                format!("n={} {}", t.len(), v.join(","))
+            }
+        };
+        let cs = match c_regexp(pat) {
+            Err(c) => format!("ERR({c})"),
+            Ok(None) => "FALLBACK".into(),
+            Ok(Some(o)) => {
+                let mut v: Vec<String> = o.trg.chunks_exact(3).map(|t| format!("{:02x}{:02x}{:02x}", t[0], t[1], t[2])).collect();
+                v.sort();
+                format!("n={} {}", o.trg.len() / 3, v.join(","))
+            }
+        };
+        (rs, cs)
+    }
+
+    /// DIVERGENCE-OF-RECORD (p1-trgm phase B, 2026-08-01, minimized from
+    /// fuzz crash-70ab9f26be5e154f15be814574ae45553b68b4d9): pattern
+    /// `(\x16{31}a|b)(c|d)(e|f)(g|h)(i|j)` — both sides extract 16
+    /// trigrams but DIFFERENT multisets (C keeps the ace/acf/ade family,
+    /// Rust keeps ceg/ceh/cfg). Mechanism: selectColorTrigrams' over-budget
+    /// eviction removes equal-penalty color trigrams in SORT ORDER; C's
+    /// order = PG qsort (unstable) over the dynahash hash_seq collection
+    /// order (both vendored order-exact in this oracle), Rust's = stable
+    /// sort over state-insertion order. Both extractions are sound
+    /// (recheck-protected; NOT SQL-result-visible) — pending ruling:
+    /// order-exact port vs certified value-equal relaxation (multirange
+    /// precedent). This test asserts the divergence EXISTS so a product
+    /// fix or ratified relaxation flips it loudly.
+    #[test]
+    fn known_divergence_penalty_tie_order() {
+        let pat = format!("({}a|b)(c|d)(e|f)(g|h)(i|j)", "\x16".repeat(31));
+        let pat = pat.replace("\\x16", "\x16");
+        let (r, c) = dump_both(pat.as_bytes());
+        assert!(r.starts_with("n=16") && c.starts_with("n=16"), "shape drift: {r} vs {c}");
+        assert_ne!(r, c, "penalty-tie divergence RESOLVED — retire this test and unblock the arm-9 multiset plane");
+    }
+
+    #[test]
+    fn minimize_crash_70ab9f26() {
+        // original: (\x16{31}a|b)(c|d)(e|f)(g|h)(i|j)
+        for (name, pat) in [
+            ("orig-shape", format!("({}a|b)(c|d)(e|f)(g|h)(i|j)", "\x16".repeat(31))),
+            ("short1", format!("({}a|b)(c|d)", "\x16".repeat(31))),
+            ("short2", format!("({}a|b)(c|d)", "\x16".repeat(3))),
+            ("short3", "(\x16a|b)(c|d)".to_string()),
+            ("short4", "(\x16a|b)c".to_string()),
+            ("short5", "\x16a".to_string()),
+            ("short6", "(!a|b)c".to_string()),
+        ] {
+            let (r, c) = dump_both(pat.as_bytes());
+            eprintln!("{name}: rust={r}");
+            eprintln!("{name}:    c={c}");
+        }
+    }
+}
