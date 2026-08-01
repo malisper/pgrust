@@ -437,11 +437,47 @@ pub fn spellfam_diff(data: &[u8]) {
     // fully in domain (e.g. the ispell_sample.affix fixture: `flag *A:`).
     {
         let lower: Vec<u8> = aff.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let has_old_section = lower
-            .split(|&b| b == b'\n')
-            .any(|l| l.starts_with(b"prefixes") || l.starts_with(b"suffixes"));
-        let has_flag_directive = lower.split(|&b| b == b'\n').any(|l| l.starts_with(b"flag"));
-        if has_old_section && !has_flag_directive {
+        // The predicate must respect LINE ORDER, not mere presence: C's
+        // `flag` buffer is uninitialized until a `flag` directive line is
+        // parsed, so ANY affix entry parsed before the first such line uses
+        // uninitialized stack — even if a `flag` line appears later in the
+        // file. A presence-only check missed exactly that (CI cluster exec 47170,
+        // seed task81-order-a7c41914: a mutated `fl\x01A:` line leaves the
+        // prefixes-section entry ` . > RE` flagless while a later `flag T:`
+        // satisfied the old test). Walk in order and carve as soon as an
+        // entry line would be parsed with no preceding `flag` directive.
+        let mut seen_flag = false;
+        let mut in_section = false;
+        let mut carve_uninit_flag = false;
+        for line in lower.split(|&b| b == b'\n') {
+            let t: &[u8] = {
+                let start = line.iter().position(|b| !b.is_ascii_whitespace());
+                match start {
+                    None => continue, // blank
+                    Some(i) => &line[i..],
+                }
+            };
+            if t.starts_with(b"#") {
+                continue;
+            }
+            if t.starts_with(b"prefixes") || t.starts_with(b"suffixes") {
+                in_section = true;
+                continue;
+            }
+            if t.starts_with(b"flag") {
+                seen_flag = true;
+                continue;
+            }
+            if t.starts_with(b"compoundwords") {
+                continue;
+            }
+            // Any other non-blank line inside a section is an affix entry.
+            if in_section && !seen_flag {
+                carve_uninit_flag = true;
+                break;
+            }
+        }
+        if carve_uninit_flag {
             return;
         }
 
@@ -911,6 +947,35 @@ mod fleet_repro {
     fn div8_c2c2ce81() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-div8-c2c2ce81")).unwrap();
         super::spellfam_diff(&data);
+    }
+    /// TASK #81 ORDER-SENSITIVITY REGRESSION: an affix entry parsed BEFORE any
+    /// `flag` directive uses C's uninitialized flag[BUFSIZ], even when a `flag`
+    /// line appears later. Seed from CI cluster exec 47170 (a mutated `fl\x01A:`
+    /// line). Must land in the carve; the ispell_sample shape
+    /// (section -> flag -> entries) must NOT.
+    #[test]
+    fn task81_flag_order_a7c41914() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/task81-order-a7c41914")).unwrap();
+        super::spellfam_diff(&data);
+        fn carved(aff: &[u8]) -> bool {
+            let lower: Vec<u8> = aff.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let (mut seen_flag, mut in_section) = (false, false);
+            for line in lower.split(|&b| b == b'\n') {
+                let Some(i) = line.iter().position(|b| !b.is_ascii_whitespace()) else { continue };
+                let t = &line[i..];
+                if t.starts_with(b"#") { continue; }
+                if t.starts_with(b"prefixes") || t.starts_with(b"suffixes") { in_section = true; continue; }
+                if t.starts_with(b"flag") { seen_flag = true; continue; }
+                if t.starts_with(b"compoundwords") { continue; }
+                if in_section && !seen_flag { return true; }
+            }
+            false
+        }
+        assert!(carved(b"prefixes\nfl\x01A:\n . > RE\nsuffixes\nflag T:\n E > -E,ING\n"),
+                "entry before any flag directive must be carved");
+        assert!(!carved(b"prefixes\n\nflag *A:\n\t. > RE\n"),
+                "flag before entries => in domain (ispell_sample shape)");
+        assert!(!carved(b"SFX T Y 1\nSFX T 0 s .\n"), "hunspell format => in domain");
     }
     #[test]
     fn div7_compound_4e2fe0d5() {
