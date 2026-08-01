@@ -16,6 +16,7 @@ use pg_strong_random::pg_strong_random;
 const MD5_SIZE: usize = 16;
 const ITOA64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
+#[derive(Debug)]
 pub enum CryptError {
     Unsupported(&'static str),
     Message(String),
@@ -92,9 +93,9 @@ pub fn crypt(password: &str, salt: &str) -> Result<String, CryptError> {
     } else if s.starts_with(b"$2a$") || s.starts_with(b"$2x$") || s.starts_with(b"$2b$") {
         bcrypt::crypt_bf(password.as_bytes(), s)
     } else if s.first() == Some(&b'_') {
-        desc::crypt_xdes(password.as_bytes(), s).map_err(CryptError::Message)
+        desc::crypt_xdes(password.as_bytes(), s)
     } else {
-        desc::crypt_des(password.as_bytes(), s).map_err(CryptError::Message)
+        desc::crypt_des(password.as_bytes(), s)
     }
 }
 
@@ -178,16 +179,18 @@ fn crypt_md5(pw: &[u8], salt: &[u8]) -> Result<String, String> {
     ))
 }
 
+// CHECK_FOR_INTERRUPTS test double, shared by the crypt/bcrypt/shacrypt/des
+// test modules: a per-thread budget of Ok() calls, then a query-cancel error —
+// plus a call counter so tests can assert exactly how many rounds actually
+// ran. Seams are set-once per process, so the installed fn reads
+// thread-locals the tests configure. NB: the seam has no default leg and
+// PANICS if uninstalled — a crypt test passing WITHOUT arm_cfi() is itself
+// proof its path carries no interrupt check.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod cfi_test_support {
     use core::cell::Cell;
     use std::sync::Once;
 
-    // CHECK_FOR_INTERRUPTS test double: a per-thread budget of Ok() calls,
-    // then a query-cancel error — plus a call counter so tests can assert
-    // exactly how many rounds actually ran. Seams are set-once per process,
-    // so the installed fn reads thread-locals the tests configure.
     thread_local! {
         static CFI_BUDGET: Cell<u64> = const { Cell::new(u64::MAX) };
         static CFI_CALLS: Cell<u64> = const { Cell::new(0) };
@@ -209,15 +212,21 @@ mod tests {
         })
     }
 
-    fn arm_cfi(budget: u64) {
+    pub(crate) fn arm_cfi(budget: u64) {
         CFI_INIT.call_once(|| postgres_seams::check_for_interrupts::set(test_cfi));
         CFI_BUDGET.with(|b| b.set(budget));
         CFI_CALLS.with(|c| c.set(0));
     }
 
-    fn cfi_calls() -> u64 {
+    pub(crate) fn cfi_calls() -> u64 {
         CFI_CALLS.with(|c| c.get())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cfi_test_support::{arm_cfi, cfi_calls};
+    use super::*;
 
     fn ok(r: Result<String, CryptError>) -> String {
         match r {

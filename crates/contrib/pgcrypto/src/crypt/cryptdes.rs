@@ -12,6 +12,13 @@
 use std::num::Wrapping as W;
 use std::sync::OnceLock;
 
+use super::CryptError;
+
+// C px_crypt_des returns NULL -> pgcrypto reports "crypt(3) returned NULL".
+fn crypt3_null() -> CryptError {
+    CryptError::Message("crypt(3) returned NULL".to_string())
+}
+
 const CRYPT_A64: &[u8; 64] =
     b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -366,13 +373,15 @@ impl DesState {
         }
     }
 
-    /// Returns Some((l_out, r_out)) on success; None if count == 0
-    /// (mirrors C's `do_des` returning 1 → `px_crypt_des` returns NULL).
-    fn do_des(&self, l_in: u32, r_in: u32, count: i32) -> Option<(u32, u32)> {
+    /// Returns Ok((l_out, r_out)) on success; the crypt(3)-NULL error if
+    /// count == 0 (mirrors C's `do_des` returning 1 → `px_crypt_des` returns
+    /// NULL), or a raised interrupt from the per-iteration
+    /// CHECK_FOR_INTERRUPTS.
+    fn do_des(&self, l_in: u32, r_in: u32, count: i32) -> Result<(u32, u32), CryptError> {
         let t = tables();
 
         let (kl1, kr1, mut count) = if count == 0 {
-            return None;
+            return Err(crypt3_null());
         } else if count > 0 {
             (&self.en_keysl, &self.en_keysr, count)
         } else {
@@ -406,6 +415,10 @@ impl DesState {
 
         let mut f = 0u32;
         while count != 0 {
+            // C runs CHECK_FOR_INTERRUPTS() at the top of every iteration
+            // (crypt-des.c:541) so a large xdes count stays cancellable. A
+            // raised cancel/die propagates out as the error.
+            postgres_seams::check_for_interrupts::call().map_err(CryptError::Pg)?;
             count -= 1;
             let kl = kl1;
             let kr = kr1;
@@ -465,12 +478,12 @@ impl DesState {
             | fpr[6][((r >> 8) & 0xff) as usize]
             | fpr[7][(r & 0xff) as usize];
 
-        Some((l_out, r_out))
+        Ok((l_out, r_out))
     }
 
     /// `des_cipher(in, out, salt, count)` — encrypt one 8-byte block.
-    /// Returns None on failure (count == 0).
-    fn des_cipher(&mut self, input: &[u8; 8], salt: i64, count: i32) -> Option<[u8; 8]> {
+    /// Fails only as `do_des` fails (count == 0, or a raised interrupt).
+    fn des_cipher(&mut self, input: &[u8; 8], salt: i64, count: i32) -> Result<[u8; 8], CryptError> {
         self.setup_salt(salt);
         let rawl = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
         let rawr = u32::from_be_bytes([input[4], input[5], input[6], input[7]]);
@@ -479,7 +492,7 @@ impl DesState {
         // pg_hton32 = to_big_endian
         out[0..4].copy_from_slice(&l_out.to_be_bytes());
         out[4..8].copy_from_slice(&r_out.to_be_bytes());
-        Some(out)
+        Ok(out)
     }
 }
 
@@ -508,12 +521,13 @@ fn ascii_to_bin(ch: u8) -> u32 {
 }
 
 /// Faithful port of `px_crypt_des(key, setting)`. Returns the encoded crypt
-/// string, or `None` when the C returns NULL (e.g. count == 0).
+/// string; errors where the C returns NULL (count == 0 → "crypt(3) returned
+/// NULL") or when CHECK_FOR_INTERRUPTS raises.
 ///
 /// The length checks that C raises as `ereport(ERROR, "invalid salt")` are NOT
 /// done here — they are handled by the callers (`crypt_des` / `crypt_xdes`) so
 /// the error text and ordering match exactly.
-pub fn px_crypt_des(key: &[u8], setting: &[u8]) -> Option<Vec<u8>> {
+pub fn px_crypt_des(key: &[u8], setting: &[u8]) -> Result<Vec<u8>, CryptError> {
     let mut st = DesState::new();
 
     // Copy the key, shifting each character up by one bit and padding with
@@ -604,31 +618,36 @@ pub fn px_crypt_des(key: &[u8], setting: &[u8]) -> Option<Vec<u8>> {
     output.push(a64[((l >> 6) & 0x3f) as usize]);
     output.push(a64[(l & 0x3f) as usize]);
 
-    Some(output)
+    Ok(output)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::cfi_test_support::arm_cfi;
     use super::*;
 
     // Helper mirroring the desc.rs callers, so we test px_crypt_des end-to-end.
     fn xdes(pw: &[u8], setting: &[u8]) -> Result<String, String> {
+        arm_cfi(u64::MAX);
         if setting.len() < 9 {
             return Err("invalid salt".to_string());
         }
         match px_crypt_des(pw, setting) {
-            Some(out) => Ok(String::from_utf8_lossy(&out).into_owned()),
-            None => Err("crypt(3) returned NULL".to_string()),
+            Ok(out) => Ok(String::from_utf8_lossy(&out).into_owned()),
+            Err(CryptError::Message(m)) => Err(m),
+            Err(_) => Err("unexpected error kind".to_string()),
         }
     }
 
     fn des(pw: &[u8], setting: &[u8]) -> Result<String, String> {
+        arm_cfi(u64::MAX);
         if setting.len() < 2 {
             return Err("invalid salt".to_string());
         }
         match px_crypt_des(pw, setting) {
-            Some(out) => Ok(String::from_utf8_lossy(&out).into_owned()),
-            None => Err("crypt(3) returned NULL".to_string()),
+            Ok(out) => Ok(String::from_utf8_lossy(&out).into_owned()),
+            Err(CryptError::Message(m)) => Err(m),
+            Err(_) => Err("unexpected error kind".to_string()),
         }
     }
 

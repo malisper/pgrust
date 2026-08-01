@@ -835,7 +835,15 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      the laneai test-module rename): cfg(test) per-thread output
     //      buffer for the whitespace tests' identity text codec; same
     //      test-only textual-count class as the row above.
-    assert_eq!(count_tree(crates), 547, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    //   +1 contrib/pgcrypto/src/crypt.rs — CFI_BUDGET/CFI_CALLS (lane
+    //      p1-cryptofix): cfg(test) per-thread budget + call counter behind
+    //      the CHECK_FOR_INTERRUPTS test double for the crypt cost-loop
+    //      cancellability witnesses (D19). One `thread_local!` block, test
+    //      binary only, absent from every shipped profile; counted only
+    //      because the census counter is textual. Non-session on the
+    //      substance: per-test scratch, no session identity, nothing an
+    //      envelope could capture or restore.
+    assert_eq!(count_tree(crates), 548, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
