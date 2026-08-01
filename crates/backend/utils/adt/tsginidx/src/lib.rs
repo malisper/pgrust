@@ -79,7 +79,7 @@ pub fn gin_extract_tsquery<'m>(
         return Ok(out);
     }
 
-    out.search_mode = if tsquery_requires_match(query, 0) {
+    out.search_mode = if tsquery_requires_match(query, 0)? {
         GIN_SEARCH_MODE_DEFAULT
     } else {
         GIN_SEARCH_MODE_ALL

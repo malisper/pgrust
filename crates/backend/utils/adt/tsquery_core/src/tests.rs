@@ -145,3 +145,101 @@ fn querytree() {
     let t = tsquerytree_core(mcx, q(mcx, "1&(2&(4&(5&6)))")).unwrap();
     assert_eq!(&t[..], b"'1' & '2' & '4' & '5' & '6'");
 }
+
+/// p1-deadguard REGRESSION (release blocker, task #62): the whole tsquery /
+/// tsvector recursion family shipped with NO stack guard at all — not even a
+/// dead frame-count cap. C guards every one of these walks with
+/// check_stack_depth() (24 call sites across tsquery.c, tsquery_util.c,
+/// tsquery_cleanup.c, tsquery_rewrite.c and tsvector_op.c), which measures
+/// actual stack BYTES against max_stack_depth and raises
+/// ERRCODE_STATEMENT_TOO_COMPLEX (54001).
+///
+/// Without it, deep input overflows the thread stack and the Rust runtime
+/// aborts the PROCESS. pgrust is thread-per-backend, so that kills every
+/// session, not just the offending one.
+///
+/// Measured pre-fix (local --release, aarch64 macOS, 8 MiB worker stack):
+///   'a&a&…&a'          survives 7000, ABORTS at 8000  (~1120 bytes/frame)
+///   '((((…a…))))'      survives 6000, ABORTS at 7000  (~1290 bytes/frame)
+/// Both are plain unprivileged casts of a `repeat()` literal. C 18.3 on the
+/// same inputs raises 54001 and never dies.
+///
+/// Runs each probe in a subprocess because a stack overflow aborts the process.
+#[test]
+fn tsquery_deep_recursion_raises_54001_and_does_not_abort() {
+    // (shape, nesting depth) — every one of these ABORTED before the fix.
+    // ('!' repetition is NOT in this set: NOT pushes onto makepol's 32-deep
+    // operator stack, so C and pgrust both reject it long before any recursion.)
+    const CASES: [(&str, usize); 7] = [
+        ("and", 8000),
+        ("and", 20000),
+        ("and", 100_000),
+        ("paren", 7000),
+        ("paren", 20000),
+        ("paren", 100_000),
+        ("phrase", 20000),
+    ];
+    if let (Ok(d), Ok(kind)) =
+        (std::env::var("TSQ_STACK_PROBE_DEPTH"), std::env::var("TSQ_STACK_PROBE_KIND"))
+    {
+        let depth: usize = d.parse().unwrap();
+        let s: String = match kind.as_str() {
+            // findoprnd_recurse / infix / qt2qtn: one frame per tree level.
+            "and" => format!("{}a", "a&".repeat(depth)),
+            // makepol: one frame per '('.
+            "paren" => format!("{}a{}", "(".repeat(depth), ")".repeat(depth)),
+            "phrase" => format!("{}a", "a<->".repeat(depth)),
+            other => panic!("bad probe kind {other}"),
+        };
+        let h = std::thread::Builder::new()
+            // Production HEADROOM: an 8 MiB worker stack paired with
+            // max_stack_depth = 2048 kB. Pairing a 2 MiB stack with 2048 kB
+            // leaves NO headroom and reddens the CI cluster's dev profile.
+            .stack_size(8 << 20)
+            .spawn(move || {
+                // A backend thread records its stack base at spawn (C: main()).
+                // Without this, stack_is_too_deep() short-circuits on base == 0
+                // and every guard below is INERT — the test would be vacuous.
+                ::stack_depth::set_stack_base();
+                ::stack_depth::assign_max_stack_depth(2048);
+                let ctx = MemoryContext::new("t");
+                let mcx = ctx.mcx();
+                let img = tsquery_in_core(mcx, s.as_bytes(), None)?.expect("no soft error");
+                let out = tsquery_out_core(mcx, TsQueryRef { payload: &img[4..] })?;
+                Ok::<usize, Box<::types_error::PgError>>(out.len())
+            })
+            .unwrap();
+        match h.join().expect("parser thread must not panic") {
+            Ok(n) => eprintln!("PROBE OK {n}"),
+            Err(e) => eprintln!("PROBE ERR {}", e.sqlstate().0),
+        }
+        return;
+    }
+    // ERRCODE_STATEMENT_TOO_COMPLEX == MAKE_SQLSTATE("54001").
+    const STATEMENT_TOO_COMPLEX: u32 = 5 + (4 << 6) + (1 << 24);
+    let exe = std::env::current_exe().unwrap();
+    for (kind, depth) in CASES {
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "--nocapture",
+                "tests::tsquery_deep_recursion_raises_54001_and_does_not_abort",
+            ])
+            .env("TSQ_STACK_PROBE_KIND", kind)
+            .env("TSQ_STACK_PROBE_DEPTH", depth.to_string())
+            .output()
+            .unwrap();
+        let se = String::from_utf8_lossy(&out.stderr);
+        let line = se.lines().find(|l| l.starts_with("PROBE")).unwrap_or_else(|| {
+            panic!("{kind}/{depth}: process died without a verdict (stack overflow): {se}")
+        });
+        // The depth at which the guard trips is a function of frame size and is
+        // NOT a comparison surface against C. That the process SURVIVES and
+        // reports 54001 rather than aborting is.
+        assert_eq!(
+            line,
+            format!("PROBE ERR {STATEMENT_TOO_COMPLEX}"),
+            "{kind}/{depth}: expected a clean 54001, got {line:?}"
+        );
+    }
+}

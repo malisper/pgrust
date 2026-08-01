@@ -485,6 +485,9 @@ impl<'s, 'e, 'mcx> QueryParser<'s, 'e, 'mcx> {
         &mut self,
         pushval: &mut dyn FnMut(&mut Self, &[u8], i16, bool) -> PgResult<()>,
     ) -> PgResult<()> {
+        // C tsquery.c makepol(): "since this function recurses, it could be
+        // driven to stack overflow" -> check_stack_depth(). One frame per '('.
+        ::stack_depth::check_stack_depth()?;
         const STACKDEPTH: usize = 32;
         let mut opstack: [(i8, i16); STACKDEPTH] = [(0, 0); STACKDEPTH];
         let mut lenstack = 0usize;
@@ -564,6 +567,9 @@ fn findoprnd_recurse(
     pos: &mut usize,
     needcleanup: &mut bool,
 ) -> PgResult<()> {
+    // C tsquery.c findoprnd_recurse(): check_stack_depth(). One frame per tree
+    // level, and 'a&a&a&...' is a left-deep tree, so depth == token count.
+    ::stack_depth::check_stack_depth()?;
     if *pos >= items.len() {
         return Err(PgError::error("malformed tsquery: operand not found").into());
     }

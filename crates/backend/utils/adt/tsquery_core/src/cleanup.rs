@@ -13,14 +13,16 @@ enum Node {
     },
 }
 
-fn maketree(items: &[Item], pos: &mut usize) -> Box<Node> {
+fn maketree(items: &[Item], pos: &mut usize) -> PgResult<Box<Node>> {
+    // C tsquery_cleanup.c maketree(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     let it = items[*pos];
     *pos += 1;
-    match it {
+    Ok(match it {
         Item::Opr(opr) => {
-            let right = maketree(items, pos);
+            let right = maketree(items, pos)?;
             let left = if opr.oper != OP_NOT {
-                Some(maketree(items, pos))
+                Some(maketree(items, pos)?)
             } else {
                 None
             };
@@ -28,53 +30,63 @@ fn maketree(items: &[Item], pos: &mut usize) -> Box<Node> {
             Box::new(Node::Op { item: opr, left, right })
         }
         other => Box::new(Node::Leaf(other)),
-    }
+    })
 }
 
-fn plainnode(out: &mut PgVec<'_, Item>, node: &Node) {
+fn plainnode(out: &mut PgVec<'_, Item>, node: &Node) -> PgResult<()> {
+    // C tsquery_cleanup.c plainnode(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     match node {
         Node::Leaf(it) => out.push(*it),
         Node::Op { item, left, right } => {
             if item.oper == OP_NOT {
                 out.push(Item::Opr(Operator { left: 1, ..*item }));
-                plainnode(out, right);
+                plainnode(out, right)?;
             } else {
                 let cur = out.len();
                 out.push(Item::Opr(*item));
-                plainnode(out, right);
+                plainnode(out, right)?;
                 let l = (out.len() - cur) as u32;
                 if let Item::Opr(ref mut o) = out[cur] {
                     o.left = l;
                 }
-                plainnode(out, left.as_ref().expect("binary operator has left"));
+                plainnode(out, left.as_ref().expect("binary operator has left"))?;
             }
         }
     }
+    Ok(())
 }
 
 fn plaintree<'mcx>(mcx: Mcx<'mcx>, root: Option<&Node>) -> PgResult<PgVec<'mcx, Item>> {
     let mut out: PgVec<Item> = vec_with_capacity_in(mcx, 16)?;
     if let Some(root) = root {
-        plainnode(&mut out, root);
+        plainnode(&mut out, root)?;
     }
     Ok(out)
 }
 
-fn clean_not_intree(node: Box<Node>) -> Option<Box<Node>> {
-    match *node {
+fn clean_not_intree(node: Box<Node>) -> PgResult<Option<Box<Node>>> {
+    // C tsquery_cleanup.c clean_NOT_intree(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
+    Ok(match *node {
         Node::Leaf(Item::Val(_)) => Some(node),
         Node::Leaf(_) => Some(node),
         Node::Op { item, left, right } => {
             if item.oper == OP_NOT {
-                return None;
+                return Ok(None);
             }
             if item.oper == OP_OR {
-                let l = clean_not_intree(left.expect("OR has left"))?;
-                let r = clean_not_intree(right)?;
+                let Some(l) = clean_not_intree(left.expect("OR has left"))? else {
+                    return Ok(None);
+                };
+                let Some(r) = clean_not_intree(right)? else { return Ok(None) };
                 Some(Box::new(Node::Op { item, left: Some(l), right: r }))
             } else {
-                let l = left.and_then(clean_not_intree);
-                let r = clean_not_intree(right);
+                let l = match left {
+                    Some(l) => clean_not_intree(l)?,
+                    None => None,
+                };
+                let r = clean_not_intree(right)?;
                 match (l, r) {
                     (None, None) => None,
                     (Some(l), None) => Some(l),
@@ -85,7 +97,7 @@ fn clean_not_intree(node: Box<Node>) -> Option<Box<Node>> {
                 }
             }
         }
-    }
+    })
 }
 
 // clean_NOT: strip NOT subtrees; None = query degenerates to nothing.
@@ -98,8 +110,8 @@ pub fn clean_not<'mcx>(
         items.push(q.item(i));
     }
     let mut pos = 0usize;
-    let root = maketree(&items, &mut pos);
-    match clean_not_intree(root) {
+    let root = maketree(&items, &mut pos)?;
+    match clean_not_intree(root)? {
         None => Ok(None),
         Some(root) => Ok(Some(plaintree(mcx, Some(root.as_ref()))?)),
     }
@@ -109,23 +121,27 @@ fn clean_stopword_intree(
     node: Box<Node>,
     ladd: &mut i32,
     radd: &mut i32,
-) -> Option<Box<Node>> {
+) -> PgResult<Option<Box<Node>>> {
+    // C tsquery_cleanup.c clean_stopword_intree(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     *ladd = 0;
     *radd = 0;
-    match *node {
+    Ok(match *node {
         Node::Leaf(Item::Val(_)) => Some(node),
         Node::Leaf(Item::ValStop) => None,
         Node::Leaf(Item::Opr(_)) => unreachable!("operator leaf"),
         Node::Op { mut item, left, right } => {
             if item.oper == OP_NOT {
-                let r = clean_stopword_intree(right, ladd, radd)?;
+                let Some(r) = clean_stopword_intree(right, ladd, radd)? else {
+                    return Ok(None);
+                };
                 Some(Box::new(Node::Op { item, left: None, right: r }))
             } else {
                 let (mut lladd, mut lradd, mut rladd, mut rradd) = (0, 0, 0, 0);
                 let l = left
                     .expect("binary operator has left")
-                    .into_clean(&mut lladd, &mut lradd);
-                let r = right.into_clean(&mut rladd, &mut rradd);
+                    .into_clean(&mut lladd, &mut lradd)?;
+                let r = right.into_clean(&mut rladd, &mut rradd)?;
 
                 let isphrase = item.oper == OP_PHRASE;
                 let ndistance = if isphrase { item.distance as i32 } else { 0 };
@@ -173,11 +189,15 @@ fn clean_stopword_intree(
                 }
             }
         }
-    }
+    })
 }
 
 impl Node {
-    fn into_clean(self: Box<Self>, ladd: &mut i32, radd: &mut i32) -> Option<Box<Node>> {
+    fn into_clean(
+        self: Box<Self>,
+        ladd: &mut i32,
+        radd: &mut i32,
+    ) -> PgResult<Option<Box<Node>>> {
         clean_stopword_intree(self, ladd, radd)
     }
 }
@@ -200,9 +220,9 @@ pub fn cleanup_tsquery_stopwords<'mcx>(
         items.push(q.item(i));
     }
     let mut pos = 0usize;
-    let root = maketree(&items, &mut pos);
+    let root = maketree(&items, &mut pos)?;
     let (mut ladd, mut radd) = (0, 0);
-    let root = clean_stopword_intree(root, &mut ladd, &mut radd);
+    let root = clean_stopword_intree(root, &mut ladd, &mut radd)?;
     let Some(root) = root else {
         if noisy {
             ::elog::ThrowErrorData(PgError::notice(

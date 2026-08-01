@@ -402,22 +402,24 @@ pub fn ts_match_vq_core<'mcx>(mcx: Mcx<'mcx>, v: TsVec<'_>, q: TsQueryRef<'_>) -
     crate::execute::ts_execute(mcx, q, crate::execute::TS_EXEC_EMPTY, &mut chk)
 }
 
-pub fn tsquery_requires_match(q: TsQueryRef<'_>, idx: usize) -> bool {
+pub fn tsquery_requires_match(q: TsQueryRef<'_>, idx: usize) -> PgResult<bool> {
     use crate::query::{Item, OP_AND, OP_NOT, OP_OR, OP_PHRASE};
-    match q.item(idx) {
+    // C tsvector_op.c tsquery_requires_match(): check_stack_depth().
+    ::stack_depth::check_stack_depth()?;
+    Ok(match q.item(idx) {
         Item::Val(_) => true,
         Item::ValStop => panic!("tsquery_requires_match: QI_VALSTOP in stored tsquery"),
         Item::Opr(opr) => match opr.oper {
             OP_NOT => false,
             OP_PHRASE | OP_AND => {
-                tsquery_requires_match(q, idx + opr.left as usize)
-                    || tsquery_requires_match(q, idx + 1)
+                tsquery_requires_match(q, idx + opr.left as usize)?
+                    || tsquery_requires_match(q, idx + 1)?
             }
             OP_OR => {
-                tsquery_requires_match(q, idx + opr.left as usize)
-                    && tsquery_requires_match(q, idx + 1)
+                tsquery_requires_match(q, idx + opr.left as usize)?
+                    && tsquery_requires_match(q, idx + 1)?
             }
             other => panic!("unrecognized operator: {other}"),
         },
-    }
+    })
 }

@@ -18,3 +18,4 @@ adt_tsquery_core = { path = "../tsquery_core" }
 spi = { path = "../../../executor/spi" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 elog = { path = "../../../utils/error/elog" }
+stack_depth = { path = "../../misc/stack_depth" }

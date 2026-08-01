@@ -40,7 +40,7 @@ fn findeq<'mcx>(
                 return Ok(Some(node));
             }
             if node.children.len() == ex.children.len() {
-                if qtn_eq(&node, ex) {
+                if qtn_eq(&node, ex)? {
                     *isfind = true;
                     return Ok(match subs {
                         Some(s) => {
@@ -59,7 +59,7 @@ fn findeq<'mcx>(
                 let mut nmatched = 0usize;
                 let (mut i, mut j) = (0usize, 0usize);
                 while i < node.children.len() && j < ex.children.len() {
-                    let cmp = qtnode_compare(&node.children[i], &ex.children[j]);
+                    let cmp = qtnode_compare(&node.children[i], &ex.children[j])?;
                     if cmp == 0 {
                         matched[i] = true;
                         nmatched += 1;
@@ -89,14 +89,14 @@ fn findeq<'mcx>(
                     }
                     // Zero-or-one-child simplification is dofindsubquery's
                     // job; the re-sort keeps regression output stable.
-                    qtn_sort(&mut node);
+                    qtn_sort(&mut node)?;
                     *isfind = true;
                 }
             }
             Ok(Some(node))
         }
         (Item::Val(nop), Item::Val(eop)) => {
-            if nop.valcrc != eop.valcrc || !qtn_eq(&node, ex) {
+            if nop.valcrc != eop.valcrc || !qtn_eq(&node, ex)? {
                 return Ok(Some(node));
             }
             *isfind = true;
@@ -122,6 +122,9 @@ fn dofindsubquery<'mcx>(
     subs: Option<&QtNode<'_>>,
     isfind: &mut bool,
 ) -> PgResult<Option<QtNode<'mcx>>> {
+    // C tsquery_rewrite.c dofindsubquery(): check_stack_depth() alongside
+    // CHECK_FOR_INTERRUPTS() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     ::postgres_seams::check_for_interrupts::call()?;
 
     let Some(mut root) = findeq(mcx, root, ex, subs, isfind)? else {
@@ -181,15 +184,15 @@ fn empty_tsquery<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
 
 fn prepared_tree<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>) -> PgResult<QtNode<'mcx>> {
     let mut t = qt2qtn(mcx, q, 0)?;
-    qtn_ternary(&mut t);
-    qtn_sort(&mut t);
+    qtn_ternary(&mut t)?;
+    qtn_sort(&mut t)?;
     Ok(t)
 }
 
 fn finish_tree<'mcx>(mcx: Mcx<'mcx>, tree: Option<QtNode<'mcx>>) -> PgResult<Datum> {
     match tree {
         Some(mut t) => {
-            ::adt_tsquery_core::util::qtn_binary(mcx, &mut t);
+            ::adt_tsquery_core::util::qtn_binary(mcx, &mut t)?;
             Ok(image_result(qtn2qt(mcx, &t)?))
         }
         None => Ok(image_result(empty_tsquery(mcx)?)),
@@ -303,9 +306,9 @@ pub fn fc_tsquery_rewrite_query(
                     *tree = findsubquery(mcx, tree.take().expect("tree"), &qex, qsubs.as_ref())?;
                     if let Some(t) = tree.as_mut() {
                         // Ready the tree for another pass.
-                        qtn_clear_flags(t, QTN_NOCHANGE);
-                        qtn_ternary(t);
-                        qtn_sort(t);
+                        qtn_clear_flags(t, QTN_NOCHANGE)?;
+                        qtn_ternary(t)?;
+                        qtn_sort(t)?;
                     }
                 }
                 Ok(())

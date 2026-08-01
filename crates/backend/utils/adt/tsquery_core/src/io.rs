@@ -59,6 +59,8 @@ fn infix<'mcx>(
     parent_priority: i32,
     right_phrase_op: bool,
 ) -> PgResult<()> {
+    // C tsquery.c infix(): check_stack_depth(). One frame per tree level.
+    ::stack_depth::check_stack_depth()?;
     match st.q.item(st.cur) {
         Item::Val(op) => {
             out.push(b'\'');
@@ -274,7 +276,7 @@ pub fn compare_tsq(a: TsQueryRef<'_>, b: TsQueryRef<'_>, mcx: Mcx<'_>) -> PgResu
     if a.size() != 0 {
         let an = crate::util::qt2qtn(mcx, a, 0)?;
         let bn = crate::util::qt2qtn(mcx, b, 0)?;
-        return Ok(crate::util::qtnode_compare(&an, &bn));
+        return crate::util::qtnode_compare(&an, &bn);
     }
     Ok(0)
 }

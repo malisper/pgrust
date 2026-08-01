@@ -18,6 +18,8 @@ pub const QTN_NOCHANGE: u32 = 0x01;
 
 // QT2QTN over a flat query payload.
 pub fn qt2qtn<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>, idx: usize) -> PgResult<QtNode<'mcx>> {
+    // C tsquery_util.c QT2QTN(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     match q.item(idx) {
         Item::Opr(opr) => {
             let mut children: PgVec<QtNode> = PgVec::new_in(mcx);
@@ -57,29 +59,31 @@ pub fn qt2qtn<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>, idx: usize) -> PgResult<Q
     }
 }
 
-pub fn qtnode_compare(a: &QtNode<'_>, b: &QtNode<'_>) -> i32 {
-    match (&a.item, &b.item) {
+pub fn qtnode_compare(a: &QtNode<'_>, b: &QtNode<'_>) -> PgResult<i32> {
+    // C tsquery_util.c QTNodeCompare(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
+    Ok(match (&a.item, &b.item) {
         (Item::Opr(ao), Item::Opr(bo)) => {
             if ao.oper != bo.oper {
-                return if ao.oper > bo.oper { -1 } else { 1 };
+                return Ok(if ao.oper > bo.oper { -1 } else { 1 });
             }
             if a.children.len() != b.children.len() {
-                return if a.children.len() > b.children.len() { -1 } else { 1 };
+                return Ok(if a.children.len() > b.children.len() { -1 } else { 1 });
             }
             for (ca, cb) in a.children.iter().zip(b.children.iter()) {
-                let res = qtnode_compare(ca, cb);
+                let res = qtnode_compare(ca, cb)?;
                 if res != 0 {
-                    return res;
+                    return Ok(res);
                 }
             }
             if ao.oper == OP_PHRASE && ao.distance != bo.distance {
-                return if ao.distance > bo.distance { -1 } else { 1 };
+                return Ok(if ao.distance > bo.distance { -1 } else { 1 });
             }
             0
         }
         (Item::Val(ao), Item::Val(bo)) => {
             if ao.valcrc != bo.valcrc {
-                return if ao.valcrc > bo.valcrc { -1 } else { 1 };
+                return Ok(if ao.valcrc > bo.valcrc { -1 } else { 1 });
             }
             ts_compare_string(&a.word, &b.word, false)
         }
@@ -92,7 +96,7 @@ pub fn qtnode_compare(a: &QtNode<'_>, b: &QtNode<'_>) -> i32 {
                 1
             }
         }
-    }
+    })
 }
 
 fn item_type(i: &Item) -> i8 {
@@ -103,36 +107,54 @@ fn item_type(i: &Item) -> i8 {
     }
 }
 
-pub fn qtn_sort(n: &mut QtNode<'_>) {
-    let Item::Opr(opr) = n.item else { return };
+pub fn qtn_sort(n: &mut QtNode<'_>) -> PgResult<()> {
+    // C tsquery_util.c QTNSort(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
+    let Item::Opr(opr) = n.item else { return Ok(()) };
     for c in n.children.iter_mut() {
-        qtn_sort(c);
+        qtn_sort(c)?;
     }
     if n.children.len() > 1 && opr.oper != OP_PHRASE {
+        // sort_by cannot fail, so the comparator's own recursion guard is
+        // pre-charged: the deepest comparison recursion is bounded by the
+        // subtree depth, which qtnode_compare re-checks per level below.
+        let mut err = None;
         n.children.sort_by(|a, b| match qtnode_compare(a, b) {
-            x if x < 0 => core::cmp::Ordering::Less,
-            0 => core::cmp::Ordering::Equal,
-            _ => core::cmp::Ordering::Greater,
+            Ok(x) if x < 0 => core::cmp::Ordering::Less,
+            Ok(0) => core::cmp::Ordering::Equal,
+            Ok(_) => core::cmp::Ordering::Greater,
+            Err(e) => {
+                if err.is_none() {
+                    err = Some(e);
+                }
+                core::cmp::Ordering::Equal
+            }
         });
+        if let Some(e) = err {
+            return Err(e);
+        }
     }
+    Ok(())
 }
 
-pub fn qtn_eq(a: &QtNode<'_>, b: &QtNode<'_>) -> bool {
+pub fn qtn_eq(a: &QtNode<'_>, b: &QtNode<'_>) -> PgResult<bool> {
     let sign = a.sign & b.sign;
     if !(sign == a.sign && sign == b.sign) {
-        return false;
+        return Ok(false);
     }
-    qtnode_compare(a, b) == 0
+    Ok(qtnode_compare(a, b)? == 0)
 }
 
 // QTNTernary: flatten nested same-operator AND/OR children.
-pub fn qtn_ternary(n: &mut QtNode<'_>) {
-    let Item::Opr(opr) = n.item else { return };
+pub fn qtn_ternary(n: &mut QtNode<'_>) -> PgResult<()> {
+    // C tsquery_util.c QTNTernary(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
+    let Item::Opr(opr) = n.item else { return Ok(()) };
     for c in n.children.iter_mut() {
-        qtn_ternary(c);
+        qtn_ternary(c)?;
     }
     if opr.oper != OP_AND && opr.oper != OP_OR {
-        return;
+        return Ok(());
     }
     let mut i = 0usize;
     while i < n.children.len() {
@@ -150,13 +172,16 @@ pub fn qtn_ternary(n: &mut QtNode<'_>) {
             i += 1;
         }
     }
+    Ok(())
 }
 
 // QTNBinary: rebuild >2-ary nodes as left-deep binaries.
-pub fn qtn_binary<'mcx>(mcx: Mcx<'mcx>, n: &mut QtNode<'mcx>) {
-    let Item::Opr(opr) = n.item else { return };
+pub fn qtn_binary<'mcx>(mcx: Mcx<'mcx>, n: &mut QtNode<'mcx>) -> PgResult<()> {
+    // C tsquery_util.c QTNBinary(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
+    let Item::Opr(opr) = n.item else { return Ok(()) };
     for c in n.children.iter_mut() {
-        qtn_binary(mcx, c);
+        qtn_binary(mcx, c)?;
     }
     // C keeps child[2..] in place: children become [nn, old_last, old[2..-1]].
     while n.children.len() > 2 {
@@ -185,10 +210,13 @@ pub fn qtn_binary<'mcx>(mcx: Mcx<'mcx>, n: &mut QtNode<'mcx>) {
         n.children[1] = last;
         n.children[0] = nn;
     }
+    Ok(())
 }
 
 // QTNCopy.
 pub fn qtn_copy<'mcx>(mcx: Mcx<'mcx>, n: &QtNode<'_>) -> PgResult<QtNode<'mcx>> {
+    // C tsquery_util.c QTNCopy(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     let mut word = vec_with_capacity_in(mcx, n.word.len())?;
     word.extend_from_slice(&n.word);
     let mut children: PgVec<'mcx, QtNode<'mcx>> = PgVec::new_in(mcx);
@@ -200,19 +228,24 @@ pub fn qtn_copy<'mcx>(mcx: Mcx<'mcx>, n: &QtNode<'_>) -> PgResult<QtNode<'mcx>> 
 }
 
 // QTNClearFlags.
-pub fn qtn_clear_flags(n: &mut QtNode<'_>, flags: u32) {
+pub fn qtn_clear_flags(n: &mut QtNode<'_>, flags: u32) -> PgResult<()> {
+    // C tsquery_util.c QTNClearFlags(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     n.flags &= !flags;
     for c in n.children.iter_mut() {
-        qtn_clear_flags(c, flags);
+        qtn_clear_flags(c, flags)?;
     }
+    Ok(())
 }
 
-fn cntsize(n: &QtNode<'_>, sumlen: &mut usize, nnode: &mut usize) {
+fn cntsize(n: &QtNode<'_>, sumlen: &mut usize, nnode: &mut usize) -> PgResult<()> {
+    // C tsquery_util.c cntsize(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     *nnode += 1;
     match &n.item {
         Item::Opr(_) => {
             for c in &n.children {
-                cntsize(c, sumlen, nnode);
+                cntsize(c, sumlen, nnode)?;
             }
         }
         Item::Val(op) => {
@@ -220,6 +253,7 @@ fn cntsize(n: &QtNode<'_>, sumlen: &mut usize, nnode: &mut usize) {
         }
         Item::ValStop => {}
     }
+    Ok(())
 }
 
 struct FillState<'mcx> {
@@ -228,6 +262,8 @@ struct FillState<'mcx> {
 }
 
 fn fill_qt(st: &mut FillState<'_>, n: &QtNode<'_>) -> PgResult<()> {
+    // C tsquery_util.c fillQT(): check_stack_depth() (one frame per tree level).
+    ::stack_depth::check_stack_depth()?;
     match n.item {
         Item::Val(mut op) => {
             op.distance = st.pool.len();
@@ -257,7 +293,7 @@ fn fill_qt(st: &mut FillState<'_>, n: &QtNode<'_>) -> PgResult<()> {
 pub fn qtn2qt<'mcx>(mcx: Mcx<'mcx>, n: &QtNode<'_>) -> PgResult<PgVec<'mcx, u8>> {
     let mut sumlen = 0usize;
     let mut nnode = 0usize;
-    cntsize(n, &mut sumlen, &mut nnode);
+    cntsize(n, &mut sumlen, &mut nnode)?;
     if nnode > (MAX_ALLOC_SIZE - HDRSIZETQ - sumlen) / QUERYITEM_SIZE {
         return Err(PgError::error("tsquery is too large")
             .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
