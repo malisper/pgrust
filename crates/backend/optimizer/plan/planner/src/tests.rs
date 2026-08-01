@@ -46,11 +46,18 @@ pub(crate) fn install_fixtures() {
                     typstorage: b'x' as i8,
                     typcollation: 100,
                 }),
+                3802 => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typstorage: b'x' as i8,
+                    typcollation: 0,
+                }),
                 _ => None,
             })
         });
         syscache_seams::pg_type_typtype::set(|typid| {
-            Ok(matches!(typid, 16 | 20 | 23 | 25).then_some(b'b' as i8))
+            Ok(matches!(typid, 16 | 20 | 23 | 25 | 3802).then_some(b'b' as i8))
         });
         syscache_seams::pg_type_io_shape::set(|typid| {
             // (typinput, typoutput) = int4in/out, int8in/out.
@@ -94,6 +101,12 @@ const PTT: u32 = 16411;
 // panic evidence).
 const TORN: u32 = 16412;
 const TORN2: u32 = 16413;
+// jsonb twins for the eqjoinsel by-ref result-mcx regression (JBEQ lane).
+const JBT: u32 = 16414;
+const JBT2: u32 = 16415;
+const JSONBEQ_OP: u32 = 3240;
+const JSONBEQ_PROC: u32 = 4043;
+const JSONB_IN_PROC: u32 = 3806;
 const INT4EQ_OP: u32 = 96;
 const INT4_LT_OP: u32 = 97;
 const INT4_GT_OP: u32 = 521;
@@ -112,6 +125,16 @@ const FIRST_VAL_ANYELEMENT: u32 = 9999;
 fn text_datum(mcx: Mcx<'_>, s: &str) -> Datum {
     let image = varlena::cstring_to_text(mcx, s.as_bytes()).unwrap().into_image();
     Datum::from_usize(image.leak().as_ptr() as usize)
+}
+
+// A by-ref jsonb datum allocated in mcx, built through the real jsonb_in.
+fn jsonb_datum(mcx: Mcx<'_>, json: &str) -> Datum {
+    let mut buf = mcx::PgVec::new_in(mcx);
+    buf.extend(json.as_bytes().iter().copied());
+    buf.push(0u8);
+    let cstr = Datum::from_usize(buf.leak().as_ptr() as usize);
+    let mut fin = fmgr_core::fmgr_info(JSONB_IN_PROC).unwrap();
+    types_fmgr::function_call1_coll_in(&mut fin, 0, mcx, cstr).unwrap()
 }
 
 fn install_scan_fixtures() {
@@ -147,6 +170,8 @@ fn install_scan_fixtures() {
             470 => Some(shape(16, 2, b'f', true)),
             // texteq / text_lt / text_ge / textregexeq.
             67 | 740 | 743 | 1254 => Some(shape(16, 2, b'f', true)),
+            // jsonb_eq (by-ref args; JBEQ regression lane).
+            JSONBEQ_PROC => Some(shape(16, 2, b'f', true)),
             // pg_proc.dat rows for the plain-agg lane (agg::* tests).
             2803 => Some(shape(20, 0, b'a', false)),
             3100 | 3101 => Some(shape(20, 0, b'w', false)),
@@ -248,6 +273,21 @@ fn install_scan_fixtures() {
                 oprcode: 1254,
                 oprrest: 1818,
                 oprjoin: 1824,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }),
+            // jsonb = jsonb. canmerge/canhash stay false so the join goes
+            // through plain join_selectivity (oprjoin 105 -> eqjoinsel)
+            // without btree/hash opfamily plumbing (JBEQ regression lane).
+            JSONBEQ_OP => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+                oprleft: 3802,
+                oprright: 3802,
+                oprresult: 16,
+                oprcom: JSONBEQ_OP,
+                oprnegate: 3241,
+                oprcode: JSONBEQ_PROC,
+                oprrest: 101,
+                oprjoin: 105,
                 oprcanmerge: false,
                 oprcanhash: false,
             }),
@@ -354,7 +394,7 @@ fn install_scan_fixtures() {
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
             INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 | 768 | 769 | 147 | 67 | 740 | 742
-            | 743 | 1254 | 177 | 9998 | 2803 => {
+            | 743 | 1254 | 177 | 9998 | 2803 | JSONBEQ_PROC => {
                 Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
             // generate_series(int4,int4): prosupport row estimation is not
@@ -477,6 +517,20 @@ fn install_scan_fixtures() {
                 typelem: 0,
                 typarray: 1009,
                 typcollation: 100,
+            }),
+            3802 => Some(syscache_seams::PgTypeTypcacheShape {
+                typname: types_tuple::NameData::default(),
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'x' as i8,
+                typtype: b'b' as i8,
+                typisdefined: true,
+                typrelid: 0,
+                typsubscript: 0,
+                typelem: 0,
+                typarray: 3807,
+                typcollation: 0,
             }),
             _ => None,
         })
@@ -602,6 +656,31 @@ fn install_scan_fixtures() {
                 slots,
             }));
         }
+        // JBT/JBT2: well-formed MCV slot whose values are BY-REF jsonb
+        // datums — the eqjoinsel_inner MCV cross-product must invoke the
+        // by-ref equality proc through an ARMED frame (JBEQ regression).
+        if (relid == JBT || relid == JBT2) && attnum == 1 && !inh {
+            let mut slots = mcx::PgVec::new_in(mcx);
+            let mut mcv_values = mcx::PgVec::new_in(mcx);
+            mcv_values.extend([jsonb_datum(mcx, "{\"k\": 1}"), jsonb_datum(mcx, "{\"k\": 2}")]);
+            let mut mcv_numbers = mcx::PgVec::new_in(mcx);
+            mcv_numbers.extend([0.30f32, 0.20f32]);
+            slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+                1,
+                JSONBEQ_OP,
+                0,
+                3802,
+                mcv_values,
+                mcv_numbers,
+                mcx::PgVec::new_in(mcx),
+            ));
+            return Ok(Some(syscache_seams::PgStatisticBundle {
+                stanullfrac: 0.0,
+                stawidth: 32,
+                stadistinct: 10.0,
+                slots,
+            }));
+        }
         if relid != STT || attnum != 1 || inh {
             return Ok(None);
         }
@@ -650,6 +729,8 @@ fn install_scan_fixtures() {
             TORN => make_join_rel_fixture(mcx, TORN, "torn", 10, 1000.0),
             TORN2 => make_join_rel_fixture(mcx, TORN2, "torn2", 10, 1000.0),
             PTT => make_text_rel_fixture(mcx, PTT, "ptt", 10, 1000.0),
+            JBT => make_jsonb_rel_fixture(mcx, JBT, "jbt", 10, 1000.0),
+            JBT2 => make_jsonb_rel_fixture(mcx, JBT2, "jbt2", 10, 1000.0),
             other => panic!("fixture relation_open: unknown oid {other}"),
         })
     });
@@ -698,7 +779,7 @@ fn install_scan_fixtures() {
             IDX => 30,
             JT1 | JT2 => 1,
             JT3 | JT4 => 100,
-            STT | PTT | TORN | TORN2 => 10,
+            STT | PTT | TORN | TORN2 | JBT | JBT2 => 10,
             other => panic!("fixture nblocks: unknown oid {other}"),
         })
     });
@@ -856,6 +937,45 @@ fn make_text_rel_fixture<'mcx>(
     attr.attalign = b'i' as i8;
     attr.attstorage = b'x' as i8;
     attr.attcollation = 950;
+    let mut attrs = mcx::PgVec::new_in(mcx);
+    attrs.push(attr);
+    let mut compact_attrs = mcx::PgVec::new_in(mcx);
+    for a in attrs.iter() {
+        let mut c = types_tuple::CompactAttribute::populate_from(a);
+        c.attnullability = ATTNULLABLE_UNRESTRICTED;
+        compact_attrs.push(c);
+    }
+    let rd_att = std::rc::Rc::new(types_tuple::TupleDescData {
+        natts: 1,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: 1,
+        constr: None,
+        compact_attrs,
+        attrs,
+    });
+    let mut form = make_pg_class(oid, name, b'r', 2, false);
+    form.relpages = pages;
+    form.reltuples = tuples;
+    types_rel::Relation::open(make_rel_data(mcx, oid, form, rd_att), None)
+}
+
+// Single jsonb column "j" (JBEQ regression lane).
+fn make_jsonb_rel_fixture<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: u32,
+    name: &str,
+    pages: i32,
+    tuples: f32,
+) -> types_rel::Relation<'mcx> {
+    use types_tuple::tupdesc::ATTNULLABLE_UNRESTRICTED;
+    let mut attr = int4_attr(1, "j", false);
+    attr.atttypid = 3802;
+    attr.attlen = -1;
+    attr.attbyval = false;
+    attr.attalign = b'i' as i8;
+    attr.attstorage = b'x' as i8;
+    attr.attcollation = 0;
     let mut attrs = mcx::PgVec::new_in(mcx);
     attrs.push(attr);
     let mut compact_attrs = mcx::PgVec::new_in(mcx);
@@ -7444,5 +7564,103 @@ mod unhandled_qual_nodes_take_boolvarsel {
     #[test]
     fn subscripting_ref_qual_plans() {
         plans_with_qual(subscript_qual);
+    }
+}
+
+// Regression witness for the eqjoinsel by-ref result-mcx defect (fixed by
+// "selfuncs: arm a result mcx around by-ref comparison procs in join
+// estimators"): eqjoinsel_inner / eqjoinsel_semi / get_stats_slot_range
+// invoked a type's comparison proc through function_call2_coll, whose frame
+// has no armed result mcx. Any by-ref proc that touches result_mcx() —
+// jsonb_eq detoasts both args through it unconditionally — then aborted
+// planning with XX000 ("fmgr: by-ref result needs a result mcx but the
+// caller never armed the frame"), so even EXPLAIN of a jsonb equality join
+// between two ANALYZEd columns failed. Found by tools/sqldiff finding-01
+// (2026-07-31-grammar-v2-joins). The MCV cross-product below drives the
+// exact pre-fix panic; do not weaken this to a stats-less join (no MCVs
+// means the eq proc is never called and the test passes vacuously).
+mod jsonb_join_stats {
+    use super::*;
+
+    fn jsonb_join_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
+        let mk_rte = |relid: u32| {
+            let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            rte.rtekind = RTEKind::RTE_RELATION;
+            rte.relid = relid;
+            rte.relkind = b'r';
+            rte.rellockmode = 1;
+            rte.inh = false;
+            rte.seal()
+        };
+        let mut rtable = NodeList::make1(mcx, mk_rte(JBT)).unwrap();
+        rtable.lappend(mcx, mk_rte(JBT2)).unwrap();
+
+        let qual = {
+            let l = Node::mk_var(mcx, 1, 1, 3802, -1, 0, 0).unwrap();
+            let r = Node::mk_var(mcx, 2, 1, 3802, -1, 0, 0).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::OpExpr {
+                    opno: JSONBEQ_OP,
+                    opfuncid: JSONBEQ_PROC,
+                    opresulttype: 16,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, l, r).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        let rtr1 = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let rtr2 = Node::mk_range_tbl_ref(mcx, 2).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make2(mcx, rtr1, rtr2).unwrap(), quals: Some(qual) },
+        )
+        .unwrap();
+        let v = Node::mk_var(mcx, 1, 1, 3802, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("j"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 44,
+            ..Query::default()
+        }
+    }
+
+    #[test]
+    fn eqjoinsel_jsonb_mcv_crossproduct_plans() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            leak_q(mcx, jsonb_join_query(mcx)),
+            "SELECT jbt.j FROM jbt, jbt2 WHERE jbt.j = jbt2.j",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let root = stmt.planTree.unwrap();
+        let rows = if let Some(nl) = root.as_nest_loop() {
+            nl.join.plan.plan_rows
+        } else if let Some(hj) = root.as_hash_join() {
+            hj.join.plan.plan_rows
+        } else if let Some(mj) = root.as_merge_join() {
+            mj.join.plan.plan_rows
+        } else {
+            panic!("join root expected, got {:?}", root.node_tag())
+        };
+        // eqjoinsel_inner over identical MCVs [0.30, 0.20], stadistinct 10:
+        // matchprodfreq = .3*.3 + .2*.2 = .13; matchfreq1 = matchfreq2 = .50;
+        // unmatchfreq = 0; otherfreq = .50 each; nmatches = 2;
+        // totalsel = .13 + .5 * (.0 + .5) / (10 - 2) = .16125
+        // -> 1000 * 1000 * .16125 rows (C selfuncs.c eqjoinsel_inner math).
+        assert_eq!(rows, 161250.0);
     }
 }
