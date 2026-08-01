@@ -869,8 +869,14 @@ mod fleet_repro {
     /// OPEN FINDING (div7): CompoundAffix count divergence from a malformed
     /// `AF"sSpB` alias line (no space after AF). Ignored until adjudicated —
     /// see the claim row; the seed is banked so the rail can witness the fix.
+    /// div7 REGRESSION (RESOLVED): the CompoundAffix count came from an
+    /// UNBOUNDED walk over C's terminator, which NISortAffixes writes ONE
+    /// ELEMENT PAST the palloc'd array when every affix is collected
+    /// (spell.c:1987 alloc vs :2015 terminator, repalloc only after) — the
+    /// repalloc drops it and the walk read heap garbage (ncomp=137 then 109
+    /// for naffixes==1). The oracle now bounds the scan by naffixes, which is
+    /// exact in both cases. Upstream OOB write recorded as its own finding.
     #[test]
-    #[ignore = "open finding div7: CompoundAffix count divergence (malformed AF line)"]
     fn div7_compound_4e2fe0d5() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/open-div7-compound-4e2fe0d5")).unwrap();
         super::spellfam_diff(&data);

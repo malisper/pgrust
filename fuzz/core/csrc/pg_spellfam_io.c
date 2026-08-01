@@ -4275,12 +4275,30 @@ pg_spf_flagmode(void)
 int
 pg_spf_ncompound(void)
 {
-	CMPDAffix  *a;
 	int			n = 0;
 
 	if (spf_conf->CompoundAffix == NULL)
 		return 0;
-	for (a = spf_conf->CompoundAffix; a->affix != NULL; a++)
+
+	/* BOUNDED walk — do NOT trust C's NULL terminator alone (UPSTREAM OOB
+	 * WRITE, spell.c:1987 vs :2015): NISortAffixes pallocs the CompoundAffix
+	 * array with exactly `naffixes` elements, but writes its terminator at
+	 * `ptr` AFTER the collection loop and only THEN repalloc's to
+	 * (collected + 1). When every affix is collected (collected == naffixes)
+	 * that terminator write lands ONE ELEMENT PAST THE END of the palloc'd
+	 * array, and the subsequent repalloc — which legitimately copies only the
+	 * old size — drops it, leaving heap garbage where the terminator should
+	 * be. An unbounded walk then runs off into that garbage (observed:
+	 * naffixes==1 yielding ncomp=137 then 109 across repeats — the C-side
+	 * nondeterminism this decode leg caught).
+	 *
+	 * `collected <= naffixes` always, so bounding the scan by naffixes is
+	 * exact in BOTH cases: if collected < naffixes the terminator is
+	 * in-bounds and survives, so the scan stops on it; if collected ==
+	 * naffixes the terminator was the lost OOB one and the bound itself is
+	 * the correct count. This keeps the surface COMPARED (not carved) and the
+	 * oracle deterministic, without editing the verbatim C. */
+	while (n < spf_conf->naffixes && spf_conf->CompoundAffix[n].affix != NULL)
 		n++;
 	return n;
 }
