@@ -1090,6 +1090,32 @@ pub fn scannum(v: &mut Vars) -> i32 {
 }
 
 
+/// C-parity companion to `NOERRN()` for `RegResult`-valued subroutine calls
+/// inside the `Option`-returning parse family (parse / parsebranch /
+/// parseqatom).
+///
+/// In C, the nfa subroutines (newstate, newarc, dupnfa, repeat, ...) record
+/// failures in `v->err` themselves via `NERR()` (`regc_nfa.c`:
+/// `#define NERR(e) VERR(nfa->v, (e))`), so a following `NOERRN()` sees the
+/// error and the "returns NULL implies ISERR()" invariant holds all the way
+/// up to pg_regcomp's `CNOERR()`. Our subroutines carry the error in the
+/// `Err` value instead; discarding it (`Err(_) => return None`) breaks that
+/// invariant: pg_regcomp's `cnoerr!()` passes with `v.err == None` and the
+/// subsequent `v.tree` unwrap is a reachable release panic (REG_ETOOBIG on
+/// e.g. nested bounded quantifiers). This macro is the NERR half: record the
+/// error into `v.err`, then return None exactly like C's NOERRN().
+macro_rules! noerrn {
+    ($v:expr, $e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(err) => {
+                $v.seterr(err.code());
+                return None;
+            }
+        }
+    };
+}
+
 pub struct DepthGuard<'g, 'mcx> {
     v: &'g mut Vars<'mcx>,
 }
@@ -1780,7 +1806,7 @@ pub fn parse(
 ) -> Option<NodeId> {
     let mut g = match DepthGuard::enter(v) {
         Ok(g) => g,
-        Err(_) => return None,
+        Err(_) => return None, // enter() has already recorded the error
     };
     let v = &mut *g;
 
@@ -1789,23 +1815,13 @@ pub fn parse(
     let branches = subre(v, b'|', LONGER, Some(init), Some(final_))?; // NOERRN
     let mut lastbranch: Option<NodeId> = None;
     loop {
-        let left = match newstate(v.mcx, &mut v.nfa) {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
-        let right = match newstate(v.mcx, &mut v.nfa) {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
+        let left = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+        let right = noerrn!(v, newstate(v.mcx, &mut v.nfa));
         if v.NISERR() {
             return None; // NOERRN
         }
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, init, left).is_err() {
-            return None;
-        }
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, right, final_).is_err() {
-            return None;
-        }
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, init, left));
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, right, final_));
         if v.NISERR() {
             return None; // NOERRN
         }
@@ -1856,7 +1872,7 @@ pub fn parsebranch(
 ) -> Option<NodeId> {
     let mut g = match DepthGuard::enter(v) {
         Ok(g) => g,
-        Err(_) => return None,
+        Err(_) => return None, // enter() has already recorded the error
     };
     let v = &mut *g;
 
@@ -1866,13 +1882,8 @@ pub fn parsebranch(
 
     while !v.SEE(b'|' as i32) && !v.SEE(stopper) && !v.SEE(EOS) {
         if seencontent != 0 {
-            lp = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if moveins(v.mcx, &mut v.nfa, &mut v.cm, false, right, lp).is_err() {
-                return None;
-            }
+            lp = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, moveins(v.mcx, &mut v.nfa, &mut v.cm, false, right, lp));
         }
         seencontent = 1;
 
@@ -1884,21 +1895,15 @@ pub fn parsebranch(
             v.NOTE(REG_UUNSPEC);
         }
         debug_assert_eq!(lp, left);
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, left, right).is_err() {
-            return None;
-        }
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, left, right));
     }
 
     Some(t)
 }
 
 fn onechr_and_next(v: &mut Vars, lp: StateId, rp: StateId) -> Option<()> {
-    if onechr(v, v.nextvalue, lp, rp).is_err() {
-        return None;
-    }
-    if okcolors(v.mcx, &mut v.nfa, &mut v.cm, false).is_err() {
-        return None;
-    }
+    noerrn!(v, onechr(v, v.nextvalue, lp, rp));
+    noerrn!(v, okcolors(v.mcx, &mut v.nfa, &mut v.cm, false));
     if v.NISERR() {
         return None; // NOERRN
     }
@@ -1916,15 +1921,13 @@ pub fn parseqatom(
 ) -> Option<NodeId> {
     let mut g = match DepthGuard::enter(v) {
         Ok(g) => g,
-        Err(_) => return None,
+        Err(_) => return None, // enter() has already recorded the error
     };
     let v = &mut *g;
 
     macro_rules! arcv {
         ($t:expr, $val:expr) => {
-            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, $t, $val, lp, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, $t, $val, lp, rp));
         };
     }
 
@@ -1971,100 +1974,44 @@ pub fn parseqatom(
             v.next();
             return Some(top);
         } else if atomtype == b'<' as i32 {
-            if wordchrs(v).is_err() {
-                return None;
-            }
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if nonword(v, BEHIND, lp, s).is_err() {
-                return None;
-            }
-            if word(v, AHEAD, s, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, wordchrs(v));
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, nonword(v, BEHIND, lp, s));
+            noerrn!(v, word(v, AHEAD, s, rp));
             v.next();
             return Some(top);
         } else if atomtype == b'>' as i32 {
-            if wordchrs(v).is_err() {
-                return None;
-            }
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if word(v, BEHIND, lp, s).is_err() {
-                return None;
-            }
-            if nonword(v, AHEAD, s, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, wordchrs(v));
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, word(v, BEHIND, lp, s));
+            noerrn!(v, nonword(v, AHEAD, s, rp));
             v.next();
             return Some(top);
         } else if atomtype == WBDRY {
-            if wordchrs(v).is_err() {
-                return None;
-            }
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if nonword(v, BEHIND, lp, s).is_err() {
-                return None;
-            }
-            if word(v, AHEAD, s, rp).is_err() {
-                return None;
-            }
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if word(v, BEHIND, lp, s).is_err() {
-                return None;
-            }
-            if nonword(v, AHEAD, s, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, wordchrs(v));
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, nonword(v, BEHIND, lp, s));
+            noerrn!(v, word(v, AHEAD, s, rp));
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, word(v, BEHIND, lp, s));
+            noerrn!(v, nonword(v, AHEAD, s, rp));
             v.next();
             return Some(top);
         } else if atomtype == NWBDRY {
-            if wordchrs(v).is_err() {
-                return None;
-            }
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if word(v, BEHIND, lp, s).is_err() {
-                return None;
-            }
-            if word(v, AHEAD, s, rp).is_err() {
-                return None;
-            }
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if nonword(v, BEHIND, lp, s).is_err() {
-                return None;
-            }
-            if nonword(v, AHEAD, s, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, wordchrs(v));
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, word(v, BEHIND, lp, s));
+            noerrn!(v, word(v, AHEAD, s, rp));
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, nonword(v, BEHIND, lp, s));
+            noerrn!(v, nonword(v, AHEAD, s, rp));
             v.next();
             return Some(top);
         } else if atomtype == LACON {
             latype = v.nextvalue as i32;
             v.next();
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None,
-            };
-            let s2 = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            let s2 = noerrn!(v, newstate(v.mcx, &mut v.nfa));
             let lt = parse(v, b')' as i32, LACON, s, s2);
             freesubre(v, lt); // internal structure irrelevant
             if v.NISERR() {
@@ -2072,9 +2019,7 @@ pub fn parseqatom(
             }
             debug_assert!(v.SEE(b')' as i32));
             v.next();
-            if processlacon(v, s, s2, latype, lp, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, processlacon(v, s, s2, latype, lp, rp));
             return Some(top);
         } else if atomtype == b'*' as i32
             || atomtype == b'+' as i32
@@ -2096,30 +2041,22 @@ pub fn parseqatom(
             break 'atomdone;
         } else if atomtype == b'[' as i32 {
             if v.nextvalue == 1 {
-                if bracket(v, lp, rp).is_err() {
-                    return None;
-                }
-            } else if cbracket(v, lp, rp).is_err() {
-                return None;
+                noerrn!(v, bracket(v, lp, rp));
+            } else {
+                noerrn!(v, cbracket(v, lp, rp));
             }
             debug_assert!(v.SEE(b']' as i32) || v.ISERR());
             v.next();
             break 'atomdone;
         } else if atomtype == CCLASSS {
             let cls = char_class_from_chr(v.nextvalue);
-            if charclass(v, cls, lp, rp).is_err() {
-                return None;
-            }
-            if okcolors(v.mcx, &mut v.nfa, &mut v.cm, false).is_err() {
-                return None;
-            }
+            noerrn!(v, charclass(v, cls, lp, rp));
+            noerrn!(v, okcolors(v.mcx, &mut v.nfa, &mut v.cm, false));
             v.next();
             break 'atomdone;
         } else if atomtype == CCLASSC {
             let cls = char_class_from_chr(v.nextvalue);
-            if charclasscomplement(v, cls, lp, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, charclasscomplement(v, cls, lp, rp));
             v.next();
             break 'atomdone;
         } else if atomtype == b'.' as i32 {
@@ -2128,9 +2065,7 @@ pub fn parseqatom(
             } else {
                 COLORLESS
             };
-            if rainbow(v.mcx, &mut v.nfa, &mut v.cm, false, PLAIN, but, lp, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, rainbow(v.mcx, &mut v.nfa, &mut v.cm, false, PLAIN, but, lp, rp));
             v.next();
             break 'atomdone;
         } else if atomtype == b'(' as i32 {
@@ -2150,20 +2085,10 @@ pub fn parseqatom(
             }
             v.next();
 
-            let s = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None,
-            };
-            let s2 = match newstate(v.mcx, &mut v.nfa) {
-                Ok(s) => s,
-                Err(_) => return None, // NOERRN
-            };
-            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, s).is_err() {
-                return None;
-            }
-            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s2, rp).is_err() {
-                return None;
-            }
+            let s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            let s2 = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+            noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, s));
+            noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s2, rp));
             if v.NISERR() {
                 return None; // NOERRN
             }
@@ -2206,9 +2131,7 @@ pub fn parseqatom(
             let target = v.subs[subno as usize].unwrap();
             v.tm(target).flags |= BRUSE;
             atom = Some(a);
-            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, rp).is_err() {
-                return None;
-            }
+            noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, rp));
             v.next();
         } else {
             v.seterr(REG_ASSERT);
@@ -2265,32 +2188,24 @@ pub fn parseqatom(
             if (v.t(at).flags & CAP) != 0 {
                 let abegin = v.t(at).begin.unwrap();
                 let aend = v.t(at).end.unwrap();
-                if delsub(&mut v.nfa, &mut v.cm, false, lp, abegin).is_err() {
-                    return None;
-                }
-                if delsub(&mut v.nfa, &mut v.cm, false, aend, rp).is_err() {
-                    return None;
-                }
+                noerrn!(v, delsub(&mut v.nfa, &mut v.cm, false, lp, abegin));
+                noerrn!(v, delsub(&mut v.nfa, &mut v.cm, false, aend, rp));
             } else {
                 freesubre(v, atom);
-                if delsub(&mut v.nfa, &mut v.cm, false, lp, rp).is_err() {
-                    return None;
-                }
+                noerrn!(v, delsub(&mut v.nfa, &mut v.cm, false, lp, rp));
             }
-        } else if delsub(&mut v.nfa, &mut v.cm, false, lp, rp).is_err() {
-            return None;
+        } else {
+            noerrn!(v, delsub(&mut v.nfa, &mut v.cm, false, lp, rp));
         }
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, rp).is_err() {
-            return None;
-        }
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, rp));
         return Some(top);
     }
 
     debug_assert!(!MESSY(v.t(top).flags));
     f = v.t(top).flags | qprefer | atom.map_or(0, |a| v.t(a).flags);
     if atomtype != b'(' as i32 && atomtype != BACKREF && !MESSY(UP(f)) {
-        if !(m == 1 && n == 1) && repeat(v, lp, rp, m, n).is_err() {
-            return None;
+        if !(m == 1 && n == 1) {
+            noerrn!(v, repeat(v, lp, rp, m, n));
         }
         if atom.is_some() {
             freesubre(v, atom);
@@ -2308,40 +2223,21 @@ pub fn parseqatom(
     let mut s: StateId;
     let mut s2: StateId;
     if v.t(atom_id).begin == Some(lp) || v.t(atom_id).end == Some(rp) {
-        s = match newstate(v.mcx, &mut v.nfa) {
-            Ok(x) => x,
-            Err(_) => return None,
-        };
-        s2 = match newstate(v.mcx, &mut v.nfa) {
-            Ok(x) => x,
-            Err(_) => return None, // NOERRN
-        };
-        if moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s).is_err() {
-            return None;
-        }
-        if moveins(v.mcx, &mut v.nfa, &mut v.cm, false, rp, s2).is_err() {
-            return None;
-        }
+        s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+        s2 = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+        noerrn!(v, moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s));
+        noerrn!(v, moveins(v.mcx, &mut v.nfa, &mut v.cm, false, rp, s2));
         v.tm(atom_id).begin = Some(s);
         v.tm(atom_id).end = Some(s2);
     } else {
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if delsub(&mut v.nfa, &mut v.cm, false, lp, abegin).is_err() {
-            return None;
-        }
-        if delsub(&mut v.nfa, &mut v.cm, false, aend, rp).is_err() {
-            return None;
-        }
+        noerrn!(v, delsub(&mut v.nfa, &mut v.cm, false, lp, abegin));
+        noerrn!(v, delsub(&mut v.nfa, &mut v.cm, false, aend, rp));
     }
 
-    s = match newstate(v.mcx, &mut v.nfa) {
-        Ok(x) => x,
-        Err(_) => return None, // NOERRN
-    };
-    if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, s).is_err() {
-        return None; // NOERRN
-    }
+    s = noerrn!(v, newstate(v.mcx, &mut v.nfa));
+    noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, s));
 
     let aflags = v.t(atom_id).flags;
     let t_node = subre(v, b'.', COMBINE(qprefer, aflags), Some(lp), Some(rp))?; // NOERRN
@@ -2362,24 +2258,18 @@ pub fn parseqatom(
         ); // just the EMPTY
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if delsub(&mut v.nfa, &mut v.cm, false, abegin, aend).is_err() {
-            return None;
-        }
+        noerrn!(v, delsub(&mut v.nfa, &mut v.cm, false, abegin, aend));
         debug_assert!(v.subs[subno as usize].is_some());
 
         let sub = v.subs[subno as usize].unwrap();
         let sub_begin = v.t(sub).begin.unwrap();
         let sub_end = v.t(sub).end.unwrap();
-        if dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, sub_begin, sub_end, abegin, aend).is_err() {
-            return None;
-        }
+        noerrn!(v, dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, sub_begin, sub_end, abegin, aend));
         if v.NISERR() {
             return None; // NOERRN
         }
 
-        if removeconstraints(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend).is_err() {
-            return None;
-        }
+        noerrn!(v, removeconstraints(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend));
         if v.NISERR() {
             return None; // NOERRN
         }
@@ -2387,13 +2277,9 @@ pub fn parseqatom(
 
     if atomtype == BACKREF {
         let abegin = v.t(atom_id).begin.unwrap();
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin).is_err() {
-            return None;
-        }
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin));
         let aend = v.t(atom_id).end.unwrap();
-        if repeat(v, abegin, aend, m, n).is_err() {
-            return None;
-        }
+        noerrn!(v, repeat(v, abegin, aend, m, n));
         v.tm(atom_id).min = m as i16;
         v.tm(atom_id).max = n as i16;
         let aflags = v.t(atom_id).flags;
@@ -2406,19 +2292,13 @@ pub fn parseqatom(
             || qprefer == (v.t(atom_id).flags & (LONGER | SHORTER | MIXED)))
     {
         let abegin = v.t(atom_id).begin.unwrap();
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin).is_err() {
-            return None;
-        }
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin));
         s2 = v.t(atom_id).end.unwrap();
     } else if (v.t(atom_id).flags & (CAP | BACKR)) == 0 {
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin).is_err() {
-            return None;
-        }
-        if repeat(v, abegin, aend, m, n).is_err() {
-            return None;
-        }
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin));
+        noerrn!(v, repeat(v, abegin, aend, m, n));
         let aflags = v.t(atom_id).flags;
         f = COMBINE(qprefer, aflags);
         let abegin = v.t(atom_id).begin.unwrap();
@@ -2430,13 +2310,9 @@ pub fn parseqatom(
     } else if m > 0 && (v.t(atom_id).flags & BACKR) == 0 {
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend, s, abegin).is_err() {
-            return None;
-        }
+        noerrn!(v, dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend, s, abegin));
         debug_assert!(m >= 1 && m != DUPINF && n >= 1);
-        if repeat(v, s, abegin, m - 1, if n == DUPINF { n } else { n - 1 }).is_err() {
-            return None;
-        }
+        noerrn!(v, repeat(v, s, abegin, m - 1, if n == DUPINF { n } else { n - 1 }));
         let aflags = v.t(atom_id).flags;
         f = COMBINE(qprefer, aflags);
         let aend = v.t(atom_id).end.unwrap();
@@ -2448,25 +2324,16 @@ pub fn parseqatom(
         v.tm(t_node).child = Some(tt);
         s2 = v.t(atom_id).end.unwrap();
     } else {
-        s2 = match newstate(v.mcx, &mut v.nfa) {
-            Ok(x) => x,
-            Err(_) => return None, // NOERRN
-        };
+        s2 = noerrn!(v, newstate(v.mcx, &mut v.nfa));
         let aend = v.t(atom_id).end.unwrap();
-        if moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, aend, s2).is_err() {
-            return None;
-        }
+        noerrn!(v, moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, aend, s2));
         if v.NISERR() {
             return None; // NOERRN
         }
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend, s, s2).is_err() {
-            return None;
-        }
-        if repeat(v, s, s2, m, n).is_err() {
-            return None;
-        }
+        noerrn!(v, dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend, s, s2));
+        noerrn!(v, repeat(v, s, s2, m, n));
         let aflags = v.t(atom_id).flags;
         f = COMBINE(qprefer, aflags);
         let tt = subre(v, b'*', f, Some(s), Some(s2))?; // NOERRN
@@ -2517,9 +2384,7 @@ pub fn parseqatom(
             }
         }
     } else {
-        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s2, rp).is_err() {
-            return None;
-        }
+        noerrn!(v, newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s2, rp));
         let tchild = v.t(t_node).child;
         let topchild = v.t(top).child.unwrap();
         v.tm(topchild).sibling = tchild;
@@ -2828,8 +2693,17 @@ pub fn pg_regcomp<'mcx>(
     v.tree = parse(&mut v, EOS, PLAIN, init, final_);
     debug_assert!(v.SEE(EOS)); // even if error; ISERR() => SEE(EOS)
     cnoerr!();
+    // C: assert(v->tree != NULL). The parse family maintains the NOERRN
+    // invariant (returning None implies ISERR(), see the noerrn! macro), so
+    // after cnoerr! this cannot be None. Surface any future invariant break
+    // as REG_ASSERT -- the code C's assert would imply -- rather than a
+    // release panic (thread-per-backend: a compiler panic kills every
+    // session).
     debug_assert!(v.tree.is_some());
-    let tree = v.tree.unwrap();
+    let tree = match v.tree {
+        Some(t) => t,
+        None => return Err(RegError(REG_ASSERT)),
+    };
 
     specialcolors(v.mcx, &mut v.nfa, &mut v.cm, None)?;
     cnoerr!();
