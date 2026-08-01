@@ -518,6 +518,68 @@ fn expand_tuple_source_with_nulls_copies_bitmap() {
     assert_eq!(out[2].as_i64(), 99);
 }
 
+// Witness for the expand_fill_tail tail-length relaxation: C expand_tuple
+// sizes the missing tail with the nominal (4B-header) datum length, but
+// fill_val SHORT-CONVERTS packable missing values, so the fill legitimately
+// comes up short of the plan and the image keeps zeroed slack. Pre-fix, a
+// strict debug_assert_eq!(off, plan.target_data_len) panicked debug builds
+// on exactly this shape (ADD COLUMN DEFAULT '<short text>' scans of
+// pre-ADD-COLUMN tuples).
+#[test]
+fn expand_tuple_short_converts_packable_missing_value() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let missing_text = varlena_4b(b"hi"); // packable 4B header -> short-converted by fill_val
+    let mut desc = make_desc(mcx, &[attr(4, true, 4), attr(-1, false, 4)]);
+    desc.compact_attrs[1].atthasmissing = true;
+    let mut missing: PgVec<AttrMissing> = PgVec::new_in(mcx);
+    missing.push(AttrMissing { am_present: false, am_value: Datum::null() });
+    missing.push(AttrMissing {
+        am_present: true,
+        am_value: Datum::from_usize(missing_text.as_ptr() as usize),
+    });
+    let constr = TupleConstr {
+        defval: PgVec::new_in(mcx),
+        check: PgVec::new_in(mcx),
+        missing,
+        num_defval: 0,
+        num_check: 0,
+        has_not_null: false,
+        has_generated_stored: false,
+        has_generated_virtual: false,
+    };
+    desc.constr = Some(mcx::box_new_in(mcx, constr));
+
+    let short_desc = make_desc(mcx, &[attr(4, true, 4)]);
+    let values = [Datum::from_i32(7)];
+    let isnull = [false];
+    let src = heap_form_tuple(mcx, &short_desc, &values, &isnull).unwrap();
+
+    let wide = heap_expand_tuple(mcx, src.as_tuple(), &desc).unwrap();
+    assert_eq!(wide.t_data().natts(), 2);
+    let mut out = [Datum::null(); 2];
+    let mut nulls = [true; 2];
+    heap_deform_tuple(wide.as_tuple(), &desc, &mut out, &mut nulls);
+    assert_eq!(out[0].as_i32(), 7);
+    assert!(!nulls[1]);
+    unsafe {
+        let p = out[1].as_usize() as *const u8;
+        assert_eq!(types_tuple::varatt::varsize_any(p), 3); // 1B short header + "hi"
+        assert_eq!(core::slice::from_raw_parts(p.add(1), 2), b"hi");
+    }
+
+    // Same shape through the minimal-tuple path.
+    let mwide = minimal_expand_tuple(mcx, src.as_tuple(), &desc).unwrap();
+    let hback = heap_tuple_from_minimal_tuple(mcx, mwide.as_bytes()).unwrap();
+    heap_deform_tuple(hback.as_tuple(), &desc, &mut out, &mut nulls);
+    assert!(!nulls[1]);
+    unsafe {
+        let p = out[1].as_usize() as *const u8;
+        assert_eq!(types_tuple::varatt::varsize_any(p), 3);
+    }
+}
+
 #[test]
 fn too_many_columns_is_sqlstate_54011() {
     let ctx = MemoryContext::new("t");

@@ -565,6 +565,38 @@ fn build_attrmap_by_name_handles_dropped_columns() {
     assert_eq!(&map[..], &[1, 0, 2]);
 }
 
+// Witness for the C 18.3 `nextindesc` rotation port: the inner search resumes
+// at the previous match (wrapping), which is load-bearing for WHICH attribute
+// matches when attnames collide. Scanning from 0 for the second output column
+// hit indesc attr 1 ("a" int4) and raised DATATYPE_MISMATCH where C's rotation
+// matches attr 3 ("a" text).
+#[test]
+fn build_attrmap_by_name_rotation_selects_c_match_on_duplicate_attnames() {
+    install_seams();
+    install_format_type_seams();
+    let ctx = MemoryContext::new("t");
+    let indesc = CreateTupleDesc(
+        ctx.mcx(),
+        &[
+            attr("a", INT4OID, 1, 4, true, TYPALIGN_INT),
+            attr("b", TEXTOID, 2, -1, false, TYPALIGN_INT),
+            attr("a", TEXTOID, 3, -1, false, TYPALIGN_INT),
+        ],
+    )
+    .unwrap();
+    let outdesc = CreateTupleDesc(
+        ctx.mcx(),
+        &[
+            attr("b", TEXTOID, 1, -1, false, TYPALIGN_INT),
+            attr("a", TEXTOID, 2, -1, false, TYPALIGN_INT),
+        ],
+    )
+    .unwrap();
+
+    let map = build_attrmap_by_name(ctx.mcx(), &indesc, &outdesc).unwrap();
+    assert_eq!(&map[..], &[2, 3]);
+}
+
 #[test]
 fn build_attrmap_by_name_mismatch_ereport_text() {
     install_seams();
