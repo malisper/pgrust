@@ -169,6 +169,20 @@ pub(crate) fn be_i32(b: &[u8]) -> i32 {
     i32::from_be_bytes([b[0], b[1], b[2], b[3]])
 }
 
+fn message_frame_len(buf: &[u8]) -> Result<Option<usize>, &'static str> {
+    if buf.len() < 5 {
+        return Ok(None);
+    }
+
+    let len = be_i32(&buf[1..5]);
+    if len < 4 {
+        return Err("server sent an invalid message length");
+    }
+
+    let frame_len = 1 + len as usize;
+    Ok((buf.len() >= frame_len).then_some(frame_len))
+}
+
 pub(crate) fn cstr_at(b: &[u8], pos: usize) -> (String, usize) {
     let end = b[pos..].iter().position(|&c| c == 0).map(|e| pos + e).unwrap_or(b.len());
     (String::from_utf8_lossy(&b[pos..end]).into_owned(), end + 1)
@@ -535,6 +549,12 @@ impl PgConn {
         !self.conn_ok
     }
 
+    fn protocol_error(&mut self, err: String) -> QueryResult {
+        self.conn_ok = false;
+        self.err = err;
+        QueryResult::error(self.err.clone())
+    }
+
     pub fn socket(&self) -> pgsocket {
         self.fd as pgsocket
     }
@@ -686,19 +706,21 @@ impl PgConn {
         }
     }
 
-    pub(crate) fn next_message(&mut self) -> Option<(u8, Vec<u8>)> {
-        let avail = self.inbuf.len() - self.inpos;
-        if avail < 5 {
-            return None;
-        }
+    pub(crate) fn next_message(&mut self) -> Result<Option<(u8, Vec<u8>)>, String> {
         let p = self.inpos;
-        let len = be_i32(&self.inbuf[p + 1..p + 5]) as usize;
-        if avail < 1 + len {
-            return None;
-        }
+        let frame_len = match message_frame_len(&self.inbuf[p..]) {
+            Ok(Some(frame_len)) => frame_len,
+            Ok(None) => return Ok(None),
+            Err(err) => {
+                self.conn_ok = false;
+                self.err = err.to_string();
+                return Err(self.err.clone());
+            }
+        };
         let t = self.inbuf[p];
-        let body = self.inbuf[p + 5..p + 1 + len].to_vec();
-        self.inpos = p + 1 + len;
+        let frame_end = p + frame_len;
+        let body = self.inbuf[p + 5..frame_end].to_vec();
+        self.inpos = frame_end;
         if self.inpos == self.inbuf.len() {
             self.inbuf.clear();
             self.inpos = 0;
@@ -706,7 +728,7 @@ impl PgConn {
             self.inbuf.drain(..self.inpos);
             self.inpos = 0;
         }
-        Some((t, body))
+        Ok(Some((t, body)))
     }
 
     pub(crate) fn read_message(
@@ -714,8 +736,10 @@ impl PgConn {
         wait_event_info: u32,
     ) -> PgResult<Result<(u8, Vec<u8>), String>> {
         loop {
-            if let Some(m) = self.next_message() {
-                return Ok(Ok(m));
+            match self.next_message() {
+                Ok(Some(message)) => return Ok(Ok(message)),
+                Ok(None) => {}
+                Err(err) => return Ok(Err(err)),
             }
             wait_socket(self.fd, WL_SOCKET_READABLE, wait_event_info)?;
             if !self.consume_input() {
@@ -787,7 +811,10 @@ impl PgConn {
                     nfields = u16::from_be_bytes([mbody[0], mbody[1]]) as usize;
                     rows.clear();
                 }
-                b'D' => rows.push(parse_data_row(&mbody)),
+                b'D' => match parse_data_row(&mbody) {
+                    Ok(row) => rows.push(row),
+                    Err(err) => return Ok(self.protocol_error(err)),
+                },
                 b'C' => {
                     let (tag, _) = cstr_at(&mbody, 0);
                     result = QueryResult {
@@ -983,7 +1010,10 @@ impl PgConn {
                     nfields = u16::from_be_bytes([mbody[0], mbody[1]]) as usize;
                     rows.clear();
                 }
-                b'D' => rows.push(parse_data_row(&mbody)),
+                b'D' => match parse_data_row(&mbody) {
+                    Ok(row) => rows.push(row),
+                    Err(err) => return Ok(self.protocol_error(err)),
+                },
                 b'C' | b's' => {
                     let tag =
                         if t == b'C' { cstr_at(&mbody, 0).0 } else { String::new() };
@@ -1073,18 +1103,16 @@ impl PgConn {
         }
         let mut p = self.inpos;
         loop {
-            if self.inbuf.len() - p < 5 {
-                return true;
-            }
-            let len = be_i32(&self.inbuf[p + 1..p + 5]) as usize;
-            if self.inbuf.len() - p < 1 + len {
-                return true;
-            }
+            let frame_len = match message_frame_len(&self.inbuf[p..]) {
+                Ok(Some(frame_len)) => frame_len,
+                Ok(None) => return true,
+                Err(_) => return false,
+            };
             match self.inbuf[p] {
                 b'C' | b'I' | b'E' | b'Z' | b'W' | b'H' | b'G' => return false,
                 _ => {}
             }
-            p += 1 + len;
+            p += frame_len;
         }
     }
 
@@ -1097,7 +1125,7 @@ impl PgConn {
     // PQgetCopyData(async=true).
     pub fn get_copy_data(&mut self) -> Result<CopyData, String> {
         loop {
-            let Some((t, body)) = self.next_message() else {
+            let Some((t, body)) = self.next_message()? else {
                 return Ok(CopyData::Block);
             };
             match t {
@@ -1143,7 +1171,10 @@ impl PgConn {
                     nfields = u16::from_be_bytes([body[0], body[1]]) as usize;
                     rows.clear();
                 }
-                b'D' => rows.push(parse_data_row(&body)),
+                b'D' => match parse_data_row(&body) {
+                    Ok(row) => rows.push(row),
+                    Err(err) => return Ok(Some(self.protocol_error(err))),
+                },
                 b'C' | b's' => {
                     let tag = if t == b'C' { cstr_at(&body, 0).0 } else { String::new() };
                     let status =
@@ -1224,7 +1255,9 @@ impl PgConn {
                         started = true;
                     }
                     let mut cols: Vec<Option<&[u8]>> = Vec::new();
-                    parse_data_row_borrowed(&body, &mut cols);
+                    if let Err(err) = parse_data_row_borrowed(&body, &mut cols) {
+                        return Ok(self.protocol_error(err));
+                    }
                     sink.row(&cols)?;
                 }
                 b'C' => {
@@ -1480,36 +1513,52 @@ fn execute_body(portal: &str, maxrows: u32) -> Vec<u8> {
     b
 }
 
-pub(crate) fn parse_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
-    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let mut cols = Vec::with_capacity(ncols);
-    let mut p = 2;
-    for _ in 0..ncols {
-        let len = be_i32(&body[p..p + 4]);
-        p += 4;
-        if len < 0 {
-            cols.push(None);
-        } else {
-            cols.push(Some(body[p..p + len as usize].to_vec()));
-            p += len as usize;
-        }
-    }
-    cols
+pub(crate) fn parse_data_row(body: &[u8]) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut borrowed = Vec::new();
+    parse_data_row_borrowed(body, &mut borrowed)?;
+    Ok(borrowed
+        .into_iter()
+        .map(|value| value.map(<[u8]>::to_vec))
+        .collect())
 }
 
-fn parse_data_row_borrowed<'a>(body: &'a [u8], cols: &mut Vec<Option<&'a [u8]>>) {
-    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let mut p = 2;
+fn parse_data_row_borrowed<'a>(
+    body: &'a [u8],
+    cols: &mut Vec<Option<&'a [u8]>>,
+) -> Result<(), String> {
+    let Some(count) = body.get(..2) else {
+        return Err("server sent a malformed DataRow message".into());
+    };
+    let ncols = u16::from_be_bytes([count[0], count[1]]) as usize;
+    cols.reserve(ncols);
+    let mut p: usize = 2;
     for _ in 0..ncols {
-        let len = be_i32(&body[p..p + 4]);
+        let Some(len_bytes) = body.get(p..p.saturating_add(4)) else {
+            return Err("server sent a malformed DataRow message".into());
+        };
+        let len = be_i32(len_bytes);
         p += 4;
-        if len < 0 {
-            cols.push(None);
-        } else {
-            cols.push(Some(&body[p..p + len as usize]));
-            p += len as usize;
+        match len {
+            -1 => cols.push(None),
+            len if len < -1 => {
+                return Err("server sent a malformed DataRow message".into());
+            }
+            len => {
+                let Some(end) = p.checked_add(len as usize) else {
+                    return Err("server sent a malformed DataRow message".into());
+                };
+                let Some(value) = body.get(p..end) else {
+                    return Err("server sent a malformed DataRow message".into());
+                };
+                cols.push(Some(value));
+                p = end;
+            }
         }
     }
+    if p != body.len() {
+        return Err("server sent a malformed DataRow message".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1571,6 +1620,53 @@ mod tests {
         let m = msg(b'Q', b"SELECT 1\0");
         assert_eq!(m[0], b'Q');
         assert_eq!(be_i32(&m[1..5]) as usize, m.len() - 1);
+    }
+
+    #[test]
+    fn message_framing_rejects_invalid_lengths() {
+        assert_eq!(message_frame_len(&[]), Ok(None));
+        assert_eq!(message_frame_len(&[b'Z', 0, 0, 0, 4]), Ok(Some(5)));
+        assert_eq!(message_frame_len(&[b'D', 0, 0, 0, 8]), Ok(None));
+        assert_eq!(
+            message_frame_len(&[b'D', 0, 0, 0, 3]),
+            Err("server sent an invalid message length")
+        );
+        assert_eq!(
+            message_frame_len(&[b'D', 0xff, 0xff, 0xff, 0xff]),
+            Err("server sent an invalid message length")
+        );
+    }
+
+    #[test]
+    fn data_row_parser_validates_column_lengths() {
+        let mut valid = Vec::new();
+        valid.extend_from_slice(&2u16.to_be_bytes());
+        valid.extend_from_slice(&3i32.to_be_bytes());
+        valid.extend_from_slice(b"abc");
+        valid.extend_from_slice(&(-1i32).to_be_bytes());
+        assert_eq!(
+            parse_data_row(&valid).unwrap(),
+            vec![Some(b"abc".to_vec()), None]
+        );
+
+        assert!(parse_data_row(&[]).is_err());
+        assert!(parse_data_row(&[0, 1]).is_err());
+
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&1u16.to_be_bytes());
+        truncated.extend_from_slice(&4i32.to_be_bytes());
+        truncated.extend_from_slice(b"abc");
+        assert!(parse_data_row(&truncated).is_err());
+
+        let mut invalid_null = Vec::new();
+        invalid_null.extend_from_slice(&1u16.to_be_bytes());
+        invalid_null.extend_from_slice(&(-2i32).to_be_bytes());
+        assert!(parse_data_row(&invalid_null).is_err());
+
+        let mut trailing = Vec::new();
+        trailing.extend_from_slice(&0u16.to_be_bytes());
+        trailing.push(0);
+        assert!(parse_data_row(&trailing).is_err());
     }
 
     #[test]
