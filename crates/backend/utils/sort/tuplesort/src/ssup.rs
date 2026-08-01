@@ -552,7 +552,6 @@ pub fn comparator_for_opfamily(
         // btoidfastcmp: unsigned; the zero-extended datum word compares exact.
         F_BTOIDSORTSUPPORT => SortComparator::Unsigned,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
-        F_BTINT2SORTSUPPORT => SortComparator::Int16,
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
             varstr_comparator(sort_support_function == F_BPCHAR_SORTSUPPORT, collation)?
         }

@@ -3297,8 +3297,6 @@ fn alter_undefined_column(colname: &str, relname: &str) -> Box<PgError> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-#[cold]
-#[inline(never)]
 fn cursor_at(mut e: Box<PgError>, src: Option<&[u8]>, location: i32) -> Box<PgError> {
     let pos =
         parser_small1::parser_errposition_source(src, location, mbutils::GetDatabaseEncoding());

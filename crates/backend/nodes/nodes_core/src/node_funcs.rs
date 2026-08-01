@@ -44,7 +44,6 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
-        NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
@@ -191,7 +190,6 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_FieldStore
         | NodeTag::T_RowCompareExpr
         | NodeTag::T_RowExpr => -1,
-        NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
@@ -293,7 +291,6 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
-        NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refcollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_SQLValueFunction => {
@@ -473,7 +470,6 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             leftmost_loc(c.location, expr_location(c.arg))
         }
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().location,
-        NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
         NodeTag::T_CaseTestExpr => -1,
         // C: the CASE/WHEN/COALESCE/GREATEST/LEAST keyword is always leftmost.

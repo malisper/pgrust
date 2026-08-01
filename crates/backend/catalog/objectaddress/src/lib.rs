@@ -1627,11 +1627,6 @@ pub fn check_object_ownership<'mcx>(
                 aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, name)?;
             }
         }
-        ObjectType::OBJECT_TYPE | ObjectType::OBJECT_DOMAIN | ObjectType::OBJECT_ATTRIBUTE => {
-            if !aclchk::object_ownercheck(address.classId, address.objectId, roleid)? {
-                aclcheck_error_type(aclchk::ACLCHECK_NOT_OWNER, address.objectId)?;
-            }
-        }
         other => panic!("check_object_ownership: unsupported object type: {other:?}"),
     }
     Ok(())

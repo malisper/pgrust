@@ -2617,7 +2617,6 @@ fn btcostestimate(
                     }
                     0
                 }
-                NodeTag::T_RowCompareExpr => clause.as_row_compare_expr().unwrap().opnos.nth(0),
                 other => panic!("btcostestimate (selfuncs.c): indexqual {other:?}; M2 lane"),
             };
             if clause_op != 0 {

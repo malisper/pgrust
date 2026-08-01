@@ -114,20 +114,6 @@ pub fn transformExprRecurse<'mcx>(
         }
         NodeTag::T_MultiAssignRef => transformMultiAssignRef(mcx, pstate, expr),
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
-        // C mutates na->arg in place; sealed nodes rebuild the wrapper.
-        NodeTag::T_NamedArgExpr => {
-            let na = expr.as_named_arg_expr().unwrap();
-            let arg = transformExprRecurse(mcx, pstate, na.arg.expect("NamedArgExpr has an arg"))?;
-            Node::mk(
-                mcx,
-                types_nodes::NamedArgExpr {
-                    arg: Some(arg),
-                    name: na.name,
-                    argnumber: na.argnumber,
-                    location: na.location,
-                },
-            )
-        }
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
         NodeTag::T_NullTest => transformNullTest(mcx, pstate, expr),
         NodeTag::T_GroupingFunc => parse_agg::transformGroupingFunc(

@@ -14,7 +14,7 @@ use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::parsenodes::{
-    CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SetOperationStmt,
+    CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry,
     SortGroupClause, TableSampleClause,
 };
 use types_nodes::primnodes::{
@@ -519,24 +519,6 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_opt_node(out, sr.refassgnexpr)?;
             w!(out, "}}");
         }
-        NodeTag::T_CaseExpr => {
-            let c = node.as_variant::<types_nodes::primnodes::CaseExpr>().expect("CaseExpr");
-            w!(out, "{{CASEEXPR :casetype {} :casecollid {} :arg ", c.casetype, c.casecollid);
-            out_opt_node(out, c.arg)?;
-            w!(out, " :args ");
-            out_list(out, &c.args)?;
-            w!(out, " :defresult ");
-            out_opt_node(out, c.defresult)?;
-            w!(out, " :location -1}}");
-        }
-        NodeTag::T_CaseWhen => {
-            let cw = node.as_variant::<types_nodes::primnodes::CaseWhen>().expect("CaseWhen");
-            w!(out, "{{CASEWHEN :expr ");
-            out_opt_node(out, cw.expr)?;
-            w!(out, " :result ");
-            out_opt_node(out, cw.result)?;
-            w!(out, " :location -1}}");
-        }
         NodeTag::T_CollateExpr => {
             let c = node
                 .as_variant::<types_nodes::primnodes::CollateExpr>()
@@ -583,43 +565,6 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             );
             out_list(out, &m.args)?;
             w!(out, " :location -1}}");
-        }
-        NodeTag::T_WindowFunc => {
-            let f =
-                node.as_variant::<types_nodes::primnodes::WindowFunc>().expect("WindowFunc");
-            w!(
-                out,
-                "{{WINDOWFUNC :winfnoid {} :wintype {} :wincollid {} :inputcollid {} :args ",
-                f.winfnoid, f.wintype, f.wincollid, f.inputcollid
-            );
-            out_list(out, &f.args)?;
-            w!(out, " :aggfilter ");
-            out_opt_node(out, f.aggfilter)?;
-            w!(out, " :runCondition ");
-            out_list(out, &f.runCondition)?;
-            w!(out, " :winref {} :winstar ", f.winref);
-            out_bool(out, f.winstar);
-            w!(out, " :winagg ");
-            out_bool(out, f.winagg);
-            w!(out, " :location -1}}");
-        }
-        NodeTag::T_SetOperationStmt => {
-            let s = node.as_variant::<SetOperationStmt>().expect("SetOperationStmt");
-            w!(out, "{{SETOPERATIONSTMT :op {} :all ", s.op as u32);
-            out_bool(out, s.all);
-            w!(out, " :larg ");
-            out_opt_node(out, s.larg)?;
-            w!(out, " :rarg ");
-            out_opt_node(out, s.rarg)?;
-            w!(out, " :colTypes ");
-            out_oid_list(out, &s.colTypes);
-            w!(out, " :colTypmods ");
-            out_int_list(out, &s.colTypmods);
-            w!(out, " :colCollations ");
-            out_oid_list(out, &s.colCollations);
-            w!(out, " :groupClauses ");
-            out_list(out, &s.groupClauses)?;
-            w!(out, "}}");
         }
         NodeTag::T_CurrentOfExpr => {
             let c = node
@@ -722,16 +667,6 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 .expect("AlternativeSubPlan");
             w!(out, "{{ALTERNATIVESUBPLAN :subplans ");
             out_list(out, &a.subplans)?;
-            w!(out, "}}");
-        }
-        NodeTag::T_NotifyStmt => {
-            let n = node
-                .as_variant::<types_nodes::parsenodes::NotifyStmt>()
-                .expect("NotifyStmt");
-            w!(out, "{{NOTIFYSTMT :conditionname ");
-            out_str(out, n.conditionname);
-            w!(out, " :payload ");
-            out_str(out, n.payload);
             w!(out, "}}");
         }
         NodeTag::T_WithCheckOption => {

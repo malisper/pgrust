@@ -2251,7 +2251,6 @@ impl<'m> TuplesortData<'m> {
     /// restored across every already-stored memtuple (REMOVEABBREV).
     /// Out of line: inlined it doubled puttuple_full on no-abbrev lanes
     /// (m3 sort_limit +22 instr/row, jobs -1783120589/-1783120595).
-    #[inline(never)]
     /// Out of line as C keeps it (ssup->abbrev_converter is an indirect
     /// call): letting the converter fuse into the put complex regressed
     /// text_sort by register pressure after the spill landing's code growth.

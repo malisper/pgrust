@@ -2149,7 +2149,6 @@ pub(crate) fn init_expr_rec<'mcx>(
             }
             init_subplan_expr(node, state, mcx, out, agg, params, sub)
         }
-        NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CaseExpr => init_case_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CaseTestExpr => match state.innermost_case {
             Some(slot) => push_step(state, mcx, Step::CaseTestVal { slot, out }),

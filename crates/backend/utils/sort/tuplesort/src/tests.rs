@@ -278,17 +278,17 @@ fn random_access_backward_rescan_markpos() {
     ts.performsort().unwrap();
     assert_eq!(ts.getdatum(true).unwrap().unwrap().value.as_i32(), 1);
     assert_eq!(ts.getdatum(true).unwrap().unwrap().value.as_i32(), 3);
-    ts.markpos();
+    ts.markpos().unwrap();
     assert_eq!(ts.getdatum(true).unwrap().unwrap().value.as_i32(), 5);
     // Backward: returns the tuple before the last-returned one.
     assert_eq!(ts.getdatum(false).unwrap().unwrap().value.as_i32(), 3);
-    ts.restorepos();
+    ts.restorepos().unwrap();
     assert_eq!(ts.getdatum(true).unwrap().unwrap().value.as_i32(), 5);
     assert_eq!(ts.getdatum(true).unwrap().unwrap().value.as_i32(), 9);
     assert!(ts.getdatum(true).unwrap().is_none());
     // Backward off EOF re-returns the last tuple.
     assert_eq!(ts.getdatum(false).unwrap().unwrap().value.as_i32(), 9);
-    ts.rescan();
+    ts.rescan().unwrap();
     assert_eq!(ts.getdatum(true).unwrap().unwrap().value.as_i32(), 1);
     ts.end();
 }

@@ -2199,7 +2199,6 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         | NodeTag::T_Param
         | NodeTag::T_Var
         | NodeTag::T_CaseTestExpr
-        | NodeTag::T_SQLValueFunction
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_MergeSupportFunc
         | NodeTag::T_CoerceToDomainValue => false,
@@ -2233,12 +2232,6 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         // expression_tree_walker (nodeFuncs.c:2257-2258).
         NodeTag::T_AlternativeSubPlan => {
             node.as_alternative_sub_plan().unwrap().subplans.iter().any(expression_returns_set)
-        }
-        NodeTag::T_ScalarArrayOpExpr => {
-            node.as_scalar_array_op_expr().unwrap().args.iter().any(expression_returns_set)
-        }
-        NodeTag::T_ArrayExpr => {
-            node.as_array_expr().unwrap().elements.iter().any(expression_returns_set)
         }
         NodeTag::T_SubscriptingRef => {
             let sr = node.as_subscripting_ref().unwrap();
