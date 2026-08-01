@@ -18,7 +18,6 @@ use crate::regguts::{
 };
 use ::regex::{pg_regoff_t, RegMatch};
 
-pub const DEFAULT_MAX_DEPTH: u32 = 10_000;
 
 
 pub const UBITS: usize = 32;
@@ -390,7 +389,6 @@ pub struct ExecVars<'a> {
     pub ladfas: Vec<Option<SubDfa>>,
     pub lblastcss: Vec<Option<usize>>,
     pub lblastcp: Vec<Option<usize>>,
-    pub max_depth: u32,
 }
 
 
@@ -720,7 +718,8 @@ fn lacon(
     cp: usize,
     co: color,
 ) -> RegResult<bool> {
-    if v.depth >= v.max_depth {
+    // C regexec.c / rege_dfa.c STACK_TOO_DEEP(v->re) == stack_is_too_deep().
+    if ::stack_depth::stack_is_too_deep() {
         return Err(RegError(REG_ETOOBIG));
     }
     v.depth += 1;
@@ -1524,7 +1523,6 @@ fn pg_regexec_code(
         ladfas,
         lblastcss,
         lblastcp,
-        max_depth: DEFAULT_MAX_DEPTH,
     };
 
     debug_assert!(g.tree.is_some());
@@ -1662,7 +1660,8 @@ fn cdissect(
     begin: usize,
     end: usize,
 ) -> RegResult<i32> {
-    if v.depth >= v.max_depth {
+    // C regexec.c / rege_dfa.c STACK_TOO_DEEP(v->re) == stack_is_too_deep().
+    if ::stack_depth::stack_is_too_deep() {
         return Ok(REG_ETOOBIG);
     }
     v.depth += 1;

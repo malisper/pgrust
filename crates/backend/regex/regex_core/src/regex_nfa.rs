@@ -32,7 +32,6 @@ pub fn reg_max_compile_space() -> usize {
     500_000 * (core::mem::size_of::<State>() + 4 * core::mem::size_of::<Arc>())
 }
 
-pub const MAX_RECURSION_DEPTH: u32 = 10_000;
 
 
 #[inline]
@@ -924,7 +923,8 @@ fn deltraverse(
     s: StateId,
     depth: u32,
 ) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -988,7 +988,8 @@ fn duptraverse<'mcx>(
     stmp: Option<StateId>,
     depth: u32,
 ) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -1043,7 +1044,8 @@ fn removetraverse<'mcx>(
     s: StateId,
     depth: u32,
 ) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -1071,7 +1073,8 @@ fn removetraverse<'mcx>(
 }
 
 fn cleartraverse(nfa: &mut Nfa, s: StateId, depth: u32) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -1123,7 +1126,8 @@ fn duptraverse_cross<'mcx>(
     stmp: Option<StateId>,
     depth: u32,
 ) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -1158,7 +1162,8 @@ fn markreachable(
     mark: Option<StateId>,
     depth: u32,
 ) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -1183,7 +1188,8 @@ fn markcanreach(
     mark: Option<StateId>,
     depth: u32,
 ) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -1811,7 +1817,8 @@ fn emptyreachable(
     inarcsorig: &[Option<ArcId>],
     depth: u32,
 ) -> RegResult<StateId> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -1925,7 +1932,8 @@ fn checkmatchall_recurse(
     haspaths: &mut Vec<Option<Vec<bool>>>,
     depth: u32,
 ) -> bool {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return false;
     }
 
@@ -2201,7 +2209,8 @@ fn findconstraintloop<'mcx>(
     s: StateId,
     depth: u32,
 ) -> RegResult<bool> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 
@@ -2326,7 +2335,8 @@ fn clonesuccessorstates<'mcx>(
     nstates: i32,
     depth: u32,
 ) -> RegResult<()> {
-    if depth >= MAX_RECURSION_DEPTH {
+    // C regc_nfa.c STACK_TOO_DEEP(nfa->v->re) == stack_is_too_deep(): BYTE-based.
+    if ::stack_depth::stack_is_too_deep() {
         return Err(err_etoobig());
     }
 

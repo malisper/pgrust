@@ -69,7 +69,6 @@ fn iscspace(x: chr) -> bool {
 }
 
 
-pub const MAX_PARSE_DEPTH: u32 = 10_000;
 
 pub struct Vars<'mcx> {
     pub mcx: Mcx<'mcx>,
@@ -1097,7 +1096,8 @@ pub struct DepthGuard<'g, 'mcx> {
 
 impl<'g, 'mcx> DepthGuard<'g, 'mcx> {
     pub fn enter(v: &'g mut Vars<'mcx>) -> RegResult<Self> {
-        if v.parse_depth >= MAX_PARSE_DEPTH {
+        // See subre() below: the guard must be byte-based, as C's is.
+        if ::stack_depth::stack_is_too_deep() {
             v.seterr(REG_ETOOBIG);
             return Err(RegError(REG_ETOOBIG));
         }
@@ -1194,7 +1194,15 @@ pub fn subre(
     begin: Option<StateId>,
     end: Option<StateId>,
 ) -> Option<NodeId> {
-    if v.parse_depth >= MAX_PARSE_DEPTH {
+    // C subre(): "Checking for stack overflow here is sufficient to protect
+    // parse() and its recursive subroutines."
+    // C regcomp.c: rstacktoodeep() == stack_is_too_deep(), i.e. STACK_TOO_DEEP
+    // measures actual stack BYTES against max_stack_depth. A frame-count cap
+    // cannot bound stack bytes: at the measured 266 bytes/parse-frame, 10_000
+    // frames is 2.66 MB, which does not fit the 2 MiB child_thread_stack_size()
+    // floor at all -- there the cap was DEAD and deep nesting aborted the
+    // process (thread-per-backend => every session).
+    if ::stack_depth::stack_is_too_deep() {
         v.seterr(REG_ETOOBIG);
         return None;
     }
