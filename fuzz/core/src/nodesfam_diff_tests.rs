@@ -1107,3 +1107,30 @@ fn datum_byte_tokens_must_be_decimals() {
                 [ 1 0 0 -1 0 0 0 0 ]}";
     assert!(run_text(good.as_bytes()), "gate rejected a valid signed datum byte");
 }
+
+/// Corpus hygiene helper (ignored by default): print the corpus files that do
+/// NOT reach a full comparison, so the committed bank stays the inputs that
+/// exercise the compared planes plus the curated `seed-*` files. Gated inputs
+/// are dead weight — the driver rejects them before the oracle runs.
+///
+///   cargo test -p decoder_fuzz nodesfam_diff::tests::list_gated_corpus \
+///     -- --ignored --nocapture > /tmp/gated.txt
+#[test]
+#[ignore]
+fn list_gated_corpus() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
+    for e in std::fs::read_dir(&dir).expect("corpus") {
+        let p = e.expect("dirent").path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        if name.starts_with("seed-") {
+            continue; // curated, always kept
+        }
+        let data = std::fs::read(&p).expect("seed");
+        if !run_text(if data.first() == Some(&0) { &data[1..] } else { &data[..] }) {
+            println!("GATED {name}");
+        }
+    }
+}
