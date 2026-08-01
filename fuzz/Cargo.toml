@@ -403,6 +403,15 @@ path = "fuzz_targets/libfam_diff.rs"
 test = false
 doc = false
 bench = false
+
+# radixtree_diff (p1-mb-lib): backend/lib/radixtree op-driver.
+[[bin]]
+name = "radixtree_diff"
+path = "fuzz_targets/radixtree_diff.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "miscfam_diff"
 path = "fuzz_targets/miscfam_diff.rs"
