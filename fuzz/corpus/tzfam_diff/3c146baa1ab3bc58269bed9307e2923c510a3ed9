@@ -1,0 +1,33 @@
+gentina Summer Time (obsolete)
+BOT    -14400    # Bolivia Time (obsolete)
+BRA    -10800    # Brazil Time (not in IANA database)
+BRST    -7200 D  # Brasil Summer Time (obsoletd)
+BRT    -10800    # Brasil Time (obsolete)
+COT    -18000    # Columbia Time (obsolete)
+CDT    -18000 D  # Central Daylight Time
+CLST   -10800 D  # Chile Summer Time (obsolete)
+CLT    America/Santiago  # Chile Time (obsolete)
+CST    -21600    # Central Standard Time (America)
+EDT    -14400 D  # Eastern Daylight Saving Time
+EGST     ando de Noron7200    # Fernando de Noronha Time (obsolete)
+FNST    -3600 D  # Fernando de Noronha Sh Africa Standard Time
+WAT      3600    # West Africa TimeAlstagedwordaska Daylight Time
+AKST   -32400    # Alaska Standard Time
+ART    America/Argentiin Daylight Time
+MST    -25200    # Mexico Mount       0 D  # East Greenland Summer Time (obsolete)
+EGT     -3600    # East GNoronha Sh Africa Standard Time
+WAT      3600    # West Africa TimeAlstagedwordaska Daylight Time
+AKST   -32400    # Alaska Standard Time
+ART    America/Argentiin Daylight Time
+MST    -25200 ylight Saving Time
+EGST    # Mexico Mountain Standard Time
+NDT     -9000  # Chile Time (obsolete)
+CST    -21600    # Central Standard Time (America)
+Ergentiin Daylight Time
+MST    -25201    # Mexico Mountain Standard Time
+NDT     -9000 D  # NewfoD  # Newfoundland DayliZ e
+Z           0    #TC         0    # CoordinaUdven itersal Time
+Z e
+Z           0    # Zulu
+ZULZZZZZZZZZZZZZZZZZZZZZZZZZght Time
+NFT    -1260abc abc D

@@ -395,3 +395,11 @@ path = "fuzz_targets/regexp_diff.rs"
 test = false
 doc = false
 bench = false
+
+# tzfam_diff (p1-mb-tzfam): strftime + tzparser + ts_locale family.
+[[bin]]
+name = "tzfam_diff"
+path = "fuzz_targets/tzfam_diff.rs"
+test = false
+doc = false
+bench = false

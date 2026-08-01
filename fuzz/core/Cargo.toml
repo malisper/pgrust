@@ -135,5 +135,12 @@ regex_core = { path = "../../crates/backend/regex/regex_core" }  # regexp_diff: 
 # pg_locale (like_diff C_LOCALE direct-kernel arms) — already declared above for jsonpath_diff
 types_nodes = { path = "../../crates/_support/types/nodes" }  # like_diff: NodeTag for the prosupport unhandled-tag plane
 
+# tzfam_diff (p1-mb-tzfam); adt_datetime/pg_locale/mbutils/wchar/mcx/types_error already above
+strftime = { path = "../../crates/backend/timezone/strftime" }
+localtime = { path = "../../crates/backend/timezone/localtime" }
+tzparser = { path = "../../crates/backend/utils/misc/tzparser" }
+ts_locale = { path = "../../crates/backend/tsearch/ts_locale" }
+guc = { path = "../../crates/backend/utils/misc/guc" }
+
 [build-dependencies]
 cc = "1"

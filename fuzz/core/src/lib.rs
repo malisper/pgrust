@@ -481,3 +481,8 @@ pub use like_diff::like_diff;
 // regexp_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-regexp_diff.md.
 pub mod regexp_diff;
 pub use regexp_diff::regexp_diff;
+
+// tzfam_diff: p1-mb-tzfam (strftime + tzparser + ts_locale vs vendored
+// 18.3 C) — see core/src/tzfam_diff.rs.
+pub mod tzfam_diff;
+pub use tzfam_diff::tzfam_diff;
