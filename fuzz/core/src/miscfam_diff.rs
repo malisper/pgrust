@@ -84,6 +84,12 @@
 //!     above); outside it C's `(int)` narrowing of the usec quotient and
 //!     -fwrapv sec arithmetic are C-implementation artifacts real
 //!     getrusage output can never produce (tv_usec < 1e6 by POSIX).
+//!   - earthdistance arm 4: NaN-BITS CARVE — when BOTH sides return NaN the
+//!     bit patterns are not compared (sign/payload propagation through
+//!     commutative FP ops is compiler codegen, not C semantics; C-vs-C
+//!     differs by compiler). Everything non-NaN stays bit-exact. See the
+//!     block comment above geo_bits_match and
+//!     tests::geo_nan_carve_narrowness (lane p1-nanadj, 2026-08-01).
 //!   - xlogstats arm 6: tot_len >= fpi sum (decoded-record invariant).
 //!   - stringinfo arm 7: enlarge error-zone needed values chosen >=
 //!     MaxAllocSize - len so the 54000 guard fires without a gigabyte
@@ -291,16 +297,65 @@ fn earthdistance_setup() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// NaN-BITS CARVE (earthdistance arm 4 — both-sides-NaN ONLY; lane p1-nanadj
+// adjudication 2026-08-01 of campaign pgrust-fuzz-campaign-1785567297-1fa3-
+// 54439 @ 8eb0b002e3: 4,855 divergences, all one class, all NaN-vs-NaN;
+// RATIFIED Michael 2026-08-01 — non-surface, do NOT re-open. The load-bearing
+// argument: C disagrees with ITSELF — the verbatim C body compiled with clang
+// -O2 -ffp-contract=off returns the Rust bit pattern while the CI cluster gcc
+// returns the other, so there is no single C answer to match and the NaN
+// sign/payload is not a PostgreSQL surface. Precedent format: multirange
+// numeric tie-representative (RATIFIED 2026-07-31) and the build.rs
+// FP-CONTRACTION CARVE 2026-07-30. Post-carve CI cluster CONFIRM GREEN: job
+// pgrust-fuzz-campaign-1785599625-787d-28826 @ 94762ffd59 — 10,604,155
+// execs, corpus resumed at 2,224 inputs including the divergence-bearing
+// NaN corpus, 0 divergences, 0 sanitizer artifacts, cov_lines 1057, rc=0.)
+// ---------------------------------------------------------------------------
+//
+// Bit-exact comparison is the DEFAULT and stays mandatory for every value
+// that is not a NaN on BOTH sides — including infinities, signed zeros, and
+// every finite value. The carve is exactly `r.is_nan() && c.is_nan()`.
+//
+// Why NaN bits are a non-surface here: geo_distance_internal's Rust body is
+// operation-for-operation identical to the C body and the C oracle is built
+// -ffp-contract=off, so both sides execute the same abstract op sequence.
+// When a NaN payload enters (raw-bit fuzz inputs), the surviving payload and
+// sign are decided by (a) which operand of a commutative FADD/FMUL the
+// compiler emits first (aarch64 ProcessNaNs propagates op1's NaN; LLVM and
+// gcc canonicalize commutative operand order differently) and (b) whether
+// the surviving copy passed through fabs (the only sign-clearing op). IEEE
+// 754 leaves NaN sign/payload propagation unspecified and C imposes nothing:
+// the SAME verbatim C compiled with clang -O2 -ffp-contract=off (macOS
+// aarch64) returns 0x7FFF494C41495204 for artifact crash-004eebee... —
+// agreeing with pgrust and DISAGREEING with the CI cluster gcc build's
+// 0xFFFF494C41495204. C Postgres disagrees with itself across compilers, so
+// the NaN bit pattern is not a PostgreSQL surface.
+//
+// Why the carve is not a mask (see tests::geo_nan_carve_narrowness):
+//   * NaN-vs-finite in EITHER direction stays a hard divergence — the carve
+//     requires BOTH sides NaN, so a wrongly-produced (or wrongly-absent) NaN
+//     still fails.
+//   * Every finite bit difference (down to 1 ulp) and signed-zero difference
+//     still fails: the comparison is bit-exact outside the carve.
+//   * NaN-in => NaN-out on both sides is structural (every op propagates
+//     NaN; both branch comparisons are false-on-NaN in both languages), so
+//     the carve cannot hide a control-flow divergence.
+fn geo_bits_match(r: f64, c: f64) -> bool {
+    r.to_bits() == c.to_bits() || (r.is_nan() && c.is_nan())
+}
+
 fn check_geo_distance(x1: f64, y1: f64, x2: f64, y2: f64) {
     use types_core::geo::Point;
     let p1 = Point { x: x1, y: y1 };
     let p2 = Point { x: x2, y: y2 };
     let r = contrib_earthdistance::geo_distance_internal(&p1, &p2);
     let c = unsafe { pg_mf_geo_distance(x1, y1, x2, y2) };
-    assert_eq!(
+    assert!(
+        geo_bits_match(r, c),
+        "geo_distance_internal({x1:?},{y1:?},{x2:?},{y2:?}): rust {:#018x} c {:#018x}",
         r.to_bits(),
-        c.to_bits(),
-        "geo_distance_internal({x1:?},{y1:?},{x2:?},{y2:?}): rust {r:?} c {c:?}"
+        c.to_bits()
     );
 
     // fc plane: the dfmgr-registered wrapper on a LocalFcinfo frame.
@@ -751,6 +806,84 @@ mod tests {
         check_cmdtag_enum(b"SELEC");
         check_cmdtag_enum(b"SELECTS");
         check_init_qc();
+    }
+
+    /// NaN-BITS CARVE narrowness proof (lane p1-nanadj 2026-08-01).
+    ///
+    /// (1) Replays crash report
+    /// 8119cc3c (campaign pgrust-fuzz-campaign-1785567297-1fa3-54439): y1 =
+    /// 0xFFFF494C41495204 (negative quiet NaN, payload from raw fuzz bytes
+    /// "RIALI"); CI cluster rust returned 0x7FFF494C41495204 vs CI cluster gcc C
+    /// 0xFFFF494C41495204 — sign-of-NaN only. Must pass under the carve.
+    ///
+    /// (2) INJECTION PROOF: a real finite-value defect — a deliberately
+    /// broken Rust geo_distance (EARTH_RADIUS off in the last decimal)
+    /// compared against the REAL C oracle through the SAME carved
+    /// comparator — is still detected, as are 1-ulp perturbations of the C
+    /// result, NaN-vs-finite in both directions, and signed-zero
+    /// differences. The carve is exactly both-sides-NaN and nothing wider.
+    #[test]
+    fn geo_nan_carve_narrowness() {
+        // (1) CI cluster artifact replay: both sides NaN => carved, no panic.
+        // (Exercises the real divergence class end-to-end, incl. fc plane.)
+        check_geo_distance(
+            2.56754520541733e-289,
+            f64::from_bits(0xFFFF494C41495204),
+            8.49644828181543e-275,
+            1.2241677834226036e-250,
+        );
+        // NaN in each coordinate position, sign/payload varied.
+        for bits in [0x7FF8000000000001u64, 0xFFF0000000000204, 0x7FF9424142430204] {
+            let n = f64::from_bits(bits);
+            check_geo_distance(n, 51.508, 2.3522, 48.8566);
+            check_geo_distance(-0.1257, n, 2.3522, 48.8566);
+            check_geo_distance(-0.1257, 51.508, n, 48.8566);
+            check_geo_distance(-0.1257, 51.508, 2.3522, n);
+        }
+
+        // (2) injected finite-value defect vs the REAL C oracle.
+        let (x1, y1, x2, y2) = (-0.1257f64, 51.508, 2.3522, 48.8566);
+        let c = unsafe { pg_mf_geo_distance(x1, y1, x2, y2) };
+        assert!(c.is_finite(), "sanity: London-Paris distance is finite");
+        // defective port: EARTH_RADIUS transcribed 3958.747717 (real C
+        // constant is 3958.747716) — the classic finite-value port defect.
+        let defective = {
+            let degtorad = |d: f64| (d / 360.0) * (2.0 * std::f64::consts::PI);
+            let (long1, lat1, long2, lat2) =
+                (degtorad(x1), degtorad(y1), degtorad(x2), degtorad(y2));
+            let mut longdiff = (long1 - long2).abs();
+            if longdiff > std::f64::consts::PI {
+                longdiff = 2.0 * std::f64::consts::PI - longdiff;
+            }
+            let half_lat = (lat1 - lat2).abs() / 2.0;
+            let mut sino = (half_lat.sin() * half_lat.sin()
+                + lat1.cos() * lat2.cos() * (longdiff / 2.0).sin() * (longdiff / 2.0).sin())
+            .sqrt();
+            if sino > 1.0 {
+                sino = 1.0;
+            }
+            2.0 * 3958.747717 * sino.asin()
+        };
+        assert!(
+            !geo_bits_match(defective, c),
+            "carve MUST NOT mask an injected finite-value defect"
+        );
+        // 1-ulp finite perturbation still detected.
+        assert!(
+            !geo_bits_match(f64::from_bits(c.to_bits() ^ 1), c),
+            "carve MUST NOT mask a 1-ulp finite difference"
+        );
+        // NaN-vs-finite is a hard divergence in BOTH directions.
+        assert!(!geo_bits_match(f64::NAN, c), "rust-NaN vs C-finite must fail");
+        assert!(!geo_bits_match(c, f64::NAN), "rust-finite vs C-NaN must fail");
+        // Signed zero and infinities stay bit-exact (carve is NaN-only).
+        assert!(!geo_bits_match(0.0, -0.0), "signed zero stays bit-exact");
+        assert!(!geo_bits_match(f64::INFINITY, f64::NEG_INFINITY));
+        // And the carve itself: distinct NaN bit patterns are accepted.
+        assert!(geo_bits_match(
+            f64::from_bits(0x7FFF494C41495204),
+            f64::from_bits(0xFFFF494C41495204)
+        ));
     }
 
     /// Deterministic seeds through every arm (also a smoke for the planes).
