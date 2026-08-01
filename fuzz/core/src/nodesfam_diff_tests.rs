@@ -1093,3 +1093,17 @@ fn huge_bitmapset_raises_on_both_sides() {
     // and the comparator handles it without killing the process
     let _ = run_text(text.as_bytes());
 }
+
+/// Datum byte tokens are plain `%d` decimals; a lone `-` is not producible
+/// (C's atoi("-") is 0, the port rejects the token).
+#[test]
+fn datum_byte_tokens_must_be_decimals() {
+    let bad = "{CONST :consttype 8 :consttypmod -1 :constcollid 0 :constlen 1 \
+               :constbyval true :constisnull false :location -1 :constvalue 1 \
+               [ 1 0 0 - 0 0 0 0 ]}";
+    assert!(!run_text(bad.as_bytes()), "gate let a lone '-' datum byte through");
+    let good = "{CONST :consttype 8 :consttypmod -1 :constcollid 0 :constlen 1 \
+                :constbyval true :constisnull false :location -1 :constvalue 1 \
+                [ 1 0 0 -1 0 0 0 0 ]}";
+    assert!(run_text(good.as_bytes()), "gate rejected a valid signed datum byte");
+}

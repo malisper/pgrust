@@ -565,9 +565,17 @@ fn datum_payload_is_well_formed(toks: &[&str], start: usize, byval: bool, length
     let mut k = start + 1;
     for _ in 0..want {
         match toks.get(k) {
-            // C does atoi(token) with no NULL check; the writer emits decimals
-            Some(t) if t.bytes().all(|b| b.is_ascii_digit() || b == b'-') && !t.is_empty() => {}
-            _ => return false,
+            // C does atoi(token) with no NULL check; outfuncs writes each byte
+            // as a plain %d, so a proper decimal (one optional leading '-',
+            // then at least one digit) is the only producible form — a lone
+            // `-` reached the oracle before this, where atoi("-") is 0.
+            Some(t) => {
+                let body = t.strip_prefix('-').unwrap_or(t);
+                if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+                    return false;
+                }
+            }
+            None => return false,
         }
         k += 1;
     }

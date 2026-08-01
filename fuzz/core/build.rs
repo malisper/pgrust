@@ -958,6 +958,14 @@ fn main() {
         }
     }
     nodesfam
+        // -funsigned-char PIN (same class contribb pinned): outfuncs' datum
+        // writer prints each byval byte as `(int) *s++` off a `char *`, so
+        // plain-char SIGNEDNESS decides whether byte 0xFF prints `-1` or
+        // `255`. The campaign's oracle of record is the CI cluster Linux/aarch64
+        // build where char is UNSIGNED — which is also what the pgrust port
+        // (u8) produces. Without the pin, a macOS (signed-char) local oracle
+        // reports a false OUT-TEXT divergence on every high datum byte.
+        .flag("-funsigned-char")
         .include("csrc/nodesfam/shim")
         .include("csrc/nodesfam/gen")
         .include("csrc/nodesfam/include")
