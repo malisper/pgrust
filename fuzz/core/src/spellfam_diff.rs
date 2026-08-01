@@ -273,7 +273,7 @@ fn rust_build<'mcx>(
 /// and the assert says whether the Rust side, the C side, or neither is the
 /// nondeterministic one. Flip to false once div5 is adjudicated (it roughly
 /// doubles per-exec cost, so it must not ride the 10M floor).
-const DECODE_CROSS_EXEC: bool = false;
+const DECODE_CROSS_EXEC: bool = true;
 
 /// Observable-output fingerprint of ONE side for one input, WITHOUT asserting
 /// anything cross-side. Used only by the decode leg.
