@@ -3107,6 +3107,12 @@ fn eqjoinsel_inner(
         let mut hasmatch2: mcx::PgVec<'_, bool> = mcx::PgVec::new_in(run.mcx);
         hasmatch2.extend(core::iter::repeat_n(false, values2.len()));
 
+        // Armed frame: by-ref equality procs (jsonb, text, arrays) detoast
+        // and allocate their result. C leaks these into the planner context;
+        // a bump scratch keeps the O(n*m) MCV cross-product bounded.
+        let scratch = ::mcx::MemoryContext::new_bump("eqjoinsel_inner");
+        let smcx = scratch.mcx();
+
         let mut matchprodfreq = 0.0f64;
         let mut nmatches = 0i32;
         for i in 0..values1.len() {
@@ -3114,8 +3120,14 @@ fn eqjoinsel_inner(
                 if hasmatch2[j] {
                     continue;
                 }
-                if types_fmgr::function_call2_coll(&mut eqproc, collation, values1[i], values2[j])?
-                    .as_bool()
+                if types_fmgr::function_call2_coll_in(
+                    &mut eqproc,
+                    collation,
+                    smcx,
+                    values1[i],
+                    values2[j],
+                )?
+                .as_bool()
                 {
                     hasmatch1[i] = true;
                     hasmatch2[j] = true;
@@ -3280,14 +3292,24 @@ fn eqjoinsel_semi(
         let mut hasmatch2: mcx::PgVec<'_, bool> = mcx::PgVec::new_in(run.mcx);
         hasmatch2.extend(core::iter::repeat_n(false, clamped_nvalues2));
 
+        // Armed frame: see eqjoinsel_inner.
+        let scratch = ::mcx::MemoryContext::new_bump("eqjoinsel_semi");
+        let smcx = scratch.mcx();
+
         let mut nmatches = 0i32;
         for i in 0..values1.len() {
             for j in 0..clamped_nvalues2 {
                 if hasmatch2[j] {
                     continue;
                 }
-                if types_fmgr::function_call2_coll(&mut eqproc, collation, values1[i], values2[j])?
-                    .as_bool()
+                if types_fmgr::function_call2_coll_in(
+                    &mut eqproc,
+                    collation,
+                    smcx,
+                    values1[i],
+                    values2[j],
+                )?
+                .as_bool()
                 {
                     hasmatch1[i] = true;
                     hasmatch2[j] = true;
@@ -4069,14 +4091,20 @@ fn get_stats_slot_range(
         *opproc = Some(fmgr_core::fmgr_info(opfuncoid)?);
     }
     let opproc = opproc.as_mut().unwrap();
+    // Armed frame: by-ref comparison procs detoast their args (see op_test).
+    // Only the incoming Datums are stored, so nothing outlives the scratch.
+    let scratch = ::mcx::MemoryContext::new_bump("get_stats_slot_range");
+    let smcx = scratch.mcx();
     for &v in values {
         match range {
             None => *range = Some((v, v)),
             Some((tmin, tmax)) => {
-                if types_fmgr::function_call2_coll(opproc, collation, v, *tmin)?.as_bool() {
+                if types_fmgr::function_call2_coll_in(opproc, collation, smcx, v, *tmin)?.as_bool()
+                {
                     *tmin = v;
                 }
-                if types_fmgr::function_call2_coll(opproc, collation, *tmax, v)?.as_bool() {
+                if types_fmgr::function_call2_coll_in(opproc, collation, smcx, *tmax, v)?.as_bool()
+                {
                     *tmax = v;
                 }
             }
