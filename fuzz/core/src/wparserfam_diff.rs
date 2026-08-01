@@ -106,6 +106,13 @@ fn rust_tokens(text: &[u8]) -> PgResult<Vec<(i32, usize, usize)>> {
     let mut out = Vec::new();
     while wparser_def::tparser_get(&mut prs)? {
         let off = prs.token_ptr() as usize - text.as_ptr() as usize;
+        // token_bytes() is the same token by a second route: assert the two
+        // accessors agree (keeps the slice face in the measured denominator).
+        assert_eq!(
+            prs.token_bytes(),
+            &text[off..off + prs.lenbytetoken],
+            "token_bytes vs (token_ptr, lenbytetoken)"
+        );
         out.push((prs.type_, off, prs.lenbytetoken));
         if out.len() >= MAXTOK {
             break;

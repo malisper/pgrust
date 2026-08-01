@@ -428,6 +428,18 @@ fn inout_case(r: &mut Rdr<'_>) {
 
     let ctx = mcx::MemoryContext::new("hstorefam-inout");
     let mcx = ctx.mcx();
+
+    // dfmgr lookup-miss arm of the crate's builtin-library table.
+    assert!(matches!(
+        dfmgr::load_external_function("hstore", "no_such_hstore_function", false),
+        Ok(None)
+    ));
+    // hstore_version_diag: new-format-only producer, always 2 (the C
+    // counterpart reads hstore_compat.c's valid_old/valid_new probes, whose
+    // old-format arm has no producer on either side — carved).
+    let (vd, _) = run_fc::<1>(fc("hstore_version_diag"), mcx, &[(Datum::null(), true)], None);
+    assert_eq!(vd.expect("version_diag infallible").as_u64() as u32, 2);
+
     let Some(img) = diff_in(&text, soft, mcx) else {
         return;
     };
@@ -437,6 +449,23 @@ fn inout_case(r: &mut Rdr<'_>) {
 /// out/send/json/array/hash faces over one certified image.
 fn downstream_unops(img: &[u8], seed: u64, mcx: mcx::Mcx<'_>) {
     let d = Datum::from_usize(img.as_ptr() as usize);
+
+    // repr accessor faces (postcondition arm: same values by a second
+    // route as key()/val()/val_isnull(), which the C-compared paths use).
+    {
+        let hs = HstoreView::from_vardata(&img[4..]);
+        assert_eq!(hs.pool_len(), hs.pool_bytes().len().min(hs.pool_len()));
+        for i in 0..hs.count() {
+            assert_eq!(hs.keylen(i), hs.key(i).len());
+            if !hs.val_isnull(i) {
+                assert_eq!(hs.vallen(i), hs.val(i).len());
+            }
+            assert_eq!(hs.pair(i).isnull(), hs.val_isnull(i));
+        }
+        if hs.count() == 0 {
+            assert_eq!(hs.pool_len(), 0);
+        }
+    }
 
     // hstore_out
     let (rres, _) = run_fc::<1>(fc("hstore_out"), mcx, &[(d, false)], None);
@@ -730,6 +759,7 @@ fn constructors_case(r: &mut Rdr<'_>) {
             let (ndim, dims): (i32, Vec<i32>) = match (flags >> 4) % 4 {
                 0 if n == 0 => (0, vec![]),
                 0 | 1 => (1, vec![n]),
+                2 if n % 3 == 0 && n > 0 => (2, vec![n / 3, 3]),  // "two columns" arm
                 2 if n % 2 == 0 && n > 0 => (2, vec![n / 2, 2]),
                 2 => (1, vec![n]),
                 _ if n % 2 == 0 && n > 0 => (3, vec![n / 2, 2, 1]),
@@ -783,20 +813,20 @@ fn constructors_case(r: &mut Rdr<'_>) {
             let klb = if flags & 64 != 0 { 2 } else { 1 }; // lbound-mismatch arm
             let nk = keys.len() as i32;
             let nv = vals.len() as i32;
-            let karr = text_array_image(
-                mcx,
-                &keys,
-                if nk == 0 { 0 } else { 1 },
-                &[nk],
-                &[klb],
-            );
-            let varr = text_array_image(
-                mcx,
-                &vals,
-                if nv == 0 { 0 } else { 1 },
-                &[nv],
-                &[1],
-            );
+            // ARR_NDIM > 1 arms ("wrong number of array subscripts"), driven
+            // on the key array and on the value array independently.
+            let k2d = flags & 128 != 0 && nk > 0 && nk % 2 == 0;
+            let v2d = flags & 2 != 0 && nv > 0 && nv % 2 == 0;
+            let karr = if k2d {
+                text_array_image(mcx, &keys, 2, &[nk / 2, 2], &[1, 1])
+            } else {
+                text_array_image(mcx, &keys, if nk == 0 { 0 } else { 1 }, &[nk], &[klb])
+            };
+            let varr = if v2d {
+                text_array_image(mcx, &vals, 2, &[nv / 2, 2], &[1, 1])
+            } else {
+                text_array_image(mcx, &vals, if nv == 0 { 0 } else { 1 }, &[nv], &[1])
+            };
 
             let (mut ip, mut il): (*const u8, c_int) = (std::ptr::null(), 0);
             let cret = unsafe {
