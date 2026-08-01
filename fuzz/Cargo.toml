@@ -403,3 +403,8 @@ path = "fuzz_targets/libfam_diff.rs"
 test = false
 doc = false
 bench = false
+[[bin]]
+name = "miscfam_diff"
+path = "fuzz_targets/miscfam_diff.rs"
+test = false
+doc = false
