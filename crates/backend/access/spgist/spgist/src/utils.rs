@@ -38,7 +38,7 @@ pub fn relation_needs_wal(rel: &Relation<'_>) -> bool {
 
 pub fn unlock_release(buffer: Buffer) -> PgResult<()> {
     bufmgr::lock_buffer::call(buffer, bufmgr::BUFFER_LOCK_UNLOCK)?;
-    bufmgr::release_buffer::call(buffer);
+    bufmgr::release_buffer::call(buffer)?;
     Ok(())
 }
 
@@ -349,7 +349,7 @@ pub fn SpGistNewBuffer(index: &Relation<'_>) -> PgResult<Buffer> {
             }
             bufmgr::lock_buffer::call(buffer, bufmgr::BUFFER_LOCK_UNLOCK)?;
         }
-        bufmgr::release_buffer::call(buffer);
+        bufmgr::release_buffer::call(buffer)?;
     }
 
     let (buf, _extended_by) = bufmgr::extend_buffered_rel_by::call(
@@ -383,7 +383,7 @@ pub fn SpGistUpdateMetaPage(index: &Relation<'_>) -> PgResult<()> {
         bufmgr::mark_buffer_dirty::call(metabuffer)?;
         unlock_release(metabuffer)?;
     } else {
-        bufmgr::release_buffer::call(metabuffer);
+        bufmgr::release_buffer::call(metabuffer)?;
     }
     Ok(())
 }
@@ -469,7 +469,7 @@ pub fn SpGistGetBuffer(
         let buffer = bufmgr::read_buffer::call(index, blkno)?;
 
         if !bufmgr::conditional_lock_buffer::call(buffer)? {
-            bufmgr::release_buffer::call(buffer);
+            bufmgr::release_buffer::call(buffer)?;
             *is_new = true;
             let nb = allocNewBuffer(index, flags, &mut cache)?;
             set_cache(index, cache);

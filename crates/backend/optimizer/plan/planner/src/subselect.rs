@@ -2450,7 +2450,7 @@ pub(crate) fn ss_make_initplan_from_plan<'mcx>(
         startup_cost: 0.0,
         per_call_cost: 0.0,
     };
-    cost_subplan(&mut splan, plan);
+    cost_subplan(&mut splan, plan)?;
     let splan_id = run.intern_expr(Node::mk(mcx, splan)?);
     run.root.init_plans.push(splan_id);
     Ok(())

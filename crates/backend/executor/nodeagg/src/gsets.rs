@@ -588,10 +588,10 @@ fn init_hash_sets<'mcx>(
         let mut aggrefs: PgVec<'mcx, (Node<'mcx>, &'mcx types_nodes::primnodes::Aggref<'mcx>)> =
             PgVec::new_in(mcx);
         for tle in node.plan.targetlist.iter() {
-            crate::collect_aggrefs(tle, &mut aggrefs);
+            crate::collect_aggrefs(tle, &mut aggrefs)?;
         }
         for q in node.plan.qual.iter() {
-            crate::collect_aggrefs(q, &mut aggrefs);
+            crate::collect_aggrefs(q, &mut aggrefs)?;
         }
         for &(_, aggref) in aggrefs.iter() {
             for a in aggref.args.iter() {

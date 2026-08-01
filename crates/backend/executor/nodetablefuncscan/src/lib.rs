@@ -209,7 +209,7 @@ impl<'mcx> TableFuncScanState<'mcx> {
             r?;
         }
 
-        store.rescan();
+        store.rescan()?;
         self.tstore = Some(store);
         Ok(())
     }
@@ -515,7 +515,7 @@ pub fn exec_rescan_table_func_scan<'mcx>(
 ) -> PgResult<()> {
     execscan::exec_scan_rescan(&mut node.ss, estate);
     if let Some(store) = node.tstore.as_mut() {
-        store.rescan();
+        store.rescan()?;
     }
     Ok(())
 }

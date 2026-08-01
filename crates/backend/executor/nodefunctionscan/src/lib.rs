@@ -124,7 +124,7 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
                     // during the scan (dropped only by the estate reset cb).
                     unsafe { self.arg_mcx.as_mut() },
                 )?;
-                store.rescan();
+                store.rescan()?;
                 fs.tstore = Some(store);
             }
             let fs = &mut self.funcstates[0];
@@ -158,7 +158,7 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
                     // during the scan (dropped only by the estate reset cb).
                     unsafe { self.arg_mcx.as_mut() },
                 )?;
-                store.rescan();
+                store.rescan()?;
                 fs.tstore = Some(store);
             }
             let fs = &mut self.funcstates[funcno];
@@ -876,7 +876,7 @@ pub fn exec_rescan_function_scan<'mcx>(
     node.ordinal = 0;
     for fs in node.funcstates.iter_mut() {
         if let Some(store) = fs.tstore.as_mut() {
-            store.rescan();
+            store.rescan()?;
         }
     }
     Ok(())
@@ -903,7 +903,7 @@ pub fn exec_rescan_function_scan_chg<'mcx>(
             }
             fs.rowcount = -1;
         } else if let Some(store) = fs.tstore.as_mut() {
-            store.rescan();
+            store.rescan()?;
         }
     }
     Ok(())
