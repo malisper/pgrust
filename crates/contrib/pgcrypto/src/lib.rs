@@ -7,8 +7,9 @@ mod pgp;
 use datum::Datum;
 use elog::ereport;
 use types_error::{ErrorLocation, PgError, PgResult, NOTICE,
-    ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION,
-    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE};
+    ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 const LIBRARY: &str = "pgcrypto";
@@ -28,6 +29,8 @@ fn crypt_err(e: crypt::CryptError) -> Box<PgError> {
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
             .into(),
         crypt::CryptError::Message(m) => px_err(m),
+        // Interrupts / C-parity ereports pass through with their own SQLSTATE.
+        crypt::CryptError::Pg(e) => e,
     }
 }
 
@@ -290,14 +293,10 @@ fn fc_pg_armor(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
     let data = unsafe { fcinfo.arg_varlena_packed(0)? }.data().to_vec();
     let (keys, values) = if fcinfo.nargs() == 3 {
         let scratch = mcx::MemoryContext::new("pgp_armor headers");
-        let ki = unsafe { fcinfo.arg_varlena_packed(1)? }.data().to_vec();
-        let vi = unsafe { fcinfo.arg_varlena_packed(2)? }.data().to_vec();
-        let k = deconstruct_nonnull_text(scratch.mcx(), &ki)?;
-        let v = deconstruct_nonnull_text(scratch.mcx(), &vi)?;
-        if k.len() != v.len() {
-            return Err(px_err("pgp_armor: number of keys and values must be equal".to_string()));
-        }
-        (k, v)
+        // SAFETY: strict fn — args non-null.
+        let ki = unsafe { array_image(fcinfo, 1)? };
+        let vi = unsafe { array_image(fcinfo, 2)? };
+        parse_key_value_arrays(scratch.mcx(), &ki, &vi)?
     } else {
         (Vec::new(), Vec::new())
     };
@@ -329,24 +328,137 @@ fn fc_pgp_armor_headers(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     Ok(srf.finish(fcinfo))
 }
 
-fn deconstruct_nonnull_text(mcx: mcx::Mcx<'_>, image: &[u8]) -> PgResult<Vec<Vec<u8>>> {
-    let (elems, nulls) =
-        arrayfuncs::construct::deconstruct_array_builtin(mcx, image, types_core::TEXTOID, true)?;
-    let mut out = Vec::with_capacity(elems.len());
-    for (d, &isnull) in elems.iter().zip(nulls.iter()) {
-        if isnull {
-            return Err(px_err("pgp_armor: null value not allowed in header".to_string()));
-        }
-        let p = d.as_usize() as *const u8;
-        // SAFETY: non-null text element datum inside the array image.
-        let bytes = unsafe {
-            let total = types_tuple::varatt::varsize_any(p);
-            let hdr = if types_tuple::varatt::varatt_is_1b(p) { 1 } else { 4 };
-            core::slice::from_raw_parts(p.add(hdr), total - hdr).to_vec()
-        };
-        out.push(bytes);
+/// Header-ful (4B varlena header) image of a varlena arg — arrays keep their
+/// dims header, which `arrayfuncs` reads at fixed offsets. Short-header
+/// images are re-expanded to the 4B form C's PG_GETARG_ARRAYTYPE_P delivers.
+///
+/// Safety: strict-fn contract — arg `i` non-null.
+unsafe fn array_image(fcinfo: &Fcinfo, i: usize) -> PgResult<Vec<u8>> {
+    // SAFETY: forwarded caller contract.
+    let v = unsafe { fcinfo.arg_varlena_packed(i)? };
+    if v.is_short() {
+        let d = v.data();
+        let total = 4 + d.len();
+        let mut buf = Vec::with_capacity(total);
+        buf.extend_from_slice(&types_tuple::varatt::set_varsize_4b_word(total as u32).to_ne_bytes());
+        buf.extend_from_slice(d);
+        Ok(buf)
+    } else {
+        Ok(v.image().to_vec())
     }
-    Ok(out)
+}
+
+/// Payload bytes of a non-null text element datum inside an array image.
+fn text_elem_bytes(d: Datum) -> Vec<u8> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null text element datum inside the array image.
+    unsafe {
+        let total = types_tuple::varatt::varsize_any(p);
+        let hdr = if types_tuple::varatt::varatt_is_1b(p) { 1 } else { 4 };
+        core::slice::from_raw_parts(p.add(hdr), total - hdr).to_vec()
+    }
+}
+
+fn armor_header_err(msg: &str, sqlstate: types_error::SqlState) -> Box<PgError> {
+    PgError::error(msg.to_string()).with_sqlstate(sqlstate).into()
+}
+
+// C pg_is_ascii (high bit clear on every byte).
+fn all_ascii(b: &[u8]) -> bool {
+    b.iter().all(|&c| c < 0x80)
+}
+
+/// C parse_key_value_arrays (pgp-pgsql.c): converts the key/value text[]
+/// pair into byte vectors, applying C's exact checks in C's exact order —
+/// dimensions, count, then per pair: key null / non-ASCII / `": "` /
+/// newline, value null / non-ASCII / newline. Without the content checks an
+/// attacker-controlled header value containing `\n` injects a forged armor
+/// header line (lane p1-pgcrypto, D8).
+#[allow(clippy::type_complexity)]
+fn parse_key_value_arrays(
+    mcx: mcx::Mcx<'_>,
+    key_image: &[u8],
+    val_image: &[u8],
+) -> PgResult<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+    let nkdims = arrayfuncs::foundation::arr_ndim(key_image);
+    let nvdims = arrayfuncs::foundation::arr_ndim(val_image);
+    if nkdims > 1 || nkdims != nvdims {
+        return Err(armor_header_err(
+            "wrong number of array subscripts",
+            ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+        ));
+    }
+    if nkdims == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let (key_datums, key_nulls) =
+        arrayfuncs::construct::deconstruct_array_builtin(mcx, key_image, types_core::TEXTOID, true)?;
+    let (val_datums, val_nulls) =
+        arrayfuncs::construct::deconstruct_array_builtin(mcx, val_image, types_core::TEXTOID, true)?;
+
+    if key_datums.len() != val_datums.len() {
+        return Err(armor_header_err(
+            "mismatched array dimensions",
+            ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+        ));
+    }
+
+    let n = key_datums.len();
+    let mut keys = Vec::with_capacity(n);
+    let mut values = Vec::with_capacity(n);
+    for i in 0..n {
+        // Check that the key doesn't contain anything funny.
+        if key_nulls[i] {
+            return Err(armor_header_err(
+                "null value not allowed for header key",
+                ERRCODE_NULL_VALUE_NOT_ALLOWED,
+            ));
+        }
+        let k = text_elem_bytes(key_datums[i]);
+        if !all_ascii(&k) {
+            return Err(armor_header_err(
+                "header key must not contain non-ASCII characters",
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        if k.windows(2).any(|w| w == b": ") {
+            return Err(armor_header_err(
+                "header key must not contain \": \"",
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        if k.contains(&b'\n') {
+            return Err(armor_header_err(
+                "header key must not contain newlines",
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        keys.push(k);
+
+        // And the same for the value.
+        if val_nulls[i] {
+            return Err(armor_header_err(
+                "null value not allowed for header value",
+                ERRCODE_NULL_VALUE_NOT_ALLOWED,
+            ));
+        }
+        let v = text_elem_bytes(val_datums[i]);
+        if !all_ascii(&v) {
+            return Err(armor_header_err(
+                "header value must not contain non-ASCII characters",
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        if v.contains(&b'\n') {
+            return Err(armor_header_err(
+                "header value must not contain newlines",
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        values.push(v);
+    }
+    Ok((keys, values))
 }
 
 fn lookup(function: &str) -> Option<PGFunction> {
@@ -385,4 +497,211 @@ pub fn init_seams() {
         lookup,
         pg_init: None,
     });
+}
+
+#[cfg(test)]
+mod armor_header_tests {
+    //! C parse_key_value_arrays parity: every message/SQLSTATE below was
+    //! EXECUTED against stock PostgreSQL 18.3 (pg-stock183, 2026-08-01).
+    use super::*;
+    use arrayfuncs::foundation::TYPALIGN_INT;
+
+    // Build a header-ful 1-D (or md) text[] image from optional elements.
+    fn text_array<'m>(
+        mcx: mcx::Mcx<'m>,
+        elems: &[Option<&[u8]>],
+        ndims: i32,
+        dims: &[i32],
+    ) -> Vec<u8> {
+        if elems.is_empty() {
+            return arrayfuncs::construct::construct_empty_array(mcx, types_core::TEXTOID)
+                .unwrap()
+                .to_vec();
+        }
+        let mut datums = Vec::new();
+        let mut nulls = Vec::new();
+        let mut keep = Vec::new();
+        for e in elems {
+            match e {
+                Some(b) => {
+                    let v = varlena::cstring_to_text(mcx, b).unwrap();
+                    let d = types_fmgr::varlena_result(v);
+                    keep.push(d);
+                    datums.push(d);
+                    nulls.push(false);
+                }
+                None => {
+                    datums.push(Datum::null());
+                    nulls.push(true);
+                }
+            }
+        }
+        let lbs = vec![1i32; ndims as usize];
+        arrayfuncs::construct::construct_md_array(
+            mcx,
+            &datums,
+            Some(&nulls),
+            ndims,
+            dims,
+            &lbs,
+            types_core::TEXTOID,
+            -1,
+            false,
+            TYPALIGN_INT,
+        )
+        .unwrap()
+        .to_vec()
+    }
+
+    fn expect_err(
+        keys: &[Option<&[u8]>],
+        vals: &[Option<&[u8]>],
+        msg: &str,
+        sqlstate: types_error::SqlState,
+    ) {
+        let ctx = mcx::MemoryContext::new("armor test");
+        let n = keys.len() as i32;
+        let m = vals.len() as i32;
+        let ki = text_array(ctx.mcx(), keys, 1, &[n]);
+        let vi = text_array(ctx.mcx(), vals, 1, &[m]);
+        match parse_key_value_arrays(ctx.mcx(), &ki, &vi) {
+            Err(e) => {
+                assert_eq!(e.message, msg);
+                assert_eq!(e.sqlstate, sqlstate);
+            }
+            Ok(_) => panic!("expected error {msg:?}, got Ok"),
+        }
+    }
+
+    // D8, check 1/5: key non-ASCII.
+    #[test]
+    fn key_non_ascii_rejected() {
+        expect_err(
+            &[Some("k\u{e9}y".as_bytes())],
+            &[Some(b"v")],
+            "header key must not contain non-ASCII characters",
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        );
+    }
+
+    // D8, check 2/5: key containing ": ".
+    #[test]
+    fn key_colon_space_rejected() {
+        expect_err(
+            &[Some(b"k: k")],
+            &[Some(b"v")],
+            "header key must not contain \": \"",
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        );
+    }
+
+    // D8, check 3/5: key containing a newline.
+    #[test]
+    fn key_newline_rejected() {
+        expect_err(
+            &[Some(b"k\nk")],
+            &[Some(b"v")],
+            "header key must not contain newlines",
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        );
+    }
+
+    // D8, check 4/5: value non-ASCII.
+    #[test]
+    fn value_non_ascii_rejected() {
+        expect_err(
+            &[Some(b"k")],
+            &[Some("v\u{e9}".as_bytes())],
+            "header value must not contain non-ASCII characters",
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        );
+    }
+
+    // D8, check 5/5: value containing a newline — the header-injection vector.
+    #[test]
+    fn value_newline_rejected() {
+        expect_err(
+            &[Some(b"k")],
+            &[Some(b"v\nInjected: forged")],
+            "header value must not contain newlines",
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        );
+    }
+
+    // C allows ": " in the VALUE (only the key check has it) — 18.3 emits
+    // "k: v: v".
+    #[test]
+    fn value_colon_space_allowed() {
+        let ctx = mcx::MemoryContext::new("armor test");
+        let ki = text_array(ctx.mcx(), &[Some(b"k")], 1, &[1]);
+        let vi = text_array(ctx.mcx(), &[Some(b"v: v")], 1, &[1]);
+        let (keys, values) = parse_key_value_arrays(ctx.mcx(), &ki, &vi).unwrap();
+        assert_eq!(keys, vec![b"k".to_vec()]);
+        assert_eq!(values, vec![b"v: v".to_vec()]);
+    }
+
+    #[test]
+    fn null_key_rejected() {
+        expect_err(
+            &[Some(b"k"), None],
+            &[Some(b"v"), Some(b"v")],
+            "null value not allowed for header key",
+            ERRCODE_NULL_VALUE_NOT_ALLOWED,
+        );
+    }
+
+    #[test]
+    fn null_value_rejected() {
+        expect_err(
+            &[Some(b"k"), Some(b"k")],
+            &[Some(b"v"), None],
+            "null value not allowed for header value",
+            ERRCODE_NULL_VALUE_NOT_ALLOWED,
+        );
+    }
+
+    #[test]
+    fn count_mismatch_rejected() {
+        expect_err(
+            &[Some(b"k"), Some(b"k")],
+            &[Some(b"v")],
+            "mismatched array dimensions",
+            ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+        );
+    }
+
+    #[test]
+    fn multidim_rejected() {
+        let ctx = mcx::MemoryContext::new("armor test");
+        let ki = text_array(ctx.mcx(), &[Some(b"k")], 2, &[1, 1]);
+        let vi = text_array(ctx.mcx(), &[Some(b"v")], 2, &[1, 1]);
+        match parse_key_value_arrays(ctx.mcx(), &ki, &vi) {
+            Err(e) => {
+                assert_eq!(e.message, "wrong number of array subscripts");
+                assert_eq!(e.sqlstate, ERRCODE_ARRAY_SUBSCRIPT_ERROR);
+            }
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn empty_arrays_yield_no_headers() {
+        let ctx = mcx::MemoryContext::new("armor test");
+        let ki = text_array(ctx.mcx(), &[], 0, &[]);
+        let vi = text_array(ctx.mcx(), &[], 0, &[]);
+        let (keys, values) = parse_key_value_arrays(ctx.mcx(), &ki, &vi).unwrap();
+        assert!(keys.is_empty() && values.is_empty());
+    }
+
+    // Sanity: the accepted pair flows into armor_encode as one header line.
+    #[test]
+    fn accepted_headers_render() {
+        let ctx = mcx::MemoryContext::new("armor test");
+        let ki = text_array(ctx.mcx(), &[Some(b"Comment")], 1, &[1]);
+        let vi = text_array(ctx.mcx(), &[Some(b"pgcrypto")], 1, &[1]);
+        let (keys, values) = parse_key_value_arrays(ctx.mcx(), &ki, &vi).unwrap();
+        let out = pgp::armor::armor_encode(b"x", &keys, &values);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("Comment: pgcrypto\n"), "{s}");
+    }
 }

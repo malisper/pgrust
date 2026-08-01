@@ -6,6 +6,12 @@
 
 use ::blowfish::Blowfish;
 
+use super::CryptError;
+
+fn invalid_salt() -> CryptError {
+    CryptError::Message("invalid salt".to_string())
+}
+
 /// bcrypt's base-64 alphabet (`BF_itoa64`, differs from the crypt `./0-9A-Za-z`).
 const BF64: &[u8; 64] = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -78,7 +84,7 @@ pub fn encode_salt64(raw: &[u8; 16]) -> String {
 }
 
 /// `crypt_bf(key, setting)` — bcrypt. `setting` is `$2<minor>$NN$<22-char salt>`.
-pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, String> {
+pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
     // Validate the setting prefix exactly as crypt-blowfish.c's _crypt_blowfish_rn.
     if setting.len() < 7 + 22
         || setting[0] != b'$'
@@ -91,18 +97,18 @@ pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, String> {
         || (setting[4] == b'3' && setting[5] > b'1')
         || setting[6] != b'$'
     {
-        return Err("invalid salt".to_string());
+        return Err(invalid_salt());
     }
 
     let log_rounds = ((setting[4] - b'0') as u32) * 10 + (setting[5] - b'0') as u32;
     let count: u64 = 1u64 << log_rounds;
     if count < 16 {
-        return Err("invalid salt".to_string());
+        return Err(invalid_salt());
     }
 
     // Decode the 16-byte salt from the 22 base-64 chars after the prefix.
     let salt_chars = &setting[7..7 + 22];
-    let salt = bf_decode(salt_chars, 16).ok_or_else(|| "invalid salt".to_string())?;
+    let salt = bf_decode(salt_chars, 16).ok_or_else(invalid_salt)?;
 
     // C's BF_set_key cycles `key` then its terminating NUL, wrapping back to the
     // start (the trailing NUL is part of the cycle). The `blowfish` crate's
@@ -117,6 +123,10 @@ pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, String> {
     let mut state = Blowfish::bc_init_state();
     state.salted_expand_key(&salt, &key_nul);
     for _ in 0..count {
+        // C runs CHECK_FOR_INTERRUPTS() at the top of every 2^cost round
+        // (crypt-blowfish.c) so a high-cost bcrypt stays cancellable. A
+        // raised cancel/die propagates out as the error.
+        postgres_seams::check_for_interrupts::call().map_err(CryptError::Pg)?;
         state.bc_expand_key(&key_nul);
         state.bc_expand_key(&salt);
     }

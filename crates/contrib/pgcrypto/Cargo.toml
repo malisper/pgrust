@@ -25,6 +25,8 @@ guc = { path = "../../backend/utils/misc/guc" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+# CHECK_FOR_INTERRUPTS in the bcrypt/sha-crypt cost loops (C parity).
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 
@@ -34,9 +36,9 @@ types_tuple = { path = "../../_support/types/types_tuple" }
 aes = "0.8"
 blowfish = { version = "0.9", features = ["bcrypt"] }
 des = "0.8"
-# Traditional/xdes DES crypt is self-contained (crypt/cryptdes.rs); pwhash
-# drives only sha-crypt ($5$/$6$).
-pwhash = "1"
+# Traditional/xdes DES crypt is self-contained (crypt/cryptdes.rs); sha-crypt
+# ($5$/$6$) is in-tree (crypt/shacrypt.rs) over pg_sha2 so its rounds loop
+# carries CHECK_FOR_INTERRUPTS.
 cast5 = "0.11"
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 ecb = { version = "0.1", features = ["alloc", "block-padding"] }
