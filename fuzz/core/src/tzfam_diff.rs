@@ -558,6 +558,11 @@ fn ts_file_case(r: &mut Rdr<'_>) {
             .expect("open failure is Ok(None)")
             .is_none()
     );
+    // NOT driven: the cross-encoding pg_any_to_server conversion arm
+    // (tsearch_readlines' Some passthrough) — a non-UTF8 database encoding
+    // routes into the conversion-proc machinery, which requires installed
+    // xact/catalog seams (server environment). excluded-state exception
+    // row of record for public.rs:168.
 
     // dict_api faces
     let int_sel = flags >> 3;
@@ -701,5 +706,30 @@ mod tests {
               @OVERRIDE\nacst 34201 D\nest -18000\n",
         );
         tzfam_diff(&data);
+    }
+}
+
+#[cfg(test)]
+mod nul_probe {
+    use super::*;
+
+    /// Documentation probe (not a gate): C fgets/strlen machinery truncates
+    /// a tz-file line at an interior NUL; the Rust port tokenizes raw bytes.
+    /// The driver carves NULs out of arm-1 fixtures; this records the
+    /// observed behavior split for the lane report.
+    #[test]
+    #[ignore]
+    fn tzparser_interior_nul_split() {
+        init_env();
+        let tzdir = format!("{}/timezonesets", share_dir());
+        std::fs::create_dir_all(&tzdir).unwrap();
+        std::fs::write(format!("{tzdir}/aaa"), b"ab\0cd ZONEX\n").unwrap();
+        unsafe { pg_tzf_reset() };
+        let c_n = unsafe { pg_tzf_load_tzoffsets(c"aaa".as_ptr()) };
+        guc::reset_guc_check_error();
+        let r_tbl = tzparser::load_tzoffsets("aaa");
+        let r_err = guc::take_guc_check_error();
+        eprintln!("C: n={c_n} msg={:?}", cstr_opt(unsafe { pg_tzf_guc_msg() }));
+        eprintln!("R: ok={} msg={:?}", r_tbl.is_some(), r_err.message);
     }
 }
