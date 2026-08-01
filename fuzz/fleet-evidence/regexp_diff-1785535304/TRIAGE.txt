@@ -1,0 +1,21 @@
+regexp_diff CI cluster campaign of record — job pgrust-fuzz-campaign-1785535304-795f-37663 @ 325985a437331a845b55e90209d3334c653a2b1f (c8g.4xlarge, fork=15, secs=6000)
+Extracted from the live pod (kubectl exec tar) because the runner's slow-unit
+triage phase (333 units x <=180s serial replay) cannot terminate inside any
+job deadline for this compile-bomb-prone target — runner defect reported in
+the lane report; campaign-stats.json therefore absent; this dir is the
+artifact bank of record. run.log.gz = full libFuzzer log.
+
+Result: 3,652,919+ execs (final line #3652919, exit 0 after 6192s of fuzzing),
+15 workers x 6192s = 25.8 CPU-hours (>24h-CPU per-family floor).
+Comparator divergences (value/verdict/errcode planes): ZERO.
+Corpus: 4372 units at exit; delta merged into fuzz/corpus/regexp_diff (5614 committed).
+
+Crash artifacts: 10, ALL attributed to regex/regex_core (engine lane p1-lanew's
+crate, out of this lane's claim; wrapper layer clean):
+ - 6x debug_assert regex_compile.rs:2821 "assertion failed: v.SEE(EOS)"
+ - 1x debug_assert regex_compile.rs:2163 "assertion failed: v.SEE(b')') || v.ISERR()"
+ - 3x ASan stack-overflow in recursive parse (rstacktoodeep() hardcoded 0 where
+   C consults stack_is_too_deep — finding #2 from the local smoke, reconfirmed)
+OOM artifacts: multi-GB engine-compile allocations (3.5-15.6 GB mallocs) on
+nested-quantifier patterns — engine memory-limit gap, same regex_core domain.
+Crash input units (raw bytes) banked alongside; repro.txt trimmed to panic lines.
