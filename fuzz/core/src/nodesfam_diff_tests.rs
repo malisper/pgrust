@@ -765,3 +765,33 @@ fn wellformedness_gate_is_live() {
     println!("gate: {compared} corpus inputs fully compared, {gated} gated/carved");
     assert!(compared >= 60, "only {compared} corpus inputs reached a full comparison");
 }
+
+/// C PARITY (defect found by the local smoke leg, fixed in-lane): an empty or
+/// all-whitespace node string is C's NULL node — `stringToNode("")` runs
+/// `nodeRead(NULL,0)`, `pg_strtok` returns NULL immediately, and the result is
+/// NULL, which `nodeToString` renders "<>". pgrust panicked
+/// ("stringToNode: empty input") where C accepted.
+#[test]
+fn empty_and_whitespace_input_is_the_null_node() {
+    for text in ["", " ", "\t", "\n", "   \t\n  "] {
+        match c_exec(text.as_bytes()) {
+            COut::Ok { out, .. } => assert_eq!(
+                out, b"<>",
+                "C did not treat {text:?} as the null node"
+            ),
+            COut::Err { errcode } => {
+                panic!("C rejected {text:?} ({errcode:#x}) — re-derive this test")
+            }
+        }
+        let cx = mcx::MemoryContext::new("nodesfam_empty");
+        let m = cx.mcx();
+        assert!(
+            readfuncs::stringToNodeNullable(m, text)
+                .expect("no error")
+                .is_none(),
+            "pgrust did not treat {text:?} as the null node"
+        );
+        // and the full comparator agrees
+        let _ = run_text(text.as_bytes());
+    }
+}
