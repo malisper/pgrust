@@ -27,7 +27,7 @@
 //!     resolution; also satisfies the C-side live asserts),
 //!   - dynahash missing_cache -> linear table (C side).
 //!
-//! RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+//! RATIFIED 2026-08-01 (Michael): platform non-surface — width-1 byval Datum upper 56
 //! bits (C fetch_att `*((char *) T)`, tupmacs.h; char signedness is
 //! platform-defined — signed on macOS-aarch64/x86_64-Linux, UNSIGNED on
 //! Linux-aarch64 — consumers truncate via DatumGetChar). Both datum
@@ -689,7 +689,7 @@ impl<'a> Rd<'a> {
     }
 }
 
-/// RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+/// RATIFIED 2026-08-01 (Michael): platform non-surface — width-1 byval Datum upper 56
 /// bits. PG's fetch_att for attlen==1 is `*((char *) T)` (tupmacs.h) and C
 /// `char` signedness is platform-defined — SIGNED on macOS-aarch64 /
 /// x86_64-Linux (0xFF sign-extends), UNSIGNED on Linux-aarch64 (0xFF

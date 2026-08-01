@@ -71,7 +71,7 @@
  *     the defval plane is compared through the descriptor field-plane
  *     serializer + equalTupleDescs instead.
  *
- * RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+ * RATIFIED 2026-08-01 (Michael): platform non-surface — width-1 byval Datum upper 56
  * bits (C fetch_att `*((char *) T)`, tupmacs.h; char signedness is
  * platform-defined — signed macOS-aarch64/x86_64-Linux, unsigned
  * Linux-aarch64; consumers truncate via DatumGetChar). Both datum
@@ -5641,7 +5641,7 @@ pg_ta_put_u64(PgTaW *w, uint64 v)
 /* serialize one fetched attribute value: [isnull u8] then for byval a
  * bit-exact u64 Datum word, for byref the pointed-to bytes per attlen
  * semantics */
-/* RATIFICATION-PENDING platform non-surface: width-1 byval Datum upper 56
+/* RATIFIED 2026-08-01 (Michael): platform non-surface — width-1 byval Datum upper 56
  * bits. fetch_att for attlen==1 is `*((char *) T)` (tupmacs.h) and C char
  * signedness is platform-defined (signed on macOS-aarch64/x86_64-Linux,
  * unsigned on Linux-aarch64), so this TU itself produces different upper
