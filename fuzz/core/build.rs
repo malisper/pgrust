@@ -471,6 +471,16 @@ fn main() {
         "int4in", "int8in", "pg_ltoa", "pg_ultoa_n",
         "pg_strtoint64", "pg_strtoint64_safe", "qsort_arg",
         "RE_compile_and_cache", "RE_compile_and_execute",
+        // p1-microbatch CI-build fix (2026-07-31): the jsonpath family's
+        // vendored Spencer engine (csrc/jsonpath/regex/) exports the same
+        // five entry points as the regexp family's engine (csrc/regexfam/,
+        // which must keep the unprefixed names — pg_regexp_io.c calls them
+        // directly). Linux ld hard-errors on the duplicate definitions and
+        // every CI cluster fuzz build at the tip died (`cargo fuzz build` builds
+        // ALL targets); macOS ld tolerated it, which is why local builds
+        // passed. Same nm-sweep remedy as the wave-3 train sweep below.
+        "pg_regcomp", "pg_regexec", "pg_regerror", "pg_regfree",
+        "pg_reg_getcolor",
         "construct_array_builtin", "ArrayGetIntegerTypmods",
         "MemoryContextSwitchTo", "AllocSetContextCreate",
         "MemoryContextResetOnly", "MemoryContextDelete",
