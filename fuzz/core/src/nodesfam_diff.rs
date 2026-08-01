@@ -408,6 +408,51 @@ pub const CUSTOM_READER_LABELS: &[&str] = &[
     "BOOLEXPR", "CONST", "RANGETBLENTRY", "A_CONST", "A_EXPR", "EXTENSIBLENODE",
 ];
 
+/// field -> macro-kind for the CUSTOM (hand-written) readers, collected from
+/// ALL branches of their bodies. Their field SEQUENCE is conditional (so it is
+/// gated against corpus shapes), but each field's KIND is fixed, which is what
+/// the value check needs. Without this, values inside a custom block went
+/// unvalidated: `{RANGETBLENTRY ... :rtekind \x06 ...}` reached the oracle,
+/// where C's atoi swallows the control byte as 0 and the port panics.
+fn custom_field_kinds() -> &'static std::collections::HashMap<String, String> {
+    static MAP: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut out = std::collections::HashMap::new();
+        for line in include_str!("../csrc/nodesfam/src/readfuncs.c").lines() {
+            let t = line.trim();
+            if !t.starts_with("READ_") || t.starts_with("READ_LOCALS") || t.starts_with("READ_DONE")
+            {
+                continue;
+            }
+            let Some(open) = t.find('(') else { continue };
+            let mut kind = t[..open].trim().to_owned();
+            let inner = &t[open + 1..];
+            let name: String = inner
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            if kind == "READ_ENUM_FIELD" {
+                if let Some(comma) = t[open..].find(',') {
+                    let ty: String = t[open + comma + 1..]
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !ty.is_empty() {
+                        kind = format!("READ_ENUM_FIELD:{ty}");
+                    }
+                }
+            }
+            out.insert(name, kind);
+        }
+        assert!(out.len() > 20, "custom_field_kinds parse collapsed: {}", out.len());
+        out
+    })
+}
+
 /// Field-name sequences for the custom-reader labels, learned from the
 /// committed corpus (each seed was validated against the C oracle before it
 /// was written).
@@ -702,6 +747,7 @@ fn parse_block(toks: &[&str], k: usize) -> Option<usize> {
         // custom reader, or a label C does not know (C's parseNodeString
         // elogs before touching a field, a compared error verdict): consume
         // the block, keeping brace/paren balance.
+        let known_label = CUSTOM_READER_LABELS.contains(&label);
         let mut depth = 1usize;
         while let Some(t) = toks.get(j).copied() {
             match t {
@@ -710,6 +756,20 @@ fn parse_block(toks: &[&str], k: usize) -> Option<usize> {
                     depth -= 1;
                     if depth == 0 {
                         return Some(j + 1);
+                    }
+                }
+                // inside a CUSTOM reader the field SEQUENCE is conditional but
+                // each field's KIND is fixed, so check the value by kind
+                _ if known_label && depth == 1 => {
+                    if let Some(fname) = t.strip_prefix(':') {
+                        if let Some(kind) = custom_field_kinds().get(fname) {
+                            let v = toks.get(j + 1).copied()?;
+                            // constvalue's payload is checked by
+                            // const_datums_are_well_formed
+                            if fname != "constvalue" && !value_token_matches_kind(v, kind) {
+                                return None;
+                            }
+                        }
                     }
                 }
                 _ => {}

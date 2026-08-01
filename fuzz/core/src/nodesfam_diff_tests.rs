@@ -943,3 +943,21 @@ fn node_field_value_must_be_node_shaped() {
                 std::str::from_utf8(ok).unwrap());
     }
 }
+
+/// Values inside a CUSTOM-reader block are kind-checked too: their field
+/// SEQUENCE is conditional (gated against corpus shapes) but each field's KIND
+/// is fixed. Witness: `:rtekind \x06` — C's atoi swallows the control byte as
+/// 0, the port panics on the bad integer token.
+#[test]
+fn custom_block_values_are_kind_checked() {
+    let bad = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colnames (\"a\")} \
+               :rtekind \u{6} :relid 1 :inh false :relkind r :rellockmode 1 \
+               :perminfoindex 0 :tablesample <> :lateral false :inFromCl true \
+               :securityQuals <>}";
+    assert!(!run_text(bad.as_bytes()), "gate let a control-byte enum value through");
+    let good = "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname r :colnames (\"a\")} \
+                :rtekind 0 :relid 1 :inh false :relkind r :rellockmode 1 \
+                :perminfoindex 0 :tablesample <> :lateral false :inFromCl true \
+                :securityQuals <>}";
+    assert!(run_text(good.as_bytes()), "gate rejected a valid RANGETBLENTRY");
+}
