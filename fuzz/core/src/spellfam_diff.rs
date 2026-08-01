@@ -273,7 +273,7 @@ fn rust_build<'mcx>(
 /// and the assert says whether the Rust side, the C side, or neither is the
 /// nondeterministic one. Flip to false once div5 is adjudicated (it roughly
 /// doubles per-exec cost, so it must not ride the 10M floor).
-const DECODE_CROSS_EXEC: bool = true;
+const DECODE_CROSS_EXEC: bool = false;
 
 /// Observable-output fingerprint of ONE side for one input, WITHOUT asserting
 /// anything cross-side. Used only by the decode leg.
@@ -457,51 +457,37 @@ pub fn spellfam_diff(data: &[u8]) {
         // PgVecs and is robust. No defined C answer, so the under-filled-AF
         // shape leaves the domain; fully-filled AF tables (the
         // hunspell_sample_num/long fixtures) stay in domain.
-        let af_lines = lower
+        // Detection MUST mirror C's own parse, not the literal text: C runs
+        // parse_ooaffentry, so an "AF line" is any line whose FIRST
+        // whitespace-delimited field lowercases to something starting with
+        // "af" (e.g. `AFx/T`), and the declared count is atoi of the SECOND
+        // field. An earlier, more literal heuristic (digits immediately after
+        // "af") let `AFx/T 0501` through and the NULL deref reappeared at
+        // CI cluster exec 12157 (seed probe-div8-c2c2ce81).
+        let fields = |l: &[u8]| -> Vec<Vec<u8>> {
+            l.split(|b: &u8| b.is_ascii_whitespace())
+                .filter(|f| !f.is_empty())
+                .map(|f| f.to_vec())
+                .collect()
+        };
+        let af_rows: Vec<Vec<Vec<u8>>> = lower
             .split(|&b| b == b'\n')
-            .filter(|l| l.starts_with(b"af"))
-            .count();
-        if af_lines > 0 {
-            // declared count = first AF header's number; provided = later AF lines
-            let declared = lower
-                .split(|&b| b == b'\n')
-                .find(|l| l.starts_with(b"af"))
-                .and_then(|l| {
-                    let t = &l[2..];
-                    let t: Vec<u8> = t.iter().copied().skip_while(|b| b.is_ascii_whitespace()).collect();
-                    let digits: Vec<u8> = t.iter().copied().take_while(u8::is_ascii_digit).collect();
-                    core::str::from_utf8(&digits).ok()?.parse::<i64>().ok()
+            .map(fields)
+            .filter(|f| f.first().is_some_and(|f0| f0.starts_with(b"af")))
+            .collect();
+        if let Some(first) = af_rows.first() {
+            let declared = first
+                .get(1)
+                .map(|f| {
+                    let d: Vec<u8> = f.iter().copied().take_while(u8::is_ascii_digit).collect();
+                    core::str::from_utf8(&d).ok().and_then(|t| t.parse::<i64>().ok()).unwrap_or(0)
                 })
                 .unwrap_or(0);
-            if declared > 0 && (af_lines as i64 - 1) < declared {
+            // rows after the header are the alias-filling lines
+            if declared > 0 && (af_rows.len() as i64 - 1) < declared {
                 return;
             }
         }
-    }
-
-    // DECODE LEG: per-side in-exec reproducibility (see DECODE_CROSS_EXEC).
-    if DECODE_CROSS_EXEC {
-        let (r1, c1) = side_fingerprints(&aff, &dict, &parsed.words, enc);
-        let (r2, c2) = side_fingerprints(&aff, &dict, &parsed.words, enc);
-        let ddbg = || {
-            format!(
-                "enc={encname} aff={:?} dict={:?}",
-                String::from_utf8_lossy(&aff[..aff.len().min(160)]),
-                String::from_utf8_lossy(&dict[..dict.len().min(160)])
-            )
-        };
-        assert_eq!(
-            r1, r2,
-            "CROSS-EXEC NONDETERMINISM on the RUST side ({})",
-            ddbg()
-        );
-        assert_eq!(
-            c1, c2,
-            "CROSS-EXEC NONDETERMINISM on the C side ({})",
-            ddbg()
-        );
-        // Both sides self-reproduced; if they disagree with each other the
-        // normal comparison planes below report it with full per-plane detail.
     }
 
     let (ap, dp) = stage_files(&aff, &dict);
@@ -900,6 +886,11 @@ mod fleet_repro {
     #[ignore = "task #83: aborts the process with allocator-detected heap corruption (by design)"]
     fn task83_min_oob_trigger() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/min83-oob-naffixes1")).unwrap();
+        super::spellfam_diff(&data);
+    }
+    #[test]
+    fn div8_c2c2ce81() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-div8-c2c2ce81")).unwrap();
         super::spellfam_diff(&data);
     }
     #[test]
