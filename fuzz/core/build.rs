@@ -86,6 +86,12 @@ fn main() {
         // assembled per the pg_rowtypes_io.c header; hashfn extern'd from
         // pg_mac_io.c.
         .file("csrc/pg_rowtypes_io.c")
+        // tupaccess_diff oracle (p1-tupaccess): verbatim 18.3 heaptuple.c /
+        // tupdesc.c / attmap.c / tupconvert.c (+ datum.c/name.c helpers),
+        // assembled per the pg_tupaccess_io.c header; assertions LIVE in
+        // that TU (verify_compact_attribute audits); hashfn extern'd from
+        // pg_mac_io.c.
+        .file("csrc/pg_tupaccess_io.c")
         // range + multirange oracles, ONE translation unit: this file
         // #includes csrc/pg_rangetypes_io.c (which is therefore NOT listed
         // here — listing both would define every pg_diff_* entry twice).

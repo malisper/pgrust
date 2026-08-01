@@ -317,6 +317,19 @@ path = "fuzz_targets/wcharfam_diff.rs"
 [[bin]]
 name = "rowtypes_diff"
 path = "fuzz_targets/rowtypes_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tupaccess_diff: heaptuple/tupdesc/attmap/tupconvert vs vendored 18.3 C
+# (csrc/pg_tupaccess_io.c); see core/src/tupaccess_diff.rs header.
+[[bin]]
+name = "tupaccess_diff"
+path = "fuzz_targets/tupaccess_diff.rs"
+test = false
+doc = false
+bench = false
+
 # jsonbio_diff: scaffolded by fuzz/scaffold.py — see README-TODO-jsonbio_diff.md.
 [[bin]]
 name = "jsonbio_diff"

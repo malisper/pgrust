@@ -403,6 +403,9 @@ pub use wcharfam::wcharfam_diff;
 // rowtypes_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-rowtypes_diff.md.
 pub mod rowtypes_diff;
 pub use rowtypes_diff::rowtypes_diff;
+// tupaccess_diff: heaptuple/tupdesc/attmap/tupconvert differential (p1-tupaccess).
+pub mod tupaccess_diff;
+pub use tupaccess_diff::tupaccess_diff;
 
 // array_userfuncs_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-array_userfuncs_diff.md.
 pub mod array_userfuncs_diff;
