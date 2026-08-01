@@ -124,6 +124,7 @@ mod proofs {
         // io family + stubs rows
         fn pg_aclitemin(s: *const c_char, out: *mut AclItem, err: *mut c_int) -> c_int;
         fn pg_aclitemout(aip: *const AclItem, out: *mut c_char, err: *mut c_int) -> c_int;
+        fn pg_oid_decimal(v: u32, p: *mut c_char) -> c_int;
         fn pg_aclinsert(err: *mut c_int) -> c_int;
         fn pg_aclremove(err: *mut c_int) -> c_int;
         fn pg_acldefault_sql(objtypec: c_char, owner: Oid, items_out: *mut AclItem, nout: *mut c_int, err: *mut c_int) -> c_int;
@@ -2061,43 +2062,84 @@ mod proofs {
         }
     }
 
-    acl_harness_mcx! {
+    /// KERNEL-EXTRACT (spot_aclitemout_numeric reduction, 2026-07-31): the
+    /// original spot walled symex (CI cluster: rss-kill 210s/7GB, then 2403s
+    /// timeout at 40GB cap without reaching SAT) because the numeric
+    /// fallback rendered through `u32::to_string()` — the core::fmt
+    /// Display/Formatter cone, the known CNF-width class; kani::assume does
+    /// not slice it out. The shipped code now renders through the factored
+    /// pub kernel adt_acl::io::push_oid_decimal (behavior-identical). This
+    /// harness proves the kernel C≡Rust over the FULL u32 domain against
+    /// the documented sprintf-%u model; the concrete-value spot below keeps
+    /// the shell (aclitemout composition) covered.
+    #[kani::proof]
+    #[kani::unwind(12)] // 10 digits max + 1
+    fn eq_oid_decimal() {
+        let v: u32 = kani::any();
+        let mut buf: Vec<u8> = Vec::new();
+        adt_acl::push_oid_decimal(&mut buf, v);
+        let mut cout = [0u8; 12];
+        let clen = unsafe { pg_oid_decimal(v, cout.as_mut_ptr() as *mut c_char) };
+        // single folded assert: kissat is non-incremental and re-solves per
+        // property batch — one property keeps the solve in budget
+        let mut ok = buf.len() == clen as usize;
+        let mut i = 0;
+        while i < 10 {
+            if i < buf.len() {
+                ok = ok && buf[i] == cout[i];
+            }
+            i += 1;
+        }
+        assert!(ok);
+    }
+
+    acl_harness! {
         /// aclitemout numeric-fallback spot: roles NOT found -> both sides
         /// render the oid in decimal (C side via the documented sprintf %u
-        /// model), LITERAL privs.
-        // unwind 65 (was 20): arm_rname's pgq-side zero-fill loop runs
-        // 64-len iterations; 20 fired the unwinding assertion (artifact
-        // FAILED, run lane 2026-07-29)
-        spot_aclitemout_numeric, 65, {
-            arm_catalog();
-            arm_role_seams(kani::any());
-            arm_rname([b"r1", b"a\"b"]);
+        /// model; Rust side via the push_oid_decimal kernel proven full-u32
+        /// in eq_oid_decimal above), LITERAL privs. Concrete-value smoke
+        /// for the aclitemout_into core composition; the mcx shell (PgVec
+        /// copy + trailing NUL) is covered by eq_aclitemout_named.
+        // unwind 30: output-image compare loop dominates — clen =
+        // 10(grantee digits) + '=' + 2(priv+star) + '/' + 9(grantor
+        // digits) = 23; digit loop 10; privs loop 16.
+        spot_aclitemout_numeric, 30, {
+            // CONCRETE smoke: everything is a literal (literals constant-fold
+            // into the formula; symbolic seam state from arm_catalog/
+            // arm_role_seams left a 450s+ SAT residue even after the fmt-cone
+            // extraction). Both role lookups miss -> numeric fallback on both
+            // sides through the proven kernel / the C sprintf-%u model.
             unsafe {
                 for i in 0..2 {
                     R_RNAME_FOUND[i] = false;
+                    R_RNAME_OID[i] = 0;
                     pgq_rname_found[i] = 0;
+                    pgq_rname_oid[i] = 0;
                 }
+                R_RNAME_LATCH = 0;
             }
             let item = AclItem { ai_grantee: 4294967295, ai_grantor: 305419896, ai_privs: (1u64 << 1) | (1u64 << 33) };
 
-            let ctx = mcx::MemoryContext::new_bump("kani-aclcheck");
-            let r = adt_acl::aclitemout(ctx.mcx(), &item);
+            let mut out: Vec<u8> = Vec::with_capacity(64);
+            let r = adt_acl::aclitemout_into(&item, &mut out);
             let mut cout = [0u8; 200];
             let mut cerr: c_int = 0;
             let clen =
                 unsafe { pg_aclitemout(&item, cout.as_mut_ptr() as *mut c_char, &mut cerr) };
-            let out = r.unwrap_or_else(|e| {
+            if let Err(e) = r {
                 core::mem::forget(e);
                 panic!("aclitemout errored")
-            });
-            assert!(out.len() == clen as usize + 1);
+            }
+            // single folded assert (kissat re-solves per property batch)
+            let mut ok = out.len() == clen as usize;
             let mut i = 0;
-            while i < clen as usize {
-                assert!(out[i] == cout[i]);
+            while i < 24 {
+                if i < clen as usize {
+                    ok = ok && out[i] == cout[i];
+                }
                 i += 1;
             }
-            core::mem::forget(out);
-            core::mem::forget(ctx);
+            assert!(ok);
         }
     }
 }
