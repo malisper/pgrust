@@ -253,7 +253,15 @@ fn check_init_qc() {
 
 // ---------------- arm 3: pg_class ----------------
 
+fn pg_class_setup() {
+    static SEAMS: Once = Once::new();
+    SEAMS.call_once(|| {
+        let _ = std::panic::catch_unwind(pg_class::init_seams);
+    });
+}
+
 fn check_relkind(relkind: u8) {
+    pg_class_setup();
     let mut cbuf = [0u8; 256];
     let cst = unsafe { pg_mf_relkind_detail(relkind, cbuf.as_mut_ptr().cast(), 256) };
     let r = pg_class::errdetail_relkind_not_supported(relkind);
@@ -297,6 +305,11 @@ fn check_geo_distance(x1: f64, y1: f64, x2: f64, y2: f64) {
 
     // fc plane: the dfmgr-registered wrapper on a LocalFcinfo frame.
     earthdistance_setup();
+    // lookup-miss arm of the crate's dfmgr lookup table.
+    assert!(matches!(
+        dfmgr::load_external_function("earthdistance", "no_such_function", false),
+        Ok(None)
+    ));
     let f = dfmgr::load_external_function("earthdistance", "geo_distance", true)
         .expect("earthdistance library registered")
         .expect("geo_distance resolves");
@@ -351,11 +364,20 @@ fn check_rusage(ru0f: [i64; 6], ru1f: [i64; 6]) {
         cstr,
         "pg_rusage_show_delta({ru0f:?}, {ru1f:?})"
     );
+
+    // Live clock-read leg (pg_rusage_init + the pg_rusage_show wrapper):
+    // no-panic + shape only — the OS getrusage/gettimeofday values are
+    // nondeterministic, so the value plane is owned by show_delta above
+    // (the C oracle carves the same seam via its fixture pg_rusage_init).
+    let live0 = pg_rusage::pg_rusage_init();
+    let live = pg_rusage::pg_rusage_show(&live0);
+    assert!(live.as_str().starts_with("CPU: user: "), "{}", live.as_str());
 }
 
 // ---------------- arm 6: xlogstats ----------------
 
 fn run_xlogstats(r: &mut Rdr) {
+    xlogstats::init_seams(); // no-op body, executed for the record
     unsafe { pg_mf_xlog_reset() };
     let mut stats = Box::new(xlogstats::XLogStats::ZEROED);
     let nrec = (r.u8() % 4) + 1;
@@ -506,9 +528,13 @@ fn run_stringinfo(r: &mut Rdr) {
     }
 
     compare_state!("init");
+    assert_eq!(si.is_empty(), si.len() == 0, "is_empty/len coherence");
+    // allocator()/mcx() both hand back the construction context.
+    let _ = si.allocator();
+    let _ = si.mcx();
 
     while !r.done() && total <= SI_APPEND_CAP {
-        let op = r.u8() % 10;
+        let op = r.u8() % 11;
         match op {
             0 | 1 => {
                 let n = r.u16() as usize % 2048;
@@ -568,7 +594,16 @@ fn run_stringinfo(r: &mut Rdr) {
             }
             6 => {
                 let raw = r.u16();
-                let (needed, expect_err) = if raw & 1 == 1 && si.len() >= 64 {
+                let (needed, expect_err) = if raw == 0xACE1 && si.len() < 4096 {
+                    // Rare gated zone (magic value + seed): force the
+                    // doubling loop to overshoot MaxAllocSize so the clamp
+                    // arm executes (stringinfo lib.rs:104 == C
+                    // enlargeStringInfo's clamp). needed = MaxAllocSize/2
+                    // + 1 makes 2^k jump straight past MaxAllocSize; the
+                    // resulting ~1 GiB reserve is lazy (pages untouched:
+                    // only len+1 bytes are ever written/compared).
+                    (mcx::MAX_ALLOC_SIZE / 2 + 1, false)
+                } else if raw & 1 == 1 && si.len() >= 64 {
                     // 54000 zone: needed >= MaxAllocSize - len always holds
                     // (len >= 64 > k), boundary margin sweeps through 0.
                     (mcx::MAX_ALLOC_SIZE - (raw >> 1) as usize % 64, true)
@@ -606,7 +641,7 @@ fn run_stringinfo(r: &mut Rdr) {
                     compare_state!("write_fixed");
                 }
             }
-            _ => {
+            9 => {
                 // append_bytes_z == appendBinaryStringInfoNT(s, len+1) with
                 // the source's own NUL (cmdtag.c-style usage).
                 let n = r.u16() as usize % 512;
@@ -621,8 +656,17 @@ fn run_stringinfo(r: &mut Rdr) {
                 nul_valid = false;
                 compare_state!("append_bytes_z");
             }
+            _ => {
+                // is_empty tracks len through mutation.
+                assert_eq!(si.is_empty(), si.len() == 0, "is_empty after ops");
+            }
         }
     }
+
+    // into_vec teardown: the buffer hand-off keeps length and bytes.
+    let final_len = si.len();
+    let v = si.into_vec();
+    assert_eq!(v.len(), final_len, "into_vec keeps len");
 }
 
 // ---------------- entry ----------------

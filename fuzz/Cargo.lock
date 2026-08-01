@@ -1491,6 +1491,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib_earthdistance"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "controldata_utils"
 version = "0.0.0"
 dependencies = [
@@ -1657,12 +1668,15 @@ dependencies = [
  "arrayfuncs",
  "arrayutils",
  "cc",
+ "cmdtag",
+ "contrib_earthdistance",
  "conv",
  "crc32c",
  "cryptohashfuncs",
  "datum",
  "detoast",
  "detoast_seams",
+ "dfmgr",
  "elog",
  "fd",
  "fmgr_core",
@@ -1683,11 +1697,13 @@ dependencies = [
  "numutils",
  "percentrepl",
  "pg_b64",
+ "pg_class",
  "pg_hmac",
  "pg_locale",
  "pg_locale_seams",
  "pg_md5",
  "pg_prng",
+ "pg_rusage",
  "pg_sha1",
  "pg_sha2",
  "pg_string",
@@ -1712,6 +1728,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_portal",
  "types_storage",
  "types_tuple",
  "unicode_category",
@@ -1721,6 +1738,7 @@ dependencies = [
  "xact_seams",
  "xlogreader",
  "xlogreader_seams",
+ "xlogstats",
 ]
 
 [[package]]
@@ -3339,6 +3357,14 @@ name = "pg_bitutils"
 version = "0.1.0"
 
 [[package]]
+name = "pg_class"
+version = "0.1.0"
+dependencies = [
+ "pg_class_seams",
+ "types_error",
+]
+
+[[package]]
 name = "pg_class_seams"
 version = "0.0.0"
 dependencies = [
@@ -3441,6 +3467,13 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "pg_rusage"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -6298,6 +6331,14 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "xlogstats"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "xlogreader_seams",
 ]
 
 [[package]]
