@@ -22,6 +22,10 @@ const VARHDRSZ_COMPRESSED: usize = VARHDRSZ + 4;
 
 pub const TOAST_PGLZ_COMPRESSION_ID: u32 = 0;
 pub const TOAST_LZ4_COMPRESSION_ID: u32 = 1;
+/// C `TOAST_INVALID_COMPRESSION_ID` (toast_compression.h): callers treat it
+/// as "no known compression", NOT an error (pg_column_compression returns
+/// NULL for it; only the remaining bit pattern 3 reaches the elog).
+pub const TOAST_INVALID_COMPRESSION_ID: u32 = 2;
 
 #[inline]
 fn is_external(b: &[u8]) -> bool {

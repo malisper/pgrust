@@ -850,6 +850,11 @@ pub fn fc_pg_column_compression(
     let name: &[u8] = match cmid {
         ::detoast::TOAST_PGLZ_COMPRESSION_ID => b"pglz",
         ::detoast::TOAST_LZ4_COMPRESSION_ID => b"lz4",
+        // C parity (varlena.c): cmid == TOAST_INVALID_COMPRESSION_ID is the
+        // "no known compression" verdict -> NULL; only the residual bit
+        // pattern reaches the invalid-cmid error. Proofs family
+        // proofs/strings-scalar (divergence found 2026-07-31).
+        ::detoast::TOAST_INVALID_COMPRESSION_ID => return Ok(fcinfo.return_null()),
         _ => return Err(invalid_compression_method_id(cmid)),
     };
     let mcx = fcinfo.result_mcx();

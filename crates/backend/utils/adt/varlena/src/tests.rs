@@ -1331,6 +1331,25 @@ mod pg_column_funcs {
         let (_, isnull) = call(fc_pg_column_toast_chunk_id, &image);
         assert!(isnull);
     }
+
+    /// External ondisk toast pointer with compress-method bits == 2:
+    /// C's toast_get_compression_id maps that to TOAST_INVALID_COMPRESSION_ID
+    /// and pg_column_compression returns NULL (varlena.c REL_18) — only
+    /// bits == 3 reach the "invalid compression method id" elog. Found by
+    /// proofs/strings-scalar eq_pg_column_compression_varlena_ondisk
+    /// (proofwave-str 2026-07-31).
+    #[test]
+    fn pg_column_compression_invalid_cmid_bits_is_null() {
+        let mut image = vec![0u8; 18];
+        image[0] = 0x01; // 1B external header
+        image[1] = 18; // VARTAG_ONDISK
+        image[2..6].copy_from_slice(&100i32.to_le_bytes()); // va_rawsize
+        // va_extinfo: extsize 50 (< rawsize - VARHDRSZ => "compressed"),
+        // compress-method bits = 2 = TOAST_INVALID_COMPRESSION_ID.
+        image[6..10].copy_from_slice(&(50u32 | (2u32 << 30)).to_le_bytes());
+        let (_, isnull) = call(fc_pg_column_compression, &image);
+        assert!(isnull, "cmid bits==2 must be NULL (C parity), not an error");
+    }
 }
 
 // fnconf batch-1, OIDs 246/253 (btnametextcmp/bttextnamecmp) and the
