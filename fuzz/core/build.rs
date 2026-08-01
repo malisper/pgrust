@@ -781,4 +781,50 @@ fn main() {
         .compile("pg_difffuzz_portfam");
     println!("cargo:rerun-if-changed=csrc/pg_portfam_io.c");
     println!("cargo:rerun-if-changed=csrc/portfam");
+    // contribb_diff oracle (p1-mb-contribb): verbatim 18.3 contrib/seg +
+    // contrib/cube non-GiST bodies (csrc/pg_contribb_io.c) plus the
+    // GENERATED flex/bison parser TUs committed under csrc/contribb/
+    // (bison 2.3 / flex 2.6.4 over the verbatim vendored grammars; see the
+    // provenance banners). Own cc::Build: the family needs its own shim
+    // include tree (csrc/contribb/include postgres.h etc.), which must not
+    // leak into the main build's files. float4in/float8in/float8out_internal
+    // resolve against pg_float_io.c in the main build (extern, one verbatim
+    // definition per symbol).
+    //
+    // -funsigned-char: plain-char signedness is implementation-defined and
+    // PG inherits the platform default; the campaign's oracle of record is
+    // the CI cluster Linux/aarch64 build where char is UNSIGNED (the pgrust port
+    // also chose u8 for SEG's sigd/ext bytes). Without the pin a macOS
+    // (signed-char) local build of seg_cmp's sigd comparisons diverges from
+    // the ratified oracle for sigd >= 128.
+    let mut contribb = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        contribb.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // -O2 PIN (found by contribb_diff, 2026-08-01): under cargo-fuzz the
+    // profile opt-level is 3 and clang -O3 vectorizes cube.c's
+    // distance loops in a way that changes distance_1D's NaN semantics
+    // (scalar IEEE: every comparison with a NaN coordinate is false ->
+    // 0.0 contribution; the -O3 code propagates the NaN payload instead —
+    // witness: 53-dim point with coord0 = 0xFFF70000000000FC, C gave
+    // 0xFFFF0000000000FC where -O1/-O2 and Rust give +Inf). Production
+    // PostgreSQL builds at -O2, so the -O2 behavior IS the oracle.
+    contribb.opt_level(2);
+    contribb
+        .file("csrc/pg_contribb_io.c")
+        .file("csrc/contribb/segparse.c")
+        .file("csrc/contribb/segscan.c")
+        .file("csrc/contribb/cubeparse.c")
+        .file("csrc/contribb/cubescan.c")
+        .include("csrc/contribb/include")
+        .include("csrc/contribb")
+        .flag("-funsigned-char")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .flag_if_supported("-ffp-contract=off")
+        .compile("pg_difffuzz_contribb");
+    println!("cargo:rerun-if-changed=csrc/pg_contribb_io.c");
+    println!("cargo:rerun-if-changed=csrc/contribb");
 }

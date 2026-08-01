@@ -499,3 +499,8 @@ pub use tzfam_diff::tzfam_diff;
 // netfam_diff (p1-mb-netfam): libpq ifaddr + pqformat two-crate family.
 pub mod netfam_diff;
 pub use netfam_diff::netfam_diff;
+// contribb_diff (p1-mb-contribb): contrib/seg + contrib/cube vs vendored
+// 18.3 C (incl. the generated flex/bison parsers) — see
+// core/src/contribb_diff.rs.
+pub mod contribb_diff;
+pub use contribb_diff::contribb_diff;
