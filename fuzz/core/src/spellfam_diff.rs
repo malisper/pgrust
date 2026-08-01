@@ -643,25 +643,6 @@ mod corpus_replay {
 #[cfg(test)]
 mod fleet_repro {
     #[test]
-    fn rust_only_probe() {
-        // Rust-side-only: does the port survive the C-crashing under-filled-AF
-        // input? (C MergeAffix NULL-derefs; check Rust's verdict.)
-        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/CI-div-segv2-4525b7a1")).unwrap();
-        let p = super::parse_input(&data).unwrap();
-        let sel = data[0];
-        let (enc,_) = super::ENCODINGS[(sel & 1) as usize];
-        super::pin_env(enc);
-        let aff: Vec<u8> = p.aff.iter().copied().filter(|&b| b!=0).collect();
-        let dict: Vec<u8> = p.dict.iter().copied().filter(|&b| b!=0).collect();
-        let (ap,dp)=super::stage_files(&aff,&dict);
-        let ctx = mcx::MemoryContext::new("probe");
-        match super::rust_build(&ctx, ap.as_bytes(), dp.as_bytes()) {
-            Ok(o) => eprintln!("RUST BUILD OK naffixes={} naffixdata={}", o.affixes.len(), o.affix_data.len()),
-            Err(e) => eprintln!("RUST BUILD ERR sqlstate={:?} msg={}", e.sqlstate().0, e.message),
-        }
-        eprintln!("aff={:?} dict={:?}", String::from_utf8_lossy(&aff), String::from_utf8_lossy(&dict));
-    }
-    #[test]
     fn segv2_4525b7a1() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/CI-div-segv2-4525b7a1")).unwrap();
         super::spellfam_diff(&data);
