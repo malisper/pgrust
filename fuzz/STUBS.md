@@ -106,3 +106,186 @@ session cell) vs `pg_stub_float8out_guc` (verbatim body reading
   global) when a planner-math target lands.
 - standard_conforming_strings has no vendored C consumer in csrc yet
   (transport-level control only; see table).
+
+---
+
+# Constructed-state stub facilities (`stub:*`)
+
+> **LANDING ORDER (coordinator ruling 2026-08-01): HOLD.** This branch's
+> ancestry merges the LIVE lanes `proofs/p1-tupaccess` and `proofs/p1-nodes`
+> (their claims are still open on main). Order of record: those lanes land
+> first and flip their claims to done; THEN `fuzz/stub-constructed` lands as
+> the small remaining delta — verify with `git cherry` + `git range-diff`
+> before pushing (containment-audit rule). The coordinator owns the trigger.
+
+Shared builders that construct STATE-SHAPED inputs identically on the Rust
+side and the C-oracle side from the same fuzz bytes (branch
+`fuzz/stub-constructed`, charter 2026-08-01). The constructed structure is
+part of the compared input: both sides build from the same bytes and neither
+side defaults anything. Modules live in `fuzz/core/src/stub_*.rs`; C shims in
+`fuzz/core/csrc/pg_stub_*.c` (plus the tupaccess SECTION-D decoder already in
+`pg_tupaccess_io.c`).
+
+Constructor-audit discipline: a constructor bug fabricates agreement — both
+sides consume the same wrong structure and the differential is blind. Every
+facility therefore ships must-fail controls
+(`fuzz/core/src/stub_controls_tests.rs`) that plant a ONE-SIDE-ONLY
+construction difference and assert the differential catches it, and the
+builders were injection-swept (results below).
+
+Run everything: `cargo test -p decoder_fuzz stub_ -- --test-threads=1`
+(the C-oracle tests in this crate are serial; the parallel-thread SIGBUS is
+the known nodesfam stack-guard/thread interplay, not a defect).
+
+## stub:tupdesc (`stub_tupdesc.rs`)
+
+TupleDesc + heap-tuple values from fuzz bytes. Factored verbatim out of the
+p1-tupaccess harness; `tupaccess_diff.rs` is the migration demo (it now
+imports the builder instead of owning a copy).
+
+How a target uses it:
+
+```rust
+use crate::stub_tupdesc::*;
+let mut cur = Cursor { b: data, i: 0 };
+let spec  = decode_desc(&mut cur);           // normalized DescSpec
+let vals  = decode_values(&mut cur, &spec, spec.natts());
+let sw    = spec_wire(&spec);                // -> C oracle (SECTION D decoder)
+let vw    = values_wire(&vals);              // -> C oracle
+let desc  = build_rust_desc(mcx, &spec);     // Rust side
+let (values, isnull) = stage_values(mcx, &spec, &vals);
+// target computes over (desc, values) and compares against the C call fed
+// (sw, vw); ser-plane helpers stay in the target (they are comparison
+// planes, not construction).
+```
+
+Clamps (compared-input contract, applied to the SPEC before either side
+builds): natts `% 41`; menu index `% 12` (pinned 12-entry type menu);
+cstring len `% 121` NUL-stripped; varlena short total `1..=127` / 4B payload
+`< 300` / TOAST pointer 16B; defvals ≤ 3 with strictly increasing adnum ≤
+natts; checks ≤ 2, ASCII NUL-free, sorted+deduped by name; `hasmissing`
+masked off on dropped/cstring columns and constr-less descriptors. Width-1
+byval Datums compare under the low-8-bit mask (ratified platform
+non-surface; `byval_word`).
+
+Unlocks: printtup formatting, toast size math, reloptions parsing (any
+target needing a descriptor + staged row).
+
+## stub:nodes (`stub_nodes.rs`)
+
+Bounded node trees from fuzz bytes. Factored verbatim out of the p1-nodes
+harness; `nodesfam_diff.rs` is the migration demo.
+
+The bridge is the TEXT plane: the Rust side constructs the tree directly
+(`build_value_node(mcx, bytes) -> Option<Node>`); the C side constructs the
+SAME tree by reading the Rust tree's `nodeToString` rendering through
+verbatim 18.3 `nodeRead`, and the target's re-out/copy/equal planes compare
+the C-side structure back byte-for-byte.
+
+Clamps: tag selector `% 8` (String / Integer / Float / Boolean /
+escaped-String / List / IntList / OidList); nesting depth `< 6`; list len
+`% 5`; int/oid list len `% 6`; strings `% 25` (escaped arm `% 17`),
+NUL-stripped; Float literals forced numeric-looking (finite `{f:?}`, else
+`1e300`).
+
+KNOWN BLIND CLASS (documented, honest): a builder defect that produces a
+DIFFERENT-BUT-LEGAL tree (e.g. an Integer decoded from fewer bytes) is
+consumed identically by both sides — the differential cannot see it
+(injection N3 below, planted expecting exactly this). Such a defect shrinks
+the explored tree surface but never falsifies a verdict; the tag-census and
+label-census tests in the demo target bound how much surface can silently
+disappear. Builder defects that violate the producible-token contract (NULs,
+non-numeric Float literals) ARE caught (N1, N2).
+
+Unlocks: rewrite/manip, optimizer pure helpers (bitmapset, pathkey
+arithmetic), walker-style code.
+
+## stub:snapshot (`stub_snapshot.rs` + `csrc/pg_stub_snapshot.c`)
+
+SnapshotData as a plain value — xmin, xmax, xip[], subxip[], flags, curcid,
+speculativeToken, snapXactCompletionCount — built identically both sides
+with zero transaction machinery. The C shim vendors the 18.3
+`utils/snapshot.h` struct verbatim (GlobalVisState stays opaque,
+pairingheap_node vendored as its three-pointer shape; both zeroed and out of
+the compared plane, as are the Rust-only marshal cells).
+
+How a target uses it:
+
+```rust
+let spec = decode_snap(&mut cur);                       // SnapSpec
+assert_snapshot_construction_agrees(mcx, &spec);        // construction plane
+let snap = build_rust_snapshot(mcx, &spec);             // Rust SnapshotData
+let wire = snap_wire(&spec);                            // -> C oracle builds
+// its own SnapshotData via the pg_stub_snapshot.c decoder; target then
+// compares e.g. XidInMVCCSnapshot verdicts over the two structures.
+```
+
+Clamps: snapshot_type `% 7`; xcnt/subxcnt `% 65` (MAX_XIP = 64); xids /
+curcid / speculativeToken raw LE u32 — NOT normalized (xmin ≤ xmax and xip ∈
+[xmin, xmax) are C invariants a consumer target may impose; the builder
+never fabricates them); flags byte bits 0..2 = suboverflowed,
+takenDuringRecovery, copied.
+
+Unlocks: XidInMVCCSnapshot, the pure core of heapam_visibility.
+
+## stub:encoding (`stub_encoding.rs` + `csrc/pg_stub_encoding.c`)
+
+The pg_enc universe pinned identically both sides: id ↔ official name
+(`pg_enc2name_tbl`, encnames.c verbatim), maxmblen (the scalar column of
+wchar.c `pg_wchar_table`, mechanically extracted), and the server-encoding
+boundary (`PG_ENCODING_BE_LAST`). The Rust rows come from the SHIPPED
+`wchar`/`mbutils` crates — a transcription defect on either side is a caught
+divergence.
+
+How a target uses it: `enc_from_byte(b)` derives the same valid encoding id
+both sides from one fuzz byte (clamp `% 42`, itself pinned by a test);
+`assert_encoding_tables_pinned()` (committed test; callable once per process
+by targets) guarantees the id means the same encoding everywhere.
+pg_conversion-style tables extend this module; the id/name/maxmblen pin is
+the substrate.
+
+## Must-fail controls (all committed, all green)
+
+| control | plants | proves |
+|---|---|---|
+| `tupdesc_control_one_side_notnull_flip_is_caught` | attnotnull flipped in the C wire only | desc field plane sees one-side construction drift |
+| `tupdesc_control_one_side_menu_swap_is_caught` | att menu (attlen/byval shape) swapped C-side only | shape-level drift caught |
+| `nodes_control_one_side_tree_difference_is_caught` | C fed a text describing a different tree | re-out plane sees it |
+| `nodes_clamp_strings_are_nul_free` | NUL-riddled builder input | the NUL-stripping clamp holds (added to close injection N1) |
+| `snapshot_control_c_side_tamper_is_caught` | xmax low byte flipped in the wire only | field plane sees C-side drift |
+| `snapshot_control_rust_side_tamper_is_caught` | xip[0] flipped on the Rust side only | field plane sees Rust-side drift |
+| `encoding_control_shifted_index_is_caught` | every Rust row compared against the wrong C row | comparator live at every index |
+| `encoding_clamp_is_pinned` | – | the `% 42` clamp is a pinned contract, not silent drift |
+
+Plus baseline-agreement tests: `snapshot_construction_agrees` (fixed spec +
+500 seeded pseudo-random specs through both constructors) and
+`encoding_tables_are_pinned` (all 42 rows). The tupdesc/nodes builders'
+structural validators are the demo targets' committed suites (seed-corpus
+replay with all diversity buckets asserted nonzero; tag/label census tests).
+
+## Builder injection sweep (2026-08-01)
+
+Scratch plants applied to the builders themselves, one at a time
+(scratchpad `inject_stub.py`); verdict = does the committed test slice fail.
+
+| plant | builder defect | verdict |
+|---|---|---|
+| T1 | `spec_wire` drops the has_constr bit (C never builds constr) | CAUGHT (seed replay + controls) |
+| T2 | `build_rust_desc` loses attnotnull | CAUGHT |
+| T3 | `stage_datum` stages width-2 byval with i32 sign width | CAUGHT |
+| N1 | `take_str` keeps NULs (text-bridge contract violation) | MISSED on the first pass — the committed suites never pushed a NUL through the string arms; closed by adding `nodes_clamp_strings_are_nul_free` (clamp-pin control), re-planted and now CAUGHT |
+| N2 | Float literal emitted empty (unreadable token stream) | CAUGHT |
+| N3 | Integer decoded from 2 bytes instead of 4 (different-but-legal tree) | MISSED — planted EXPECTING silence: this is the documented blind class of the text-bridge builder (both sides consume the same tree; surface shrinks, verdicts never falsify) |
+| S1 | `snap_wire` swaps xmin/xmax | CAUGHT |
+| S2 | Rust side silently caps xcnt at 32 | CAUGHT (mini-fuzz) |
+| S3 | plane serializer omits `copied` | CAUGHT |
+| E1 | Rust count pin 43 | CAUGHT |
+| E2 | C maxmblen table defect (UTF8 -> 3) | CAUGHT |
+| E3 | `enc_from_byte` clamp drifts to % 41 | CAUGHT (clamp-pin control) |
+
+Final: 11/12 caught after the N1 gap was closed; 1/12 (N3) is the
+documented-silent class, kept in the table so the limitation stays visible.
+
+Reporting per the harness-detection-power law: counts above are honest; the
+one expected-silent plant is the documented nodes blind class, kept in the
+table so the limitation stays visible.

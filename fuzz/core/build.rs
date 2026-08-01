@@ -96,6 +96,11 @@ fn main() {
         // that TU (verify_compact_attribute audits); hashfn extern'd from
         // pg_mac_io.c.
         .file("csrc/pg_tupaccess_io.c")
+        // stub:snapshot + stub:encoding constructed-state builder shims
+        // (fuzz/stub-constructed; both-sides contracts in
+        // src/stub_snapshot.rs / src/stub_encoding.rs)
+        .file("csrc/pg_stub_snapshot.c")
+        .file("csrc/pg_stub_encoding.c")
         // range + multirange oracles, ONE translation unit: this file
         // #includes csrc/pg_rangetypes_io.c (which is therefore NOT listed
         // here — listing both would define every pg_diff_* entry twice).

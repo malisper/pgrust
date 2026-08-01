@@ -1830,6 +1830,7 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_portal",
+ "types_snapshot",
  "types_storage",
  "types_tuple",
  "tzparser",
