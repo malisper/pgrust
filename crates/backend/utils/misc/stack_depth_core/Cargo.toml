@@ -1,0 +1,13 @@
+[package]
+name = "stack_depth_core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../error/elog" }
+libc = "0.2"
+types_error = { path = "../../../../_support/types/types_error" }

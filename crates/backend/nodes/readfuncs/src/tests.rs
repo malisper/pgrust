@@ -350,3 +350,107 @@ fn nonnull_entry_panics_on_bare_null_marker() {
     let ctx = MemoryContext::new("t");
     let _ = stringToNode(ctx.mcx(), "<>");
 }
+
+// ---- lane p1-nodes fix witnesses (nodesfam_diff differential findings) ----
+
+// C PARITY: stringToNode("") runs nodeRead(NULL,0); pg_strtok returns NULL
+// immediately and the result is NULL — C treats empty/whitespace node text as
+// the NULL node, exactly like "<>". The port used to panic
+// ("stringToNode: empty input").
+#[test]
+fn empty_and_whitespace_input_is_the_null_node() {
+    for text in ["", " ", "\t", "\n", "   \t\n  "] {
+        let ctx = MemoryContext::new("t");
+        assert!(
+            crate::stringToNodeNullable(ctx.mcx(), text).unwrap().is_none(),
+            "{text:?} should read as the NULL node (C parity)"
+        );
+    }
+}
+
+// DATA-CORRUPTION FIX: the value-node path used `parse_int(t) as i32`, which
+// silently WRAPPED — the token `9992999999` built an Integer node holding
+// 1403065407 where C builds a Float node printing "9992999999". The port now
+// applies C nodeTokenType's own rule: strtoint over the UNSIGNED magnitude
+// (so INT32_MIN's magnitude ERANGEs exactly as in C), everything else numeric
+// is a T_Float value node, outside this crate's charter -> loud panic.
+#[test]
+fn in_range_integer_tokens_read_as_integer_nodes() {
+    for t in ["0", "-1", "2147483647", "-2147483647"] {
+        let ctx = MemoryContext::new("t");
+        let m = ctx.mcx();
+        let n = crate::stringToNodeNullable(m, t).unwrap().unwrap();
+        assert_eq!(n.node_tag(), types_nodes::NodeTag::T_Integer, "{t:?}");
+        assert_eq!(
+            n.as_integer().unwrap().ival,
+            t.parse::<i32>().unwrap(),
+            "{t:?} must read to its exact value, never a wrapped one"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "T_Float value node")]
+fn out_of_range_integer_token_does_not_wrap() {
+    let ctx = MemoryContext::new("t");
+    // used to silently build Integer(1403065407)
+    let _ = crate::stringToNodeNullable(ctx.mcx(), "9992999999");
+}
+
+#[test]
+#[should_panic(expected = "T_Float value node")]
+fn int32_min_token_follows_cs_magnitude_rule() {
+    let ctx = MemoryContext::new("t");
+    // C's nodeTokenType strips the sign first, so INT32_MIN's magnitude
+    // ERANGEs and C builds a FLOAT node; the port must not build an Integer.
+    let _ = crate::stringToNodeNullable(ctx.mcx(), "-2147483648");
+}
+
+// RECURSION GUARD (C parity: readfuncs.c:578 parseNodeString calls
+// check_stack_depth). With the guard armed and the limit lowered, deep {}
+// nesting must come back as a STRUCTURED 54001, never a stack overflow.
+// MUST-FAIL CONTROL inverted: the same input parses fine at the default
+// limit, so the 54001 witness is the guard firing, not a parse error.
+#[test]
+fn deep_nesting_raises_54001_with_the_guard_armed() {
+    let depth = 4000;
+    let mut text = String::new();
+    for _ in 0..depth {
+        text.push_str("{BOOLEXPR :boolop and :args (");
+    }
+    text.push_str("<>");
+    for _ in 0..depth {
+        text.push_str(") :location -1}");
+    }
+
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            stack_depth_core::set_stack_base();
+
+            // control: parses clean under a generous limit
+            stack_depth_core::assign_max_stack_depth(16 * 1024);
+            let ctx = MemoryContext::new("t");
+            assert!(
+                crate::stringToNodeNullable(ctx.mcx(), &text).is_ok(),
+                "control failed: the witness input must parse at a high limit"
+            );
+
+            // guard: a low limit turns the same input into 54001
+            stack_depth_core::assign_max_stack_depth(200);
+            let ctx2 = MemoryContext::new("t");
+            let err = crate::stringToNodeNullable(ctx2.mcx(), &text)
+                .expect_err("the guard must fire at a 200kB limit");
+            assert_eq!(
+                err.sqlstate(),
+                types_error::ERRCODE_STATEMENT_TOO_COMPLEX,
+                "guard must raise 54001, got {:?}",
+                err.sqlstate()
+            );
+            // restore for other tests on this thread (none, but be tidy)
+            stack_depth_core::assign_max_stack_depth(100);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

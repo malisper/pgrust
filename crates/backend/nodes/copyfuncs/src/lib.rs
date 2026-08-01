@@ -35,6 +35,10 @@ pub fn copy_utility_planned_stmt<'d>(
 }
 
 pub(crate) fn copy_node<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
+    // C copyfuncs.c copyObjectImpl: "Guard against stack overflow due to
+    // overly complex expressions" (check_stack_depth after the NULL test;
+    // a Rust Node handle is never null).
+    stack_depth_core::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_String => {
             let s = node.as_string().expect("String");

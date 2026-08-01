@@ -4623,6 +4623,7 @@ dependencies = [
  "mcx",
  "outfuncs",
  "readfuncs",
+ "stack_depth_core",
  "types_error",
  "types_nodes",
  "types_tuple",
@@ -10561,6 +10562,7 @@ dependencies = [
  "datum",
  "mcx",
  "readfuncs",
+ "stack_depth_core",
  "types_core",
  "types_error",
  "types_nodes",
@@ -14374,6 +14376,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "mcx",
+ "stack_depth_core",
  "types_core",
  "types_error",
  "types_nodes",
@@ -16926,12 +16929,20 @@ dependencies = [
 name = "stack_depth"
 version = "0.0.0"
 dependencies = [
- "elog",
  "guc",
  "guc_tables",
- "libc",
+ "stack_depth_core",
  "types_error",
  "types_guc",
+]
+
+[[package]]
+name = "stack_depth_core"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "libc",
+ "types_error",
 ]
 
 [[package]]

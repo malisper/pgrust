@@ -46,6 +46,9 @@ macro_rules! w {
 }
 
 fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
+    // C outfuncs.c outNode: "Guard against stack overflow due to overly
+    // complex expressions" (check_stack_depth at entry).
+    stack_depth_core::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_Var => out_var(out, node.as_variant::<Var>().expect("Var")),
         NodeTag::T_Const => out_const(out, node.as_variant::<Const>().expect("Const")),

@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }

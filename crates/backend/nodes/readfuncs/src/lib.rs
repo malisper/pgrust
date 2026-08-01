@@ -38,7 +38,16 @@ mod tests;
 // SQL-reachable readers of such columns (pg_get_expr) MUST use this entry.
 pub fn stringToNodeNullable<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Option<Node<'mcx>>> {
     let mut r = Reader { mcx, buf: s.as_bytes(), pos: 0 };
-    r.node_read().expect("stringToNode: empty input")
+    // C PARITY: stringToNode("") -> nodeRead(NULL, 0) -> pg_strtok returns
+    // NULL at once -> nodeRead returns NULL, i.e. C treats an empty (or
+    // all-whitespace) node string as the NULL node, exactly like "<>". This
+    // entry point's contract is "may return None", so return it instead of
+    // panicking (the panic was a ported-in constraint C does not have; found
+    // by nodesfam_diff, lane p1-nodes: C accepted, pgrust panicked).
+    match r.node_read() {
+        Some(res) => res,
+        None => Ok(None),
+    }
 }
 
 // stringToNode (read.c) for the call sites whose C counterpart dereferences
@@ -336,7 +345,28 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             return Ok(Some(Node::mk_string(self.mcx, s)?));
         }
         if t[0].is_ascii_digit() || (t[0] == b'-' && t.len() > 1 && t[1].is_ascii_digit()) {
-            return Ok(Some(Node::mk_integer(self.mcx, Self::parse_int(t) as i32)?));
+            // C nodeTokenType (read.c): a numeric-leading token is T_Integer
+            // ONLY when strtoint consumes the whole token WITHOUT ERANGE —
+            // note C advances past the sign first, so the range test is on the
+            // UNSIGNED magnitude (INT32_MIN's magnitude therefore ERANGEs).
+            // Anything else numeric is T_Float, which is outside this crate's
+            // charter, so it takes the loud panic like any unported shape.
+            //
+            // This used to be `parse_int(t) as i32`, which SILENTLY WRAPPED:
+            // the token `9992999999` built an Integer node holding 1403065407
+            // where C builds a Float node printing "9992999999" (found by
+            // nodesfam_diff, lane p1-nodes — data corruption, not a carve).
+            let sval = core::str::from_utf8(t).expect("ascii-digit token");
+            let magnitude = sval.strip_prefix('-').unwrap_or(sval);
+            match magnitude.parse::<i32>() {
+                Ok(_) => {
+                    let v: i32 = sval.parse().expect("magnitude fits, so the signed value does");
+                    return Ok(Some(Node::mk_integer(self.mcx, v)?));
+                }
+                Err(_) => panic!(
+                    "nodeRead (read.c): T_Float value node {sval:?} (view SELECT-rule read set)"
+                ),
+            }
         }
         panic!(
             "nodeRead (read.c): unhandled token {:?} (view SELECT-rule read set)",
@@ -388,6 +418,9 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
     }
 
     fn parse_node_string(&mut self) -> PgResult<Node<'mcx>> {
+        // C readfuncs.c parseNodeString: "Guard against stack overflow due
+        // to overly complex expressions" (check_stack_depth at entry).
+        stack_depth_core::check_stack_depth()?;
         let name = self.token("node label");
         match name {
             b"QUERY" => self.read_query(),

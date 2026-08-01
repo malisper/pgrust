@@ -1,5 +1,6 @@
 use std::sync::Once;
 
+use types_error::ERRCODE_STATEMENT_TOO_COMPLEX;
 use types_guc::GucSource;
 
 use super::*;
