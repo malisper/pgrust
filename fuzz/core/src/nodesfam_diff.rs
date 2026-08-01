@@ -587,9 +587,12 @@ fn const_datums_are_well_formed(text: &str) -> bool {
                     ":constbyval" => byval = toks.get(j + 1).map(|t| *t == "true"),
                     ":constisnull" => isnull = toks.get(j + 1).map(|t| *t == "true"),
                     ":constvalue" => {
-                        // NULL datums write "<>" and read no payload
+                        // A NULL Const's value is written as exactly "<>";
+                        // C's _readConst skips the token WITHOUT checking it,
+                        // so any garbage is accepted there while the port
+                        // asserts the marker (witness: ":constvalue <,").
                         if isnull == Some(true) {
-                            break;
+                            return toks.get(j + 1).copied() == Some("<>");
                         }
                         let Some(lt) = toks.get(j + 1) else { return false };
                         let Ok(len) = lt.parse::<i64>() else { return false };

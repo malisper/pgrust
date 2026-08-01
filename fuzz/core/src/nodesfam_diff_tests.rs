@@ -994,3 +994,16 @@ fn unported_shape_carve_is_live_and_singular() {
         .count();
     assert_eq!(n, 3, "the read port now has {n} unported panics — record them");
 }
+
+/// A NULL Const writes its value as exactly `<>`; C's _readConst skips that
+/// token without checking it, so garbage is C-accepted while the port asserts
+/// the marker. Gated as not writer-producible.
+#[test]
+fn null_const_value_must_be_the_marker() {
+    let bad = "{CONST :consttype 16 :consttypmod -1 :constcollid 0 :constlen 1 \
+               :constbyval true :constisnull true :location -1 :constvalue <,}";
+    assert!(!run_text(bad.as_bytes()), "gate let a non-marker NULL Const value through");
+    let good = "{CONST :consttype 16 :consttypmod -1 :constcollid 0 :constlen 1 \
+                :constbyval true :constisnull true :location -1 :constvalue <>}";
+    assert!(run_text(good.as_bytes()), "gate rejected a valid NULL Const");
+}
