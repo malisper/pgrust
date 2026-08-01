@@ -3,7 +3,6 @@
 // pattern as proofs/brin-minmax/build.rs — plain native compile; there is
 // no Kani arm here (the fuzz workspace never builds under cargo-kani).
 fn main() {
-<<<<<<< HEAD
     let mut build = cc::Build::new();
     // SANCOV ON THE C ORACLE (NEZHA union-coverage, campaign 2026-07-30):
     // instrument the vendored csrc objects so libFuzzer's retention feedback
@@ -150,10 +149,6 @@ fn main() {
         // the encoding/putmessage seam shims).
         // DEDUPED (single registration above): // DEDUPED (single registration above): .file("csrc/pg_netfam_io.c")
         // DEDUPED (single registration above): .file("csrc/pg_netfam_io.c")
-=======
-    cc::Build::new()
-        .file("csrc/pg_int_io.c")
->>>>>>> 122c339cbb (int_diff: vendored 18.3 C oracle (int.c + numutils + pqformat verbatim, dispatchers))
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
