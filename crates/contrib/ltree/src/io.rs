@@ -754,11 +754,14 @@ fn pushval_asis(
 
 const STACKDEPTH: usize = 32;
 
-fn makepol(st: &mut QprsState, depth: u32) -> Result<i32, PgError> {
-    if depth > 10_000 {
-        return Err(PgError::error("stack depth limit exceeded")
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
-    }
+fn makepol(st: &mut QprsState) -> Result<i32, PgError> {
+    // C ltxtquery_io.c makepol(): "since this function recurses, it could be
+    // driven to stack overflow" -> check_stack_depth(). The guard must be
+    // BYTE-based like C's: a frame-count cap cannot bound stack bytes, and at
+    // ~3 KiB/frame a 10_000-frame cap is unreachable behind any real backend
+    // stack (2 MiB floor / 8 MiB rlimit), i.e. dead code that let deep
+    // nesting abort the process.
+    stack_depth::check_stack_depth()?;
     let mut stack = [0i32; STACKDEPTH];
     let mut lenstack = 0usize;
 
@@ -790,7 +793,7 @@ fn makepol(st: &mut QprsState, depth: u32) -> Result<i32, PgError> {
                 }
             }
             x if x == OPEN => {
-                if makepol(st, depth + 1)? == ERR {
+                if makepol(st)? == ERR {
                     return Ok(ERR);
                 }
                 while lenstack > 0
@@ -822,11 +825,9 @@ fn makepol(st: &mut QprsState, depth: u32) -> Result<i32, PgError> {
     Ok(END)
 }
 
-fn findoprnd(items: &mut [Item], pos: &mut usize, depth: u32) -> Result<(), PgError> {
-    if depth > 10_000 {
-        return Err(PgError::error("stack depth limit exceeded")
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
-    }
+fn findoprnd(items: &mut [Item], pos: &mut usize) -> Result<(), PgError> {
+    // C ltxtquery_io.c findoprnd(): check_stack_depth() (see makepol).
+    stack_depth::check_stack_depth()?;
     let p = *pos;
     if items[p].typ as i32 == VAL || items[p].typ as i32 == VALTRUE {
         items[p].left = 0;
@@ -834,13 +835,13 @@ fn findoprnd(items: &mut [Item], pos: &mut usize, depth: u32) -> Result<(), PgEr
     } else if items[p].val == b'!' as i32 {
         items[p].left = 1;
         *pos += 1;
-        findoprnd(items, pos, depth + 1)?;
+        findoprnd(items, pos)?;
     } else {
         let tmp = *pos;
         *pos += 1;
-        findoprnd(items, pos, depth + 1)?;
+        findoprnd(items, pos)?;
         items[tmp].left = (*pos - tmp) as i16;
-        findoprnd(items, pos, depth + 1)?;
+        findoprnd(items, pos)?;
     }
     Ok(())
 }
@@ -857,7 +858,7 @@ pub fn parse_ltxtquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         sumlen: 0,
     };
 
-    if makepol(&mut st, 0)? == ERR {
+    if makepol(&mut st)? == ERR {
         // soft error path; queryin returns NULL → but we raise via the Err above
         return Err(PgError::error("syntax error").with_sqlstate(ERRCODE_SYNTAX_ERROR));
     }
@@ -898,7 +899,7 @@ pub fn parse_ltxtquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
 
     // Set left links.
     let mut pos = 0usize;
-    findoprnd(&mut items, &mut pos, 0)?;
+    findoprnd(&mut items, &mut pos)?;
     for (i, it) in items.iter().enumerate() {
         write_item(&mut out, i, it);
     }
@@ -914,11 +915,9 @@ struct Infix<'a> {
 }
 
 impl<'a> Infix<'a> {
-    fn run(&mut self, first: bool, depth: u32) -> Result<(), PgError> {
-        if depth > 10_000 {
-            return Err(PgError::error("stack depth limit exceeded")
-                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
-        }
+    fn run(&mut self, first: bool) -> Result<(), PgError> {
+        // C ltxtquery_io.c infix(): check_stack_depth() (see makepol).
+        stack_depth::check_stack_depth()?;
         let it = self.items[self.cur];
         if it.typ as i32 == VAL {
             // operand bytes at op + distance, up to NUL
@@ -945,7 +944,7 @@ impl<'a> Infix<'a> {
             if isopr {
                 self.out.extend_from_slice(b"( ");
             }
-            self.run(isopr, depth + 1)?;
+            self.run(isopr)?;
             if isopr {
                 self.out.extend_from_slice(b" )");
             }
@@ -963,11 +962,11 @@ impl<'a> Infix<'a> {
                 op: self.op,
                 out: Vec::new(),
             };
-            nrm.run(false, depth + 1)?;
+            nrm.run(false)?;
 
             // left operand into self
             self.cur = nrm.cur;
-            self.run(false, depth + 1)?;
+            self.run(false)?;
 
             // operator + right operand
             self.out.push(b' ');
@@ -995,6 +994,6 @@ pub fn deparse_ltxtquery(image: &[u8]) -> Result<Vec<u8>, PgError> {
         op: q.operand(),
         out: Vec::new(),
     };
-    inf.run(true, 0)?;
+    inf.run(true)?;
     Ok(inf.out)
 }

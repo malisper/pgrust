@@ -938,4 +938,88 @@ mod tests {
         let e = fc_ltree_recv(None, &mut fcinfo).unwrap_err();
         assert_eq!(e.message(), "unsupported ltree version number 2");
     }
+
+    /// p1-ltree REGRESSION (release blocker, fixed 2026-08-01): ltxtquery's
+    /// parser recurses once per '(' and was guarded by a fixed FRAME-COUNT cap
+    /// (`depth > 10_000`) instead of C's byte-based check_stack_depth(). At the
+    /// measured ~3 KiB/frame that cap was unreachable behind any real backend
+    /// stack, so the guard was dead code and deep nesting overflowed the stack
+    /// and SIGABRTed the whole process (thread-per-backend => every session).
+    /// Measured before the fix (local, --release): abort at depth 700 on the
+    /// 2 MiB child_thread_stack_size() floor, and at 2800 on an 8 MiB rlimit.
+    /// PostgreSQL 18.3 (docker postgres:18.3) returns a value at 5000 and
+    /// raises 54001 at 9000 — it never dies.
+    ///
+    /// Runs in a subprocess because a stack overflow aborts the process.
+    #[test]
+    fn ltxtquery_deep_nesting_raises_54001_and_does_not_abort() {
+        // (nesting depth, must the guard have fired?)
+        const DEPTHS: [(usize, bool); 5] =
+            [(700, false), (2800, true), (9000, true), (20000, true), (100_000, true)];
+        if let Ok(d) = std::env::var("LTREE_STACK_PROBE") {
+            let depth: usize = d.parse().unwrap();
+            let mut s = Vec::new();
+            s.extend(std::iter::repeat(b'(').take(depth));
+            s.push(b'a');
+            s.extend(std::iter::repeat(b')').take(depth));
+            let h = std::thread::Builder::new()
+                // the child_thread_stack_size() floor: the worst case a real
+                // backend thread can get.
+                .stack_size(2 << 20)
+                .spawn(move || {
+                    // A backend thread records its stack base at spawn (C:
+                    // main()); without it stack_is_too_deep() short-circuits on
+                    // base == 0 and the guard is INERT. Arming it here is what
+                    // makes this test non-vacuous.
+                    stack_depth::set_stack_base();
+                    stack_depth::assign_max_stack_depth(2048);
+                    io::parse_ltxtquery(&s)
+                })
+                .unwrap();
+            match h.join().expect("parser thread must not panic") {
+                Ok(_) => eprintln!("PROBE {depth} OK"),
+                Err(e) => eprintln!("PROBE {depth} ERR {}", e.sqlstate().0),
+            }
+            return;
+        }
+        // ERRCODE_STATEMENT_TOO_COMPLEX == MAKE_SQLSTATE("54001").
+        const STATEMENT_TOO_COMPLEX: u32 = 5 + (4 << 6) + (1 << 24);
+        let exe = std::env::current_exe().unwrap();
+        for (depth, must_raise) in DEPTHS {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "--nocapture",
+                    "tests::ltxtquery_deep_nesting_raises_54001_and_does_not_abort",
+                ])
+                .env("LTREE_STACK_PROBE", depth.to_string())
+                .output()
+                .unwrap();
+            let se = String::from_utf8_lossy(&out.stderr);
+            let line = se
+                .lines()
+                .find(|l| l.starts_with("PROBE"))
+                .unwrap_or_else(|| panic!("depth {depth}: process died (no verdict): {se}"));
+            assert!(
+                out.status.success(),
+                "depth {depth}: child failed: {se}"
+            );
+            // The depth at which the guard trips is NOT a comparison surface
+            // (it is a function of frame size, which differs from C's); that
+            // the process SURVIVES and reports 54001 rather than dying is.
+            if must_raise {
+                assert_eq!(
+                    line,
+                    format!("PROBE {depth} ERR {STATEMENT_TOO_COMPLEX}"),
+                    "depth {depth}: expected a clean 54001, got {line:?}"
+                );
+            } else {
+                assert!(
+                    line == format!("PROBE {depth} OK")
+                        || line == format!("PROBE {depth} ERR {STATEMENT_TOO_COMPLEX}"),
+                    "depth {depth}: unexpected verdict {line:?}"
+                );
+            }
+        }
+    }
 }
