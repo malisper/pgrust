@@ -119,23 +119,23 @@ extern "C" {
     fn pg_diff_pf_crc32_traditional(data: *const u8, len: usize) -> u32;
     fn pg_diff_pf_crc32_legacy(data: *const u8, len: usize) -> u32;
     // pgstrcasecmp
-    fn pg_diff_pf_strcasecmp(s1: *const i8, s2: *const i8) -> i32;
-    fn pg_diff_pf_strncasecmp(s1: *const i8, s2: *const i8, n: usize) -> i32;
+    fn pg_diff_pf_strcasecmp(s1: *const u8, s2: *const u8) -> i32;
+    fn pg_diff_pf_strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> i32;
     fn pg_diff_pf_toupper(ch: i32) -> i32;
     fn pg_diff_pf_tolower(ch: i32) -> i32;
     fn pg_diff_pf_ascii_toupper(ch: i32) -> i32;
     fn pg_diff_pf_ascii_tolower(ch: i32) -> i32;
     // path
-    fn pg_diff_pf_canonicalize(buf: *mut i8);
-    fn pg_diff_pf_join(head: *const i8, tail: *const i8, ret: *mut i8);
-    fn pg_diff_pf_parent_dir(buf: *mut i8);
-    fn pg_diff_pf_first_dir_sep(s: *const i8) -> i64;
-    fn pg_diff_pf_last_dir_sep(s: *const i8) -> i64;
-    fn pg_diff_pf_first_path_var_sep(s: *const i8) -> i64;
-    fn pg_diff_pf_contains_parent_ref(s: *const i8) -> i32;
-    fn pg_diff_pf_rel_below_cwd(s: *const i8) -> i32;
-    fn pg_diff_pf_prefix_of(p1: *const i8, p2: *const i8) -> i32;
-    fn pg_diff_pf_get_rel_path(which: i32, my_exec_path: *const i8, ret: *mut i8);
+    fn pg_diff_pf_canonicalize(buf: *mut u8);
+    fn pg_diff_pf_join(head: *const u8, tail: *const u8, ret: *mut u8);
+    fn pg_diff_pf_parent_dir(buf: *mut u8);
+    fn pg_diff_pf_first_dir_sep(s: *const u8) -> i64;
+    fn pg_diff_pf_last_dir_sep(s: *const u8) -> i64;
+    fn pg_diff_pf_first_path_var_sep(s: *const u8) -> i64;
+    fn pg_diff_pf_contains_parent_ref(s: *const u8) -> i32;
+    fn pg_diff_pf_rel_below_cwd(s: *const u8) -> i32;
+    fn pg_diff_pf_prefix_of(p1: *const u8, p2: *const u8) -> i32;
+    fn pg_diff_pf_get_rel_path(which: i32, my_exec_path: *const u8, ret: *mut u8);
     // bufmask
     fn pg_diff_pf_mask_page_lsn_and_checksum(page: *mut u8);
     fn pg_diff_pf_mask_page_hint_bits(page: *mut u8);
@@ -221,7 +221,7 @@ fn cstr(s: &str) -> CString {
     CString::new(s.as_bytes()).unwrap_or_else(|_| CString::new("").unwrap())
 }
 
-fn c_buf_to_string(buf: &[i8]) -> String {
+fn c_buf_to_string(buf: &[u8]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     buf[..end].iter().map(|&c| c as u8 as char).collect()
 }
@@ -229,11 +229,11 @@ fn c_buf_to_string(buf: &[i8]) -> String {
 /// C `canonicalize_path` on a MAXPGPATH scratch buffer (the C API is
 /// in-place on a caller buffer).
 fn c_canonicalize(s: &str) -> String {
-    let mut buf = vec![0i8; MAXPGPATH];
+    let mut buf = vec![0u8; MAXPGPATH];
     let bytes = s.as_bytes();
     assert!(bytes.len() < MAXPGPATH, "driver must cap path inputs");
     for (i, &b) in bytes.iter().enumerate() {
-        buf[i] = b as i8;
+        buf[i] = b;
     }
     // SAFETY: buf is MAXPGPATH bytes and NUL-terminated (zero-initialized).
     unsafe { pg_diff_pf_canonicalize(buf.as_mut_ptr()) };
@@ -372,8 +372,8 @@ fn arm_strcase(a: &[u8], b: &[u8], n: usize) {
     // SAFETY: both pointers are NUL-terminated CString buffers.
     let (c_cmp, c_ncmp) = unsafe {
         (
-            pg_diff_pf_strcasecmp(ca.as_ptr(), cb.as_ptr()),
-            pg_diff_pf_strncasecmp(ca.as_ptr(), cb.as_ptr(), n),
+            pg_diff_pf_strcasecmp(ca.as_ptr().cast(), cb.as_ptr().cast()),
+            pg_diff_pf_strncasecmp(ca.as_ptr().cast(), cb.as_ptr().cast(), n),
         )
     };
     let r_cmp = pgstrcasecmp::pg_strcasecmp(&ra, &rb);
@@ -415,12 +415,12 @@ fn arm_pathpred(a: &str, b: &str) {
     let (ca, cb) = (cstr(a), cstr(b));
     // SAFETY: both pointers are NUL-terminated CString buffers.
     unsafe {
-        let c_first = pg_diff_pf_first_dir_sep(ca.as_ptr());
-        let c_last = pg_diff_pf_last_dir_sep(ca.as_ptr());
-        let c_var = pg_diff_pf_first_path_var_sep(ca.as_ptr());
-        let c_par = pg_diff_pf_contains_parent_ref(ca.as_ptr());
-        let c_below = pg_diff_pf_rel_below_cwd(ca.as_ptr());
-        let c_prefix = pg_diff_pf_prefix_of(ca.as_ptr(), cb.as_ptr());
+        let c_first = pg_diff_pf_first_dir_sep(ca.as_ptr().cast());
+        let c_last = pg_diff_pf_last_dir_sep(ca.as_ptr().cast());
+        let c_var = pg_diff_pf_first_path_var_sep(ca.as_ptr().cast());
+        let c_par = pg_diff_pf_contains_parent_ref(ca.as_ptr().cast());
+        let c_below = pg_diff_pf_rel_below_cwd(ca.as_ptr().cast());
+        let c_prefix = pg_diff_pf_prefix_of(ca.as_ptr().cast(), cb.as_ptr().cast());
 
         assert_eq!(
             pg_path::first_dir_separator(a).map_or(-1i64, |i| i as i64),
@@ -472,17 +472,17 @@ fn arm_canon(s: &str) {
 
 fn arm_join(head: &str, tail: &str) {
     let (ch, ct) = (cstr(head), cstr(tail));
-    let mut buf = vec![0i8; MAXPGPATH];
+    let mut buf = vec![0u8; MAXPGPATH];
     // SAFETY: buf is a MAXPGPATH output area, exactly the C contract.
-    unsafe { pg_diff_pf_join(ch.as_ptr(), ct.as_ptr(), buf.as_mut_ptr()) };
+    unsafe { pg_diff_pf_join(ch.as_ptr().cast(), ct.as_ptr().cast(), buf.as_mut_ptr()) };
     let c_joined = c_buf_to_string(&buf);
     let r_joined = pg_path::join_path_components(head, tail);
     assert_eq!(r_joined, c_joined, "join_path_components");
 
     // get_parent_directory over that result (in-place C API).
-    let mut pbuf = vec![0i8; MAXPGPATH];
+    let mut pbuf = vec![0u8; MAXPGPATH];
     for (i, &b) in r_joined.as_bytes().iter().enumerate() {
-        pbuf[i] = b as i8;
+        pbuf[i] = b;
     }
     // SAFETY: pbuf is MAXPGPATH bytes and NUL-terminated.
     unsafe { pg_diff_pf_parent_dir(pbuf.as_mut_ptr()) };
@@ -496,9 +496,9 @@ fn arm_join(head: &str, tail: &str) {
 fn arm_relpath(which: u8, my_exec_path: &str) {
     let w = (which % 11) as i32;
     let cp = cstr(my_exec_path);
-    let mut buf = vec![0i8; MAXPGPATH];
+    let mut buf = vec![0u8; MAXPGPATH];
     // SAFETY: buf is a MAXPGPATH output area, exactly the C contract.
-    unsafe { pg_diff_pf_get_rel_path(w, cp.as_ptr(), buf.as_mut_ptr()) };
+    unsafe { pg_diff_pf_get_rel_path(w, cp.as_ptr().cast(), buf.as_mut_ptr()) };
     let c_out = c_buf_to_string(&buf);
     let r_out = match w {
         0 => pg_path::get_share_path(my_exec_path),

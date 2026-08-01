@@ -1,0 +1,13 @@
+===== FLEET JOB MANIFEST =====
+
+description:
+  p1-microbatch portfam_diff 10M CONFIRM (pg_bitutils/crc32c/pgstrcasecmp/pg_path/bufmask vs verbatim 18.3 C)
+
+job_name: pgrust-fuzz-campaign-1785566865-5906-14640
+job_type: fuzz-campaign
+git_ref: cc62060a57dcc6331d2097a89f1916c89548f3da
+repo_url: https://github.com/malisper/pgrust.git
+build_kind: fast
+sha: cc62060a57dc
+started_utc: 2026-08-01T06:49:21Z
+hostname: pgrust-fuzz-campaign-1785566865-5906-14640-8gnfg
