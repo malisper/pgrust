@@ -408,3 +408,10 @@ name = "miscfam_diff"
 path = "fuzz_targets/miscfam_diff.rs"
 test = false
 doc = false
+# portfam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-portfam_diff.md.
+[[bin]]
+name = "portfam_diff"
+path = "fuzz_targets/portfam_diff.rs"
+test = false
+doc = false
+bench = false

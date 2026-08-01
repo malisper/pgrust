@@ -1150,23 +1150,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "binaryheap"
-version = "0.1.0"
-
-[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
-
-[[package]]
-name = "bloomfilter"
-version = "0.1.0"
-dependencies = [
- "hashfn",
- "mcx",
- "types_error",
-]
 
 [[package]]
 name = "brin_pageops"
@@ -1504,17 +1491,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrib_earthdistance"
-version = "0.0.0"
-dependencies = [
- "datum",
- "dfmgr",
- "types_core",
- "types_error",
- "types_fmgr",
-]
-
-[[package]]
 name = "controldata_utils"
 version = "0.0.0"
 dependencies = [
@@ -1680,18 +1656,14 @@ dependencies = [
  "array_userfuncs",
  "arrayfuncs",
  "arrayutils",
- "binaryheap",
- "bloomfilter",
+ "bufmask",
  "cc",
- "cmdtag",
- "contrib_earthdistance",
  "conv",
  "crc32c",
  "cryptohashfuncs",
  "datum",
  "detoast",
  "detoast_seams",
- "dfmgr",
  "elog",
  "fd",
  "fmgr_core",
@@ -1699,9 +1671,7 @@ dependencies = [
  "guc_tables",
  "hashfn",
  "heaptuple",
- "hyperloglog",
  "indexcmds_seams",
- "integerset",
  "keywords",
  "libc",
  "lsyscache",
@@ -1712,20 +1682,20 @@ dependencies = [
  "namespace_seams",
  "nbt_compare",
  "numutils",
- "pairingheap",
  "percentrepl",
  "pg_b64",
- "pg_class",
+ "pg_bitutils",
  "pg_hmac",
  "pg_locale",
  "pg_locale_seams",
  "pg_md5",
+ "pg_path",
  "pg_prng",
- "pg_rusage",
  "pg_sha1",
  "pg_sha2",
  "pg_string",
  "pglz",
+ "pgstrcasecmp",
  "pgtz",
  "postgres_seams",
  "pqformat",
@@ -1746,7 +1716,6 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
- "types_portal",
  "types_storage",
  "types_tuple",
  "unicode_category",
@@ -1756,7 +1725,6 @@ dependencies = [
  "xact_seams",
  "xlogreader",
  "xlogreader_seams",
- "xlogstats",
 ]
 
 [[package]]
@@ -2537,14 +2505,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integerset"
-version = "0.1.0"
-dependencies = [
- "mcx",
- "types_error",
-]
-
-[[package]]
 name = "interrupt"
 version = "0.0.0"
 dependencies = [
@@ -3321,10 +3281,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pairingheap"
-version = "0.1.0"
-
-[[package]]
 name = "parallel_seams"
 version = "0.0.0"
 dependencies = [
@@ -3385,14 +3341,6 @@ version = "0.1.0"
 [[package]]
 name = "pg_bitutils"
 version = "0.1.0"
-
-[[package]]
-name = "pg_class"
-version = "0.1.0"
-dependencies = [
- "pg_class_seams",
- "types_error",
-]
 
 [[package]]
 name = "pg_class_seams"
@@ -3497,13 +3445,6 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
-]
-
-[[package]]
-name = "pg_rusage"
-version = "0.0.0"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -6361,14 +6302,6 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
-]
-
-[[package]]
-name = "xlogstats"
-version = "0.1.0"
-dependencies = [
- "types_core",
- "xlogreader_seams",
 ]
 
 [[package]]
