@@ -139,6 +139,14 @@ fn main() {
     }
     wcharfam
         .file("csrc/pg_wcharfam.c")
+        // LINK FIX (p1-microbatch, 2026-08-01): pg_wcharfam.c's vendored
+        // mbutils extract calls pg_wchar_strlen, whose upstream definition
+        // lives in src/backend/utils/mb/wstrncmp.c — a TU this family never
+        // vendored. Plain `cargo test` never caught it (macOS -dead_strip
+        // discards the unreferenced cone), but EVERY cargo-fuzz target
+        // failed to link with "Undefined symbols: _pg_wchar_strlen",
+        // including already-landed ones. Vendored verbatim below.
+        .file("csrc/wcharfam/wstrncmp.c")
         .include("csrc/wcharfam")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
