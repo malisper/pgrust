@@ -48,42 +48,16 @@ pub fn pg_qsort<T: Copy>(v: &mut [T], mut cmp: impl FnMut(&T, &T) -> i32) {
 }
 
 /// C's qsort_arg with a fallible comparator (fmgr): the first comparator
-/// error is propagated; the slice is left as some valid permutation of its
-/// input (as in C, where the error longjmps out mid-sort).
-///
-/// Codegen note (measured on the CI cluster, pgqs_rangebound_arg_200): threading
-/// `Result` through the core costs 1.24x C instructions — the Ok/Err
-/// discriminant survives the noinline med3 boundary and the recursion. So
-/// the fallible entry runs the INFALLIBLE core with a first-error
-/// accumulator: on the success path the comparator stream — and therefore
-/// the output permutation — is bit-identical to running the fallible core
-/// (one perfectly-predicted `err.is_none()` branch per comparison is the
-/// only delta); after the first error the comparator is never called again
-/// (fmgr side-effect safety) and remaining comparisons report 0, so the
-/// sort finishes cheaply on swaps alone and the error is returned. C's
-/// longjmp likewise abandons any ordering guarantee on error.
+/// error aborts the sort and is propagated; the slice is left as some valid
+/// permutation of its input (as in C, where the error longjmps out).
 #[inline]
 pub fn pg_qsort_arg<T: Copy, E>(
     v: &mut [T],
     mut cmp: impl FnMut(&T, &T) -> Result<i32, E>,
 ) -> Result<(), E> {
-    let mut err: Option<E> = None;
-    pg_qsort(v, |a, b| {
-        if err.is_some() {
-            return 0;
-        }
-        match cmp(a, b) {
-            Ok(r) => r,
-            Err(e) => {
-                err = Some(e);
-                0
-            }
-        }
-    });
-    match err {
-        None => Ok(()),
-        Some(e) => Err(e),
-    }
+    let n = v.len();
+    // SAFETY: the pointer region is exactly v's n elements (core contract).
+    unsafe { qsort_rec(v.as_mut_ptr(), n, &mut cmp, &mut || Ok(())) }
 }
 
 /// C's qsort_interruptible: infallible comparator, plus an interrupt check
