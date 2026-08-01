@@ -301,27 +301,9 @@ pg_mblen_unbounded(const char *mbstr)
  * Historical name for pg_mblen_unbounded().  Should not be used and will be
  * removed in a later version.
  */
-/* ==== PLANTED DEFECT — MUST BE REVERTED (p1-spell ASan verification) ====
- * Michael's ruling requires proving ASan actually DETECTS an OOB write in this
- * TU before a clean run is trusted. Fires once per process. */
-static void
-wfam_asan_plant(void)
-{
-	static int	done = 0;
-	volatile char *p;
-
-	if (done)
-		return;
-	done = 1;
-	p = (volatile char *) malloc(8);
-	p[16] = 'x';				/* heap-buffer-overflow WRITE of size 1 */
-	free((void *) p);
-}
-
 int
 pg_mblen(const char *mbstr)
 {
-	wfam_asan_plant();
 	return pg_mblen_unbounded(mbstr);
 }
 
