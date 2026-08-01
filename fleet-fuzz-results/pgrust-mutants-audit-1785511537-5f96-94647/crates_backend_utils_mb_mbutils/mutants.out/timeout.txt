@@ -1,4 +1,0 @@
-crates/backend/utils/mb/mbutils/src/lib.rs:845:11: replace += with *= in ascii_run
-crates/backend/utils/mb/mbutils/src/lib.rs:852:11: replace += with *= in ascii_run
-crates/backend/utils/mb/mbutils/src/lib.rs:855:11: replace += with *= in ascii_run
-crates/backend/utils/mb/mbutils/src/lib.rs:914:11: replace += with *= in cliplen

@@ -1586,6 +1586,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "copyfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "outfuncs",
+ "readfuncs",
+ "stack_depth_core",
+ "types_error",
+ "types_nodes",
+ "types_tuple",
+]
+
+[[package]]
 name = "crc32c"
 version = "0.1.0"
 
@@ -1727,6 +1741,7 @@ dependencies = [
  "contrib_earthdistance",
  "contrib_seg",
  "conv",
+ "copyfuncs",
  "crc32c",
  "cryptohashfuncs",
  "datum",
@@ -1761,6 +1776,7 @@ dependencies = [
  "namespace_seams",
  "nbt_compare",
  "numutils",
+ "outfuncs",
  "pairingheap",
  "percentrepl",
  "pg_b64",
@@ -1783,6 +1799,7 @@ dependencies = [
  "pqcomm_seams",
  "pqformat",
  "radixtree",
+ "readfuncs",
  "regex_core",
  "regexp_alt",
  "relpath",
@@ -1792,6 +1809,7 @@ dependencies = [
  "scan_fgram",
  "scram_common",
  "stack_depth",
+ "stack_depth_core",
  "strftime",
  "stringinfo",
  "superuser_seams",
