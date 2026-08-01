@@ -135,6 +135,13 @@ fn main() {
     }
     wcharfam
         .file("csrc/pg_wcharfam.c")
+        // LINK FIX (p1-microbatch, 2026-08-01): pg_wcharfam.c's vendored
+        // pg_wchar2mb calls pg_wchar_strlen, whose definition lives in
+        // src/backend/utils/mb/wstrncmp.c — a TU this family never
+        // vendored; every `cargo fuzz build` link on Linux (and macOS
+        // without -dead_strip) died with an unresolved symbol. Verbatim
+        // whole-file copy.
+        .file("csrc/wcharfam/wstrncmp.c")
         .include("csrc/wcharfam")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
@@ -445,6 +452,17 @@ fn main() {
         "int4in", "int8in", "pg_ltoa", "pg_ultoa_n",
         "pg_strtoint64", "pg_strtoint64_safe", "qsort_arg",
         "RE_compile_and_cache", "RE_compile_and_execute",
+        // CI-build hotfix (p1-microbatch, 2026-08-01): the jsonpath
+        // family's vendored Spencer engine (csrc/jsonpath/regex/) exports
+        // the same five entry points as the regexp family's engine
+        // (csrc/regexfam/, which must keep the unprefixed names —
+        // pg_regexp_io.c calls them directly). Linux ld hard-errors on the
+        // duplicates and every CI cluster fuzz build at the tip died (`cargo
+        // fuzz build` builds ALL targets); macOS ld tolerated it, which is
+        // why local builds passed. Same nm-sweep remedy as the wave-3
+        // train sweep below.
+        "pg_regcomp", "pg_regexec", "pg_regerror", "pg_regfree",
+        "pg_reg_getcolor",
         "construct_array_builtin", "ArrayGetIntegerTypmods",
         "MemoryContextSwitchTo", "AllocSetContextCreate",
         "MemoryContextResetOnly", "MemoryContextDelete",
