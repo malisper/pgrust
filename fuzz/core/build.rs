@@ -65,6 +65,12 @@ fn main() {
         // wfam_ copies in pg_wcharfam.c (see the file header for
         // provenance, shims and the ts_headline carve).
         .file("csrc/pg_wparserfam_io.c")
+        // spellfam_diff oracle (p1-spell): verbatim 18.3 spell.c loader +
+        // regis.c + ts_locale.c + pg_get_line.c/stringinfo.c/formatting.c
+        // asc_tolower, spf_-prefixed; mb layer + regex engine resolved
+        // against pg_wcharfam.c and the unprefixed csrc/regexfam/ objects
+        // (see pg_spellfam_io.c header for provenance, shims and carves).
+        .file("csrc/pg_spellfam_io.c")
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the same union

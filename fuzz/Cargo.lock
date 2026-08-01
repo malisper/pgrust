@@ -1789,6 +1789,7 @@ dependencies = [
  "syscache_seams",
  "timestamp_seams",
  "ts_locale",
+ "tsearch_spell",
  "tupdesc",
  "typcache",
  "types_core",

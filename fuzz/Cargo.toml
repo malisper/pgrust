@@ -433,6 +433,13 @@ path = "fuzz_targets/wparser_diff.rs"
 test = false
 doc = false
 bench = false
+# spellfam_diff (p1-spell): tsearch/spell dictionary loader + normalizer.
+[[bin]]
+name = "spellfam_diff"
+path = "fuzz_targets/spellfam_diff.rs"
+test = false
+doc = false
+bench = false
 # hstore_diff (p1-mb-contribc): contrib/hstore family.
 [[bin]]
 name = "hstore_diff"
