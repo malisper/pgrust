@@ -614,8 +614,8 @@ fn bare_token_producible(tok: &str) -> bool {
     if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
         return true;
     }
-    // bitstring: b followed by bits
-    if bytes[0] == b'b' && tok[1..].bytes().all(|c| c == b'0' || c == b'1') {
+    // bitstring: C nodeTokenType takes ANY token starting 'b' or 'x'
+    if bytes[0] == b'b' || bytes[0] == b'x' {
         return true;
     }
     // numeric: C's nodeTokenType takes a leading digit/sign/dot, then the
@@ -1033,9 +1033,12 @@ fn classify_panic(text: &str, msg: &str, labels: &[&str]) -> PanicClass {
         .strip_prefix("nodeRead (read.c): unhandled token \"")
         .and_then(|r| r.split('"').next())
     {
-        // classify by C's OWN rule (nodeTokenType), not by guesswork
+        // classify by C's OWN rule (nodeTokenType), not by guesswork:
+        // T_BitString is `*token == 'b' || *token == 'x'` — BOTH letters (hex
+        // bitstrings), which an earlier version of this classifier missed and
+        // reported a bare `x` as a divergence.
         let is_bool = tok == "true" || tok == "false";
-        let is_bitstring = tok.starts_with('b');
+        let is_bitstring = tok.starts_with('b') || tok.starts_with('x');
         let first = tok.as_bytes().first().copied().unwrap_or(0);
         let numeric_lead = first.is_ascii_digit()
             || ((first == b'-' || first == b'+' || first == b'.')

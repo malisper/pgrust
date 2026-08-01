@@ -884,3 +884,19 @@ fn const_datum_payload_gate_is_live() {
         "gate rejected a well-formed byval Const"
     );
 }
+
+/// C nodeTokenType's T_BitString rule is `*token == 'b' || *token == 'x'` —
+/// BOTH letters. A bare `x` is a BitString value node (outside the port's
+/// chartered read set), i.e. a value-token carve, not a divergence.
+#[test]
+fn bitstring_token_rule_covers_b_and_x() {
+    for t in [&b"b"[..], b"b1010", b"x", b"xdeadbeef"] {
+        let before = VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(!run_text(t), "{:?} should not reach a full comparison", t);
+        assert!(
+            VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "{:?} was not charged to the value-token carve",
+            std::str::from_utf8(t).unwrap()
+        );
+    }
+}
