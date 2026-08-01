@@ -240,7 +240,6 @@ mod tests {
     // < MIN check, and clamp to 1000 — never a 999,999,999-round run.
     #[test]
     fn shacrypt_rounds_out_of_range_clamps_like_c() {
-        arm_cfi(u64::MAX);
         for r in [
             "2147483648",           // wraps to -2147483648 (C NOTICE prints it)
             "4294967296",           // wraps to 0
@@ -250,7 +249,10 @@ mod tests {
             "0",
             "999",
         ] {
-            arm_cfi(u64::MAX);
+            // Finite CFI budget keeps this witness BOUNDED even if the clamp
+            // regresses to a huge round count: a broken clamp trips the
+            // budget on round 2001 and errors fast instead of grinding.
+            arm_cfi(2000);
             let h = ok(crypt("pw", &format!("$5$rounds={r}$abcdefgh")));
             assert_eq!(h, C_ORACLE_CLAMPED_MIN, "rounds={r}");
             // The rounds ACTUALLY RUN equal C's clamped 1000 (one
@@ -262,7 +264,7 @@ mod tests {
     #[test]
     fn shacrypt_rounds_strtol_sign_and_space_like_c() {
         for r in ["7000", "+7000", " 7000"] {
-            arm_cfi(u64::MAX);
+            arm_cfi(8000); // bounded witness, same rationale as above
             let h = ok(crypt("pw", &format!("$5$rounds={r}$abcdefgh")));
             assert_eq!(h, C_ORACLE_7000, "rounds={r}");
             assert_eq!(cfi_calls(), 7000, "rounds={r}");
@@ -290,16 +292,16 @@ mod tests {
 
     // D19: the sha-crypt rounds loop honors CHECK_FOR_INTERRUPTS — a raised
     // cancel aborts the loop instead of grinding out the remaining rounds.
-    // Uses the max-clamp path so the DoS shape itself is the witness, with
-    // a budget that keeps the test bounded.
+    // 200k rounds keeps the witness bounded even with interrupts absent
+    // (the planted-defect run must fail FAST, not wedge the binary).
     #[test]
     fn shacrypt_loop_is_cancellable() {
         arm_cfi(5);
-        match crypt("pw", "$6$rounds=1000000000$abcdefgh") {
+        match crypt("pw", "$6$rounds=200000$abcdefgh") {
             Err(CryptError::Pg(e)) => {
                 assert_eq!(e.sqlstate, types_error::ERRCODE_QUERY_CANCELED);
             }
-            Ok(_) => panic!("999,999,999-round crypt completed: interrupts not honored"),
+            Ok(_) => panic!("200,000-round crypt completed: interrupts not honored"),
             Err(_) => panic!("unexpected error kind"),
         }
         assert_eq!(cfi_calls(), 6); // 5 Ok rounds + the cancelling call
