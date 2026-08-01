@@ -301,6 +301,28 @@ pub fn spellfam_diff(data: &[u8]) {
     // domain by the lexize token contract.
     let aff: Vec<u8> = parsed.aff.iter().copied().filter(|&b| b != 0).collect();
     let dict: Vec<u8> = parsed.dict.iter().copied().filter(|&b| b != 0).collect();
+
+    // DOMAIN CARVE (divergence-of-record, ts_locale read layer — NOT this
+    // crate): under UTF8 an INVALID multibyte sequence in a FILE line makes
+    // the two sides report DIFFERENT errors because their line readers differ
+    // architecturally — pgrust's tsearch_readlines reads+encoding-validates
+    // the WHOLE file eagerly (so a bad byte on a late line is caught first,
+    // sqlstate 22021), while C's tsearch_readline is a LAZY per-line iterator
+    // interleaved with parsing (so an earlier parse error, e.g. the old/new
+    // format-mix config error F0000, fires before the bad line is ever read).
+    // Same eager-vs-lazy class as the interior-NUL divergence-of-record
+    // (p1-microbatch owns the ts_locale read layer; match-or-fix owed).
+    // Require valid UTF-8 file bytes so both sides read identical, well-
+    // encoded lines and the spell PARSER logic is what's compared; valid
+    // multibyte (accented/CJK) stays in the domain. SQL_ASCII validates every
+    // byte trivially and needs no gate. Witness: tests::interior_nul_* and the
+    // banked CI-div seeds.
+    if enc == wchar::PG_UTF8
+        && (core::str::from_utf8(&aff).is_err() || core::str::from_utf8(&dict).is_err())
+    {
+        return;
+    }
+
     let (ap, dp) = stage_files(&aff, &dict);
 
     let ctx = MemoryContext::new("spellfam");
