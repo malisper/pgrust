@@ -78,6 +78,14 @@ extern "C" {
     fn pg_spf_lex(i: c_int, nvariant: *mut c_int, flags: *mut c_int) -> *const c_char;
 }
 
+/// PG's ERRCODE_STATEMENT_TOO_COMPLEX ("stack depth limit exceeded"). BOTH sides
+/// guard their compound-split recursion, but their THRESHOLDS differ (PG uses the
+/// max_stack_depth GUC; the oracle uses a harness constant; pgrust uses the
+/// stack_depth crate's own base/limit). The threshold is therefore a documented
+/// NON-SURFACE: any exec where either side reports depth-exceeded is carved
+/// rather than compared. Established campaign practice (the 54001 depth carve).
+const ERRCODE_STATEMENT_TOO_COMPLEX: i32 = 16_777_477; // MAKE_SQLSTATE('5','4','0','0','1')
+
 const MAXFILE: usize = 4096;
 const MAXWORD: usize = 300;
 const MAXWORDS: usize = 16;
@@ -132,6 +140,23 @@ fn pin_env(enc: i32) {
     }
     pg_locale::set_database_ctype_is_c(true);
     unsafe { pg_spf_set_db_encoding(enc) };
+
+    // ARM THE RUST-SIDE RECURSION GUARD (jsonpath_diff precedent). spell.c's
+    // SplitToVariants recurses per compound split and the port guards it with
+    // stack_depth::check_stack_depth, but that guard is INERT until a base and
+    // limit are set — so a deep-compound input overflowed the harness thread's
+    // stack outright (CI cluster exec 4080 came back as an ASan stack-overflow, and
+    // giving only the C side a faithful guard did not fix it because the RUST
+    // side was the one recursing unguarded). Threshold: the smallest thread
+    // this harness runs on is a 2 MiB libtest thread, and PG's own admission
+    // rule is stack minus STACK_DEPTH_SLOP, hence 1536 kB.
+    const HARNESS_MAX_STACK_DEPTH_KB: i32 =
+        2048 - stack_depth::STACK_DEPTH_SLOP as i32 / 1024;
+    if stack_depth::max_stack_depth() != HARNESS_MAX_STACK_DEPTH_KB {
+        stack_depth::set_max_stack_depth(HARNESS_MAX_STACK_DEPTH_KB);
+        stack_depth::assign_max_stack_depth(HARNESS_MAX_STACK_DEPTH_KB);
+    }
+    let _ = stack_depth::set_stack_base();
 }
 
 /// Tokenize an AffixData flag string into its individual flags and return
@@ -214,8 +239,21 @@ fn parse_input(data: &[u8]) -> Option<Parsed<'_>> {
         for w in data[p..].split(|&b| b == 0).take(MAXWORDS) {
             // A lexize token cannot carry a NUL and is capped; also drop the
             // empty tail split produces.
-            if !w.is_empty() {
-                words.push(&w[..w.len().min(MAXWORD)]);
+            // CALLER-CONTRACT CARVE (C-UB, attributed): a query word must be
+            // VALID text. C's RS_execute (regis.c) walks the string with
+            // pg_mblen for r->nchar nodes without re-bounding against the
+            // terminator, so an INVALID/truncated multibyte sequence makes the
+            // cursor jump past the NUL and read wild memory — the wild read
+            // this lane chased for several runs, finally attributed to
+            // spf_RS_execute via CheckAffix on a word containing a lone 0xE0.
+            // Real PostgreSQL never reaches it: lexize tokens come from a
+            // `text` value that pg_verify_mbstr already validated, so invalid
+            // multibyte is not a reachable input. Same rule as the file bytes
+            // and the same class as wparserfam's NUL carve. Applied to both
+            // selector encodings for uniformity.
+            let w = &w[..w.len().min(MAXWORD)];
+            if !w.is_empty() && core::str::from_utf8(w).is_ok() {
+                words.push(w);
             }
         }
     }
@@ -551,6 +589,18 @@ pub fn spellfam_diff(data: &[u8]) {
 
     let c_rc = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
 
+    // Depth non-surface carve (see ERRCODE_STATEMENT_TOO_COMPLEX): if either
+    // side hit its recursion guard, the thresholds differ by construction, so
+    // there is nothing meaningful to compare.
+    if c_rc != 0 && unsafe { pg_spf_sqlstate() } == ERRCODE_STATEMENT_TOO_COMPLEX {
+        return;
+    }
+    if let Err(e) = &r {
+        if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX {
+            return;
+        }
+    }
+
     let dbg = || {
         format!(
             "enc={encname} aff={:?} dict={:?}",
@@ -657,6 +707,15 @@ pub fn spellfam_diff(data: &[u8]) {
         let octx = MemoryContext::new("spellfam-norm");
         let rn = obj.ni_normalize_word(octx.mcx(), word);
         let cn = unsafe { pg_spf_normalize(word.as_ptr().cast(), word.len() as c_int) };
+        // Depth non-surface carve, per word.
+        if cn < 0 && unsafe { pg_spf_sqlstate() } == ERRCODE_STATEMENT_TOO_COMPLEX {
+            continue;
+        }
+        if let Err(e) = &rn {
+            if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX {
+                continue;
+            }
+        }
         let wdbg = || {
             format!("word={:?} {}", String::from_utf8_lossy(word), dbg())
         };
@@ -818,6 +877,18 @@ mod tests {
         let ctx = MemoryContext::new("spellfam-nulwitness");
         let r = rust_build(&ctx, ap.as_bytes(), dp.as_bytes());
         let c_rc = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
+
+    // Depth non-surface carve (see ERRCODE_STATEMENT_TOO_COMPLEX): if either
+    // side hit its recursion guard, the thresholds differ by construction, so
+    // there is nothing meaningful to compare.
+    if c_rc != 0 && unsafe { pg_spf_sqlstate() } == ERRCODE_STATEMENT_TOO_COMPLEX {
+        return;
+    }
+    if let Err(e) = &r {
+        if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX {
+            return;
+        }
+    }
         // C builds ok (truncated line); Rust errors 22021 — the divergence.
         assert_eq!(c_rc, 0, "C should truncate at NUL and build");
         assert!(r.is_err(), "pgrust should reject the embedded NUL under UTF8");
@@ -976,6 +1047,15 @@ mod fleet_repro {
         assert!(!carved(b"prefixes\n\nflag *A:\n\t. > RE\n"),
                 "flag before entries => in domain (ispell_sample shape)");
         assert!(!carved(b"SFX T Y 1\nSFX T 0 s .\n"), "hunspell format => in domain");
+    }
+    /// DEPTH-GUARD REGRESSION: the CI cluster input (exec 4080) that overflowed the
+    /// C oracle's stack when check_stack_depth() was a no-op. With the faithful
+    /// guard the oracle now ERRORS (54001) instead of crashing, and the driver
+    /// carves the threshold non-surface. Asserts we survive the input.
+    #[test]
+    fn depth_guard_455d2dc2() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/depthcarve-455d2dc2")).unwrap();
+        for _ in 0..3 { super::spellfam_diff(&data); }
     }
     #[test]
     fn div7_compound_4e2fe0d5() {

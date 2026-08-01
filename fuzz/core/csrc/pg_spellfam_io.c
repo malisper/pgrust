@@ -132,7 +132,16 @@ typedef unsigned int pg_wchar;	/* mb/pg_wchar.h */
 #define Min(x, y) ((x) < (y) ? (x) : (y))
 #define Max(x, y) ((x) > (y) ? (x) : (y))
 #define CHECK_FOR_INTERRUPTS() ((void) 0)
-#define check_stack_depth() ((void) 0)
+/* check_stack_depth: FAITHFUL, not a no-op — body after the error shims below
+ * (it needs spf_errcode/spf_raise/MAKE_SQLSTATE). Rationale: spell.c's
+ * SplitToVariants recurses per compound split and PostgreSQL guards it with a
+ * real check_stack_depth() that ereports ERRCODE_STATEMENT_TOO_COMPLEX
+ * ("stack depth limit exceeded", utils/misc/stack_depth.c:94-105). Stubbing it
+ * to a no-op gave the C side NO guard while the pgrust port has a live one, so a
+ * deep-compound input crashed the ORACLE with an ASan stack-overflow instead of
+ * erroring (CI cluster exec 4080). */
+static void spf_check_stack_depth(void);
+#define check_stack_depth() spf_check_stack_depth()
 #define unlikely(x) __builtin_expect((x) != 0, 0)
 #define likely(x) __builtin_expect((x) != 0, 1)
 /* c.h lines 1126-1127 @ 62d6c7d3df */
@@ -173,6 +182,32 @@ static void
 spf_raise(void)
 {
 	longjmp(spf_env, 1);
+}
+
+/* Mirrors stack_is_too_deep(): distance from a base captured at driver entry to
+ * a local, abs value, against a limit. The limit is a HARNESS value, not PG's
+ * max_stack_depth GUC, so the exact THRESHOLD is a documented non-surface — the
+ * driver carves any exec where either side reports the depth sqlstate. */
+#define ERRCODE_STATEMENT_TOO_COMPLEX	MAKE_SQLSTATE('5','4','0','0','1')
+static _Thread_local char *spf_stack_base;
+#define SPF_MAX_STACK_BYTES (1024L * 1024L)	/* well under the smallest thread stack */
+
+static void
+spf_check_stack_depth(void)
+{
+	char		here;
+	long		depth;
+
+	if (spf_stack_base == NULL)
+		return;					/* base not armed: no guard */
+	depth = (long) (spf_stack_base - &here);
+	if (depth < 0)
+		depth = -depth;
+	if (depth > SPF_MAX_STACK_BYTES)
+	{
+		spf_errcode = ERRCODE_STATEMENT_TOO_COMPLEX;
+		spf_raise();
+	}
 }
 
 #define errcode(c) (spf_errcode = (c), 0)
@@ -4208,6 +4243,9 @@ pg_spf_set_db_encoding(int encoding)
 int
 pg_spf_build(const char *affpath, const char *dictpath)
 {
+	char		base;
+
+	spf_stack_base = &base;		/* arm the depth guard (set_stack_base) */
 	if (setjmp(spf_env) != 0)
 		return -1;
 	spf_conf = spf_palloc0(sizeof(IspellDict));
@@ -4320,7 +4358,9 @@ pg_spf_normalize(const char *word, int len)
 	char	   *w;
 	TSLexeme   *res;
 	int			n = 0;
+	char		base;
 
+	spf_stack_base = &base;		/* arm the depth guard (set_stack_base) */
 	if (setjmp(spf_env) != 0)
 		return -1;
 	w = spf_palloc(len + 1);
