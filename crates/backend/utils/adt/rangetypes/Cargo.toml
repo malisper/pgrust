@@ -18,6 +18,7 @@ hashfn = { path = "../../../../common/hashfn" }
 lsyscache = { path = "../../cache/lsyscache" }
 mcx = { path = "../../../../_support/mcx" }
 pqformat = { path = "../../../libpq/pqformat" }
+stack_depth = { path = "../../misc/stack_depth" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 typcache = { path = "../../cache/typcache" }
 types_core = { path = "../../../../_support/types/types_core" }

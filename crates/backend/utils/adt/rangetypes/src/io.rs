@@ -299,6 +299,9 @@ pub fn range_in<'m>(
     typmod: i32,
     esc: Option<&mut ::types_fmgr::ErrorSaveNode>,
 ) -> PgResult<Option<PgVec<'m, u8>>> {
+    // C rangetypes.c range_in: check_stack_depth() — "recurses when subtype is
+    // a range type" (the bound's input function is range_in again).
+    ::stack_depth::check_stack_depth()?;
     let mut soft = esc;
     let parsed = {
         let ctx = soft.as_deref_mut().map(|n| &mut n.ctx);
@@ -368,6 +371,9 @@ pub fn range_out<'m>(
     cache: &mut RangeIOData,
     range: &[u8],
 ) -> PgResult<PgVec<'m, u8>> {
+    // C rangetypes.c range_out: check_stack_depth() — recurses when the
+    // subtype is a range type (the bound's output function is range_out).
+    ::stack_depth::check_stack_depth()?;
     let (lower, upper, _empty) = range_deserialize(&cache.ri.elem, range);
     let flags = range_get_flags(range);
 
@@ -432,6 +438,10 @@ pub fn range_recv<'m>(
     buf: &mut ::stringinfo::StringInfo<'_>,
     typmod: i32,
 ) -> PgResult<PgVec<'m, u8>> {
+    // C rangetypes.c range_recv: check_stack_depth() — recurses when the
+    // subtype is a range type, and the binary wire form is LINEAR in nesting
+    // depth (unlike the text form), so this one is reachable with small input.
+    ::stack_depth::check_stack_depth()?;
     let mut flags = ::pqformat::pq_getmsgbyte(buf)? as u8;
     flags &= RANGE_EMPTY | RANGE_LB_INC | RANGE_LB_INF | RANGE_UB_INC | RANGE_UB_INF;
 
@@ -485,6 +495,9 @@ pub fn range_send<'m>(
     cache: &mut RangeIOData,
     range: &[u8],
 ) -> PgResult<::datum::Bytea<'m>> {
+    // C rangetypes.c range_send: check_stack_depth() — recurses when the
+    // subtype is a range type (the bound's send function is range_send).
+    ::stack_depth::check_stack_depth()?;
     let (lower, upper, _empty) = range_deserialize(&cache.ri.elem, range);
     let flags = range_get_flags(range);
 

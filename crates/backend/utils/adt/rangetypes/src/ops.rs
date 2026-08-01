@@ -390,6 +390,9 @@ pub fn range_split_internal<'m>(
 
 /// range_cmp core (btree comparator; empties sort first).
 pub fn range_cmp_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<i32> {
+    // C rangetypes.c range_cmp: check_stack_depth() — recurses when the
+    // subtype is a range type (the bound comparator is range_cmp again).
+    ::stack_depth::check_stack_depth()?;
     check_same_type(r1, r2)?;
     let (mut lower1, mut upper1) = range_bound_slots();
     let empty1 = range_deserialize_into(&ri.elem, r1, &mut lower1, &mut upper1);
@@ -448,6 +451,9 @@ pub fn elem_hash_extended_finfo(ri: &mut RangeInfo) -> PgResult<&mut FmgrInfo> {
 
 /// hash_range (rangetypes.c).
 pub fn hash_range_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r: &[u8]) -> PgResult<u32> {
+    // C rangetypes.c hash_range: check_stack_depth() — recurses when the
+    // subtype is a range type (the element hash function is hash_range).
+    ::stack_depth::check_stack_depth()?;
     let (mut lower, mut upper) = range_bound_slots();
     let _empty = range_deserialize_into(&ri.elem, r, &mut lower, &mut upper);
     let flags = range_get_flags(r);
@@ -479,6 +485,9 @@ pub fn hash_range_extended_internal(
     r: &[u8],
     seed: Datum,
 ) -> PgResult<u64> {
+    // C rangetypes.c hash_range_extended: check_stack_depth() — recurses when
+    // the subtype is a range type.
+    ::stack_depth::check_stack_depth()?;
     let (mut lower, mut upper) = range_bound_slots();
     let _empty = range_deserialize_into(&ri.elem, r, &mut lower, &mut upper);
     let flags = range_get_flags(r);

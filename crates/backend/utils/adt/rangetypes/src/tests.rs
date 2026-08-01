@@ -400,7 +400,7 @@ mod bound_detoast {
 
     static TOAST_STORE: Mutex<Option<HashMap<u32, std::vec::Vec<u8>>>> = Mutex::new(None);
 
-    fn install_test_detoast() {
+    pub(super) fn install_test_detoast() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             ::detoast_seams::detoast_attr::set(::detoast::detoast_attr);
@@ -620,5 +620,415 @@ mod recv_wire {
         wire.extend_from_slice(&4u32.to_be_bytes());
         wire.extend_from_slice(&9i32.to_be_bytes());
         recv(mcx, &wire).expect("well-formed [1,9) wire must receive");
+    }
+}
+
+/// p1-rangeguard REGRESSION (release blocker, task #78): rangetypes.c guards
+/// SEVEN functions with check_stack_depth() — range_in(104), range_out(151),
+/// range_recv(190), range_send(273), range_cmp(1264), hash_range(1407),
+/// hash_range_extended(1474) — every one commented "recurses when subtype is
+/// a range type". The port had ZERO of them, and this hole ROUTES AROUND the
+/// parser's guard: the nesting comes from CREATE TYPE (a range whose subtype
+/// is another range type), so the recursion runs through the element type's
+/// I/O / cmp / hash function via fmgr, not through expression depth.
+///
+/// Without the guard, deep nesting overflows the thread stack and the Rust
+/// runtime aborts the PROCESS. pgrust is thread-per-backend, so that kills
+/// every session, not just the offending one. C 18.3 on the same shape raises
+/// ERRCODE_STATEMENT_TOO_COMPLEX (54001) and survives.
+///
+/// The rig emulates exactly the production dispatch: each nested fc function
+/// resolves the inner range type from the argument image's embedded rngtypid
+/// (what flinfo_ri / cached_range_io_data do via typcache) and re-enters the
+/// same rangetypes entry point, so the frames on the stack are the real
+/// recursion frames. The serialized value and the binary wire form are LINEAR
+/// in nesting depth, so these six shapes are all reachable with small input.
+/// (range_in is the seventh C site; its guard is ported for parity, but its
+/// TEXT form needs quote-doubling per level — exponential input — so it
+/// cannot be driven deep by any feasible input in C or pgrust.)
+mod stack_guard {
+    use super::*;
+    use crate::builtins::arg_range;
+    use crate::io::{self, RangeIOData};
+    use crate::ops;
+    use ::lsyscache::IOFuncSelector;
+    use ::types_error::ERRCODE_STATEMENT_TOO_COMPLEX;
+    use ::types_fmgr::{byref_result, cstring_result, varlena_result};
+
+    // Synthetic, non-catalog oids: a range over int4, and a range whose
+    // subtype is a range (the leaf one, or itself at every deeper level).
+    const LEAF_RANGE: Oid = 999_000;
+    const NESTED_RANGE: Oid = 999_001;
+
+    // Inner range bounds < 127 bytes are stored SHORT (1-byte header), so
+    // arg_range takes the detoast path; share bound_detoast's process-wide
+    // installer (a seam panics if installed twice).
+    fn install_detoast() {
+        super::bound_detoast::install_test_detoast();
+    }
+
+    fn fc_leaf_i32_hash(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        Ok(Datum::from_i32(fcinfo.arg(0).as_i32()))
+    }
+
+    fn fc_leaf_i32_hash_ext(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        Ok(Datum::from_u64(fcinfo.arg(0).as_i32() as u64 ^ fcinfo.arg(1).as_u64()))
+    }
+
+    fn fc_nested_hash(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let r = arg_range(fcinfo, 0, mcx)?;
+        let mut ri = ri_for(range_type_oid(&r));
+        Ok(Datum::from_i32(ops::hash_range_internal(mcx, &mut ri, &r)? as i32))
+    }
+
+    fn fc_nested_hash_ext(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let r = arg_range(fcinfo, 0, mcx)?;
+        let seed = fcinfo.arg(1);
+        let mut ri = ri_for(range_type_oid(&r));
+        Ok(Datum::from_u64(ops::hash_range_extended_internal(mcx, &mut ri, &r, seed)?))
+    }
+
+    fn fc_nested_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let r1 = arg_range(fcinfo, 0, mcx)?;
+        let r2 = arg_range(fcinfo, 1, mcx)?;
+        let mut ri = ri_for(range_type_oid(&r1));
+        Ok(Datum::from_i32(ops::range_cmp_internal(mcx, &mut ri, &r1, &r2)?))
+    }
+
+    fn fc_leaf_i32_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let s = format!("{}\0", fcinfo.arg(0).as_i32());
+        let mut v: ::mcx::PgVec<'_, u8> = ::mcx::vec_with_capacity_in(mcx, s.len())?;
+        ::mcx::vec_append_bytes(&mut v, s.as_bytes())?;
+        Ok(cstring_result(v))
+    }
+
+    fn fc_nested_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let r = arg_range(fcinfo, 0, mcx)?;
+        let mut cache = io_cache_for(range_type_oid(&r), IOFuncSelector::IOFunc_output);
+        Ok(cstring_result(io::range_out(mcx, &mut cache, &r)?))
+    }
+
+    fn fc_leaf_i32_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let mut buf = ::pqformat::pq_begintypsend(mcx)?;
+        ::pqformat::pq_sendint32(&mut buf, fcinfo.arg(0).as_i32() as u32)?;
+        Ok(varlena_result(::pqformat::pq_endtypsend(buf)))
+    }
+
+    fn fc_nested_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        let r = arg_range(fcinfo, 0, mcx)?;
+        let mut cache = io_cache_for(range_type_oid(&r), IOFuncSelector::IOFunc_send);
+        Ok(varlena_result(io::range_send(mcx, &mut cache, &r)?))
+    }
+
+    fn fc_leaf_i32_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        // SAFETY: receive_function_call passes a live StringInfo in arg 0.
+        let buf = unsafe { fcinfo.arg_stringinfo(0) };
+        Ok(Datum::from_i32(::pqformat::pq_getmsgint(buf, 4)? as i32))
+    }
+
+    fn fc_nested_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        let mcx = fcinfo.result_mcx();
+        // SAFETY: receive_function_call passes a live StringInfo in arg 0.
+        let buf = unsafe { fcinfo.arg_stringinfo(0) };
+        // The wire form carries no oid; the leaf-range wire is exactly
+        // flags(1) + len(4) + int4(4) = 9 bytes, a deeper one is >= 14.
+        let inner = if buf.len() - buf.cursor == 9 { LEAF_RANGE } else { NESTED_RANGE };
+        let mut cache = io_cache_for(inner, IOFuncSelector::IOFunc_receive);
+        let img = io::range_recv(mcx, &mut cache, buf, -1)?;
+        byref_result(mcx, &img)
+    }
+
+    /// What cached_range_info / flinfo_ri resolve from typcache in production.
+    fn ri_for(rngtypid: Oid) -> RangeInfo {
+        if rngtypid == LEAF_RANGE {
+            RangeInfo {
+                pin: None,
+                rngtypid: LEAF_RANGE,
+                collation: InvalidOid,
+                elem_typid: 23,
+                elem: ElemInfo { typlen: 4, typbyval: true, typalign: b'i', typstorage: b'p' },
+                cmp: FmgrInfo::new(fc_i32_cmp, 351, 2, true, false),
+                canonical_oid: InvalidOid,
+                elem_hash: Some(FmgrInfo::new(fc_leaf_i32_hash, 425, 1, true, false)),
+                elem_hash_extended: Some(FmgrInfo::new(fc_leaf_i32_hash_ext, 442, 2, true, false)),
+                own_typlen: -1,
+                own_typbyval: false,
+                own_typalign: b'i',
+            }
+        } else {
+            RangeInfo {
+                pin: None,
+                rngtypid: NESTED_RANGE,
+                collation: InvalidOid,
+                elem_typid: NESTED_RANGE,
+                elem: ElemInfo { typlen: -1, typbyval: false, typalign: b'i', typstorage: b'x' },
+                cmp: FmgrInfo::new(fc_nested_cmp, 3870, 2, true, false),
+                canonical_oid: InvalidOid,
+                elem_hash: Some(FmgrInfo::new(fc_nested_hash, 3902, 1, true, false)),
+                elem_hash_extended: Some(FmgrInfo::new(fc_nested_hash_ext, 3417, 2, true, false)),
+                own_typlen: -1,
+                own_typbyval: false,
+                own_typalign: b'i',
+            }
+        }
+    }
+
+    /// What cached_range_io_data resolves in production: the range's typcache
+    /// info plus the ELEMENT type's I/O function.
+    fn io_cache_for(rngtypid: Oid, func: IOFuncSelector) -> RangeIOData {
+        let leaf = rngtypid == LEAF_RANGE;
+        let typioproc = match func {
+            IOFuncSelector::IOFunc_output => {
+                if leaf {
+                    FmgrInfo::new(fc_leaf_i32_out, 43, 1, true, false)
+                } else {
+                    FmgrInfo::new(fc_nested_out, 3835, 1, true, false)
+                }
+            }
+            IOFuncSelector::IOFunc_send => {
+                if leaf {
+                    FmgrInfo::new(fc_leaf_i32_send, 2406, 1, true, false)
+                } else {
+                    FmgrInfo::new(fc_nested_send, 3836, 1, true, false)
+                }
+            }
+            IOFuncSelector::IOFunc_receive => {
+                if leaf {
+                    FmgrInfo::new(fc_leaf_i32_recv, 2404, 3, true, false)
+                } else {
+                    FmgrInfo::new(fc_nested_recv, 3834, 3, true, false)
+                }
+            }
+            _ => unreachable!("text input is not deep-drivable (exponential literal)"),
+        };
+        RangeIOData { ri: ri_for(rngtypid), typioproc, typioparam: if leaf { 23 } else { NESTED_RANGE } }
+    }
+
+    /// 8-byte-aligned copy of a serialized range image (bound datums are read
+    /// through varlena headers; keep them aligned like palloc does).
+    fn img_copy(img: &[u8]) -> (Vec<u64>, usize) {
+        let n = img.len();
+        let mut v = vec![0u64; n.div_ceil(8)];
+        // SAFETY: destination has >= n writable bytes.
+        unsafe { std::ptr::copy_nonoverlapping(img.as_ptr(), v.as_mut_ptr() as *mut u8, n) };
+        (v, n)
+    }
+
+    /// depth-1 nested serialized value, built bottom-up with the real
+    /// serializer (level 1 = LEAF_RANGE over int4 [1,2); each further level =
+    /// NESTED_RANGE with the previous image as its lower bound, upper
+    /// infinite). Linear in depth; each level's scratch context is dropped.
+    fn build_nested_img(depth: usize) -> (Vec<u64>, usize) {
+        assert!(depth >= 1);
+        let (mut buf, mut len);
+        {
+            let cx = MemoryContext::new("leaf");
+            let mcx = cx.mcx();
+            let mut ri = ri_for(LEAF_RANGE);
+            let mut lo = bound(1, true, true);
+            let mut up = bound(2, false, false);
+            let img = range_serialize(mcx, &mut ri, &mut lo, &mut up, false, None)
+                .unwrap()
+                .unwrap();
+            (buf, len) = img_copy(&img);
+        }
+        for _ in 1..depth {
+            let cx = MemoryContext::new("lvl");
+            let mcx = cx.mcx();
+            let mut ri = ri_for(NESTED_RANGE);
+            let mut lo = RangeBound {
+                val: Datum::from_usize(buf.as_ptr() as usize),
+                infinite: false,
+                inclusive: true,
+                lower: true,
+            };
+            let mut up = inf_bound(false);
+            let img = range_serialize(mcx, &mut ri, &mut lo, &mut up, false, None)
+                .unwrap()
+                .unwrap();
+            (buf, len) = img_copy(&img);
+        }
+        (buf, len)
+    }
+
+    fn img_bytes(buf: &[u64], len: usize) -> &[u8] {
+        // SAFETY: img_copy wrote `len` initialized bytes at the buffer start.
+        unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u8, len) }
+    }
+
+    /// range_recv wire image of the same nested value: linear in depth.
+    fn build_nested_wire(depth: usize) -> Vec<u8> {
+        assert!(depth >= 1);
+        // Leaf level is [1,) — exactly flags(1) + len(4) + int4(4) = 9 bytes,
+        // which is fc_nested_recv's leaf discriminator.
+        let mut wire = vec![RANGE_LB_INC | RANGE_UB_INF];
+        wire.extend_from_slice(&4u32.to_be_bytes());
+        wire.extend_from_slice(&1i32.to_be_bytes());
+        for _ in 1..depth {
+            let mut outer = vec![RANGE_LB_INC | RANGE_UB_INF];
+            outer.extend_from_slice(&(wire.len() as u32).to_be_bytes());
+            outer.extend_from_slice(&wire);
+            wire = outer;
+        }
+        wire
+    }
+
+    /// Shallow sanity: the emulated dispatch really recurses through the real
+    /// entry points and produces the right answers.
+    #[test]
+    fn nested_range_dispatch_is_real() {
+        install_detoast();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let (buf, len) = build_nested_img(3);
+        let img = img_bytes(&buf, len);
+        assert_eq!(range_type_oid(img), NESTED_RANGE);
+
+        let mut ri = ri_for(NESTED_RANGE);
+        assert_eq!(ops::range_cmp_internal(mcx, &mut ri, img, img).unwrap(), 0);
+
+        let mut ri = ri_for(NESTED_RANGE);
+        let h1 = ops::hash_range_internal(mcx, &mut ri, img).unwrap();
+        let mut ri = ri_for(NESTED_RANGE);
+        let h2 = ops::hash_range_internal(mcx, &mut ri, img).unwrap();
+        assert_eq!(h1, h2);
+
+        let mut cache = io_cache_for(NESTED_RANGE, IOFuncSelector::IOFunc_output);
+        let out = io::range_out(mcx, &mut cache, img).unwrap();
+        // ["["[1,2)",)",) with per-level quote doubling — the exponential form.
+        assert_eq!(&out[..out.len() - 1], br#"["[""[1,2)"",)",)"#);
+
+        let mut cache = io_cache_for(NESTED_RANGE, IOFuncSelector::IOFunc_send);
+        io::range_send(mcx, &mut cache, img).unwrap();
+
+        let wire = build_nested_wire(3);
+        let mut buf = ::stringinfo::StringInfo::new_in(mcx).unwrap();
+        buf.append_bytes(&wire).unwrap();
+        let mut cache = io_cache_for(NESTED_RANGE, IOFuncSelector::IOFunc_receive);
+        let img2 = io::range_recv(mcx, &mut cache, &mut buf, -1).unwrap();
+        assert_eq!(range_type_oid(&img2), NESTED_RANGE);
+    }
+
+    /// Runs each deep probe in a subprocess because pre-fix the recursion
+    /// aborts the whole process (stack overflow), and a guard asserted
+    /// without a survivable harness is assumed, not proven.
+    #[test]
+    fn range_deep_nesting_raises_54001_and_does_not_abort() {
+        // Every one of these ABORTED the process before the fix
+        // (--release, 8 MiB probe stack).
+        const CASES: [(&str, usize); 8] = [
+            ("cmp", 30_000),
+            ("hash", 30_000),
+            ("hashext", 30_000),
+            ("out", 30_000),
+            ("send", 30_000),
+            ("recv", 30_000),
+            ("recv", 200_000),
+            ("cmp", 100_000),
+        ];
+        if let (Ok(d), Ok(kind)) =
+            (std::env::var("RANGE_STACK_PROBE_DEPTH"), std::env::var("RANGE_STACK_PROBE_KIND"))
+        {
+            let depth: usize = d.parse().unwrap();
+            let h = std::thread::Builder::new()
+                // Production HEADROOM: an 8 MiB worker stack paired with
+                // max_stack_depth = 2048 kB. A 2 MiB / 2048 kB pairing has
+                // zero headroom and reddens the CI cluster's dev profile.
+                .stack_size(8 << 20)
+                .spawn(move || {
+                    // A backend thread records its stack base at spawn
+                    // (C: main()). Without this, stack_is_too_deep()
+                    // short-circuits on base == 0 and every guard is INERT —
+                    // the test would be vacuous.
+                    ::stack_depth::set_stack_base();
+                    ::stack_depth::assign_max_stack_depth(2048);
+                    install_detoast();
+                    let ctx = MemoryContext::new("t");
+                    let mcx = ctx.mcx();
+                    let r: PgResult<usize> = match kind.as_str() {
+                        "cmp" => {
+                            let (buf, len) = build_nested_img(depth);
+                            let img = img_bytes(&buf, len);
+                            let mut ri = ri_for(NESTED_RANGE);
+                            ops::range_cmp_internal(mcx, &mut ri, img, img).map(|c| c as usize)
+                        }
+                        "hash" => {
+                            let (buf, len) = build_nested_img(depth);
+                            let img = img_bytes(&buf, len);
+                            let mut ri = ri_for(NESTED_RANGE);
+                            ops::hash_range_internal(mcx, &mut ri, img).map(|h| h as usize)
+                        }
+                        "hashext" => {
+                            let (buf, len) = build_nested_img(depth);
+                            let img = img_bytes(&buf, len);
+                            let mut ri = ri_for(NESTED_RANGE);
+                            ops::hash_range_extended_internal(mcx, &mut ri, img, Datum::from_u64(11))
+                                .map(|h| h as usize)
+                        }
+                        "out" => {
+                            let (buf, len) = build_nested_img(depth);
+                            let img = img_bytes(&buf, len);
+                            let mut cache = io_cache_for(NESTED_RANGE, IOFuncSelector::IOFunc_output);
+                            io::range_out(mcx, &mut cache, img).map(|v| v.len())
+                        }
+                        "send" => {
+                            let (buf, len) = build_nested_img(depth);
+                            let img = img_bytes(&buf, len);
+                            let mut cache = io_cache_for(NESTED_RANGE, IOFuncSelector::IOFunc_send);
+                            io::range_send(mcx, &mut cache, img).map(|_| 0)
+                        }
+                        "recv" => {
+                            let wire = build_nested_wire(depth);
+                            let mut buf = ::stringinfo::StringInfo::new_in(mcx).unwrap();
+                            buf.append_bytes(&wire).unwrap();
+                            let mut cache =
+                                io_cache_for(NESTED_RANGE, IOFuncSelector::IOFunc_receive);
+                            io::range_recv(mcx, &mut cache, &mut buf, -1).map(|v| v.len())
+                        }
+                        other => panic!("bad probe kind {other}"),
+                    };
+                    r
+                })
+                .unwrap();
+            match h.join().expect("probe thread must not panic") {
+                Ok(n) => eprintln!("PROBE OK {n}"),
+                Err(e) => eprintln!(
+                    "PROBE ERR {}",
+                    if e.sqlstate == ERRCODE_STATEMENT_TOO_COMPLEX { "54001" } else { "other" }
+                ),
+            }
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        for (kind, depth) in CASES {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "--nocapture",
+                    "tests::stack_guard::range_deep_nesting_raises_54001_and_does_not_abort",
+                ])
+                .env("RANGE_STACK_PROBE_KIND", kind)
+                .env("RANGE_STACK_PROBE_DEPTH", depth.to_string())
+                .output()
+                .unwrap();
+            let se = String::from_utf8_lossy(&out.stderr);
+            let line = se.lines().find(|l| l.starts_with("PROBE")).unwrap_or_else(|| {
+                panic!("{kind}/{depth}: process died without a verdict (stack overflow): {se}")
+            });
+            // The depth at which the guard trips is a function of frame size
+            // and is NOT a comparison surface against C. That the process
+            // SURVIVES and reports a clean 54001 rather than aborting is.
+            assert_eq!(
+                line, "PROBE ERR 54001",
+                "{kind}/{depth}: expected a clean 54001, got {line:?}"
+            );
+        }
     }
 }

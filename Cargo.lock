@@ -810,6 +810,7 @@ dependencies = [
  "mcx",
  "pglz",
  "pqformat",
+ "stack_depth",
  "stringinfo",
  "toast_internals_seams",
  "typcache",
