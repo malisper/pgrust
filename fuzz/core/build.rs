@@ -50,6 +50,10 @@ fn main() {
         // oracle-serialization holder check (fuzz plumbing; see the
         // file header + scripts/lint-oracle-serial.py)
         .file("csrc/pg_oracle_guard.c")
+        // COMPILE GATE (trgm_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_trgm_io.c is filled
+        // with verbatim vendored C (README-TODO-trgm_diff.md step 1).
+        // .file("csrc/pg_trgm_io.c")
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         .file("csrc/pg_libfam_io.c")

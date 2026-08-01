@@ -889,3 +889,7 @@ pub use instrument_diff::instrument_diff;
 // family vs the whole-TU verbatim 18.3 oracle (csrc/pg_ltreefam_io.c).
 pub mod ltree_diff;
 pub use ltree_diff::ltree_diff;
+
+// trgm_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-trgm_diff.md.
+pub mod trgm_diff;
+pub use trgm_diff::trgm_diff;

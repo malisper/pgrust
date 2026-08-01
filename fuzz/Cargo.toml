@@ -650,3 +650,11 @@ path = "fuzz_targets/ltree_diff.rs"
 test = false
 doc = false
 bench = false
+
+# trgm_diff: scaffolded by fuzz/scaffold.py — see README-TODO-trgm_diff.md.
+[[bin]]
+name = "trgm_diff"
+path = "fuzz_targets/trgm_diff.rs"
+test = false
+doc = false
+bench = false
