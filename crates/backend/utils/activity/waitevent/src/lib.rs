@@ -272,7 +272,8 @@ pub fn pgstat_get_wait_event_type(wait_event_info: u32) -> Option<&'static str> 
         PG_WAIT_TIMEOUT => "Timeout",
         PG_WAIT_IO => "IO",
         PG_WAIT_INJECTIONPOINT => "InjectionPoint",
-        class => panic!("unknown wait event class {class:#010x}"),
+        // C's default arm (wait_event.c pgstat_get_wait_event_type).
+        _ => "???",
     })
 }
 
@@ -283,10 +284,16 @@ pub fn pgstat_get_wait_event(wait_event_info: u32) -> Option<&'static str> {
     let class_id = wait_event_info & WAIT_EVENT_CLASS_MASK;
     let event_id = (wait_event_info & WAIT_EVENT_ID_MASK) as usize;
 
+    // C's generated switches (pgstat_wait_event.c) match the FULL 32-bit
+    // value against the enum constants (class | index), so any bits outside
+    // the class and id masks, or an out-of-range id, take the generated
+    // default: "unknown wait event".
     let named = |names: &'static [&'static str]| {
-        *names.get(event_id).unwrap_or_else(|| {
-            panic!("unknown wait event {event_id} in class {class_id:#010x}")
-        })
+        if wait_event_info & !(WAIT_EVENT_CLASS_MASK | WAIT_EVENT_ID_MASK) != 0 {
+            "unknown wait event"
+        } else {
+            names.get(event_id).copied().unwrap_or("unknown wait event")
+        }
     };
     Some(match class_id {
         PG_WAIT_LWLOCK => lwlock::GetLWLockIdentifier(class_id, event_id as u16),
@@ -302,7 +309,8 @@ pub fn pgstat_get_wait_event(wait_event_info: u32) -> Option<&'static str> {
         PG_WAIT_IPC => named(&WAIT_EVENT_IPC_NAMES),
         PG_WAIT_TIMEOUT => named(&WAIT_EVENT_TIMEOUT_NAMES),
         PG_WAIT_IO => named(&WAIT_EVENT_IO_NAMES),
-        class => panic!("unknown wait event class {class:#010x}"),
+        // C's default arm (wait_event.c pgstat_get_wait_event).
+        _ => "unknown wait event",
     })
 }
 

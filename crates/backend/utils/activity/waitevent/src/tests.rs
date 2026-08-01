@@ -82,16 +82,32 @@ fn wait_event_decodes_known_constants() {
     assert_eq!(pgstat_get_wait_event(PG_WAIT_EXTENSION), Some("Extension"));
 }
 
+// C-parity fallbacks (wait_event.c + generated pgstat_wait_event.c): C never
+// errors on unknown inputs — out-of-range ids and unknown classes take the
+// switch defaults. The previous panics here were ported-in constraints.
 #[test]
-#[should_panic(expected = "unknown wait event")]
-fn wait_event_unknown_event_id_panics() {
-    super::pgstat_get_wait_event(super::PG_WAIT_ACTIVITY + 18);
-}
-
-#[test]
-#[should_panic(expected = "unknown wait event class")]
-fn wait_event_type_unknown_class_panics() {
-    super::pgstat_get_wait_event_type(0x0C00_0000);
+fn wait_event_unknown_inputs_take_c_defaults() {
+    // Out-of-range event id within a known class.
+    assert_eq!(
+        super::pgstat_get_wait_event(super::PG_WAIT_ACTIVITY + 18),
+        Some("unknown wait event")
+    );
+    // Bits 16-23 set: C's generated switch compares the FULL value, so this
+    // is NOT "BgwriterMain" even though the low 16 bits index a valid entry.
+    assert_eq!(
+        super::pgstat_get_wait_event(super::PG_WAIT_ACTIVITY | 0x0001_0003),
+        Some("unknown wait event")
+    );
+    // Unknown class.
+    assert_eq!(super::pgstat_get_wait_event(0x0C00_0000), Some("unknown wait event"));
+    assert_eq!(super::pgstat_get_wait_event_type(0x0C00_0000), Some("???"));
+    // Lock arm ignores bits 16-23 (C masks eventId before the lmgr lookup)
+    // and returns "???" past LOCKTAG_LAST_TYPE.
+    assert_eq!(
+        super::pgstat_get_wait_event(super::PG_WAIT_LOCK | 0x0001_0004),
+        Some("tuple")
+    );
+    assert_eq!(super::pgstat_get_wait_event(super::PG_WAIT_LOCK + 12), Some("???"));
 }
 
 // A single test: WAIT_EVENT_CUSTOM_LOCK is a real process-global LWLock
