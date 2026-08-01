@@ -1211,3 +1211,28 @@ fn groupingset_content_list_marker_divergence_is_recorded() {
         "the reverse direction changed — re-audit the record"
     );
 }
+
+/// DEFECT FIXED IN-LANE (found by the FLEET CONFIRM at 2.09M execs): float
+/// fields printed with Rust `{}` Display where C's WRITE_FLOAT_FIELD goes
+/// through Ryu shortest-decimal — different NOTATION for large exponents
+/// (Display: 115 expanded digits; Ryu: "4.4444444444444444e+113"), so catalog
+/// text written by pgrust differed from C. Now via the verified ryu port.
+#[test]
+fn float_fields_use_shortest_decimal() {
+    let text = "{SUBPLAN :subLinkType 0 :testexpr <> :paramIds <> :plan_id 0 \
+        :plan_name << :firstColType 0 :firstColTypmod 0 :firstColCollation 0 \
+        :useHashTable false :unknownEqFalse false :parallel_safe false \
+        :setParam <> :parParam <> :args <> :startup_cost 4.4444444444444444e+113 \
+        :per_call_cost 0 }";
+    assert!(run_text(text.as_bytes()), "SUBPLAN float witness did not compare");
+    // and boundary spellings round-trip identically
+    for cost in ["0", "-0", "1e-300", "1.5", "1e300", "Infinity", "-Infinity", "NaN"] {
+        let t = format!(
+            "{{SUBPLAN :subLinkType 0 :testexpr <> :paramIds <> :plan_id 0 \
+             :plan_name a :firstColType 0 :firstColTypmod 0 :firstColCollation 0 \
+             :useHashTable false :unknownEqFalse false :parallel_safe false \
+             :setParam <> :parParam <> :args <> :startup_cost {cost} :per_call_cost 0 }}"
+        );
+        let _ = run_text(t.as_bytes());
+    }
+}
