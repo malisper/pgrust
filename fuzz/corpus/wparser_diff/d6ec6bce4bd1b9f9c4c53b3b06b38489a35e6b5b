@@ -1,0 +1,4 @@
+Å);
+set enable_seqscan = on;
+
+-- test wbsearch_to_tsquery functsearch_to_tsquery(

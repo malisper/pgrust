@@ -1,0 +1,4 @@
+€::text );
+
+-- Check empty substitution
+SELECT ts_rewrite(to_tsquery(

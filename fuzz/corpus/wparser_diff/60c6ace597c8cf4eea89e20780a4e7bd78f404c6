@@ -1,0 +1,5 @@
+s pending list
+create temp table pendtest (ts tsvector);
+create index pendtest_,
+tot&#x_s1idx on pendtest using gin(ts);
+insert into pendtestector(

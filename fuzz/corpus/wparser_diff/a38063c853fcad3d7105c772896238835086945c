@@ -1,0 +1,5 @@
+s pending list
+crea(te ŸŸŸŸŸŸŸŸŸŸŸŸdtest (ts tsvector);
+create index pendtest_,
+tot&#x_s1idx s1idx on pendtest using gin(ts);
+iinto pendtestector(

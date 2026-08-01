@@ -36,7 +36,40 @@ fn main() {
         // tzfam_diff oracle (p1-mb-tzfam): verbatim 18.3 strftime.c +
         // tzparser.c + datetime.c ConvertTimeZoneAbbrevs + ts_locale.c
         // t_is* macros (see pg_tzfam_io.c header for provenance + shims).
+        // RESTORED (p1-mb-contribc, 2026-08-01): the p1-microbatch-1 union
+        // merge kept the three family TUs under csrc/ but dropped their
+        // build.rs registrations — tzfam/miscfam/netfam targets could not
+        // link at main.
         .file("csrc/pg_tzfam_io.c")
+        // miscfam_diff oracle (p1-mb-miscfam): verbatim 18.3 cmdtag.c +
+        // pg_class.c errdetail_relkind + earthdistance.c +
+        // pg_rusage.c show + xlogstats.c + common/stringinfo.c core
+        // (see pg_miscfam_io.c header; cmdtaglist.h vendored under
+        // csrc/miscfam/tcop/).
+        .file("csrc/pg_miscfam_io.c")
+        .include("csrc/miscfam")
+        // netfam_diff oracle (p1-mb-netfam): verbatim 18.3 ifaddr.c pure
+        // core + pqformat.c + pqformat.h inlines + common/stringinfo.c
+        // behind nf_-renames (see pg_netfam_io.c header for provenance +
+        // the encoding/putmessage seam shims).
+        .file("csrc/pg_netfam_io.c")
+        // hstore_diff oracle (p1-mb-contribc): verbatim 18.3 contrib/hstore
+        // hstore_io.c + hstore_op.c cores + the array/stringinfo/pqformat/
+        // json machinery behind them, hst_-prefixed (see pg_hstorefam_io.c
+        // header for provenance, shims and the records/SRF/jsonb/gist/gin
+        // carves).
+        .file("csrc/pg_hstorefam_io.c")
+        // wparser_diff oracle (p1-mb-contribc): verbatim 18.3
+        // wparser_def.c tokenizer half (lines 33-1935, through prsd_end),
+        // wpd_-prefixed; encoding walkers resolved against the verbatim
+        // wfam_ copies in pg_wcharfam.c (see the file header for
+        // provenance, shims and the ts_headline carve).
+        .file("csrc/pg_wparserfam_io.c")
+        // libfam_diff oracle: verbatim vendored files under csrc/libfam/
+        // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
+        // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the same union
+        // merge as the tzfam/miscfam/netfam registrations above.
+        // DEDUPED (single registration above): .file("csrc/pg_libfam_io.c")
         // COMPILE GATE (array_userfuncs_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_array_userfuncs_io.c is filled
         // with verbatim vendored C (README-TODO-array_userfuncs_diff.md step 1).
@@ -84,12 +117,12 @@ fn main() {
         // pg_rusage.c show + xlogstats.c + common/stringinfo.c core
         // (see pg_miscfam_io.c header; cmdtaglist.h vendored under
         // csrc/miscfam/tcop/).
-        .file("csrc/pg_miscfam_io.c")
+        // DEDUPED (single registration above): .file("csrc/pg_miscfam_io.c")
         // netfam_diff oracle (p1-mb-netfam): verbatim 18.3 ifaddr.c pure
         // core + pqformat.c + pqformat.h inlines + common/stringinfo.c
         // behind nf_-renames (see pg_netfam_io.c header for provenance +
         // the encoding/putmessage seam shims).
-        .file("csrc/pg_netfam_io.c")
+        // DEDUPED (single registration above): .file("csrc/pg_netfam_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
@@ -125,6 +158,10 @@ fn main() {
         // shipped keywords crate's build.rs transcribes (table parity by
         // shared source of truth)
         .include("../../crates/common/keywords")
+        // libfam_diff: verbatim lib/ headers + reduced port/common/utils
+        // headers (appended LAST so existing include resolution is
+        // unchanged; no other main-build TU includes these paths)
+        .include("csrc/libfam/include")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         // FP-CONTRACTION CARVE (2026-07-30, found by float_math_diff):
@@ -713,6 +750,9 @@ fn main() {
     // postgres.h / postgres_fe.h tree (csrc/portfam/shim) must never shadow
     // — or be shadowed by — csrc/shim's, and its verbatim pg_bitutils.h /
     // pg_crc32c.h / storage headers are a full vendored include tree.
+    // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the p1-microbatch-1
+    // union merge together with the tzfam/miscfam/netfam/libfam
+    // registrations above — portfam_diff could not link at main.
     //
     // SYMBOL ISOLATION: several oracle families already vendor pg_crc.c,
     // pg_crc32c_sb8.c and friends (hashenc, cryptofam). Every extern this

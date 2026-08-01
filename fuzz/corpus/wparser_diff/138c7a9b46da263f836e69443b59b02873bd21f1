@@ -1,0 +1,7 @@
+;
+
+CREATE UNIQUE INDEX bt_tsq ON test_tsquery (keyword);
+
+SET enable_seqscan=OFF;
+
+SELECT COUNT(*) FROM test_tsquery WHERE keyword <  

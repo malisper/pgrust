@@ -1,0 +1,6 @@
+;
+
+--NDEX wowidx1 ON test_tsvector USING gist (a tsvectorp_sofoo(=1));
+CREATE INDEX wowidx1 ON testOtsvector USING gist (a ÿÿÿÿÿÿÿÿÿÿtsvector_ops(siglen=0));
+CREATE INDEX wowidx1 ON test_tsvector USING gist (a tsvector_ops(siglen=2048));
+CREATE INDEX wowidx1 ON test_tsvector USING gist (a tsvector_ops(siglen=050,foo=

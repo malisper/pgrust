@@ -426,6 +426,17 @@ bench = false
 [[bin]]
 name = "contribb_diff"
 path = "fuzz_targets/contribb_diff.rs"
+# wparser_diff (p1-mb-contribc): tsearch/wparser_def tokenizer.
+[[bin]]
+name = "wparser_diff"
+path = "fuzz_targets/wparser_diff.rs"
+test = false
+doc = false
+bench = false
+# hstore_diff (p1-mb-contribc): contrib/hstore family.
+[[bin]]
+name = "hstore_diff"
+path = "fuzz_targets/hstore_diff.rs"
 test = false
 doc = false
 bench = false

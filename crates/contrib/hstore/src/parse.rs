@@ -7,9 +7,11 @@ use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
 use crate::repr::Pair;
 use crate::{check_key_len, check_val_len};
 
-// scanner_isspace (scansup.c).
+// scanner_isspace (scansup.c): must match scan.l's {space} class, which
+// includes \v (0x0b) since PG 16. Missing \v was a real divergence found by
+// hstore_diff (lane p1-mb-contribc).
 fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 enum Gv {

@@ -1,0 +1,4 @@
+‚);
+
+--Fragments when there all query words are t in the document
+SELECT Êts_headline(

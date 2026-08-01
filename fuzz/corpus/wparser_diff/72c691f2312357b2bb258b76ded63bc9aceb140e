@@ -1,0 +1,6 @@
+€) AS query;
+
+CREATE INDEX qq ON test_tsquery USING gist (keyword tsquery_ops);
+SET enable_seqscan=OFF;
+
+SELECT keyword FROM test_tsquery WHERE keyword @> 

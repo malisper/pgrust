@@ -504,3 +504,10 @@ pub use netfam_diff::netfam_diff;
 // core/src/contribb_diff.rs.
 pub mod contribb_diff;
 pub use contribb_diff::contribb_diff;
+// hstorefam_diff (p1-mb-contribc): contrib/hstore vs vendored 18.3 C.
+pub mod hstorefam_diff;
+pub use hstorefam_diff::hstorefam_diff;
+// wparserfam_diff (p1-mb-contribc): tsearch/wparser_def tokenizer vs
+// vendored 18.3 C.
+pub mod wparserfam_diff;
+pub use wparserfam_diff::wparserfam_diff;

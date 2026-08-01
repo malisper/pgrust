@@ -1,0 +1,3 @@
+Å);
+
+SELECT length(to_tsvector(

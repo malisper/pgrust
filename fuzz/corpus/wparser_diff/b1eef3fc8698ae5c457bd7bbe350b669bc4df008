@@ -1,0 +1,4 @@
+));
+create index phrase_index_test_idx on phrase_index_test using gin(fts);
+set enable_seqscan = off;
+select * from phrase_index_test where fts @@ phraseto_tsquery(

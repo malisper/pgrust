@@ -1,0 +1,3 @@
+Å));
+
+SELECT ts_rank_cd(stp(to_tsvector,

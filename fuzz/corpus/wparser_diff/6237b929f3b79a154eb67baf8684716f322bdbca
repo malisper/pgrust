@@ -1,0 +1,9 @@
+€;
+
+DROP INDEX wowidx2;
+
+CREATE INDEX wowidx ON test_tsvector USING gist (a tsvector_ops(siglen=484));
+
+\d test_tsvector
+
+EXPLAIN (costs off) SELECT count(*) FROM test_tsvector WHERE a @@ 

@@ -1,0 +1,5 @@
+‚);
+
+-- cases handled by gettoken_tsvector()
+select websearch_to_tsquery('');
+select websearch_to_tsquery('

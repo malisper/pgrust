@@ -1,0 +1,9 @@
+Å
+foo & bar & qq	foo & (bar | qq) & city
+1 & (2 <-> 3)	2 <-> 4
+5 <-> 6	5 <-> 7
+\.
+\set ECHO all
+
+ALTER TABLE test_tsquery ADD COLUMN keyword tsquery;
+UPDATE test_tsquery SET keyword = to_tsquery(

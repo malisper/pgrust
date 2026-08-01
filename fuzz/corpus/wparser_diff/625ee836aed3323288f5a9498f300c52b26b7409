@@ -1,0 +1,5 @@
+Å;
+
+RESET enable_seqscan;
+
+INSERT INTO test_tsvector VALUES (

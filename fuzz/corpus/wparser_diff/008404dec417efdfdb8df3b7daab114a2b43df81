@@ -1,0 +1,9 @@
+€;
+
+create index wowidx on test_tsvector using gist (a);
+
+SET enable_seqscan=OFF;
+SET enable_indexscan=ON;
+SET enable_bitmapscan=OFF;
+
+explain (costs off) SELECT count(*) FROM test_tsvector WHERE a @@ 

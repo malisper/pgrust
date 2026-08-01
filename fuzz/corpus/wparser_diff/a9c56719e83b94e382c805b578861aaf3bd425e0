@@ -1,0 +1,12 @@
+€));
+CREATE INDEX wowidx1 ON test_tsvecto'r USING gisu (a tsvector_ops(siglen=100, siglen = 201)
+
+;)CREATE INDEX wowidx2 ON test_tsvector USING gist (a t(siglen=1)));
+
+\d test_tsvector
+
+DROP INDEX w);
+
+SELECT tsowidx;
+
+EXPLA_headline(IN (costs off) SELECT count(*) FROM test_ve

@@ -1734,6 +1734,7 @@ dependencies = [
  "guc_tables",
  "hashfn",
  "heaptuple",
+ "hstore",
  "hyperloglog",
  "ifaddr",
  "indexcmds_seams",
@@ -1797,10 +1798,21 @@ dependencies = [
  "varlena",
  "wait_error",
  "wchar",
+ "wparser_def",
  "xact_seams",
  "xlogreader",
  "xlogreader_seams",
  "xlogstats",
+]
+
+[[package]]
+name = "define"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -2281,6 +2293,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gin_hstore_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
 name = "gin_vocab"
 version = "0.1.0"
 dependencies = [
@@ -2499,6 +2519,50 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "hstore"
+version = "0.0.0"
+dependencies = [
+ "adt_domains",
+ "adt_json",
+ "adt_jsonb",
+ "adt_numeric",
+ "arrayfuncs",
+ "crc32c",
+ "datum",
+ "detoast",
+ "detoast_seams",
+ "dfmgr",
+ "fmgr_seams",
+ "funcapi",
+ "gin_hstore_seams",
+ "hashfn",
+ "heaptuple",
+ "hstore_subs_seams",
+ "lsyscache",
+ "mcx",
+ "pqformat",
+ "reloptions",
+ "stringinfo",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
+name = "hstore_subs_seams"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -4264,6 +4328,26 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "reloptions"
+version = "0.1.0"
+dependencies = [
+ "adt_bool",
+ "datum",
+ "define",
+ "elog",
+ "guc",
+ "mcx",
+ "syscache_seams",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
