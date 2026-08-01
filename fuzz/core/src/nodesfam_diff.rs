@@ -1135,11 +1135,20 @@ fn classify_panic(text: &str, msg: &str, labels: &[&str]) -> PanicClass {
     {
         return PanicClass::EnumDomain;
     }
-    if NONNULL_FIELD_CARVES
-        .iter()
-        .any(|(_, field)| text.contains(&format!(":{field} <>")))
+    // TOKEN-based, not substring-based: `:arg\n\n\n <>` is the same token
+    // pair as `:arg <>` and must classify the same (a substring check missed
+    // it and reported the carve as a divergence at ~25M local execs).
     {
-        return PanicClass::NonNull;
+        let toks = pg_strtok_all(text);
+        let hit = toks.windows(2).any(|w| {
+            w[1] == "<>"
+                && NONNULL_FIELD_CARVES
+                    .iter()
+                    .any(|(_, field)| w[0] == format!(":{field}"))
+        });
+        if hit {
+            return PanicClass::NonNull;
+        }
     }
     // C nodeTokenType (read.c, verbatim rule): a numeric-leading token is
     // T_Integer only if `strtoint` consumes the WHOLE token without ERANGE —

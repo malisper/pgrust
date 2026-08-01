@@ -1134,3 +1134,22 @@ fn list_gated_corpus() {
         }
     }
 }
+
+/// Carve classification is TOKEN-based: whitespace between a carved field name
+/// and its `<>` value must not change the class (a substring check missed
+/// `:arg\n\n\n <>` and reported the carve as a divergence).
+#[test]
+fn nonnull_carve_is_whitespace_insensitive() {
+    for text in [
+        "{COLLATEEXPR :arg <> :collOid 0 :location 1 }",
+        "{COLLATEEXPR :arg\n\n\n <> :collOid 0 :location 1 }",
+        "{COLLATEEXPR :arg\t<> :collOid 0 :location 1 }",
+    ] {
+        let before = NONNULL_CARVES.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(!run_text(text.as_bytes()));
+        assert!(
+            NONNULL_CARVES.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "{text:?} was not charged to the non-null carve"
+        );
+    }
+}
