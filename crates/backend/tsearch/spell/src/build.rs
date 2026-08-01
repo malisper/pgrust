@@ -695,6 +695,19 @@ impl<'mcx> IspellDict<'mcx> {
                         .into());
                     }
                     naffix += 1;
+                    // C: Conf->AffixData = palloc0(naffix * sizeof(char *)).
+                    // palloc0 enforces AllocSizeIsValid, so an oversized alias
+                    // count raises "invalid memory alloc request size" BEFORE
+                    // any allocation is attempted. Reproduce C's exact
+                    // condition (naffix * sizeof(char *), i.e. 8 bytes per
+                    // slot on LP64 — NOT this port's element size) so the
+                    // threshold and the error match C. Without this the port
+                    // handed a ~39 GB request straight to try_reserve, which C
+                    // refuses outright (found by spellfam_diff: an `AF` line
+                    // whose count atoi-truncates to 1215752191).
+                    ::mcx::check_alloc_size(
+                        (naffix as usize).saturating_mul(core::mem::size_of::<*const u8>()),
+                    )?;
                     self.affix_data
                         .try_reserve(naffix as usize)
                         .map_err(|_| mcx.oom(naffix as usize))?;

@@ -818,6 +818,16 @@ mod fleet_repro {
         assert!(carved(&p.aff), "banked div5 seed must be carved");
         super::spellfam_diff(&data);
     }
+    /// AF-alias-count MaxAllocSize regression (pgrust defect FIXED in-lane):
+    /// an `AF` line whose count atoi-truncates to 1215752191 made the port hand
+    /// try_reserve a ~39 GB request, where C's palloc0 refuses outright with
+    /// "invalid memory alloc request size". Both sides must now error
+    /// identically (the differential asserts the sqlstate).
+    #[test]
+    fn oom_affixdata_fc73a730() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/CI-oom-affixdata-fc73a730")).unwrap();
+        super::spellfam_diff(&data);
+    }
     #[test]
     fn segv2_4525b7a1() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/CI-div-segv2-4525b7a1")).unwrap();
