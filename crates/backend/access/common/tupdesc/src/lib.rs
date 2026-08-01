@@ -648,6 +648,13 @@ fn build_attrmap_by_name_impl<'mcx>(
     missing_ok: bool,
 ) -> PgResult<PgVec<'mcx, i16>> {
     let mut attmap: PgVec<'mcx, i16> = vec_with_capacity_in(mcx, outdesc.natts as usize)?;
+    // C (18.3) rotates the inner search with `nextindesc`: it resumes where
+    // the previous outer iteration matched (wrapping), optimizing the
+    // common attributes-in-same-order case. The rotation is also load-bearing
+    // for WHICH attribute matches when names collide, so it is ported
+    // exactly rather than scanning from 0.
+    let innatts = indesc.natts as usize;
+    let mut nextindesc: isize = -1;
     for i in 0..outdesc.natts as usize {
         let outatt = outdesc.attr(i);
         if outatt.attisdropped {
@@ -657,8 +664,12 @@ fn build_attrmap_by_name_impl<'mcx>(
         let name_bytes = outatt.attname.name_str();
         let name = core::str::from_utf8(name_bytes).unwrap_or_else(|_| panic!("non-UTF-8 attname"));
         let mut mapped: i16 = 0;
-        for j in 0..indesc.natts as usize {
-            let inatt = indesc.attr(j);
+        for _ in 0..innatts {
+            nextindesc += 1;
+            if nextindesc >= innatts as isize {
+                nextindesc = 0;
+            }
+            let inatt = indesc.attr(nextindesc as usize);
             if !inatt.attisdropped && inatt.attname.name_str() == name_bytes {
                 if inatt.atttypid != outatt.atttypid || inatt.atttypmod != outatt.atttypmod {
                     return Err(could_not_convert_row_type(name, indesc, outdesc, true)?);
