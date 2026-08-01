@@ -1021,12 +1021,14 @@ fn classify_panic(text: &str, msg: &str, labels: &[&str]) -> PanicClass {
     // port's chartered read set. So an over-long or non-integral digit string
     // (`66666666666666666666`, `1.5`) is a VALUE-TOKEN carve, not a
     // divergence, even though the port reports it as a bad integer token.
-    if let Some(tok) = msg
-        .strip_prefix("readfuncs.c: bad integer token \"")
-        .and_then(|r| r.split('"').next())
-    {
-        if c_reads_as_float(tok) {
-            return PanicClass::ValueToken;
+    for prefix in [
+        "readfuncs.c: bad integer token \"",
+        "nodeRead (read.c): T_Float value node \"",
+    ] {
+        if let Some(tok) = msg.strip_prefix(prefix).and_then(|r| r.split('"').next()) {
+            if c_reads_as_float(tok) {
+                return PanicClass::ValueToken;
+            }
         }
     }
     if let Some(tok) = msg

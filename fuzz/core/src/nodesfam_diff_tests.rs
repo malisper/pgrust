@@ -817,46 +817,32 @@ fn integer_vs_float_token_rule_matches_c() {
     );
 }
 
-/// DIVERGENCE OF RECORD (text-invisible, tag-level): the token
-/// `-2147483648`.
+/// RESOLVED (was a text-invisible tag divergence; fixed by the same change as
+/// `out_of_range_integer_token_does_not_wrap`): the token `-2147483648`.
 ///
-/// `nodeTokenType` advances past the sign and calls `strtoint` on the
-/// UNSIGNED body, so INT32_MIN's magnitude raises ERANGE and C builds a
-/// **Float** node — for the exact text `outfuncs` writes for an **Integer**
-/// node holding INT32_MIN (`%d`). C's own out->read round trip is therefore
-/// not type-preserving at INT32_MIN. pgrust's reader parses the signed token
-/// as i32, which succeeds, and builds an **Integer** node.
-///
-/// The out-TEXT is identical on both sides (a Float node stores and reprints
-/// its token verbatim), so the text plane cannot see this — recorded here as
-/// the harness's known blind spot rather than left undocumented. Downstream
-/// consumers that switch on the node tag would differ.
+/// `nodeTokenType` advances past the sign and calls `strtoint` on the UNSIGNED
+/// body, so INT32_MIN's magnitude raises ERANGE and C builds a **Float** node
+/// — for the exact text `outfuncs` writes for an **Integer** node holding
+/// INT32_MIN (`%d`). C's own out->read is therefore not type-preserving at
+/// INT32_MIN. pgrust used to parse the signed token as i32 (which succeeds)
+/// and build an Integer node: same rendering, different tag, invisible to the
+/// text plane. The port now applies C's magnitude rule, so INT32_MIN takes the
+/// chartered T_Float panic and the tag divergence is gone.
 #[test]
-fn int32_min_token_is_a_c_float_node() {
+fn int32_min_token_follows_cs_magnitude_rule() {
     let text = "-2147483648";
-    // C: text-stable
+    // C: text-stable, and classified as a Float node
     match c_exec(text.as_bytes()) {
         COut::Ok { out, .. } => assert_eq!(String::from_utf8_lossy(&out), text),
         COut::Err { errcode } => panic!("C rejected {text:?} ({errcode:#x})"),
     }
-    // C's classification says Float...
     assert!(c_reads_as_float(text), "C should classify INT32_MIN as T_Float");
-    // ...while pgrust builds an Integer node with the same rendering
-    let cx = mcx::MemoryContext::new("nodesfam_int32min");
-    let m = cx.mcx();
-    let node = readfuncs::stringToNodeNullable(m, text)
-        .expect("no error")
-        .expect("some node");
-    assert_eq!(
-        node.node_tag(),
-        types_nodes::NodeTag::T_Integer,
-        "pgrust's tag for INT32_MIN changed — re-audit this divergence record"
-    );
-    assert_eq!(
-        outfuncs::nodeToString(m, node).expect("out").as_str(),
-        text,
-        "the divergence must stay text-invisible; if the text differs it is a \
-         LIVE text-plane divergence and must be reported, not recorded"
+    // pgrust: no longer an Integer node — chartered value-token carve
+    let before = VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(!run_text(text.as_bytes()));
+    assert!(
+        VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed) > before,
+        "INT32_MIN was not charged to the value-token carve"
     );
 }
 
@@ -898,5 +884,42 @@ fn bitstring_token_rule_covers_b_and_x() {
             "{:?} was not charged to the value-token carve",
             std::str::from_utf8(t).unwrap()
         );
+    }
+}
+
+/// DEFECT FIXED IN-LANE (data corruption): the value-node path treated ANY
+/// digit-leading token as an Integer via a truncating `as i32` cast, so
+/// `9992999999` built an Integer node holding 1403065407 while C builds a
+/// Float node that prints "9992999999" — a silent wrong VALUE, found at ~10M
+/// local execs. The port now applies C's own rule (strtoint over the unsigned
+/// magnitude) and takes its chartered loud panic for T_Float tokens.
+#[test]
+fn out_of_range_integer_token_does_not_wrap() {
+    for t in [&b"9992999999"[..], b"2147483648", b"-2147483648", b"99999999999999999999"] {
+        let text = std::str::from_utf8(t).unwrap();
+        // C keeps the text verbatim (Float node stores the token)
+        match c_exec(t) {
+            COut::Ok { out, .. } => assert_eq!(String::from_utf8_lossy(&out), text),
+            COut::Err { errcode } => panic!("C rejected {text:?} ({errcode:#x})"),
+        }
+        // pgrust must NOT silently produce a wrapped Integer
+        let owned = text.to_owned();
+        let r = std::panic::catch_unwind(move || {
+            let cx = mcx::MemoryContext::new("nodesfam_wrap");
+            let m = cx.mcx();
+            let _ = readfuncs::stringToNodeNullable(m, &owned);
+        });
+        assert!(
+            r.is_err(),
+            "{text:?} must take the chartered T_Float panic, not build a wrapped Integer"
+        );
+    }
+    // in-range tokens still read as Integer nodes
+    for t in ["0", "-1", "2147483647", "-2147483647"] {
+        let cx = mcx::MemoryContext::new("nodesfam_ok");
+        let m = cx.mcx();
+        let n = readfuncs::stringToNodeNullable(m, t).expect("no error").expect("node");
+        assert_eq!(n.node_tag(), types_nodes::NodeTag::T_Integer, "{t:?}");
+        assert_eq!(outfuncs::nodeToString(m, n).expect("out").as_str(), t);
     }
 }
