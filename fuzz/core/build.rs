@@ -16,6 +16,13 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // libfam_diff oracle: verbatim vendored files under csrc/libfam/
+        // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
+        .file("csrc/pg_libfam_io.c")
+        // portfam_diff oracle (p1-microbatch PORTFAM) compiles in its OWN
+        // cc::Build below (pg_difffuzz_portfam): it needs the
+        // csrc/portfam/{shim,include} tree, whose c.h/postgres.h must not
+        // leak into this build's TUs.
         // json_diff oracle lives in the dedicated jsonfam cc::Build below
         // (own shim include tree; pg_jsonfam_-prefixed symbols).
         // arrayfuncs_diff oracle (p1-lanex): verbatim 18.3 arrayfuncs.c core
@@ -26,6 +33,10 @@ fn main() {
         // varlena.c text family + formatting.c asc_* kernels + the mbutils/
         // wchar multibyte walkers behind them (see pg_oraclefam_io.c header).
         .file("csrc/pg_oraclefam_io.c")
+        // tzfam_diff oracle (p1-mb-tzfam): verbatim 18.3 strftime.c +
+        // tzparser.c + datetime.c ConvertTimeZoneAbbrevs + ts_locale.c
+        // t_is* macros (see pg_tzfam_io.c header for provenance + shims).
+        .file("csrc/pg_tzfam_io.c")
         // COMPILE GATE (array_userfuncs_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_array_userfuncs_io.c is filled
         // with verbatim vendored C (README-TODO-array_userfuncs_diff.md step 1).
@@ -68,6 +79,17 @@ fn main() {
         // SCAFFOLD-TODO #error paste site in csrc/pg_pg_prng_io.c is filled
         // with verbatim vendored C (README-TODO-pg_prng_diff.md step 1).
         .file("csrc/pg_pg_prng_io.c")
+        // miscfam_diff oracle (p1-mb-miscfam): verbatim 18.3 cmdtag.c +
+        // pg_class.c errdetail_relkind + earthdistance.c +
+        // pg_rusage.c show + xlogstats.c + common/stringinfo.c core
+        // (see pg_miscfam_io.c header; cmdtaglist.h vendored under
+        // csrc/miscfam/tcop/).
+        .file("csrc/pg_miscfam_io.c")
+        // netfam_diff oracle (p1-mb-netfam): verbatim 18.3 ifaddr.c pure
+        // core + pqformat.c + pqformat.h inlines + common/stringinfo.c
+        // behind nf_-renames (see pg_netfam_io.c header for provenance +
+        // the encoding/putmessage seam shims).
+        .file("csrc/pg_netfam_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
@@ -93,7 +115,12 @@ fn main() {
         .include("csrc/shim")
         .include("csrc/pgdt")
         .include("csrc")
+        .include("csrc/miscfam")
         .include("csrc/ryu")
+        // libfam_diff: verbatim lib/ headers + reduced port/common/utils
+        // headers (appended LAST so existing include resolution is
+        // unchanged; no other main-build TU includes these paths)
+        .include("csrc/libfam/include")
         // pg_enc_tables.c includes the SAME generated kwlist_d.h the
         // shipped keywords crate's build.rs transcribes (table parity by
         // shared source of truth)
@@ -136,11 +163,12 @@ fn main() {
     wcharfam
         .file("csrc/pg_wcharfam.c")
         // LINK FIX (p1-microbatch, 2026-08-01): pg_wcharfam.c's vendored
-        // pg_wchar2mb calls pg_wchar_strlen, whose definition lives in
-        // src/backend/utils/mb/wstrncmp.c — a TU this family never
-        // vendored; every `cargo fuzz build` link on Linux (and macOS
-        // without -dead_strip) died with an unresolved symbol. Verbatim
-        // whole-file copy.
+        // mbutils extract calls pg_wchar_strlen, whose upstream definition
+        // lives in src/backend/utils/mb/wstrncmp.c — a TU this family never
+        // vendored. Plain `cargo test` never caught it (macOS -dead_strip
+        // discards the unreferenced cone), but EVERY cargo-fuzz target
+        // failed to link with "Undefined symbols: _pg_wchar_strlen",
+        // including already-landed ones. Vendored verbatim below.
         .file("csrc/wcharfam/wstrncmp.c")
         .include("csrc/wcharfam")
         .flag_if_supported("-fno-strict-aliasing")
@@ -452,15 +480,14 @@ fn main() {
         "int4in", "int8in", "pg_ltoa", "pg_ultoa_n",
         "pg_strtoint64", "pg_strtoint64_safe", "qsort_arg",
         "RE_compile_and_cache", "RE_compile_and_execute",
-        // CI-build hotfix (p1-microbatch, 2026-08-01): the jsonpath
-        // family's vendored Spencer engine (csrc/jsonpath/regex/) exports
-        // the same five entry points as the regexp family's engine
-        // (csrc/regexfam/, which must keep the unprefixed names —
-        // pg_regexp_io.c calls them directly). Linux ld hard-errors on the
-        // duplicates and every CI cluster fuzz build at the tip died (`cargo
-        // fuzz build` builds ALL targets); macOS ld tolerated it, which is
-        // why local builds passed. Same nm-sweep remedy as the wave-3
-        // train sweep below.
+        // p1-microbatch CI-build fix (2026-07-31): the jsonpath family's
+        // vendored Spencer engine (csrc/jsonpath/regex/) exports the same
+        // five entry points as the regexp family's engine (csrc/regexfam/,
+        // which must keep the unprefixed names — pg_regexp_io.c calls them
+        // directly). Linux ld hard-errors on the duplicate definitions and
+        // every CI cluster fuzz build at the tip died (`cargo fuzz build` builds
+        // ALL targets); macOS ld tolerated it, which is why local builds
+        // passed. Same nm-sweep remedy as the wave-3 train sweep below.
         "pg_regcomp", "pg_regexec", "pg_regerror", "pg_regfree",
         "pg_reg_getcolor",
         "construct_array_builtin", "ArrayGetIntegerTypmods",
@@ -680,4 +707,124 @@ fn main() {
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-ffp-contract=off")
         .compile("pg_difffuzz_dtclo");
+
+    // portfam_diff oracle (p1-microbatch PORTFAM: pg_bitutils, crc32c,
+    // pgstrcasecmp, pg_path, bufmask). OWN cc::Build: its shim c.h /
+    // postgres.h / postgres_fe.h tree (csrc/portfam/shim) must never shadow
+    // — or be shadowed by — csrc/shim's, and its verbatim pg_bitutils.h /
+    // pg_crc32c.h / storage headers are a full vendored include tree.
+    //
+    // SYMBOL ISOLATION: several oracle families already vendor pg_crc.c,
+    // pg_crc32c_sb8.c and friends (hashenc, cryptofam). Every extern this
+    // family's TUs export is renamed portfam_* at compile time so the
+    // duplicate definitions never cross-bind under one binary (the Linux
+    // GNU-ld hard-error class that Apple ld64 silently tolerates locally).
+    // strlcpy is renamed too: the platform libc supplies one on macOS/BSD.
+    const PORTFAM_SYMS: &[&str] = &[
+        // pg_bitutils.c / pg_popcount_aarch64.c
+        "pg_leftmost_one_pos", "pg_rightmost_one_pos", "pg_number_of_ones",
+        "pg_popcount32", "pg_popcount64", "pg_popcount_optimized",
+        "pg_popcount_masked_optimized",
+        // pg_crc32c_sb8.c / pg_crc.c
+        "pg_comp_crc32c_sb8", "pg_crc32_table", "crc32_bytea", "crc32c_bytea",
+        // pgstrcasecmp.c
+        "pg_strcasecmp", "pg_strncasecmp", "pg_toupper", "pg_tolower",
+        "pg_ascii_toupper", "pg_ascii_tolower",
+        // (strlcpy is renamed inside csrc/portfam/shim/c.h instead — a
+        // command-line -D loses to Apple <string.h>'s _FORTIFY re-#define.)
+        // path.c
+        "has_drive_prefix", "first_dir_separator", "first_path_var_separator",
+        "last_dir_separator", "make_native_path", "cleanup_path",
+        "join_path_components", "canonicalize_path", "canonicalize_path_enc",
+        "path_contains_parent_reference", "path_is_relative_and_below_cwd",
+        "path_is_prefix_of_path", "get_progname", "make_absolute_path",
+        "get_share_path", "get_etc_path", "get_include_path",
+        "get_pkginclude_path", "get_includeserver_path", "get_lib_path",
+        "get_pkglib_path", "get_locale_path", "get_doc_path", "get_html_path",
+        "get_man_path", "get_home_path", "get_parent_directory",
+        // bufmask.c
+        "mask_page_lsn_and_checksum", "mask_page_hint_bits",
+        "mask_unused_space", "mask_lp_flags", "mask_page_content",
+    ];
+    let mut portfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        portfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in PORTFAM_SYMS {
+        portfam.define(s, format!("portfam_{s}").as_str());
+    }
+    for f in [
+        "pg_portfam_io.c",
+        "portfam/pg_bitutils.c",
+        "portfam/pg_popcount_aarch64.c",
+        "portfam/pg_crc32c_sb8.c",
+        "portfam/pg_crc.c",
+        "portfam/pgstrcasecmp.c",
+        "portfam/path.c",
+        "portfam/strlcpy.c",
+        "portfam/bufmask.c",
+    ] {
+        portfam.file(format!("csrc/{f}"));
+    }
+    portfam
+        // path.c's FRONTEND arm: identical pure-path logic; the arms that
+        // differ live only in make_absolute_path's OOM/cwd error legs, which
+        // the driver never calls (cwd-reading carve).
+        .define("FRONTEND", None)
+        .include("csrc/portfam/shim")
+        .include("csrc/portfam/include")
+        .include("csrc/portfam")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_portfam");
+    println!("cargo:rerun-if-changed=csrc/pg_portfam_io.c");
+    println!("cargo:rerun-if-changed=csrc/portfam");
+    // contribb_diff oracle (p1-mb-contribb): verbatim 18.3 contrib/seg +
+    // contrib/cube non-GiST bodies (csrc/pg_contribb_io.c) plus the
+    // GENERATED flex/bison parser TUs committed under csrc/contribb/
+    // (bison 2.3 / flex 2.6.4 over the verbatim vendored grammars; see the
+    // provenance banners). Own cc::Build: the family needs its own shim
+    // include tree (csrc/contribb/include postgres.h etc.), which must not
+    // leak into the main build's files. float4in/float8in/float8out_internal
+    // resolve against pg_float_io.c in the main build (extern, one verbatim
+    // definition per symbol).
+    //
+    // -funsigned-char: plain-char signedness is implementation-defined and
+    // PG inherits the platform default; the campaign's oracle of record is
+    // the CI cluster Linux/aarch64 build where char is UNSIGNED (the pgrust port
+    // also chose u8 for SEG's sigd/ext bytes). Without the pin a macOS
+    // (signed-char) local build of seg_cmp's sigd comparisons diverges from
+    // the ratified oracle for sigd >= 128.
+    let mut contribb = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        contribb.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // -O2 PIN (found by contribb_diff, 2026-08-01): under cargo-fuzz the
+    // profile opt-level is 3 and clang -O3 vectorizes cube.c's
+    // distance loops in a way that changes distance_1D's NaN semantics
+    // (scalar IEEE: every comparison with a NaN coordinate is false ->
+    // 0.0 contribution; the -O3 code propagates the NaN payload instead —
+    // witness: 53-dim point with coord0 = 0xFFF70000000000FC, C gave
+    // 0xFFFF0000000000FC where -O1/-O2 and Rust give +Inf). Production
+    // PostgreSQL builds at -O2, so the -O2 behavior IS the oracle.
+    contribb.opt_level(2);
+    contribb
+        .file("csrc/pg_contribb_io.c")
+        .file("csrc/contribb/segparse.c")
+        .file("csrc/contribb/segscan.c")
+        .file("csrc/contribb/cubeparse.c")
+        .file("csrc/contribb/cubescan.c")
+        .include("csrc/contribb/include")
+        .include("csrc/contribb")
+        .flag("-funsigned-char")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .flag_if_supported("-ffp-contract=off")
+        .compile("pg_difffuzz_contribb");
+    println!("cargo:rerun-if-changed=csrc/pg_contribb_io.c");
+    println!("cargo:rerun-if-changed=csrc/contribb");
 }

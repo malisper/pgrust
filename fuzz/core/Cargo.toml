@@ -164,5 +164,9 @@ guc = { path = "../../crates/backend/utils/misc/guc" }
 ifaddr = { path = "../../crates/backend/libpq/ifaddr" }
 pqcomm_seams = { path = "../../crates/backend/libpq/pqcomm_seams" }
 
+# contribb_diff (p1-mb-contribb); mcx/datum/types_*/stringinfo/dfmgr already above
+contrib_seg = { path = "../../crates/contrib/seg" }
+contrib_cube = { path = "../../crates/contrib/cube" }
+
 [build-dependencies]
 cc = "1"

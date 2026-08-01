@@ -422,3 +422,10 @@ path = "fuzz_targets/netfam_diff.rs"
 test = false
 doc = false
 bench = false
+# contribb_diff (p1-mb-contribb): contrib/seg + contrib/cube family.
+[[bin]]
+name = "contribb_diff"
+path = "fuzz_targets/contribb_diff.rs"
+test = false
+doc = false
+bench = false

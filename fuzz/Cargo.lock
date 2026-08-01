@@ -1504,6 +1504,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib_cube"
+version = "0.0.0"
+dependencies = [
+ "adt_float",
+ "arrayfuncs",
+ "datum",
+ "dfmgr",
+ "mcx",
+ "pqformat",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "contrib_earthdistance"
 version = "0.0.0"
 dependencies = [
@@ -1512,6 +1530,19 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+]
+
+[[package]]
+name = "contrib_seg"
+version = "0.0.0"
+dependencies = [
+ "adt_float",
+ "datum",
+ "dfmgr",
+ "mcx",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
 ]
 
 [[package]]
@@ -1685,7 +1716,9 @@ dependencies = [
  "bufmask",
  "cc",
  "cmdtag",
+ "contrib_cube",
  "contrib_earthdistance",
+ "contrib_seg",
  "conv",
  "crc32c",
  "cryptohashfuncs",

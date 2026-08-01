@@ -21,7 +21,7 @@ use types_fmgr::{
     PGFunction,
 };
 
-use repr::{build_image, build_image_auto, cube_size, point_size, CubeView, CUBE_MAX_DIM};
+use repr::{build_image, build_image_auto, CubeView, CUBE_MAX_DIM};
 
 const LIBRARY: &str = "cube";
 
@@ -660,12 +660,4 @@ pub fn init_seams() {
         lookup,
         pg_init: None,
     });
-}
-
-// Silence the unused-import warning for point_size/cube_size, which exist
-// for parity documentation and unit assertions.
-#[allow(unused)]
-fn _size_parity() {
-    let _ = point_size(1);
-    let _ = cube_size(1);
 }

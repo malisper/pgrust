@@ -282,7 +282,12 @@ pub fn parse_seg(input: &[u8]) -> PgResult<Seg> {
             if p.cur.kind == Kind::Float || p.cur.kind == Kind::Extension {
                 // boundary RANGE boundary
                 let b2 = p.boundary()?;
-                p.expect(Kind::Eof)?;
+                // The swapped-boundaries check runs BEFORE the trailing-
+                // input check: bison performs the rule's DEFAULT REDUCTION
+                // (running this action, which errsaves 22023 and YYERRORs)
+                // without consulting the lookahead, so C reports swapped
+                // boundaries even when garbage follows ("3 .. 2 z").
+                // Found by contribb_diff (input "01 .. 0..0000001z0").
                 if b1.val > b2.val {
                     return Err(Box::new(
                         PgError::error(format!(
@@ -293,6 +298,7 @@ pub fn parse_seg(input: &[u8]) -> PgResult<Seg> {
                         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
                     ));
                 }
+                p.expect(Kind::Eof)?;
                 Ok(Seg {
                     lower: b1.val,
                     upper: b2.val,
@@ -394,6 +400,13 @@ mod tests {
         );
         assert_eq!(
             err("3 .. 2"),
+            "swapped boundaries: 3 is greater than 2|"
+        );
+        // bison default reduction: the swapped-boundaries action fires
+        // before the trailing-garbage syntax error (contribb_diff finding,
+        // input "01 .. 0..0000001z0")
+        assert_eq!(
+            err("3 .. 2 z"),
             "swapped boundaries: 3 is greater than 2|"
         );
         // range error from float4in_internal

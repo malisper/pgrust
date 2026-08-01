@@ -327,35 +327,48 @@ pub fn parse_cube(input: &[u8]) -> PgResult<Vec<u8>> {
             p.expect(Kind::Comma)?;
             let l2 = p.paren_list()?;
             p.expect(Kind::CBracket)?;
-            p.expect(Kind::Eof)?;
+            // The box action runs BEFORE the trailing-input check: bison
+            // performs the rule's DEFAULT REDUCTION (dim checks + the
+            // write_box float8in calls, each of which can errsave) without
+            // consulting the lookahead, so C reports those errors even when
+            // garbage follows. Found by contribb_diff ("1e-455(3000,1000),)"
+            // -> 22003, not 22P02). Same in the three cases below.
             if l1.len() != l2.len() {
                 return Err(dim_mismatch(&l1, &l2));
             }
             check_dim(l1.len())?;
-            write_box(&l1, &l2)
+            let img = write_box(&l1, &l2)?;
+            p.expect(Kind::Eof)?;
+            Ok(img)
         }
         Kind::OParen => {
             let l1 = p.paren_list()?;
             if p.cur.kind == Kind::Comma {
                 p.advance();
                 let l2 = p.paren_list()?;
-                p.expect(Kind::Eof)?;
+                // default reduction: action before the Eof check (see above)
                 if l1.len() != l2.len() {
                     return Err(dim_mismatch(&l1, &l2));
                 }
                 check_dim(l1.len())?;
-                write_box(&l1, &l2)
-            } else {
+                let img = write_box(&l1, &l2)?;
                 p.expect(Kind::Eof)?;
+                Ok(img)
+            } else {
+                // default reduction: action before the Eof check (see above)
                 check_dim(l1.len())?;
-                write_point_as_box(&l1)
+                let img = write_point_as_box(&l1)?;
+                p.expect(Kind::Eof)?;
+                Ok(img)
             }
         }
         Kind::Float => {
             let l = p.list()?;
-            p.expect(Kind::Eof)?;
+            // default reduction: action before the Eof check (see above)
             check_dim(l.len())?;
-            write_point_as_box(&l)
+            let img = write_point_as_box(&l)?;
+            p.expect(Kind::Eof)?;
+            Ok(img)
         }
         _ => Err(syntax_error(&p.cur)),
     }
@@ -373,6 +386,19 @@ mod tests {
     fn err_detail(s: &str) -> String {
         let e = parse(s).unwrap_err();
         format!("{}|{}", e.message(), e.detail().unwrap_or(""))
+    }
+
+    #[test]
+    fn bison_default_reduction_error_order() {
+        // the box action (incl. float8in) fires at the rule's default
+        // reduction BEFORE the trailing-garbage syntax error is seen
+        // (contribb_diff finding, input "1e-455(3000,1000),)"):
+        // underflow 22003 beats 22P02
+        let e = parse("1e-455(3000,1000),)").unwrap_err();
+        assert_eq!(e.sqlstate, types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        // and a clean prefix still errors 22P02 on the garbage
+        let e = parse("1,2)").unwrap_err();
+        assert_eq!(e.sqlstate, types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
     }
 
     #[test]
