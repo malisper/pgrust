@@ -1,0 +1,33 @@
+name: Core CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Server build and core tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: target
+    steps:
+      - name: Check out source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libre2-dev pkg-config
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Run core quality gate
+        run: bash scripts/check-core.sh
