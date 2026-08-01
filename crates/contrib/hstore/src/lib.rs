@@ -221,8 +221,18 @@ fn fc_hstore_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     if pcount == 0 {
         return ret_hstore(fcinfo, &build_hstore(&[]));
     }
-    if pcount < 0 || pcount as usize > (isize::MAX as usize) / core::mem::size_of::<Pair>() {
-        return Err(PgError::error(format!("invalid number of pairs: {pcount}")).into());
+    // C parity (hstore_io.c hstore_recv): pcount > MaxAllocSize/sizeof(Pairs)
+    // is ERRCODE_PROGRAM_LIMIT_EXCEEDED with this exact message. sizeof(Pairs)
+    // = 40 on LP64 (2 pointers + 2 size_t + 2 bool, padded). The old bound
+    // (isize::MAX / sizeof) admitted counts C rejects, then died trying to
+    // reserve gigabytes (found by hstore_diff, lane p1-mb-contribc).
+    const MAX_PAIRS: i32 = (0x3fff_ffff_i64 / 40) as i32;
+    if pcount < 0 || pcount > MAX_PAIRS {
+        return Err(PgError::error(format!(
+            "number of pairs ({pcount}) exceeds the maximum allowed ({MAX_PAIRS})"
+        ))
+        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .into());
     }
     let mut pairs: Vec<Pair> = Vec::with_capacity(pcount as usize);
     for _ in 0..pcount {
@@ -312,17 +322,35 @@ fn fc_hstore_from_arrays(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let scratch = mcx::MemoryContext::new("hstore_from_arrays");
     let mcx = scratch.mcx();
     // SAFETY: checked non-null.
-    let keys = deconstruct_text_array(mcx, unsafe { arg_image(fcinfo, 0)? })?;
+    let key_image = unsafe { arg_image(fcinfo, 0)? };
+    // C checks ARR_NDIM > 1 on the key array BEFORE deconstructing (empty
+    // arrays are 0-D, hence >1 rather than != 1).
+    if arrayfuncs::foundation::arr_ndim(key_image) > 1 {
+        return Err(subscript_err("wrong number of array subscripts"));
+    }
+    let keys = deconstruct_text_array(mcx, key_image)?;
     let vals = if b_null {
         None
     } else {
         // SAFETY: checked non-null.
-        let v = deconstruct_text_array(mcx, unsafe { arg_image(fcinfo, 1)? })?;
-        if v.len() != keys.len() {
-            return Err(PgError::error("arrays must have same bounds")
-                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
-                .into());
+        let val_image = unsafe { arg_image(fcinfo, 1)? };
+        if arrayfuncs::foundation::arr_ndim(val_image) > 1 {
+            return Err(subscript_err("wrong number of array subscripts"));
         }
+        // C compares ndim, dims[0] AND lbound[0] whenever either array is
+        // non-empty — an element-count match with a different lower bound is
+        // still "arrays must have same bounds". Comparing only the
+        // deconstructed lengths accepted inputs C rejects, and let the
+        // null-key error fire where C raises the bounds error (found by
+        // hstore_diff, lane p1-mb-contribc).
+        let (knd, kdims, klbs) = arrayfuncs::foundation::read_dims_lbounds(key_image);
+        let (vnd, vdims, vlbs) = arrayfuncs::foundation::read_dims_lbounds(val_image);
+        if (knd > 0 || vnd > 0)
+            && (knd != vnd || kdims[0] != vdims[0] || klbs[0] != vlbs[0])
+        {
+            return Err(subscript_err("arrays must have same bounds"));
+        }
+        let v = deconstruct_text_array(mcx, val_image)?;
         Some(v)
     };
     let mut pairs: Vec<Pair> = Vec::with_capacity(keys.len());
@@ -343,6 +371,11 @@ fn fc_hstore_from_arrays(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     }
     let pairs = unique_pairs(pairs);
     ret_hstore(fcinfo, &build_hstore(&pairs))
+}
+
+#[cold]
+fn subscript_err(msg: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR))
 }
 
 #[track_caller]

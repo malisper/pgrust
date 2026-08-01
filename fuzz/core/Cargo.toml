@@ -164,5 +164,9 @@ guc = { path = "../../crates/backend/utils/misc/guc" }
 ifaddr = { path = "../../crates/backend/libpq/ifaddr" }
 pqcomm_seams = { path = "../../crates/backend/libpq/pqcomm_seams" }
 
+# hstore_diff (p1-mb-contribc); arrayfuncs/mcx/datum/types_fmgr/dfmgr/varlena/
+# stringinfo/pqformat/mbutils/hashfn/types_tuple already above
+hstore = { path = "../../crates/contrib/hstore" }
+
 [build-dependencies]
 cc = "1"

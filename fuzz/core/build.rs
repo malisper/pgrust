@@ -26,6 +26,37 @@ fn main() {
         // varlena.c text family + formatting.c asc_* kernels + the mbutils/
         // wchar multibyte walkers behind them (see pg_oraclefam_io.c header).
         .file("csrc/pg_oraclefam_io.c")
+        // tzfam_diff oracle (p1-mb-tzfam): verbatim 18.3 strftime.c +
+        // tzparser.c + datetime.c ConvertTimeZoneAbbrevs + ts_locale.c
+        // t_is* macros (see pg_tzfam_io.c header for provenance + shims).
+        // RESTORED (p1-mb-contribc, 2026-08-01): the p1-microbatch-1 union
+        // merge kept the three family TUs under csrc/ but dropped their
+        // build.rs registrations — tzfam/miscfam/netfam targets could not
+        // link at main.
+        .file("csrc/pg_tzfam_io.c")
+        // miscfam_diff oracle (p1-mb-miscfam): verbatim 18.3 cmdtag.c +
+        // pg_class.c errdetail_relkind + earthdistance.c +
+        // pg_rusage.c show + xlogstats.c + common/stringinfo.c core
+        // (see pg_miscfam_io.c header; cmdtaglist.h vendored under
+        // csrc/miscfam/tcop/).
+        .file("csrc/pg_miscfam_io.c")
+        .include("csrc/miscfam")
+        // netfam_diff oracle (p1-mb-netfam): verbatim 18.3 ifaddr.c pure
+        // core + pqformat.c + pqformat.h inlines + common/stringinfo.c
+        // behind nf_-renames (see pg_netfam_io.c header for provenance +
+        // the encoding/putmessage seam shims).
+        .file("csrc/pg_netfam_io.c")
+        // hstore_diff oracle (p1-mb-contribc): verbatim 18.3 contrib/hstore
+        // hstore_io.c + hstore_op.c cores + the array/stringinfo/pqformat/
+        // json machinery behind them, hst_-prefixed (see pg_hstorefam_io.c
+        // header for provenance, shims and the records/SRF/jsonb/gist/gin
+        // carves).
+        .file("csrc/pg_hstorefam_io.c")
+        // libfam_diff oracle: verbatim vendored files under csrc/libfam/
+        // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
+        // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the same union
+        // merge as the tzfam/miscfam/netfam registrations above.
+        .file("csrc/pg_libfam_io.c")
         // COMPILE GATE (array_userfuncs_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_array_userfuncs_io.c is filled
         // with verbatim vendored C (README-TODO-array_userfuncs_diff.md step 1).
@@ -98,6 +129,10 @@ fn main() {
         // shipped keywords crate's build.rs transcribes (table parity by
         // shared source of truth)
         .include("../../crates/common/keywords")
+        // libfam_diff: verbatim lib/ headers + reduced port/common/utils
+        // headers (appended LAST so existing include resolution is
+        // unchanged; no other main-build TU includes these paths)
+        .include("csrc/libfam/include")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         // FP-CONTRACTION CARVE (2026-07-30, found by float_math_diff):
@@ -680,4 +715,81 @@ fn main() {
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-ffp-contract=off")
         .compile("pg_difffuzz_dtclo");
+
+    // portfam_diff oracle (p1-microbatch PORTFAM: pg_bitutils, crc32c,
+    // pgstrcasecmp, pg_path, bufmask). OWN cc::Build: its shim c.h /
+    // postgres.h / postgres_fe.h tree (csrc/portfam/shim) must never shadow
+    // — or be shadowed by — csrc/shim's, and its verbatim pg_bitutils.h /
+    // pg_crc32c.h / storage headers are a full vendored include tree.
+    // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the p1-microbatch-1
+    // union merge together with the tzfam/miscfam/netfam/libfam
+    // registrations above — portfam_diff could not link at main.
+    //
+    // SYMBOL ISOLATION: several oracle families already vendor pg_crc.c,
+    // pg_crc32c_sb8.c and friends (hashenc, cryptofam). Every extern this
+    // family's TUs export is renamed portfam_* at compile time so the
+    // duplicate definitions never cross-bind under one binary (the Linux
+    // GNU-ld hard-error class that Apple ld64 silently tolerates locally).
+    // strlcpy is renamed too: the platform libc supplies one on macOS/BSD.
+    const PORTFAM_SYMS: &[&str] = &[
+        // pg_bitutils.c / pg_popcount_aarch64.c
+        "pg_leftmost_one_pos", "pg_rightmost_one_pos", "pg_number_of_ones",
+        "pg_popcount32", "pg_popcount64", "pg_popcount_optimized",
+        "pg_popcount_masked_optimized",
+        // pg_crc32c_sb8.c / pg_crc.c
+        "pg_comp_crc32c_sb8", "pg_crc32_table", "crc32_bytea", "crc32c_bytea",
+        // pgstrcasecmp.c
+        "pg_strcasecmp", "pg_strncasecmp", "pg_toupper", "pg_tolower",
+        "pg_ascii_toupper", "pg_ascii_tolower",
+        // (strlcpy is renamed inside csrc/portfam/shim/c.h instead — a
+        // command-line -D loses to Apple <string.h>'s _FORTIFY re-#define.)
+        // path.c
+        "has_drive_prefix", "first_dir_separator", "first_path_var_separator",
+        "last_dir_separator", "make_native_path", "cleanup_path",
+        "join_path_components", "canonicalize_path", "canonicalize_path_enc",
+        "path_contains_parent_reference", "path_is_relative_and_below_cwd",
+        "path_is_prefix_of_path", "get_progname", "make_absolute_path",
+        "get_share_path", "get_etc_path", "get_include_path",
+        "get_pkginclude_path", "get_includeserver_path", "get_lib_path",
+        "get_pkglib_path", "get_locale_path", "get_doc_path", "get_html_path",
+        "get_man_path", "get_home_path", "get_parent_directory",
+        // bufmask.c
+        "mask_page_lsn_and_checksum", "mask_page_hint_bits",
+        "mask_unused_space", "mask_lp_flags", "mask_page_content",
+    ];
+    let mut portfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        portfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in PORTFAM_SYMS {
+        portfam.define(s, format!("portfam_{s}").as_str());
+    }
+    for f in [
+        "pg_portfam_io.c",
+        "portfam/pg_bitutils.c",
+        "portfam/pg_popcount_aarch64.c",
+        "portfam/pg_crc32c_sb8.c",
+        "portfam/pg_crc.c",
+        "portfam/pgstrcasecmp.c",
+        "portfam/path.c",
+        "portfam/strlcpy.c",
+        "portfam/bufmask.c",
+    ] {
+        portfam.file(format!("csrc/{f}"));
+    }
+    portfam
+        // path.c's FRONTEND arm: identical pure-path logic; the arms that
+        // differ live only in make_absolute_path's OOM/cwd error legs, which
+        // the driver never calls (cwd-reading carve).
+        .define("FRONTEND", None)
+        .include("csrc/portfam/shim")
+        .include("csrc/portfam/include")
+        .include("csrc/portfam")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_portfam");
+    println!("cargo:rerun-if-changed=csrc/pg_portfam_io.c");
+    println!("cargo:rerun-if-changed=csrc/portfam");
 }

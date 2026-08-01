@@ -499,3 +499,6 @@ pub use tzfam_diff::tzfam_diff;
 // netfam_diff (p1-mb-netfam): libpq ifaddr + pqformat two-crate family.
 pub mod netfam_diff;
 pub use netfam_diff::netfam_diff;
+// hstorefam_diff (p1-mb-contribc): contrib/hstore vs vendored 18.3 C.
+pub mod hstorefam_diff;
+pub use hstorefam_diff::hstorefam_diff;
