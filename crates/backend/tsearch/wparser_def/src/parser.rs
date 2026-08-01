@@ -301,6 +301,22 @@ fn new_tparser_position(prev: Option<&TParserPosition>) -> TParserPosition {
     res
 }
 
+// pg_locale.c char2wchar's mbstowcs-failure ereport: errcode
+// ERRCODE_CHARACTER_NOT_IN_REPERTOIRE (22021) + the LC_CTYPE hint — NOT the
+// internal-error default (found by wparser_diff's error-sqlstate plane:
+// Rust XX000 vs C 22021 on valid UTF-8 the process locale cannot convert;
+// glibc's C-locale mbstowcs rejects non-ASCII). Sqlstate pinned by
+// tests::invalid_multibyte_for_locale_sqlstate.
+#[cold]
+fn invalid_multibyte_for_locale() -> Box<::types_error::PgError> {
+    ::types_error::PgError::error("invalid multibyte character for locale")
+        .with_sqlstate(::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        .with_hint(
+            "The server's LC_CTYPE locale is probably incompatible with the database encoding.",
+        )
+        .into()
+}
+
 // char2wchar with C's NULL pg_locale_t: plain mbstowcs in the current locale.
 fn char2wchar_default(head: &[u8]) -> PgResult<Vec<u32>> {
     let mut nul = Vec::with_capacity(head.len() + 1);
@@ -317,10 +333,7 @@ fn char2wchar_default(head: &[u8]) -> PgResult<Vec<u32>> {
     };
     if n == usize::MAX {
         ::mbutils::pg_verifymbstr(head, false)?;
-        return Err(::types_error::PgError::error(
-            "invalid multibyte character for locale",
-        )
-        .into());
+        return Err(invalid_multibyte_for_locale());
     }
     // C TParserInit allocates lenstr+1 wchar slots and char2wchar fills n of
     // them (plus the terminating 0 when it fits), so wstr[poschar] is always
@@ -820,4 +833,21 @@ pub fn tparser_get(prs: &mut TParser) -> PgResult<bool> {
     }
 
     Ok(matches!(last_flags, Some(f) if f & A_BINGO != 0))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression (wparser_diff error-sqlstate plane, 2026-08-01): the
+    /// char2wchar mbstowcs-failure error must carry pg_locale.c's
+    /// ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, not the XX000 default. The
+    /// failure itself is only reachable when the process locale rejects the
+    /// input (glibc C locale, non-ASCII) — this pins the error construction
+    /// on every platform; the two-sided witness lives in the wparser_diff
+    /// driver (tests::char2wchar_failure_sqlstate + corpus seed
+    /// seed-char2wchar-sqlstate).
+    #[test]
+    fn invalid_multibyte_for_locale_sqlstate() {
+        let e = super::invalid_multibyte_for_locale();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+    }
 }

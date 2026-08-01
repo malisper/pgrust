@@ -332,6 +332,26 @@ mod tests {
         }
     }
 
+    /// Regression (ASan-treewide divergence triage, 2026-08-01): valid UTF-8
+    /// the PROCESS LOCALE cannot convert (mbstowcs failure in char2wchar,
+    /// the UTF8 + !ctype_is_c wstr arm). Rust raised the XX000 internal
+    /// default where C raises ERRCODE_CHARACTER_NOT_IN_REPERTOIRE (22021)
+    /// with the LC_CTYPE hint — pg_locale.c char2wchar. Whether the error
+    /// fires at all depends on the host libc's C-locale mbstowcs (it does on
+    /// glibc, which rejects non-ASCII); both sides share the one libc, so
+    /// the diff is deterministic either way. Corpus twin:
+    /// fuzz/corpus/wparser_diff/seed-char2wchar-sqlstate.
+    #[test]
+    fn char2wchar_failure_sqlstate() {
+        // "80" + U+175C0 (the CI cluster repro), all encodings x ctype postures.
+        let text = b"80\xf0\x97\x97\x80";
+        for sel_base in [0u8, 1, 2] {
+            for ctype in [0u8, 0x80] {
+                run(sel_base | ctype, text);
+            }
+        }
+    }
+
     /// Invalid / truncated multibyte sequences under UTF8 (the arm where
     /// pg_mblen / pg_mb2wchar / mbstowcs can disagree with a naive walk).
     #[test]
