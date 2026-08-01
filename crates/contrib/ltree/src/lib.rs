@@ -995,7 +995,7 @@ mod tests {
                 .join()
                 .unwrap();
             let h = std::thread::Builder::new()
-                .stack_size(2 << 20)
+                .stack_size(8 << 20)
                 .spawn(move || {
                     if armed {
                         stack_depth::set_stack_base();
@@ -1126,8 +1126,9 @@ mod tests {
     /// measured ~3 KiB/frame that cap was unreachable behind any real backend
     /// stack, so the guard was dead code and deep nesting overflowed the stack
     /// and SIGABRTed the whole process (thread-per-backend => every session).
-    /// Measured before the fix (local, --release): abort at depth 700 on the
-    /// 2 MiB child_thread_stack_size() floor, and at 2800 on an 8 MiB rlimit.
+    /// Measured before the fix (local, --release, guard absent so no pairing
+    /// could have saved it): abort at nesting depth 700 on a 2 MiB stack and at
+    /// 2800 on the 8 MiB RLIMIT_STACK a backend thread normally gets.
     /// PostgreSQL 18.3 (docker postgres:18.3) returns a value at 5000 and
     /// raises 54001 at 9000 — it never dies.
     ///
@@ -1144,9 +1145,12 @@ mod tests {
             s.push(b'a');
             s.extend(std::iter::repeat(b')').take(depth));
             let h = std::thread::Builder::new()
-                // the child_thread_stack_size() floor: the worst case a real
-                // backend thread can get.
-                .stack_size(2 << 20)
+                // The production pairing: child_thread_stack_size() hands a
+                // backend thread RLIMIT_STACK (8 MiB typical) while PG's boot
+                // logic caps max_stack_depth at 2048 kB, i.e. 4x headroom for
+                // the guard to fire in. Pairing a 2 MiB stack WITH a 2048 kB
+                // limit leaves zero headroom and cannot work in any profile.
+                .stack_size(8 << 20)
                 .spawn(move || {
                     // A backend thread records its stack base at spawn (C:
                     // main()); without it stack_is_too_deep() short-circuits on
