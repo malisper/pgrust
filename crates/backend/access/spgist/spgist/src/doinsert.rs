@@ -1547,8 +1547,10 @@ pub fn spgdoinsert<'m>(
         } else if current.blkno != parent.blkno {
             current.buffer = bufmgr::read_buffer::call(index, current.blkno)?;
             if !bufmgr::conditional_lock_buffer::call(current.buffer)? {
-                bufmgr::release_buffer::call(current.buffer)?;
-                unlock_release(parent.buffer)?;
+                let current_release = bufmgr::release_buffer::call(current.buffer);
+                let parent_release = unlock_release(parent.buffer);
+                current_release?;
+                parent_release?;
                 return Ok(false);
             }
         } else {
