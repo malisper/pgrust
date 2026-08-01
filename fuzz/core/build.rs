@@ -975,6 +975,8 @@ fn main() {
         jsonpath.file(format!("csrc/jsonpath/{f}"));
     }
     jsonpath
+        // weak strlcpy compat (pre-2.38 glibc CI cluster pods; see the TU header)
+        .file("csrc/pg_strlcpy_compat.c")
         .include("csrc/jsonpath/include")
         .include("csrc/jsonpath")
         .flag_if_supported("-fno-strict-aliasing")
@@ -1155,6 +1157,84 @@ fn main() {
         .flag_if_supported("-fwrapv")
         .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_regexlocale");
+
+    // trgm_diff arm 9 oracle (p1-trgm phase B): verbatim 18.3 trgm_regexp.c
+    // (csrc/pg_trgm_regexp_io.c, generator-assembled) + WHOLE-FILE verbatim
+    // order-bearing infrastructure under csrc/trgmrxfam/ (dynahash — its
+    // hash_seq_search iteration order is semantics for packGraph; PG qsort —
+    // penalty-comparator ties are real; list.c; hashfn tag_hash;
+    // pg_bitutils; regexport). Own cc build: the trgmrxfam shim include
+    // tree supplies postgres.h etc., and csrc/regexfam(+include) supplies
+    // the regex engine headers (the engine OBJECTS come from the regexfam
+    // build above; only pg_reg_* introspection compiles here). Every
+    // vendored extern is renamed trgmrx_* (hashfn/list/dynahash/qsort
+    // symbols collide with other oracle TUs' unprefixed vendored copies,
+    // e.g. pg_hashfn_io.c's hash_bytes).
+    let mut trgmrxfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        trgmrxfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    const TRGMRX_SHARED_SYMS: &[&str] = &[
+        // dynahash.c
+        "hash_create", "hash_destroy", "hash_stats", "hash_get_num_entries",
+        "hash_search", "hash_search_with_hash_value", "get_hash_value",
+        "hash_update_hash_key", "hash_seq_init",
+        "hash_seq_init_with_hash_value", "hash_seq_search", "hash_seq_term",
+        "hash_freeze", "hash_estimate_size", "hash_select_dirsize",
+        "hash_get_shared_size", "AtEOXact_HashTables",
+        "AtEOSubXact_HashTables", "string_hash", "tag_hash", "uint32_hash",
+        // hashfn.c
+        "hash_bytes", "hash_bytes_extended", "hash_bytes_uint32",
+        "hash_bytes_uint32_extended", "bitmap_hash", "bitmap_match",
+        // list.c (the subset list.c defines; unreferenced ones are inert)
+        "lappend", "lappend_int", "lappend_oid", "lappend_xid",
+        "list_concat", "list_concat_copy", "list_copy", "list_copy_head",
+        "list_copy_tail", "list_copy_deep", "list_delete",
+        "list_delete_ptr", "list_delete_int", "list_delete_oid",
+        "list_delete_first", "list_delete_last", "list_delete_first_n",
+        "list_delete_nth_cell", "list_delete_cell", "list_free",
+        "list_free_deep", "list_insert_nth", "list_insert_nth_int",
+        "list_insert_nth_oid", "list_member", "list_member_ptr",
+        "list_member_int", "list_member_oid", "list_member_xid",
+        "list_append_unique", "list_append_unique_ptr",
+        "list_append_unique_int", "list_append_unique_oid",
+        "list_concat_unique", "list_concat_unique_ptr",
+        "list_concat_unique_int", "list_concat_unique_oid",
+        "list_intersection", "list_intersection_int", "list_difference",
+        "list_difference_ptr", "list_difference_int", "list_difference_oid",
+        "list_union", "list_union_ptr", "list_union_int", "list_union_oid",
+        "list_sort", "list_deduplicate_oid", "list_make1_impl",
+        "list_make2_impl", "list_make3_impl", "list_make4_impl",
+        "list_make5_impl", "new_head_cell", "new_tail_cell", "lcons",
+        "lcons_int", "lcons_oid", "list_nth_cell",
+        // pg_bitutils.c
+        "pg_leftmost_one_pos", "pg_rightmost_one_pos", "pg_number_of_ones",
+        "pg_popcount32_slow", "pg_popcount64_slow", "pg_popcount_slow",
+        "pg_popcount_masked_slow", "pg_popcount32", "pg_popcount64",
+        "pg_popcount_optimized", "pg_popcount_masked_optimized",
+        // qsort.c (strlcpy is renamed at source level in the shim
+        // postgres.h -- Apple's fortified string.h owns the bare name)
+        "pg_qsort",
+    ];
+    for s in TRGMRX_SHARED_SYMS {
+        trgmrxfam.define(s, format!("trgmrx_{s}").as_str());
+    }
+    trgmrxfam
+        .define("_GNU_SOURCE", None)
+        .file("csrc/trgmrxfam/dynahash.c")
+        .file("csrc/trgmrxfam/list.c")
+        .file("csrc/trgmrxfam/hashfn.c")
+        .file("csrc/trgmrxfam/pg_bitutils.c")
+        .file("csrc/trgmrxfam/qsort.c")
+        .file("csrc/trgmrxfam/strlcpy.c")
+        .file("csrc/trgmrxfam/regexport.c")
+        .file("csrc/pg_trgm_regexp_io.c")
+        .include("csrc/trgmrxfam/include")
+        .include("csrc/regexfam")
+        .include("csrc/regexfam/include")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .compile("pg_difffuzz_trgmrxfam");
 
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");
