@@ -1697,6 +1697,7 @@ dependencies = [
  "fd",
  "fmgr_core",
  "fmgr_seams",
+ "guc",
  "guc_tables",
  "hashfn",
  "heaptuple",
@@ -1705,6 +1706,7 @@ dependencies = [
  "integerset",
  "keywords",
  "libc",
+ "localtime",
  "lsyscache",
  "mbutils",
  "mbutils_seams",
@@ -1741,9 +1743,11 @@ dependencies = [
  "scalar_seams",
  "scram_common",
  "stack_depth",
+ "strftime",
  "stringinfo",
  "syscache_seams",
  "timestamp_seams",
+ "ts_locale",
  "tupdesc",
  "typcache",
  "types_core",
@@ -1753,6 +1757,7 @@ dependencies = [
  "types_portal",
  "types_storage",
  "types_tuple",
+ "tzparser",
  "unicode_category",
  "varlena",
  "wait_error",
@@ -5832,6 +5837,17 @@ dependencies = [
  "mcx",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "tzparser"
+version = "0.0.0"
+dependencies = [
+ "adt_datetime",
+ "guc",
+ "init_small",
+ "mcx",
+ "pg_path",
 ]
 
 [[package]]

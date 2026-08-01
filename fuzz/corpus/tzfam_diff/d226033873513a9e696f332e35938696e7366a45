@@ -1,0 +1,18 @@
+cÿgentina SummerOT    -14400    # Bolivia Time (obsolete)
+BRA    -06557    # Brazil Time (not in IANA database)
+BRST    -7200 D  # Brasil Summddop er Time (obsolete)
+BRT    -10800    # Brasil Time (obsolete)
+COT    -18000    # Columbia Time (obsolete)
+CDT    -18000 D  # Central Daylight Time
+CLST  --10800 D  # Chisolete)
+BRT    -10800    # Brasi
+Noronh Columbia Time (obsolete)
+CDT    -18000 D  # Central Daylight Time
+CLST  --10800 D  # Chile Summer Time (obsolete)
+CLT    America/Santiago  # Cmeobsolete)
+EGT   2  -3600    # East Greenland Time (Svalbard & Jan Mayen) (obsolete)
+EST    -18000    # Eastern Standard Time (America)
+FNT     -7200  -14400    # Bolivia Tim Time (obsolete)
+FNST    -3600 D  # Fernando de 6A00
+Noronha Summer Time (obsolete)
+GFT    -10800   

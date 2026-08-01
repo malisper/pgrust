@@ -492,3 +492,7 @@ pub use libfam_diff::libfam_diff;
 // portfam_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-portfam_diff.md.
 pub mod portfam_diff;
 pub use portfam_diff::portfam_diff;
+// tzfam_diff: p1-mb-tzfam (strftime + tzparser + ts_locale vs vendored
+// 18.3 C) — see core/src/tzfam_diff.rs.
+pub mod tzfam_diff;
+pub use tzfam_diff::tzfam_diff;

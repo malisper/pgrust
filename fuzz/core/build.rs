@@ -33,6 +33,10 @@ fn main() {
         // varlena.c text family + formatting.c asc_* kernels + the mbutils/
         // wchar multibyte walkers behind them (see pg_oraclefam_io.c header).
         .file("csrc/pg_oraclefam_io.c")
+        // tzfam_diff oracle (p1-mb-tzfam): verbatim 18.3 strftime.c +
+        // tzparser.c + datetime.c ConvertTimeZoneAbbrevs + ts_locale.c
+        // t_is* macros (see pg_tzfam_io.c header for provenance + shims).
+        .file("csrc/pg_tzfam_io.c")
         // COMPILE GATE (array_userfuncs_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_array_userfuncs_io.c is filled
         // with verbatim vendored C (README-TODO-array_userfuncs_diff.md step 1).

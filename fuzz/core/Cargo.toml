@@ -153,5 +153,12 @@ pgstrcasecmp = { path = "../../crates/port/pgstrcasecmp" }  # portfam_diff
 pg_path = { path = "../../crates/port/pg_path" }  # portfam_diff
 bufmask = { path = "../../crates/backend/access/common/bufmask" }  # portfam_diff
 
+# tzfam_diff (p1-mb-tzfam); adt_datetime/pg_locale/mbutils/wchar/mcx/types_error already above
+strftime = { path = "../../crates/backend/timezone/strftime" }
+localtime = { path = "../../crates/backend/timezone/localtime" }
+tzparser = { path = "../../crates/backend/utils/misc/tzparser" }
+ts_locale = { path = "../../crates/backend/tsearch/ts_locale" }
+guc = { path = "../../crates/backend/utils/misc/guc" }
+
 [build-dependencies]
 cc = "1"

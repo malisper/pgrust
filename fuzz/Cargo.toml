@@ -412,6 +412,10 @@ doc = false
 [[bin]]
 name = "portfam_diff"
 path = "fuzz_targets/portfam_diff.rs"
+# tzfam_diff (p1-mb-tzfam): strftime + tzparser + ts_locale family.
+[[bin]]
+name = "tzfam_diff"
+path = "fuzz_targets/tzfam_diff.rs"
 test = false
 doc = false
 bench = false
