@@ -481,3 +481,7 @@ pub use like_diff::like_diff;
 // regexp_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-regexp_diff.md.
 pub mod regexp_diff;
 pub use regexp_diff::regexp_diff;
+
+// netfam_diff (p1-mb-netfam): libpq ifaddr + pqformat two-crate family.
+pub mod netfam_diff;
+pub use netfam_diff::netfam_diff;
