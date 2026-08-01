@@ -1234,17 +1234,8 @@ wfam_x_valid_server_encoding(const char *name)
 	return pg_valid_server_encoding(name);
 }
 
-/* ==== VERBATIM: pg_wchar_strlen (src/backend/utils/mb/wstrncmp.c lines
- * 69..77 @ 62d6c7d3df). Referenced by pg_wchar2mb above; the original
- * extract omitted it, leaving every fuzz binary on this branch with an
- * unresolved _pg_wchar_strlen at link (found by miscfam_diff build,
- * p1-mb-miscfam). Declared extern in wcharfam/mb/pg_wchar.h line 699. ==== */
-size_t
-pg_wchar_strlen(const pg_wchar *str)
-{
-	const pg_wchar *s;
-
-	for (s = str; *s; ++s)
-		;
-	return (s - str);
-}
+/* pg_wchar_strlen: both p1-mb-miscfam and p1-mb-portfam independently fixed
+ * the missing-definition link break; the merge keeps ONE definition — the
+ * verbatim TU csrc/wcharfam/wstrncmp.c (registered in build.rs) — because a
+ * second in-file copy here is a duplicate symbol under Linux ld (the exact
+ * failure class that broke the CI cluster fuzz build at 2c0bf108f008). */
