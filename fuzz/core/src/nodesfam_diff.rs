@@ -1,0 +1,951 @@
+//! nodesfam_diff: differential fuzz driver for the three node-walker crates
+//! vs verbatim vendored PostgreSQL 18.3 C (csrc/pg_nodesfam_io.c, upstream
+//! sha 62d6c7d3df; lane p1-nodes):
+//!
+//!   crates/backend/nodes/readfuncs — stringToNode (read.c + readfuncs.c)
+//!   crates/backend/nodes/outfuncs  — nodeToString (outfuncs.c)
+//!   crates/backend/nodes/copyfuncs — copyObject   (copyfuncs.c)
+//!
+//! ONE fixture drives all three: the input is node-text (the outfuncs
+//! serialization language). Pipeline per exec, both sides:
+//!
+//!     read(text) -> node
+//!     out(node) -> text'                        [outfuncs vs _outNode]
+//!     copy(node) -> node2; out(node2) -> text'' [copyfuncs vs copyObject]
+//!     read(text') -> node3; out(node3)          [round-trip stability]
+//!     C only: equal(node, copy)                 [equalfuncs witness]
+//!
+//! Comparison planes (all compared on every exec where both sides accept):
+//!   P1 out-text bytes:      rust text' == C text'
+//!   P2 copy self-oracle:    text'' == text' on EACH side independently
+//!   P3 round-trip:          re-read/re-out == text' on EACH side
+//!   P4 C equal(node, copy)  (C-side witness that the copy is structural)
+//!   P5 verdict + errcode:   accept/reject agree; on structured errors the
+//!      packed sqlstate matches (SqlState uses C's MAKE_SQLSTATE encoding,
+//!      so C's int compares directly; e.g. 54001 stack-depth on both sides)
+//!
+//! SCOPE (the honest-verdict rules; see the tag census in tests.rs):
+//!   The Rust crates are chartered SCOPED ports of the catalog-stored node
+//!   universe (pg_rewrite ev_action / pg_attrdef adbin / pg_constraint
+//!   conbin / pg_trigger tgqual): readfuncs dispatches 80 of C's 316
+//!   labels, outfuncs 87 of C's 387 tags, copyfuncs 321 of C's 336. Out of
+//!   scope, the ports PANIC BY CHARTER ("loud panic naming the C reader").
+//!   Verdict table for one exec:
+//!     C=err,  Rust=err/panic  -> PASS (both reject; errcode compared when
+//!                                the Rust side is a structured PgError)
+//!     C=ok,   Rust=ok         -> compare P1..P4
+//!     C=err,  Rust=ok         -> DIVERGENCE (Rust accepted what C rejects)
+//!     C=ok,   Rust=PgError    -> DIVERGENCE (structured over-rejection)
+//!     C=ok,   Rust=panic:
+//!         every {LABEL in the input is port-dispatched -> DIVERGENCE
+//!           (in-scope panic: either a port hole or a value-scope carve
+//!           that must be documented here — none are documented yet)
+//!         any label outside the port set -> SCOPE CARVE (counted, OK;
+//!           this is the chartered loud-panic arm)
+//!
+//! Value-node arm (selector): C reads bare `true`/`1.5`/`b101` tokens as
+//! Boolean/Float/BitString value nodes; the Rust read port carries only
+//! quoted strings + integers (list elements in the SELECT-rule universe).
+//! The out/copy arms for Float/Boolean/String/Integer/BitString are still
+//! port surface, so arm 1 BUILDS the value/list nodes programmatically
+//! (types_nodes constructors over fuzz bytes), rust-outs them, and feeds
+//! the text to the C pipeline: C read(text) must accept and re-out the
+//! identical bytes, plus copy planes on both sides.
+//!
+//! Interior NUL: both sides get the input TRUNCATED at the first NUL (C
+//! stringToNode is char*-terminated; feeding Rust the longer slice would
+//! compare different inputs, the tzparser lesson).
+//!
+//! Recursion guard: C check_stack_depth is vendored REAL (stack_depth.c)
+//! and pinned to the server-default 2048kB; the Rust side pins the same
+//! via the stack_depth crate. THE GUARDS ARE PART OF THE SURFACE: the
+//! p1-nodes lane ADDED the missing check_stack_depth calls to all three
+//! Rust walkers (C parity, readfuncs.c:578 / outfuncs.c:733 /
+//! copyfuncs.c:185) — before that fix, deep nesting crashed the process
+//! where C raises 54001.
+
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int};
+use std::sync::OnceLock;
+
+use mcx::Mcx;
+use types_error::{PgError, PgResult};
+use types_nodes::Node;
+
+/// Intern a &str into the context arena (the copyfuncs str_in shape).
+fn intern<'m>(m: Mcx<'m>, s: &str) -> PgResult<&'m str> {
+    let v = mcx::slice_in(m, s.as_bytes())?;
+    // SAFETY: verbatim copy of a &str
+    Ok(unsafe { core::str::from_utf8_unchecked(v.leak()) })
+}
+
+#[repr(C)]
+struct NfOut {
+    verdict: c_int,   // 0 ok, 1 ereport(ERROR) captured
+    errcode: c_int,   // packed sqlstate (MAKE_SQLSTATE encoding)
+    out_text: *const c_char,
+    copy_text: *const c_char,
+    equal_ok: c_int,  // equal(node, copyObject(node))
+    reread_ok: c_int, // out(read(out_text)) == out_text
+}
+
+extern "C" {
+    fn pg_nf_init();
+    fn pg_nf_exec(input: *const c_char) -> *const NfOut;
+}
+
+/// C oracle verdict for one input text.
+#[derive(Debug, PartialEq)]
+enum COut {
+    Ok { out: Vec<u8>, copy: Vec<u8>, equal_ok: bool, reread_ok: bool },
+    Err { errcode: i32 },
+}
+
+fn c_exec(input: &[u8]) -> COut {
+    rust_stack_init();
+    let cs = CString::new(input).expect("caller truncates at NUL");
+    unsafe {
+        let r = &*pg_nf_exec(cs.as_ptr());
+        if r.verdict != 0 {
+            return COut::Err { errcode: r.errcode };
+        }
+        let out = std::ffi::CStr::from_ptr(r.out_text).to_bytes().to_vec();
+        let copy = std::ffi::CStr::from_ptr(r.copy_text).to_bytes().to_vec();
+        COut::Ok { out, copy, equal_ok: r.equal_ok == 1, reread_ok: r.reread_ok == 1 }
+    }
+}
+
+/// Rust pipeline verdict for one input text.
+enum ROut {
+    Ok { out: Vec<u8>, copy: Vec<u8>, reread_ok: bool },
+    /// Ok(None): the "<>" null-node marker.
+    NullNode,
+    Err { errcode: i32 },
+    Panic { msg: String },
+}
+
+thread_local! {
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm the guards ONCE PER THREAD.
+///
+/// NOT once per process: C's `stack_base_ptr` is a process-global static and
+/// Rust's is thread-local, so a base recorded on thread A is meaningless on
+/// thread B — the computed depth becomes the distance between two unrelated
+/// stacks, the guard fires on EVERY input, and the whole campaign silently
+/// measures nothing but the depth-carve arm (the exact 2.5x-understatement
+/// failure this campaign already root-caused once, ASan fake-stack edition).
+/// Caught here by six tests going red the moment the process ran more than
+/// one test thread.
+fn rust_stack_init() {
+    if !ARMED.get() {
+        rearm_stack_bases();
+        ARMED.set(true);
+    }
+}
+
+/// Re-arm BOTH stack bases in the CALLING thread and pin max_stack_depth to
+/// the server default 2048kB on both sides.
+///
+/// Why this is public and per-thread: C's `stack_base_ptr` is a process
+/// static and Rust's is thread-local, so a base recorded on thread A is
+/// meaningless on thread B — and the guard must be armed relative to the
+/// stack the walkers actually recurse on. libFuzzer drives one thread, so
+/// the OnceLock path above is right there; the deep-nesting test drives a
+/// dedicated big-stack thread and calls this explicitly. A guard armed 2048kB
+/// deep on a 2 MiB test-harness thread would be armed BEYOND the real stack
+/// end — which is exactly how a "guard" silently becomes a stack overflow.
+pub fn rearm_stack_bases() {
+    unsafe { pg_nf_init() };
+    ARMED.set(true);
+    stack_depth_core::set_stack_base();
+    stack_depth_core::set_max_stack_depth(2048);
+    stack_depth_core::assign_max_stack_depth(2048);
+}
+
+fn rust_exec(input: &str) -> ROut {
+    rust_stack_init();
+    let input = input.to_owned();
+    // The scoped ports panic BY CHARTER outside the catalog node universe;
+    // comparator failures live OUTSIDE this catch so a divergence still
+    // aborts the exec (fuzz artifact).
+    let caught = std::panic::catch_unwind(move || -> Result<Option<(Vec<u8>, Vec<u8>, bool)>, Box<PgError>> {
+        let cx = mcx::MemoryContext::new("nodesfam_fuzz");
+        let m = cx.mcx();
+        let Some(node) = readfuncs::stringToNodeNullable(m, &input)? else {
+            return Ok(None);
+        };
+        let out1 = outfuncs::nodeToString(m, node)?;
+        let copy = copyfuncs::copy_object(m, node)?;
+        let out2 = outfuncs::nodeToString(m, copy)?;
+        // Round-trip stability: re-read our own output, re-out it. MUST use
+        // the NULLABLE entry: an empty List out-texts to "<>" (C's NIL and
+        // C's NULL node are the SAME value — read.c returns (Node *) NIL —
+        // so "<>" is a legitimate re-read input), and the non-nullable entry
+        // panics on it by charter.
+        let out3 = match readfuncs::stringToNodeNullable(m, out1.as_str())? {
+            Some(node3) => outfuncs::nodeToString(m, node3)?.as_str().to_owned(),
+            None => "<>".to_owned(),
+        };
+        let reread_ok = out1.as_str() == out3;
+        Ok(Some((
+            out1.as_str().as_bytes().to_vec(),
+            out2.as_str().as_bytes().to_vec(),
+            reread_ok,
+        )))
+    });
+    match caught {
+        Ok(Ok(Some((out, copy, reread_ok)))) => ROut::Ok { out, copy, reread_ok },
+        Ok(Ok(None)) => ROut::NullNode,
+        Ok(Err(e)) => ROut::Err { errcode: e.sqlstate().0 },
+        Err(payload) => ROut::Panic { msg: panic_msg(&payload) },
+    }
+}
+
+fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_owned()
+    }
+}
+
+/// The port's read dispatch set, extracted at compile time from the crate
+/// source of truth (the `b"LABEL" => self.read_*` arms). tests.rs asserts
+/// this parse is exact and a subset of the C switch.
+pub fn port_read_labels() -> &'static Vec<&'static str> {
+    static LABELS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    LABELS.get_or_init(|| {
+        let src: &str = include_str!("../../../crates/backend/nodes/readfuncs/src/lib.rs");
+        let mut v = Vec::new();
+        for line in src.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("b\"") {
+                if let Some(idx) = rest.find("\" => self.read_") {
+                    v.push(&rest[..idx]);
+                }
+            }
+        }
+        v.sort_unstable();
+        v.dedup();
+        assert!(
+            v.len() >= 70,
+            "port_read_labels parse collapsed ({} labels) — dispatch regex drifted",
+            v.len()
+        );
+        v
+    })
+}
+
+/// C readfuncs switch label set, from the vendored GENERATED switch file.
+pub fn c_read_labels() -> &'static Vec<&'static str> {
+    static LABELS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    LABELS.get_or_init(|| {
+        let src: &str = include_str!("../csrc/nodesfam/gen/readfuncs.switch.c");
+        let mut v = Vec::new();
+        for line in src.lines() {
+            if let Some(rest) = line.trim().strip_prefix("if (MATCH(\"") {
+                if let Some(idx) = rest.find('"') {
+                    v.push(&rest[..idx]);
+                }
+            }
+        }
+        v.sort_unstable();
+        v.dedup();
+        assert!(v.len() > 300, "c_read_labels parse collapsed: {}", v.len());
+        v
+    })
+}
+
+
+/// EXPECTED FIELD SEQUENCE per C node label, parsed from the GENERATED C
+/// reader bodies (csrc/nodesfam/gen/readfuncs.funcs.c) plus the hand-written
+/// readers in csrc/nodesfam/src/readfuncs.c.
+///
+/// WHY THIS GATE EXISTS (harness finding of record, lane p1-nodes): C's node
+/// readers are NOT hardened against malformed text — catalog node strings are
+/// written by C's own outfuncs and therefore TRUSTED. Only a handful of shapes
+/// elog; a wrong field NAME or a missing field walks the reader off the token
+/// stream and dereferences garbage. Feeding libFuzzer's raw mutations straight
+/// to the oracle SIGSEGVs the C side (witnessed: `{CREATESTMT :relation <>}`,
+/// a 1-of-13-fields truncation, segfaults inside _readCreateStmt), and those
+/// crashes are neither pgrust defects nor meaningful upstream defects.
+///
+/// So the COMPARED DOMAIN is well-formed node text: for every `{LABEL ...}`
+/// block whose LABEL C knows, the field-name sequence must equal C's expected
+/// sequence exactly. Field VALUES, nesting, list contents, escaping and
+/// whitespace stay fully free for the fuzzer — that is where the interesting
+/// surface is. Unknown labels pass the gate untouched (C's parseNodeString
+/// elogs "badly formatted node string" before touching any field, which is a
+/// compared error-verdict, not a crash).
+fn expected_fields() -> &'static std::collections::HashMap<String, Vec<String>> {
+    static MAP: OnceLock<std::collections::HashMap<String, Vec<String>>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        // fn name -> ordered field list
+        let mut bodies: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for src in [
+            include_str!("../csrc/nodesfam/gen/readfuncs.funcs.c"),
+            include_str!("../csrc/nodesfam/src/readfuncs.c"),
+        ] {
+            let mut cur: Option<String> = None;
+            for line in src.lines() {
+                if let Some(rest) = line.strip_prefix("_read") {
+                    if let Some(i) = rest.find("(void)") {
+                        cur = Some(format!("_read{}", &rest[..i]));
+                        bodies.entry(cur.clone().unwrap()).or_default();
+                        continue;
+                    }
+                }
+                if line == "}" {
+                    cur = None;
+                    continue;
+                }
+                let t = line.trim();
+                if let (Some(f), Some(open)) = (cur.as_ref(), t.find('(')) {
+                    if t.starts_with("READ_") && !t.starts_with("READ_LOCALS")
+                        && !t.starts_with("READ_TEMP_LOCALS") && !t.starts_with("READ_DONE")
+                    {
+                        let inner = &t[open + 1..];
+                        let name: String = inner
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        if !name.is_empty() {
+                            bodies.get_mut(f).expect("body").push(name);
+                        }
+                    }
+                }
+            }
+        }
+        // label -> fn, from the generated switch. The MATCH test and the
+        // _read call sit on CONSECUTIVE lines, so pair them with lookahead.
+        let mut out = std::collections::HashMap::new();
+        let sw: Vec<&str> = include_str!("../csrc/nodesfam/gen/readfuncs.switch.c")
+            .lines()
+            .collect();
+        for (k, line) in sw.iter().enumerate() {
+            let t = line.trim();
+            let Some(rest) = t.strip_prefix("if (MATCH(\"") else { continue };
+            let Some(i) = rest.find('"') else { continue };
+            let label = &rest[..i];
+            let Some(next) = sw.get(k + 1) else { continue };
+            let Some(j) = next.find("_read") else { continue };
+            let fname: String = next[j..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if let Some(fields) = bodies.get(&fname) {
+                out.insert(label.to_string(), fields.clone());
+            }
+        }
+        assert!(out.len() > 250, "field-sequence map collapsed: {}", out.len());
+        out
+    })
+}
+
+/// Split node text into `{LABEL field-name...}` blocks and check each against
+/// C's expected field sequence. Returns false when the text is outside the
+/// trusted-input contract (and therefore outside the compared domain).
+/// The 6 node labels whose C reader is HAND-WRITTEN (not generated) and whose
+/// field sequence is therefore CONDITIONAL — `_readRangeTblEntry` switches on
+/// rtekind, `_readA_Expr` on kind, `_readConst`/`_readBoolExpr`/`_readA_Const`/
+/// `_readExtensibleNode` consume fields with raw `pg_strtok`. No static
+/// sequence models them, so they are gated against the field-name sequences
+/// OBSERVED IN THE C-VALIDATED SEED CORPUS (values, nesting and escaping stay
+/// free; only the shape is pinned). Adding an rtekind variant = adding a
+/// validated seed. `custom_reader_labels_match_the_c_source` keeps this list
+/// equal to the hand-written reader set.
+pub const CUSTOM_READER_LABELS: &[&str] = &[
+    "BOOLEXPR", "CONST", "RANGETBLENTRY", "A_CONST", "A_EXPR", "EXTENSIBLENODE",
+];
+
+/// Field-name sequences for the custom-reader labels, learned from the
+/// committed corpus (each seed was validated against the C oracle before it
+/// was written).
+fn custom_shapes() -> &'static std::collections::HashMap<String, Vec<Vec<String>>> {
+    static MAP: OnceLock<std::collections::HashMap<String, Vec<Vec<String>>>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut out: std::collections::HashMap<String, Vec<Vec<String>>> =
+            std::collections::HashMap::new();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let Ok(data) = std::fs::read(e.path()) else { continue };
+                // seeds carry the arm selector byte
+                let body = if data.first() == Some(&0) { &data[1..] } else { &data[..] };
+                let Ok(text) = std::str::from_utf8(body) else { continue };
+                for (label, fields) in text_blocks(text) {
+                    if CUSTOM_READER_LABELS.contains(&label.as_str()) {
+                        out.entry(label).or_default().push(fields);
+                    }
+                }
+            }
+        }
+        for v in out.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        out
+    })
+}
+
+/// Every `{LABEL :field ... }` block in the text as (label, field-name-seq).
+/// Nested blocks are reported separately; a field whose value is a nested
+/// block does not contaminate the parent's sequence.
+fn text_blocks(text: &str) -> Vec<(String, Vec<String>)> {
+    let b = text.as_bytes();
+    let mut done: Vec<(String, Vec<String>)> = Vec::new();
+    let mut stack: Vec<(String, Vec<String>)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'}' {
+                    j += 1;
+                }
+                stack.push((text[start..j].to_owned(), Vec::new()));
+                i = j;
+            }
+            b'}' => {
+                if let Some(done_block) = stack.pop() {
+                    done.push(done_block);
+                }
+                i += 1;
+            }
+            b':' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                if let Some(top) = stack.last_mut() {
+                    top.1.push(text[start..j].to_owned());
+                }
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    done
+}
+
+fn is_well_formed(text: &str) -> bool {
+    // custom-reader labels: shape must match a corpus-validated sequence
+    for (label, fields) in text_blocks(text) {
+        if CUSTOM_READER_LABELS.contains(&label.as_str()) {
+            match custom_shapes().get(&label) {
+                Some(shapes) if shapes.iter().any(|s| *s == fields) => {}
+                _ => return false,
+            }
+        }
+    }
+    is_well_formed_generated(text)
+}
+
+fn is_well_formed_generated(text: &str) -> bool {
+    let b = text.as_bytes();
+    let exp = expected_fields();
+    let mut i = 0;
+    // stack of (label, next expected field index)
+    let mut stack: Vec<(Option<&Vec<String>>, usize)> = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'{' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'}' {
+                    j += 1;
+                }
+                let label = &text[start..j];
+                // custom readers are gated by shape above, not by sequence
+                let e = if CUSTOM_READER_LABELS.contains(&label) {
+                    None
+                } else {
+                    exp.get(label)
+                };
+                stack.push((e, 0));
+                i = j;
+            }
+            b'}' => {
+                if let Some((Some(fields), n)) = stack.pop() {
+                    // every field the reader will consume must have been named
+                    if n != fields.len() {
+                        return false;
+                    }
+                }
+                i += 1;
+            }
+            b':' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                let name = &text[start..j];
+                if let Some((Some(fields), n)) = stack.last_mut().map(|e| (e.0, &mut e.1)) {
+                    match fields.get(*n) {
+                        Some(expected) if expected == name => *n += 1,
+                        // C's READ macros compare the token to the field name
+                        // and elog on mismatch ONLY in some readers; treat any
+                        // deviation as out-of-domain.
+                        _ => return false,
+                    }
+                }
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    stack.is_empty()
+}
+
+/// Every `{LABEL`-shaped token in the input. Uppercase-or-underscore runs
+/// after `{`, exactly the token the C/Rust label dispatch sees.
+fn input_labels(text: &str) -> Vec<&str> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'{' {
+            let start = i + 1;
+            let mut j = start;
+            while j < b.len() && (b[j].is_ascii_uppercase() || b[j] == b'_' || b[j].is_ascii_digit())
+            {
+                j += 1;
+            }
+            if j > start {
+                out.push(&text[start..j]);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+
+/// NONNULL-FIELD CARVES (finding of record, lane p1-nodes).
+///
+/// The Rust read port asserts these 14 (label, field) pairs are non-NULL
+/// (`read_node("f")?.expect(...)`), where C's `READ_NODE_FIELD` accepts NULL
+/// without complaint. So for text carrying `:field <>` on one of these,
+/// C ACCEPTS and Rust PANICS.
+///
+/// Why this is a CARVE and not a live defect: every one of these fields is a
+/// mandatory child in C's own node contract (`Expr *arg` built by
+/// parse-analysis / the rewriter), and the only writer of the catalog columns
+/// these crates read is C's own outfuncs over such a node. A NULL there is
+/// not reachable from any PG-written text — it requires hand-edited catalog
+/// bytes. It IS a robustness delta worth recording: pgrust panics (backend
+/// crash class under thread-per-backend) where C would proceed and typically
+/// segfault later on the same NULL, so neither side is defensible on
+/// hand-corrupted input, and the port is not WORSE.
+///
+/// Recorded, not silent: the comparator counts these hits separately
+/// (NONNULL_CARVES) and `nonnull_carves_match_the_port` asserts the table
+/// still equals the port's actual set, so a new expect() in the port either
+/// gets a row here or turns the census test red.
+pub const NONNULL_FIELD_CARVES: &[(&str, &str)] = &[
+    ("RETURNINGEXPR", "retexpr"),
+    ("FIELDSELECT", "arg"),
+    ("FIELDSTORE", "arg"),
+    ("COLLATEEXPR", "arg"),
+    ("JOINEXPR", "larg"),
+    ("JOINEXPR", "rarg"),
+    ("TARGETENTRY", "expr"),
+    ("COERCEVIAIO", "arg"),
+    ("ARRAYCOERCEEXPR", "arg"),
+    ("CONVERTROWTYPEEXPR", "arg"),
+    ("PLACEHOLDERVAR", "phexpr"),
+    ("RELABELTYPE", "arg"),
+    ("COERCETODOMAIN", "arg"),
+    ("SUBLINK", "subselect"),
+];
+
+/// Executions charged to a NONNULL_FIELD_CARVES hit.
+pub static NONNULL_CARVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// ENUM-DOMAIN CARVES (finding of record, lane p1-nodes).
+///
+/// The Rust read port VALIDATES 25 node enum fields against their declared
+/// value sets and panics on anything else; C's `READ_ENUM_FIELD` casts the
+/// integer token blindly, so C ACCEPTS an out-of-domain enum and Rust
+/// PANICS. Same reachability argument as the non-null carves: the only
+/// writer of these catalog columns is C's own outfuncs over an in-memory
+/// node whose enum came from the parser, so out-of-domain values are not
+/// reachable from PG-written text. Recorded here rather than waived: the
+/// classification is BY PANIC MESSAGE (`readfuncs.c: bad <Enum> <n>`),
+/// counted in ENUM_CARVES, and `enum_carves_match_the_port` keeps the list
+/// equal to the port's actual validator set.
+pub const ENUM_DOMAIN_VALIDATORS: &[&str] = &[
+    "NullTestType", "WCOKind", "LockClauseStrength", "LockWaitPolicy",
+    "MinMaxOp", "XmlExprOp", "TableFuncType", "ParamKind",
+    "JsonConstructorType", "BoolTestType", "CmdType", "QuerySource",
+    "XmlOptionType", "RTEKind", "JoinType", "OverridingKind",
+    "MergeMatchKind", "CTEMaterialize", "LimitOption", "SetOperation",
+    "SubLinkType", "OnConflictAction", "VarReturningType", "CoercionForm",
+];
+
+pub static ENUM_CARVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// VALUE-TOKEN CARVE (charter, documented in the module header).
+///
+/// C's `nodeTokenType` (read.c) classifies bare tokens into FIVE value-node
+/// kinds: `true`/`false` -> Boolean, `"..."` -> String, `b...` -> BitString,
+/// digits -> Integer or Float. The Rust read port carries only the two that
+/// occur in catalog-stored trees (quoted String, Integer) and panics loudly
+/// on the rest — post-parse-analysis expression trees carry literals as
+/// `Const` nodes; bare Boolean/Float/BitString value nodes exist only inside
+/// raw-grammar `A_Const`, which never reaches these columns.
+///
+/// The OUT and COPY arms for those tags ARE port surface and ARE compared —
+/// by the arm-1 value-node builder, which constructs them programmatically
+/// and feeds the rendered text to C. So this carve costs the READ arm only.
+pub static VALUE_TOKEN_CARVES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Classification of a chartered Rust panic.
+enum PanicClass {
+    /// out-of-charter node label (scoped port) — chartered loud panic
+    OutOfCharter,
+    /// carved non-null field carrying `<>`
+    NonNull,
+    /// carved enum field out of its declared domain
+    EnumDomain,
+    /// bare Boolean/Float/BitString value token (read-set carve)
+    ValueToken,
+    /// anything else with every label in scope: a real divergence
+    Divergence,
+}
+
+fn classify_panic(text: &str, msg: &str, labels: &[&str]) -> PanicClass {
+    let port = port_read_labels();
+    if !labels.iter().all(|l| port.binary_search(l).is_ok()) {
+        return PanicClass::OutOfCharter;
+    }
+    if ENUM_DOMAIN_VALIDATORS
+        .iter()
+        .any(|e| msg.starts_with(&format!("readfuncs.c: bad {e} ")))
+    {
+        return PanicClass::EnumDomain;
+    }
+    if NONNULL_FIELD_CARVES
+        .iter()
+        .any(|(_, field)| text.contains(&format!(":{field} <>")))
+    {
+        return PanicClass::NonNull;
+    }
+    if let Some(tok) = msg
+        .strip_prefix("nodeRead (read.c): unhandled token \"")
+        .and_then(|r| r.split('"').next())
+    {
+        // classify by C's OWN rule (nodeTokenType), not by guesswork
+        let is_bool = tok == "true" || tok == "false";
+        let is_bitstring = tok.starts_with('b');
+        let first = tok.as_bytes().first().copied().unwrap_or(0);
+        let numeric_lead = first.is_ascii_digit()
+            || ((first == b'-' || first == b'+' || first == b'.')
+                && tok.len() > 1);
+        if is_bool || is_bitstring || numeric_lead {
+            return PanicClass::ValueToken;
+        }
+    }
+    PanicClass::Divergence
+}
+
+/// Number of executions that hit the chartered out-of-scope loud-panic arm
+/// (visible in unit tests; the fuzz loop just counts).
+pub static SCOPE_CARVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 54001 (ERRCODE_STATEMENT_TOO_COMPLEX), packed. The GUARD is part of the
+/// compared surface (both sides pin 2048kB), but the exact DEPTH at which
+/// it fires depends on native frame sizes, which are not a surface — so a
+/// one-sided 54001 near the threshold is a documented non-divergence
+/// (both-sides-guarded is separately witnessed by the deep-nesting seed
+/// test, which drives depth far past both thresholds).
+const SQLSTATE_54001: i32 = types_error::make_sqlstate(*b"54001").0;
+
+/// Arm 0: shared text pipeline. Returns true when a full P1..P4 comparison
+/// happened (used by the injection sweep + seed tests to prove liveness).
+pub fn run_text(input_bytes: &[u8]) -> bool {
+    // both sides see the identical NUL-truncated text
+    let nul = input_bytes.iter().position(|&b| b == 0).unwrap_or(input_bytes.len());
+    let text = match std::str::from_utf8(&input_bytes[..nul]) {
+        Ok(t) => t,
+        // C would see bytes Rust's &str cannot carry: skip non-UTF-8 —
+        // catalog node text is always server-encoding-clean.
+        Err(_) => return false,
+    };
+    // depth pre-bound: the 2048kB guard fires on both sides far below this;
+    // keep libFuzzer from burning time on megabyte brace towers
+    if text.len() > 1 << 20 {
+        return false;
+    }
+    // C read.c nodeRead's LIST recursion carries NO check_stack_depth in
+    // PostgreSQL itself (catalog node text is outfuncs-written, so depth is
+    // trusted); only the {LABEL} path is guarded (parseNodeString). A deep
+    // bare-paren tower would therefore overflow the REAL C oracle exactly
+    // as it overflows a real backend. Harness bound, mirroring the trusted-
+    // input posture; the {LABEL} guard itself IS exercised (deep_nesting
+    // seed test drives {} depth past both guards -> 54001 both sides).
+    {
+        let mut depth = 0usize;
+        let mut maxd = 0usize;
+        for &b in text.as_bytes() {
+            match b {
+                b'(' => {
+                    depth += 1;
+                    maxd = maxd.max(depth);
+                }
+                b')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        if maxd > 2000 {
+            return false;
+        }
+    }
+
+    // trusted-input contract: malformed node text is UB in C by design
+    if !is_well_formed(text) {
+        return false;
+    }
+
+    let c = c_exec(text.as_bytes());
+    let r = rust_exec(text);
+
+    match (c, r) {
+        (COut::Err { errcode: ce }, ROut::Err { errcode: re }) => {
+            assert_eq!(
+                ce, re,
+                "ERRCODE DIVERGENCE on {text:?}: C {ce:#x} vs Rust {re:#x}"
+            );
+            false
+        }
+        (COut::Err { .. }, ROut::Panic { .. }) => false, // both reject
+        // frame-size carve: one-sided stack-guard fire is not a divergence
+        (COut::Err { errcode: SQLSTATE_54001 }, ROut::Ok { .. } | ROut::NullNode) => false,
+        (COut::Ok { .. }, ROut::Err { errcode: SQLSTATE_54001 }) => false,
+        (COut::Err { errcode }, ROut::Ok { .. } | ROut::NullNode) => {
+            panic!("ACCEPT DIVERGENCE on {text:?}: C rejected ({errcode:#x}), Rust accepted");
+        }
+        (COut::Ok { out, .. }, ROut::NullNode) => {
+            assert_eq!(out, b"<>", "NULL-NODE DIVERGENCE on {text:?}");
+            false
+        }
+        (COut::Ok { .. }, ROut::Err { errcode }) => {
+            panic!("REJECT DIVERGENCE on {text:?}: C accepted, Rust PgError {errcode:#x}");
+        }
+        (COut::Ok { .. }, ROut::Panic { msg }) => {
+            use std::sync::atomic::Ordering::Relaxed;
+            let labels = input_labels(text);
+            match classify_panic(text, &msg, &labels) {
+                PanicClass::OutOfCharter => {
+                    SCOPE_CARVES.fetch_add(1, Relaxed);
+                }
+                PanicClass::NonNull => {
+                    NONNULL_CARVES.fetch_add(1, Relaxed);
+                }
+                PanicClass::EnumDomain => {
+                    ENUM_CARVES.fetch_add(1, Relaxed);
+                }
+                PanicClass::ValueToken => {
+                    VALUE_TOKEN_CARVES.fetch_add(1, Relaxed);
+                }
+                PanicClass::Divergence => panic!(
+                    "IN-SCOPE PANIC DIVERGENCE on {text:?}: C accepted, Rust panicked \
+                     ({msg:?}), every label {labels:?} is port-dispatched and the panic \
+                     matches no recorded carve"
+                ),
+            }
+            false
+        }
+        (
+            COut::Ok { out: co, copy: cc, equal_ok, reread_ok: crr },
+            ROut::Ok { out: ro, copy: rc, reread_ok: rrr },
+        ) => {
+            assert_eq!(
+                String::from_utf8_lossy(&co),
+                String::from_utf8_lossy(&ro),
+                "OUT-TEXT DIVERGENCE on {text:?}"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&cc),
+                String::from_utf8_lossy(&co),
+                "C COPY-OUT != C OUT on {text:?}"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&rc),
+                String::from_utf8_lossy(&ro),
+                "RUST COPY-OUT != RUST OUT on {text:?}"
+            );
+            assert!(equal_ok, "C equal(node, copy) failed on {text:?}");
+            assert!(crr, "C round-trip instability on {text:?}");
+            assert!(rrr, "Rust round-trip instability on {text:?}");
+            true
+        }
+    }
+}
+
+/// Arm 1: value/list nodes built programmatically (Float/Boolean/BitString
+/// out+copy arms are unreachable through the scoped read port; C reads the
+/// rendered text fine, closing the loop). Bytes drive the shape.
+pub fn run_value_nodes(data: &[u8]) -> bool {
+    rust_stack_init();
+    let cx = mcx::MemoryContext::new("nodesfam_values");
+    let m = cx.mcx();
+    let Some(node) = build_value_node(m, data) else { return false };
+
+    let out1 = outfuncs::nodeToString(m, node).expect("value out");
+    let copy = copyfuncs::copy_object(m, node).expect("value copy");
+    let out2 = outfuncs::nodeToString(m, copy).expect("value copy out");
+    assert_eq!(out1.as_str(), out2.as_str(), "RUST value copy-out mismatch");
+
+    match c_exec(out1.as_str().as_bytes()) {
+        COut::Ok { out, copy, equal_ok, reread_ok } => {
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                out1.as_str(),
+                "VALUE OUT DIVERGENCE (C re-out of rust text)"
+            );
+            assert_eq!(out, copy, "C value copy-out mismatch");
+            assert!(equal_ok && reread_ok, "C value equal/reread failed");
+            true
+        }
+        COut::Err { errcode } => {
+            panic!(
+                "VALUE READ DIVERGENCE: C rejected rust-rendered {:?} ({errcode:#x})",
+                out1.as_str()
+            );
+        }
+    }
+}
+
+/// Bounded value/list node builder over fuzz bytes. Emits every value-node
+/// tag the outfuncs port dispatches: String, Integer, Float, Boolean,
+/// List (nested), IntList, OidList. (T_BitString is NOT an outfuncs-port
+/// tag: catalog-stored expression trees never carry a BitString value node
+/// — it exists pre-parse-analysis only, in A_Const under the raw grammar —
+/// so it lives in the complement ledger; its copyfuncs arm is exercised by
+/// a direct unit test instead.)
+fn build_value_node<'m>(m: Mcx<'m>, data: &[u8]) -> Option<Node<'m>> {
+    let mut it = data.iter().copied();
+    build_value_inner(m, &mut it, 0)
+}
+
+fn build_value_inner<'m>(
+    m: Mcx<'m>,
+    it: &mut impl Iterator<Item = u8>,
+    depth: u32,
+) -> Option<Node<'m>> {
+    let sel = it.next()?;
+    // nodeRead token constraints: strings go through outToken escaping on
+    // write, so arbitrary ASCII (NUL-free) is legal; keep them short.
+    let mut take_str = |maxlen: usize| -> String {
+        let len = (it.next().unwrap_or(0) as usize) % (maxlen + 1);
+        let mut s = String::new();
+        for _ in 0..len {
+            let b = it.next().unwrap_or(b'a');
+            if b != 0 {
+                s.push(b as char);
+            }
+        }
+        s
+    };
+    match sel % 8 {
+        0 => {
+            let sval = take_str(24);
+            Node::mk(m, types_nodes::String { sval: intern(m, &sval).ok()? }).ok()
+        }
+        1 => {
+            let mut v = [0u8; 4];
+            for b in v.iter_mut() {
+                *b = it.next().unwrap_or(0);
+            }
+            Node::mk(m, types_nodes::Integer { ival: i32::from_le_bytes(v) }).ok()
+        }
+        2 => {
+            // Float carries its literal TEXT (C stores the token string):
+            // digits/.eE+- ; C nodeTokenType classifies by leading char, so
+            // force a numeric-looking literal.
+            let mut v = [0u8; 8];
+            for b in v.iter_mut() {
+                *b = it.next().unwrap_or(0);
+            }
+            let f = f64::from_le_bytes(v);
+            let lit = if f.is_finite() { format!("{f:?}") } else { "1e300".to_owned() };
+            Node::mk(m, types_nodes::Float { fval: intern(m, &lit).ok()? }).ok()
+        }
+        3 => Node::mk(m, types_nodes::Boolean { boolval: it.next()? & 1 == 1 }).ok(),
+        4 => {
+            // escaping-heavy strings: outToken's quote/backslash surface
+            let raw = take_str(16);
+            let mut s = String::new();
+            for (i, ch) in raw.chars().enumerate() {
+                s.push(match i % 4 {
+                    0 => '"',
+                    1 => '\\',
+                    _ => ch,
+                });
+            }
+            Node::mk(m, types_nodes::String { sval: intern(m, &s).ok()? }).ok()
+        }
+        5 if depth < 6 => {
+            let n = (it.next().unwrap_or(0) as usize) % 5;
+            let mut l = types_nodes::NodeList::with_capacity(m, n).ok()?;
+            for _ in 0..n {
+                l.lappend(m, build_value_inner(m, it, depth + 1)?).ok()?;
+            }
+            Node::mk_list(m, l).ok()
+        }
+        6 => {
+            let n = (it.next().unwrap_or(0) as usize) % 6;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                let mut b4 = [0u8; 4];
+                for b in b4.iter_mut() {
+                    *b = it.next().unwrap_or(0);
+                }
+                v.push(i32::from_le_bytes(b4));
+            }
+            Node::mk_int_list(m, types_nodes::list::IntList::from_slice(m, &v).ok()?).ok()
+        }
+        _ => {
+            let n = (it.next().unwrap_or(0) as usize) % 6;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                let mut b4 = [0u8; 4];
+                for b in b4.iter_mut() {
+                    *b = it.next().unwrap_or(0);
+                }
+                v.push(u32::from_le_bytes(b4)); // types_core::Oid = u32
+            }
+            Node::mk_oid_list(m, types_nodes::list::OidList::from_slice(m, &v).ok()?).ok()
+        }
+    }
+}
+
+/// libFuzzer entry: selector byte routes text vs value-builder arm.
+pub fn fuzz_entry(data: &[u8]) {
+    let Some((&sel, rest)) = data.split_first() else { return };
+    match sel % 4 {
+        // text arm gets 3/4 of the budget: it is the read-side surface
+        0..=2 => {
+            let _live = run_text(rest);
+        }
+        _ => {
+            let _live = run_value_nodes(rest);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "nodesfam_diff_tests.rs"]
+mod tests;

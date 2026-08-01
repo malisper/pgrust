@@ -25,6 +25,10 @@ mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
 detoast = { path = "../../crates/backend/access/common/detoast" }
 wchar = { path = "../../crates/common/wchar" }
 stack_depth = { path = "../../crates/backend/utils/misc/stack_depth" }
+stack_depth_core = { path = "../../crates/backend/utils/misc/stack_depth_core" }
+readfuncs = { path = "../../crates/backend/nodes/readfuncs" }
+outfuncs = { path = "../../crates/backend/nodes/outfuncs" }
+copyfuncs = { path = "../../crates/backend/nodes/copyfuncs" }
 # Differential targets (shipped Rust vs vendored C oracle in csrc/):
 adt_float = { path = "../../crates/backend/utils/adt/float" }
 adt_geo = { path = "../../crates/backend/utils/adt/geo" }

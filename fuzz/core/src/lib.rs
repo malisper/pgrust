@@ -531,3 +531,7 @@ pub use contriba_diff::contriba_diff;
 // define_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-define_diff.md.
 pub mod define_diff;
 pub use define_diff::define_diff;
+
+// nodesfam_diff (p1-nodes): readfuncs/outfuncs/copyfuncs node walkers vs
+// vendored 18.3 C (read->out->copy->out round-trip, all planes).
+pub mod nodesfam_diff;

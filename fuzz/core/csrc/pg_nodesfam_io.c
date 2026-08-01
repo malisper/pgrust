@@ -211,17 +211,46 @@ errcode(int sqlerrcode)
 	return 0;
 }
 
+/*
+ * DIAGNOSTIC CHANNEL ONLY (never a compared plane): with
+ * PGRUST_NODESFAM_DEBUG=1 the oracle prints the C error text to stderr, so a
+ * lane can see WHY C rejected an input. Message text stays out of every
+ * comparison (campaign rule: value + verdict + errcode only).
+ */
+static void
+nf_debug_msg(const char *fmt, va_list ap)
+{
+	static int	on = -1;
+
+	if (on < 0)
+		on = getenv("PGRUST_NODESFAM_DEBUG") != NULL;
+	if (on)
+	{
+		fputs("C-ERROR: ", stderr);
+		vfprintf(stderr, fmt, ap);
+		fputc('\n', stderr);
+	}
+}
+
 int
 errmsg(const char *fmt,...)
 {
-	(void) fmt;
+	va_list		ap;
+
+	va_start(ap, fmt);
+	nf_debug_msg(fmt, ap);
+	va_end(ap);
 	return 0;
 }
 
 int
 errmsg_internal(const char *fmt,...)
 {
-	(void) fmt;
+	va_list		ap;
+
+	va_start(ap, fmt);
+	nf_debug_msg(fmt, ap);
+	va_end(ap);
 	return 0;
 }
 
