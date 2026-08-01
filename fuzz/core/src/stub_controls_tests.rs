@@ -101,6 +101,28 @@ fn nodes_control_one_side_tree_difference_is_caught() {
     );
 }
 
+/// Pin the NUL-stripping clamp itself: builder strings must never carry a
+/// NUL (the text bridge truncates at NUL, so a kept NUL would silently
+/// shrink the compared text). Added after injection N1 showed the committed
+/// suites never push a NUL through the string arms.
+#[test]
+fn nodes_clamp_strings_are_nul_free() {
+    let _serial = crate::c_oracle_serial();
+    let cx = mcx::MemoryContext::new("stub_nodes_clamp");
+    let m = cx.mcx();
+    // sel=0 => String arm; len byte 8; payload deliberately NUL-riddled
+    let node = crate::stub_nodes::build_value_node(m, &[0, 8, 0, b'a', 0, b'b', 0, 0, b'c'])
+        .expect("builder");
+    let out = outfuncs::nodeToString(m, node).expect("out");
+    assert!(
+        !out.as_str().as_bytes().contains(&0),
+        "builder let a NUL into a string: {:?}",
+        out.as_str()
+    );
+    let re = crate::nodesfam_diff::c_reout_control(out.as_str().as_bytes()).expect("C read");
+    assert_eq!(re.as_slice(), out.as_str().as_bytes(), "NUL-free string must round-trip");
+}
+
 // -------------------------------------------------------------------------
 // stub:snapshot
 // -------------------------------------------------------------------------
