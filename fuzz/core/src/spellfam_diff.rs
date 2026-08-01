@@ -444,6 +444,39 @@ pub fn spellfam_diff(data: &[u8]) {
         if has_old_section && !has_flag_directive {
             return;
         }
+
+        // DOMAIN CARVE (C-UB, SECOND REACH-SITE of the AffixData NULL-slot
+        // defect already tracked as task #80 — pgrust robust, C undefined).
+        // An `AF <n>` header palloc0's n+1 alias slots; slot 0 is set to
+        // VoidString and each later `AF <flags>` line fills one more. If the
+        // file declares MORE slots than it fills, the tail stays NULL, and
+        // spell.c dereferences those NULLs — including from INSIDE
+        // NIImportOOAffixes itself (getAffixFlagSet -> getCompoundAffixFlagValue
+        // -> getNextFlagFromString on a NULL `s`), i.e. BEFORE the driver's
+        // post-import NULL->"" normalization can apply. pgrust stores empty
+        // PgVecs and is robust. No defined C answer, so the under-filled-AF
+        // shape leaves the domain; fully-filled AF tables (the
+        // hunspell_sample_num/long fixtures) stay in domain.
+        let af_lines = lower
+            .split(|&b| b == b'\n')
+            .filter(|l| l.starts_with(b"af"))
+            .count();
+        if af_lines > 0 {
+            // declared count = first AF header's number; provided = later AF lines
+            let declared = lower
+                .split(|&b| b == b'\n')
+                .find(|l| l.starts_with(b"af"))
+                .and_then(|l| {
+                    let t = &l[2..];
+                    let t: Vec<u8> = t.iter().copied().skip_while(|b| b.is_ascii_whitespace()).collect();
+                    let digits: Vec<u8> = t.iter().copied().take_while(u8::is_ascii_digit).collect();
+                    core::str::from_utf8(&digits).ok()?.parse::<i64>().ok()
+                })
+                .unwrap_or(0);
+            if declared > 0 && (af_lines as i64 - 1) < declared {
+                return;
+            }
+        }
     }
 
     // DECODE LEG: per-side in-exec reproducibility (see DECODE_CROSS_EXEC).
@@ -826,6 +859,11 @@ mod fleet_repro {
     #[test]
     fn oom_affixdata_fc73a730() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/CI-oom-affixdata-fc73a730")).unwrap();
+        super::spellfam_diff(&data);
+    }
+    #[test]
+    fn div6_f7c91129() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-div6-f7c91129")).unwrap();
         super::spellfam_diff(&data);
     }
     #[test]
