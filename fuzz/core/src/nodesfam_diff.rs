@@ -343,7 +343,20 @@ fn expected_fields() -> &'static std::collections::HashMap<String, Vec<(String, 
                     if t.starts_with("READ_") && !t.starts_with("READ_LOCALS")
                         && !t.starts_with("READ_TEMP_LOCALS") && !t.starts_with("READ_DONE")
                     {
-                        let kind: String = t[..open].trim().to_owned();
+                        let mut kind: String = t[..open].trim().to_owned();
+                        if kind == "READ_ENUM_FIELD" {
+                            // READ_ENUM_FIELD(fldname, EnumType): keep the type
+                            if let Some(comma) = t[open..].find(',') {
+                                let ty: String = t[open + comma + 1..]
+                                    .trim_start()
+                                    .chars()
+                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                    .collect();
+                                if !ty.is_empty() {
+                                    kind = format!("READ_ENUM_FIELD:{ty}");
+                                }
+                            }
+                        }
                         let inner = &t[open + 1..];
                         let name: String = inner
                             .chars()
@@ -656,12 +669,55 @@ fn well_formed_token_stream(text: &str) -> bool {
 /// that permissiveness delta accumulate as carve after carve, the compared
 /// domain is restricted to tokens C's own writer could emit for the field's
 /// kind. The delta itself is recorded in the lane report.
+/// Writer-producible integer values per C enum type, from the GENERATED
+/// `gen/enum_domains.tsv` (gen_enum_domains.py over the vendored header
+/// closure). `*` = the parser would not model the block; those enums stay
+/// permissive and their divergences are handled by the panic-carve classes.
+fn enum_domains() -> &'static std::collections::HashMap<String, Option<Vec<i64>>> {
+    static MAP: OnceLock<std::collections::HashMap<String, Option<Vec<i64>>>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut out = std::collections::HashMap::new();
+        for line in include_str!("../csrc/nodesfam/gen/enum_domains.tsv").lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            let mut it = line.splitn(2, '\t');
+            let (Some(name), Some(vals)) = (it.next(), it.next()) else { continue };
+            let parsed = if vals.trim() == "*" {
+                None
+            } else {
+                Some(vals.split(',').filter_map(|v| v.trim().parse::<i64>().ok()).collect())
+            };
+            out.insert(name.to_owned(), parsed);
+        }
+        assert!(out.len() > 100, "enum_domains.tsv parse collapsed: {}", out.len());
+        out
+    })
+}
+
 fn value_token_matches_kind(tok: &str, kind: &str) -> bool {
     let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let signed_int = |s: &str| {
         let body = s.strip_prefix('-').unwrap_or(s);
         all_digits(body)
     };
+    // READ_ENUM_FIELD carries its C enum type: the value must be one the
+    // enum actually declares, because an out-of-domain enum integer is not
+    // writer-producible and the two sides disagree on it in TWO ways — the
+    // port either panics (24 validators) or SILENTLY maps to the default and
+    // loses the value (witnessed: `{JSONFORMAT :format_type 5 ...}`, C echoes
+    // 5, pgrust echoes 0 — an OUT-TEXT divergence, not a panic).
+    if let Some(ty) = kind.strip_prefix("READ_ENUM_FIELD:") {
+        if !signed_int(tok) {
+            return false;
+        }
+        let Ok(v) = tok.parse::<i64>() else { return false };
+        return match enum_domains().get(ty) {
+            Some(Some(vals)) => vals.contains(&v),
+            // unmodelled or unknown enum: permissive (carve classes cover it)
+            _ => true,
+        };
+    }
     match kind {
         "READ_INT_FIELD" | "READ_LONG_FIELD" | "READ_INT64_FIELD" | "READ_ENUM_FIELD"
         | "READ_LOCATION_FIELD" => signed_int(tok),

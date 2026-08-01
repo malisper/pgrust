@@ -67,4 +67,7 @@ find "$GEN/catalog" -type f ! -name '*_d.h' -delete
 printf '/* SHIM: decls-only stand-in for generated fmgrprotos.h; datum.c\n * includes it but the vendored build references no symbol of it. */\n' \
     > "$GEN/utils/fmgrprotos.h"
 
+# --- enum-domain table for the gate (see gen_enum_domains.py header) ----
+python3 "$D/gen_enum_domains.py" "$D/include" "$GEN/enum_domains.tsv"
+
 echo "nodesfam assembled from $V"

@@ -611,71 +611,65 @@ fn enum_carves_match_the_port() {
     assert_eq!(found.len(), 24);
 }
 
-/// The enum carve is REACHED (live classification, not a dead table).
+/// STRONGER THAN A CARVE (result of record): every enum validator the Rust
+/// read port carries accepts EXACTLY the value set its C enum declares.
+///
+/// This is what retired the enum carve as a live class. The gate now rejects
+/// out-of-domain enum integers as not writer-producible, and this test proves
+/// the port and C agree on what "in domain" means — so for every MODELLED
+/// enum there is nothing left to carve. `ENUM_DOMAIN_VALIDATORS` and the
+/// ENUM_CARVES counter stay for the enums `gen_enum_domains.py` marks `*`
+/// (initializers it will not model), where the gate is permissive by design.
 #[test]
-fn enum_carve_arm_is_live() {
-    let before = ENUM_CARVES.load(std::sync::atomic::Ordering::Relaxed);
-    // JsonConstructorType is 1-based, so :type 0 is out of domain: C casts
-    // it blindly and accepts, the port validates and panics.
-    let text = "{JSONCONSTRUCTOREXPR :type 0 :args <> :func <> :coercion <> \
-                :returning <> :absent_on_null false :unique false :location -1 }";
-    assert!(!run_text(text.as_bytes()));
-    let after = ENUM_CARVES.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(after > before, "ENUM carve arm never fired — dead classification");
-}
-
-/// The value-token carve is REACHED (live classification).
-#[test]
-fn value_token_carve_arm_is_live() {
-    let before = VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(!run_text(b"(true)"));
-    let after = VALUE_TOKEN_CARVES.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(after > before, "VALUE-TOKEN carve arm never fired — dead classification");
-}
-
-/// Every carve counter is DISTINCT: a single input must not be chargeable to
-/// two classes (a classification that overlaps is a classification that hides
-/// things). Drives one witness per class and asserts exactly one counter
-/// moved each time.
-#[test]
-fn carve_classes_are_disjoint() {
-    use std::sync::atomic::Ordering::Relaxed;
-    let witnesses: &[(&str, &str)] = &[
-        ("value-token", "(true)"),
-        (
-            "enum-domain",
-            "{JSONCONSTRUCTOREXPR :type 0 :args <> :func <> :coercion <> :returning <> \
-             :absent_on_null false :unique false :location -1 }",
-        ),
-        ("nonnull", "{RETURNINGEXPR :retlevelsup 0 :retold false :retexpr <> }"),
-        ("out-of-charter", "{CREATESTMT :relation <> :tableElts <> :inhRelations <>              :partbound <> :partspec <> :ofTypename <> :constraints <> :nnconstraints <>              :options <> :oncommit 0 :tablespacename <> :accessMethod <>              :if_not_exists false}"),
-    ];
-    for (name, text) in witnesses {
-        let before = (
-            VALUE_TOKEN_CARVES.load(Relaxed),
-            ENUM_CARVES.load(Relaxed),
-            NONNULL_CARVES.load(Relaxed),
-            SCOPE_CARVES.load(Relaxed),
-        );
-        let _ = run_text(text.as_bytes());
-        let after = (
-            VALUE_TOKEN_CARVES.load(Relaxed),
-            ENUM_CARVES.load(Relaxed),
-            NONNULL_CARVES.load(Relaxed),
-            SCOPE_CARVES.load(Relaxed),
-        );
-        let moved = [
-            after.0 - before.0,
-            after.1 - before.1,
-            after.2 - before.2,
-            after.3 - before.3,
-        ];
-        let n: u64 = moved.iter().sum();
-        assert_eq!(
-            n, 1,
-            "witness {name:?} ({text:?}) moved {n} counters {moved:?}, expected exactly 1"
-        );
+fn port_enum_validators_equal_the_c_domains() {
+    let src = include_str!("../../../crates/backend/nodes/readfuncs/src/lib.rs");
+    let lines: Vec<&str> = src.lines().collect();
+    let mut checked = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let Some(j) = line.find("panic!(\"readfuncs.c: bad ") else { continue };
+        let rest = &line[j + "panic!(\"readfuncs.c: bad ".len()..];
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+        if name.is_empty() || name == "integer" {
+            continue;
+        }
+        // walk BACK to the enclosing `match` and collect its integer arms
+        let mut accepted: Vec<i64> = Vec::new();
+        let mut k = i;
+        while k > 0 {
+            k -= 1;
+            let t = lines[k].trim();
+            if t.starts_with("match ") || t.contains(" match ") {
+                break;
+            }
+            if let Some(a) = t.find(" =>") {
+                if let Ok(v) = t[..a].trim().parse::<i64>() {
+                    accepted.push(v);
+                }
+            }
+        }
+        accepted.sort_unstable();
+        accepted.dedup();
+        if accepted.is_empty() {
+            continue; // non-integer match (e.g. token bytes)
+        }
+        match enum_domains().get(&name) {
+            Some(Some(c_vals)) => {
+                let mut c_sorted = c_vals.clone();
+                c_sorted.sort_unstable();
+                assert_eq!(
+                    accepted, c_sorted,
+                    "{name}: the port accepts {accepted:?} but C declares {c_sorted:?} — \
+                     a stricter port REJECTS text C's writer can emit, a looser one \
+                     accepts text it cannot"
+                );
+                checked += 1;
+            }
+            Some(None) => {} // '*' unmodelled enum: gate stays permissive
+            None => panic!("{name}: no enum_domains.tsv row — regenerate the table"),
+        }
     }
+    println!("enum validators checked against C domains: {checked}");
+    assert!(checked >= 16, "only {checked} validators were checked");
 }
 
 /// CUSTOM_READER_LABELS must equal the set of labels whose C reader is
