@@ -43,6 +43,19 @@
 //!     pgrust port zero-fills those slots (see the resize in
 //!     tparser_init/char2wchar_default), which is strictly more defined.
 //!     Single-byte encodings read raw bytes and keep NULs in the domain.
+//!     WITNESS-LOSS WARNING (recorded 2026-08-01 with the tzparser
+//!     interior-NUL ruling): this carve removes the ONLY shape that
+//!     witnesses the tparser_init wide-array truncation OOB fix at main
+//!     (landed 2622e2955a) — interior-NUL/short-multibyte conversion
+//!     shortfall is the only producer reaching that OOB, so a mutation
+//!     restoring the pre-fix truncation SURVIVES this driver (observed by
+//!     lane p1-mb-text). The fix must be witnessed OUTSIDE the fuzz plane:
+//!     a directed crate-level regression test is OWED to
+//!     crates/backend/tsearch/wparser_def (p1-mb-text produced
+//!     `interior_nul_wide_arrays_inbounds`, input `ab\0cd ef` under UTF8,
+//!     both ctype postures; owner to land — see the wparser_def row in
+//!     docs/verification/phase1-claims.tsv). Do not treat this driver's
+//!     green as covering that fix.
 //!   - input length capped at 8 KiB (the token stream is compared in full;
 //!     the state machine has no length-dependent arm above a few chars).
 //!   - token stream capped at 4096 tokens per exec (same reason; the cap

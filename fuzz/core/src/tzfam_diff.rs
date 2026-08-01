@@ -58,11 +58,27 @@
 //!     outside these widths C -fwrapv arithmetic in %j/%U/%W/V-G-g is an
 //!     implementation artifact no pg_tm from the timezone engine produces.
 //!     Format bytes are NUL-free (C cstring contract).
-//!   - tzparser: fixture bytes are NUL-free. C's fgets+strlen machinery
-//!     truncates each line at an interior NUL while the Rust port parses
-//!     raw bytes to the newline — a REAL representational divergence for
-//!     NUL-bearing files, recorded in the lane report (timezone abbrev
-//!     files are text; PG itself cannot round-trip NULs through fgets).
+//!   - tzparser: fixture bytes are NUL-free. RULED BUG-FOR-BUG / ratified
+//!     NON-SURFACE (Michael 2026-08-01; ledger of record =
+//!     docs/verification/phase1-claims.tsv row backend/utils/misc/tzparser;
+//!     went AGAINST the investigating lane's MATCH recommendation — pgrust
+//!     keeps its behavior, do NOT make it match C's truncation): C's
+//!     ParseTzFile fgets a line into tzbuf and every consumer (strlen,
+//!     pg_strncasecmp, splitTzLine) treats it as a cstring, so an interior
+//!     NUL makes C silently ignore the remainder of the line (fgets itself
+//!     does NOT stop at the NUL — the bytes are read, file position stays
+//!     correct, the parse never desynchronizes; the NUL also defeats C's
+//!     own line-too-long guard, tzparser.c:375 `strlen(tzbuf) ==
+//!     sizeof(tzbuf) - 1`). The Rust port parses raw bytes to the newline.
+//!     BIDIRECTIONAL — both directions reproduced in
+//!     nul_probe::tzparser_interior_nul_split below. Non-surface rationale
+//!     of record: admin-authored text files in $PGSHAREDIR/timezonesets/
+//!     loaded via the timezone_abbreviations GUC; not SQL-reachable; no
+//!     reachable input produces an interior NUL. The NUL carve STAYS.
+//!     Witness-loss check (wparserfam_diff tparser_init law): no fixed
+//!     tzparser defect is reachable only inside this carve — the lane
+//!     shipped no tzparser code fix and its only product divergence is the
+//!     ruled one, so the carve currently shadows no fix witness.
 //!     Line count capped indirectly by input size.
 //!   - rss: the Rust side leaks each exec's converted table by design
 //!     (ConvertTimeZoneAbbrevs Box::leak, C guc_malloc counterpart is
@@ -715,21 +731,50 @@ mod nul_probe {
 
     /// Documentation probe (not a gate): C fgets/strlen machinery truncates
     /// a tz-file line at an interior NUL; the Rust port tokenizes raw bytes.
-    /// The driver carves NULs out of arm-1 fixtures; this records the
-    /// observed behavior split for the lane report.
+    /// The driver carves NULs out of arm-1 fixtures; this reproduces the
+    /// ruled behavior split in BOTH directions.
+    ///
+    /// RULED BUG-FOR-BUG / ratified NON-SURFACE (Michael 2026-08-01,
+    /// against the lane's MATCH recommendation): pgrust keeps its raw-byte
+    /// parse; do NOT make it match C's truncation. Ledger of record =
+    /// docs/verification/phase1-claims.tsv row backend/utils/misc/tzparser;
+    /// full mechanism note in this file's DOMAIN CARVES header.
+    ///
+    ///   - `ab\0cd ZONEX\n`: C truncates to "ab" (abbrev with no offset,
+    ///     "missing time zone offset" check-error, load_tzoffsets = -1);
+    ///     pgrust SUCCEEDS with a DYNTZ entry whose abbrev embeds the NUL.
+    ///   - `aaa 3600\0junk\n`: C truncates to a valid "aaa 3600" (1 abbrev);
+    ///     pgrust FAILS ("invalid number for time zone offset").
+    fn nul_case(fixture: &[u8]) -> (c_int, Option<String>, bool, Option<String>) {
+        let tzdir = format!("{}/timezonesets", share_dir());
+        std::fs::create_dir_all(&tzdir).unwrap();
+        std::fs::write(format!("{tzdir}/aaa"), fixture).unwrap();
+        unsafe { pg_tzf_reset() };
+        let c_n = unsafe { pg_tzf_load_tzoffsets(c"aaa".as_ptr()) };
+        let c_msg = cstr_opt(unsafe { pg_tzf_guc_msg() });
+        guc::reset_guc_check_error();
+        let r_tbl = tzparser::load_tzoffsets("aaa");
+        let r_err = guc::take_guc_check_error();
+        (c_n, c_msg, r_tbl.is_some(), r_err.message)
+    }
+
     #[test]
     #[ignore]
     fn tzparser_interior_nul_split() {
         init_env();
-        let tzdir = format!("{}/timezonesets", share_dir());
-        std::fs::create_dir_all(&tzdir).unwrap();
-        std::fs::write(format!("{tzdir}/aaa"), b"ab\0cd ZONEX\n").unwrap();
-        unsafe { pg_tzf_reset() };
-        let c_n = unsafe { pg_tzf_load_tzoffsets(c"aaa".as_ptr()) };
-        guc::reset_guc_check_error();
-        let r_tbl = tzparser::load_tzoffsets("aaa");
-        let r_err = guc::take_guc_check_error();
-        eprintln!("C: n={c_n} msg={:?}", cstr_opt(unsafe { pg_tzf_guc_msg() }));
-        eprintln!("R: ok={} msg={:?}", r_tbl.is_some(), r_err.message);
+
+        // Direction 1: C FAILS, pgrust SUCCEEDS.
+        let (c_n, c_msg, r_ok, r_msg) = nul_case(b"ab\0cd ZONEX\n");
+        eprintln!("dir1 C: n={c_n} msg={c_msg:?}");
+        eprintln!("dir1 R: ok={r_ok} msg={r_msg:?}");
+        assert_eq!(c_n, -1);
+        assert!(r_ok);
+
+        // Direction 2: C SUCCEEDS, pgrust FAILS.
+        let (c_n, c_msg, r_ok, r_msg) = nul_case(b"aaa 3600\0junk\n");
+        eprintln!("dir2 C: n={c_n} msg={c_msg:?}");
+        eprintln!("dir2 R: ok={r_ok} msg={r_msg:?}");
+        assert_eq!(c_n, 1);
+        assert!(!r_ok);
     }
 }
