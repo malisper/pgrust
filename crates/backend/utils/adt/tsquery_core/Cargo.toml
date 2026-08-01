@@ -19,3 +19,4 @@ crc32c = { path = "../../../../port/crc32c" }
 elog = { path = "../../../utils/error/elog" }
 ts_locale = { path = "../../../tsearch/ts_locale" }
 stack_depth = { path = "../../misc/stack_depth" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

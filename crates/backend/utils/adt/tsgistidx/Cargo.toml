@@ -21,3 +21,4 @@ reloptions = { path = "../../../access/common/reloptions" }
 
 [dev-dependencies]
 adt_tsquery_core = { path = "../tsquery_core" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

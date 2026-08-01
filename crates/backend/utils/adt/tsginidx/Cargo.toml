@@ -16,3 +16,4 @@ gin_vocab = { path = "../../../access/gin/gin_vocab" }
 
 [dev-dependencies]
 adt_tsquery_core = { path = "../tsquery_core" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

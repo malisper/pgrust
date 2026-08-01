@@ -21,6 +21,13 @@ fn close(got: f32, want: f32) -> bool {
     (got - want).abs() <= want.abs().max(1e-6) * 1e-5
 }
 
+// tsvector_op.c's TS_execute walks call CHECK_FOR_INTERRUPTS(); the seam has no
+// default, so unit tests must install the no-op leg.
+fn cfi_installed() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| ::postgres_seams::check_for_interrupts::set(|| Ok(())));
+}
+
 #[test]
 fn rank_matrix() {
     let ctx = MemoryContext::new("t");
@@ -45,6 +52,7 @@ fn rank_matrix() {
 
 #[test]
 fn rank_cd_matrix() {
+    cfi_installed();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     for (doc, query, want) in [

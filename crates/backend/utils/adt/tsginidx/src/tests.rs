@@ -3,6 +3,13 @@ use ::adt_tsvector_core::query::TsQueryRef;
 use ::gin_vocab::{GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT, GIN_TRUE};
 use ::mcx::{Mcx, MemoryContext};
 
+// tsvector_op.c's TS_execute walks call CHECK_FOR_INTERRUPTS(); the seam has no
+// default, so unit tests must install the no-op leg.
+fn cfi_installed() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| ::postgres_seams::check_for_interrupts::set(|| Ok(())));
+}
+
 fn tsq<'m>(mcx: Mcx<'m>, s: &str) -> ::mcx::PgVec<'m, u8> {
     ::adt_tsquery_core::io::tsquery_in_core(mcx, s.as_bytes(), None)
         .expect("tsquery parse")
@@ -67,6 +74,7 @@ fn extract_tsquery_shapes() {
 // present: lexemes marked GIN_TRUE; entry positions come from extraction
 // order (tsquery items are polish-ordered, not query-text-ordered).
 fn consistent(qs: &str, present: &[&[u8]]) -> (bool, bool) {
+    cfi_installed();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let q = tsq(mcx, qs);

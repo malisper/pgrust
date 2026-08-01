@@ -115,8 +115,11 @@ pub fn ts_phrase_execute<'mcx>(
     chkcond: ChkCond<'_, 'mcx>,
     mut data: Option<&mut ExecPhraseData<'mcx>>,
 ) -> PgResult<Ternary> {
-    // C tsvector_op.c TS_phrase_execute(): check_stack_depth() (one frame per tree level).
+    // C tsvector_op.c TS_phrase_execute(): check_stack_depth() + CHECK_FOR_INTERRUPTS()
+    // (one frame per tree level; phrase matching can burn CPU for a long time,
+    // so without the CFI the match is uncancellable by statement_timeout).
     ::stack_depth::check_stack_depth()?;
+    ::postgres_seams::check_for_interrupts::call()?;
     match q.item(idx) {
         Item::Val(op) => chkcond(idx, &op, data),
         Item::ValStop => panic!("ts_phrase_execute: QI_VALSTOP in stored tsquery"),
@@ -272,8 +275,11 @@ fn ts_execute_recurse<'mcx>(
     flags: u32,
     chkcond: ChkCond<'_, 'mcx>,
 ) -> PgResult<Ternary> {
-    // C tsvector_op.c TS_execute_recurse(): check_stack_depth() (one frame per tree level).
+    // C tsvector_op.c TS_execute_recurse(): check_stack_depth() + CHECK_FOR_INTERRUPTS()
+    // (one frame per tree level; phrase matching can burn CPU for a long time,
+    // so without the CFI the match is uncancellable by statement_timeout).
     ::stack_depth::check_stack_depth()?;
+    ::postgres_seams::check_for_interrupts::call()?;
     match q.item(idx) {
         Item::Val(op) => chkcond(idx, &op, None),
         Item::ValStop => panic!("TS_execute: QI_VALSTOP in stored tsquery"),
@@ -370,8 +376,11 @@ fn ts_execute_locations_recurse<'mcx>(
     chkcond: ChkCond<'_, 'mcx>,
     locations: &mut Vec<ExecPhraseData<'mcx>>,
 ) -> PgResult<bool> {
-    // C tsvector_op.c TS_execute_locations_recurse(): check_stack_depth() (one frame per tree level).
+    // C tsvector_op.c TS_execute_locations_recurse(): check_stack_depth() + CHECK_FOR_INTERRUPTS()
+    // (one frame per tree level; phrase matching can burn CPU for a long time,
+    // so without the CFI the match is uncancellable by statement_timeout).
     ::stack_depth::check_stack_depth()?;
+    ::postgres_seams::check_for_interrupts::call()?;
     locations.clear();
     match q.item(idx) {
         Item::Val(op) => {

@@ -1,3 +1,10 @@
+// tsvector_op.c's TS_execute walks call CHECK_FOR_INTERRUPTS(); the seam has no
+// default, so unit tests must install the no-op leg.
+fn cfi_installed() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| ::postgres_seams::check_for_interrupts::set(|| Ok(())));
+}
+
 use ::mcx::MemoryContext;
 
 use crate::io::{tsvector_in_core, tsvector_out_core};
@@ -71,6 +78,7 @@ fn tsv<'a>(mcx: ::mcx::Mcx<'a>, s: &str) -> TsVec<'a> {
 
 #[test]
 fn tsvector_ops() {
+    cfi_installed();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
 
@@ -113,6 +121,7 @@ fn tsq<'a>(mcx: ::mcx::Mcx<'a>, s: &str) -> TsQueryRef<'a> {
 
 #[test]
 fn match_single_operand() {
+    cfi_installed();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let v = tsv(mcx, "a b:89 ca:23A,64b d:34c");

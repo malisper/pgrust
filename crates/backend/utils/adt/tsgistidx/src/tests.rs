@@ -3,6 +3,13 @@ use ::mcx::{Mcx, MemoryContext};
 
 use crate::*;
 
+// tsvector_op.c's TS_execute walks call CHECK_FOR_INTERRUPTS(); the seam has no
+// default, so unit tests must install the no-op leg.
+fn cfi_installed() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| ::postgres_seams::check_for_interrupts::set(|| Ok(())));
+}
+
 fn arr_image<'m>(mcx: Mcx<'m>, crcs: &[i32]) -> GtsRef<'m> {
     let size = 8 + crcs.len() * 4;
     let mut img: ::mcx::PgVec<'m, u8> = mcx::vec_with_capacity_in(mcx, size).unwrap();
@@ -39,6 +46,7 @@ fn crc(s: &[u8]) -> i32 {
 
 #[test]
 fn consistent_arr_key() {
+    cfi_installed();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut crcs = [crc(b"foo"), crc(b"bar")];
@@ -61,6 +69,7 @@ fn consistent_arr_key() {
 
 #[test]
 fn consistent_sign_key() {
+    cfi_installed();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let key = sign_image(mcx, &[crc(b"foo"), crc(b"bar")], SIGLEN_DEFAULT);
