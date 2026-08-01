@@ -17,9 +17,13 @@
 //!   1: RadixTree<RtvVal>    <-> C rtv_* (RT_VARLEN_VALUE_SIZE +
 //!      RT_RUNTIME_EMBEDDABLE_VALUE; tidstore's BlocktableEntry shape:
 //!      first byte's low bit doubles as the embedded pointer tag)
-//!   2: SharedRadixTree<u64> <-> C rtf_* — the thread-native stand-in for
-//!      C's RT_SHMEM flavor, driven under the C lock discipline
+//!   2: SharedRadixTree<RtvVal> <-> C rtv_* — the thread-native stand-in
+//!      for C's RT_SHMEM flavor, driven under the C lock discipline
 //!      (lock_exclusive for set/delete, lock_share for find/iterate).
+//!      Varlen values so the shared store's LEAF alloc/free paths run
+//!      (tidstore, the shipped consumer, is exactly shared+varlen; a
+//!      fixed-u64 shared arm never allocates a leaf — CI cluster lcov of the
+//!      10M run at be0165bd64 proved free_recurse's leaf free uncovered).
 //!
 //! Comparison planes (all arms):
 //!   - set: "found" verdict (bool)
@@ -553,12 +557,14 @@ fn varlen_iterate_compare(rust: &RadixTree<RtvVal>, b: &mut Budget, cbuf: &mut [
     unsafe { pg_diff_rtv_iter_end() };
 }
 
-// ---- arm 2: SharedRadixTree<u64> vs C rtf_* (C lock discipline) ----
+// ---- arm 2: SharedRadixTree<RtvVal> vs C rtv_* (C lock discipline) ----
 
 fn shared_arm(r: &mut R) {
-    let mut rust: SharedRadixTree<u64> = SharedRadixTree::create().expect("shared create");
-    unsafe { pg_diff_rtf_create() };
+    let mut rust: SharedRadixTree<RtvVal> =
+        SharedRadixTree::create().expect("shared create");
+    unsafe { pg_diff_rtv_create() };
     let mut b = Budget { sets: 0, iter_pairs: 0, recreates: 0 };
+    let mut cbuf = [0u8; RTV_MAX_SIZE];
 
     for _ in 0..MAX_OPS {
         let Some(op) = r.u8() else { break };
@@ -569,33 +575,49 @@ fn shared_arm(r: &mut R) {
                 }
                 b.sets += 1;
                 let Some(key) = r.key() else { break };
-                let Some(val) = fixed_val(r, key) else { break };
-                let rfound = rust.lock_exclusive().set(key, &val).expect("rust set");
-                let cfound = unsafe { pg_diff_rtf_set(key, val) } != 0;
+                let Some(lb) = r.u8() else { break };
+                let len = (lb as usize) % (RTV_MAX_LEN + 1);
+                let Some(payload) = r.take(len) else { break };
+                let img = RtvImage::new(payload);
+                // SAFETY: img is a live staging buffer covering value_size.
+                let rfound = unsafe {
+                    rust.lock_exclusive()
+                        .set_ptr(key, (&img as *const RtvImage).cast::<RtvVal>())
+                }
+                .expect("rust set");
+                let cfound =
+                    unsafe { pg_diff_rtv_set(key, payload.as_ptr(), len as i32) } != 0;
                 assert_eq!(rfound, cfound, "shared set verdict, key={key:#x}");
             }
             1 => {
                 let Some(key) = r.key() else { break };
                 let g = rust.lock_share();
-                let rv = g.find(key).copied();
-                drop(g);
-                let mut cvv = 0u64;
-                let cp = unsafe { pg_diff_rtf_find(key, &mut cvv) } != 0;
-                assert_eq!(rv.is_some(), cp, "shared find presence, key={key:#x}");
-                if let Some(rvv) = rv {
-                    assert_eq!(rvv, cvv, "shared find value, key={key:#x}");
+                let rp = g.find_ptr(key);
+                let mut clen = 0i32;
+                let cp =
+                    unsafe { pg_diff_rtv_find(key, cbuf.as_mut_ptr(), &mut clen) } != 0;
+                assert_eq!(rp.is_some(), cp, "shared find presence, key={key:#x}");
+                if let Some(p) = rp {
+                    // SAFETY: pointer from find_ptr covers the whole image;
+                    // the share guard is live for the read.
+                    let rimg = unsafe { rtv_image(p) };
+                    assert_eq!(
+                        rimg.as_slice(),
+                        &cbuf[..clen as usize],
+                        "shared find image, key={key:#x}"
+                    );
                 }
             }
             2 => {
                 let Some(key) = r.key() else { break };
                 let rd = rust.lock_exclusive().delete(key);
-                let cd = unsafe { pg_diff_rtf_delete(key) } != 0;
+                let cd = unsafe { pg_diff_rtv_delete(key) } != 0;
                 assert_eq!(rd, cd, "shared delete verdict, key={key:#x}");
             }
-            3 => shared_iterate_compare(&rust, &mut b),
+            3 => shared_iterate_compare(&rust, &mut b, &mut cbuf),
             4 => {
                 let rm = rust.memory_usage();
-                let cm = unsafe { pg_diff_rtf_memory_usage() };
+                let cm = unsafe { pg_diff_rtv_memory_usage() };
                 assert!(rm > 0 && cm > 0, "shared memory_usage liveness");
             }
             5 => {
@@ -603,11 +625,13 @@ fn shared_arm(r: &mut R) {
                     continue;
                 }
                 b.recreates += 1;
-                shared_iterate_compare(&rust, &mut b);
+                shared_iterate_compare(&rust, &mut b, &mut cbuf);
+                // drop with live keys = C RT_FREE's RT_FREE_RECURSE walk
+                // (node + leaf frees) on the recursive-free store
                 rust = SharedRadixTree::create().expect("shared create");
                 unsafe {
-                    pg_diff_rtf_free();
-                    pg_diff_rtf_create();
+                    pg_diff_rtv_free();
+                    pg_diff_rtv_create();
                 }
             }
             6 => {
@@ -620,9 +644,18 @@ fn shared_arm(r: &mut R) {
                     }
                     b.sets += 1;
                     let key = base.wrapping_add(i);
-                    let val = key ^ 0xAAAA_AAAA_AAAA_AAAA;
-                    let rfound = g.set(key, &val).expect("rust set");
-                    let cfound = unsafe { pg_diff_rtf_set(key, val) } != 0;
+                    let len = (i % 13) as usize; // 0..=12 payload straddles the embed fence
+                    let payload: Vec<u8> =
+                        (0..len).map(|j| (key as u8).wrapping_add(j as u8)).collect();
+                    let img = RtvImage::new(&payload);
+                    // SAFETY: as above.
+                    let rfound = unsafe {
+                        g.set_ptr(key, (&img as *const RtvImage).cast::<RtvVal>())
+                    }
+                    .expect("rust set");
+                    let cfound = unsafe {
+                        pg_diff_rtv_set(key, payload.as_ptr(), len as i32)
+                    } != 0;
                     assert_eq!(rfound, cfound, "shared dense set verdict, key={key:#x}");
                 }
             }
@@ -633,37 +666,46 @@ fn shared_arm(r: &mut R) {
                 for i in 0..n as u64 {
                     let key = base.wrapping_add(i);
                     let rd = g.delete(key);
-                    let cd = unsafe { pg_diff_rtf_delete(key) } != 0;
+                    let cd = unsafe { pg_diff_rtv_delete(key) } != 0;
                     assert_eq!(rd, cd, "shared dense delete verdict, key={key:#x}");
                 }
             }
         }
         let rn = rust.lock_share().num_keys();
-        let cn = unsafe { pg_diff_rtf_num_keys() };
+        let cn = unsafe { pg_diff_rtv_num_keys() };
         assert_eq!(rn, cn, "shared num_keys after op {op}");
     }
-    shared_iterate_compare(&rust, &mut b);
+    shared_iterate_compare(&rust, &mut b, &mut cbuf);
+    // final drop happens with whatever keys remain live — the recursive
+    // free path (nodes AND single-value leaves) runs every exec
     drop(rust);
-    unsafe { pg_diff_rtf_free() };
+    unsafe { pg_diff_rtv_free() };
 }
 
-fn shared_iterate_compare(rust: &SharedRadixTree<u64>, b: &mut Budget) {
+fn shared_iterate_compare(rust: &SharedRadixTree<RtvVal>, b: &mut Budget, cbuf: &mut [u8]) {
     if b.iter_pairs >= MAX_ITER_PAIRS {
         return;
     }
     let g = rust.lock_share();
     let mut it = g.begin_iterate();
-    unsafe { pg_diff_rtf_iter_begin() };
+    unsafe { pg_diff_rtv_iter_begin() };
     loop {
-        let rn = it.next();
+        let rn = it.next_ptr();
         let mut ck = 0u64;
-        let mut cv = 0u64;
-        let cn = unsafe { pg_diff_rtf_iter_next(&mut ck, &mut cv) } != 0;
+        let mut clen = 0i32;
+        let cn = unsafe { pg_diff_rtv_iter_next(&mut ck, cbuf.as_mut_ptr(), &mut clen) }
+            != 0;
         match rn {
-            Some((rk, rv)) => {
+            Some((rk, rp)) => {
                 assert!(cn, "shared iterate: Rust yielded {rk:#x}, C exhausted");
                 assert_eq!(rk, ck, "shared iterate key");
-                assert_eq!(*rv, cv, "shared iterate value, key={rk:#x}");
+                // SAFETY: pointer from next_ptr covers the whole image.
+                let rimg = unsafe { rtv_image(rp) };
+                assert_eq!(
+                    rimg.as_slice(),
+                    &cbuf[..clen as usize],
+                    "shared iterate image, key={rk:#x}"
+                );
             }
             None => {
                 assert!(!cn, "shared iterate: C yielded {ck:#x}, Rust exhausted");
@@ -675,7 +717,7 @@ fn shared_iterate_compare(rust: &SharedRadixTree<u64>, b: &mut Budget) {
             break;
         }
     }
-    unsafe { pg_diff_rtf_iter_end() };
+    unsafe { pg_diff_rtv_iter_end() };
 }
 
 #[cfg(test)]
@@ -788,6 +830,40 @@ mod tests {
         }
     }
 
+    /// Shared-arm leaf lifecycle witness: non-embeddable images (leaves)
+    /// live at drop time, so the recursive-free store's node AND leaf free
+    /// paths run (the tidstore shape; closes the CI-lcov line-1567 gap).
+    #[test]
+    fn witness_shared_leaf_drop() {
+        let mut inp = vec![2u8]; // shared arm
+        for kb in [0x10u8, 0x20, 0x30] {
+            inp.push(0); // set
+            inp.push(0); // ctl: 1-byte key
+            inp.push(kb);
+            inp.push(20); // 20-byte payload -> 22-byte image -> LEAF
+            for j in 0..20u8 {
+                inp.push(kb.wrapping_add(j));
+            }
+        }
+        inp.push(3); // iterate (image plane over leaves)
+        inp.push(5); // recreate: drops the tree with 3 live leaves
+        // repopulate one embedded + one leaf, then end-of-exec drop
+        inp.push(0);
+        inp.push(0);
+        inp.push(0x44);
+        inp.push(2); // embedded (4-byte image)
+        inp.push(1);
+        inp.push(2);
+        inp.push(0);
+        inp.push(0);
+        inp.push(0x55);
+        inp.push(30); // leaf
+        for j in 0..30u8 {
+            inp.push(j);
+        }
+        run(&inp);
+    }
+
     /// Node-kind ladder: dense runs grow 4 -> 16 -> 48 -> 256, then dense
     /// deletes shrink back; iterate after each phase.
     #[test]
@@ -858,7 +934,7 @@ mod tests {
                 inp.push(0); // set
                 inp.push(7); // ctl: 8 raw bytes
                 inp.extend_from_slice(&key.to_le_bytes());
-                if sel % 3 == 1 {
+                if sel % 3 != 0 {
                     inp.push(9); // varlen: 9-byte payload (leaf)
                     inp.extend_from_slice(&key.to_le_bytes());
                     inp.push(0xEE);
