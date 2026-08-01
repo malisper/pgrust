@@ -113,7 +113,7 @@ fn warmup() {
             for &(enc, _) in &ENCODINGS {
                 pin_env(enc);
                 unsafe { pg_spf_reset() };
-                let (ap, dp) = stage_files(b"SFX T Y 1\nSFX T 0 s .\n", b"1\nbook/T\n");
+                let Some((ap, dp)) = stage_files(b"SFX T Y 1\nSFX T 0 s .\n", b"1\nbook/T\n") else { continue };
                 let ctx = MemoryContext::new("spellfam-warm");
                 if let Ok(obj) = rust_build(&ctx, ap.as_bytes(), dp.as_bytes()) {
                     let octx = MemoryContext::new("spellfam-warm-norm");
@@ -263,7 +263,7 @@ fn parse_input(data: &[u8]) -> Option<Parsed<'_>> {
 /// Write the two fuzzer files to a per-thread temp dir; returns the two NUL-
 /// terminated path CStrings. Files are FILE bytes verbatim (NULs kept — the
 /// truncation is the behavior under test).
-fn stage_files(aff: &[u8], dict: &[u8]) -> (std::ffi::CString, std::ffi::CString) {
+fn stage_files(aff: &[u8], dict: &[u8]) -> Option<(std::ffi::CString, std::ffi::CString)> {
     thread_local! {
         static DIR: std::path::PathBuf = {
             let mut d = std::env::temp_dir();
@@ -272,15 +272,18 @@ fn stage_files(aff: &[u8], dict: &[u8]) -> (std::ffi::CString, std::ffi::CString
             d
         };
     }
+    // Never panic on harness I/O: a transient pod condition (EMFILE, ENOSPC)
+    // would otherwise abort the run and be reported as a "crash", i.e. a
+    // harness artifact masquerading as a finding. Skip the exec instead.
     DIR.with(|d| {
         let ap = d.join("f.affix");
         let dp = d.join("f.dict");
-        std::fs::File::create(&ap).unwrap().write_all(aff).unwrap();
-        std::fs::File::create(&dp).unwrap().write_all(dict).unwrap();
-        (
-            std::ffi::CString::new(ap.to_string_lossy().into_owned()).unwrap(),
-            std::ffi::CString::new(dp.to_string_lossy().into_owned()).unwrap(),
-        )
+        std::fs::File::create(&ap).ok()?.write_all(aff).ok()?;
+        std::fs::File::create(&dp).ok()?.write_all(dict).ok()?;
+        Some((
+            std::ffi::CString::new(ap.to_string_lossy().into_owned()).ok()?,
+            std::ffi::CString::new(dp.to_string_lossy().into_owned()).ok()?,
+        ))
     })
 }
 
@@ -318,7 +321,7 @@ const DECODE_CROSS_EXEC: bool = false;
 fn side_fingerprints(aff: &[u8], dict: &[u8], words: &[&[u8]], enc: i32) -> (String, String) {
     pin_env(enc);
     unsafe { pg_spf_reset() };
-    let (ap, dp) = stage_files(aff, dict);
+    let Some((ap, dp)) = stage_files(aff, dict) else { return (String::new(), String::new()) };
 
     // --- Rust side ---
     let ctx = MemoryContext::new("spellfam-fp");
@@ -628,7 +631,7 @@ pub fn spellfam_diff(data: &[u8]) {
         }
     }
 
-    let (ap, dp) = stage_files(&aff, &dict);
+    let Some((ap, dp)) = stage_files(&aff, &dict) else { return };
 
     let ctx = MemoryContext::new("spellfam");
     let r = rust_build(&ctx, ap.as_bytes(), dp.as_bytes());
@@ -955,7 +958,7 @@ mod tests {
         // hand-staged file to exhibit the divergence.
         unsafe { pg_spf_reset() };
         pin_env(wchar::PG_UTF8);
-        let (ap, dp) = stage_files(b"prefixes\nflag A:\n . > \x00X\n", b"a\n");
+        let (ap, dp) = stage_files(b"prefixes\nflag A:\n . > \x00X\n", b"a\n").expect("temp files");
         let ctx = MemoryContext::new("spellfam-nulwitness");
         let r = rust_build(&ctx, ap.as_bytes(), dp.as_bytes());
         let c_rc = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
@@ -1143,6 +1146,34 @@ mod fleet_repro {
     fn nullseg_f861dd44() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-nullseg-f861dd44")).unwrap();
         super::spellfam_diff(&data);
+    }
+    /// FD-LEAK CONTROL (the EMFILE that ended the 806k-exec floor run).
+    /// spell.c ereports out of dictionary import, longjmping past
+    /// tsearch_readline_end, so a bare fopen/fclose oracle leaks a FILE* per
+    /// FAILED build; real PG does not leak because fd.c closes at abort. Drives
+    /// 4000 ERRORING builds — far past a typical 1024 fd ulimit — and must not
+    /// hit "Too many open files". Fails loudly if the cleanup regresses.
+    #[test]
+    fn fd_leak_control() {
+        // an affix file that always errors: bad FLAG value
+        let aff = b"FLAG banana\n";
+        let dict = b"0\n";
+        let mut d = vec![0u8];
+        d.push((aff.len() & 0xff) as u8);
+        d.push(((aff.len() >> 8) & 0xff) as u8);
+        d.extend_from_slice(aff);
+        d.push((dict.len() & 0xff) as u8);
+        d.push(((dict.len() >> 8) & 0xff) as u8);
+        d.extend_from_slice(dict);
+        d.extend_from_slice(b"word");
+        for _ in 0..4000 {
+            super::spellfam_diff(&d);
+        }
+        // If FILE*s leaked we would already have panicked/errored above; assert
+        // we can still open a file, which EMFILE would deny.
+        let probe = std::env::temp_dir().join("spellfam-fdprobe");
+        assert!(std::fs::File::create(&probe).is_ok(), "fd exhaustion (EMFILE)");
+        let _ = std::fs::remove_file(&probe);
     }
     #[test]
     fn div7_compound_4e2fe0d5() {

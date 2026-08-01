@@ -300,9 +300,73 @@ static _Thread_local char spf_cxt_dummy;
 #define CurTransactionContext ((MemoryContext) &spf_cxt_dummy)
 #define ALLOCSET_DEFAULT_SIZES 0
 
-/* fd.c plumbing */
-#define AllocateFile(name, mode) fopen((name), (mode))
-#define FreeFile(fp) fclose(fp)
+/* fd.c plumbing — WITH the resource-owner cleanup fd.c actually provides.
+ * spell.c's error paths ereport (longjmp) straight past tsearch_readline_end,
+ * so a bare fopen/fclose pair LEAKS the FILE* on every failed import. Real
+ * PostgreSQL does not leak: AllocateFile registers the fd with fd.c, which
+ * closes it during transaction abort — the bookkeeping originally shimmed away
+ * as "server plumbing". Without it a floor run dies of EMFILE after ~1k errored
+ * builds (observed: "Too many open files" at exec 806107). Track them and close
+ * any stragglers in pg_spf_reset(), which is this oracle's abort boundary. */
+#define SPF_MAX_FILES 64
+static _Thread_local FILE *spf_files[SPF_MAX_FILES];
+
+static FILE *
+spf_allocate_file(const char *name, const char *mode)
+{
+	FILE	   *fp = fopen(name, mode);
+	int			i;
+
+	if (fp == NULL)
+		return NULL;
+	for (i = 0; i < SPF_MAX_FILES; i++)
+	{
+		if (spf_files[i] == NULL)
+		{
+			spf_files[i] = fp;
+			return fp;
+		}
+	}
+	/* Table full: legitimate use holds ONE file at a time, so a full table
+	 * means FILE*s are accumulating across execs — i.e. the fd.c abort-time
+	 * cleanup regressed. Fail LOUDLY. Returning NULL here instead would cap
+	 * the leak silently, spuriously report "could not open affix file", and
+	 * make the fd_leak_control test vacuous (it did exactly that once). */
+	fprintf(stderr,
+			"spellfam oracle: AllocateFile table full (%d) — fd cleanup regressed\n",
+			SPF_MAX_FILES);
+	fclose(fp);
+	abort();
+}
+
+static int
+spf_free_file(FILE *fp)
+{
+	int			i;
+
+	for (i = 0; i < SPF_MAX_FILES; i++)
+		if (spf_files[i] == fp)
+			spf_files[i] = NULL;
+	return fclose(fp);
+}
+
+static void
+spf_close_all_files(void)
+{
+	int			i;
+
+	for (i = 0; i < SPF_MAX_FILES; i++)
+	{
+		if (spf_files[i] != NULL)
+		{
+			fclose(spf_files[i]);
+			spf_files[i] = NULL;
+		}
+	}
+}
+
+#define AllocateFile(name, mode) spf_allocate_file((name), (mode))
+#define FreeFile(fp) spf_free_file(fp)
 
 /* elog.c error-context plumbing (tsearch_readline arms it, we ignore it) */
 typedef struct ErrorContextCallback
@@ -4215,6 +4279,8 @@ pg_spf_reset(void)
 				pg_regfree(a->reg.pregex);
 		}
 	}
+
+	spf_close_all_files();		/* fd.c abort-time cleanup (see AllocateFile) */
 
 	for (i = 0; i < spf_nallocs; i++)
 		free(spf_allocs[i]);	/* header base pointers */
