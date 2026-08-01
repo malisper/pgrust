@@ -939,6 +939,41 @@ mod tests {
         assert_eq!(e.message(), "unsupported ltree version number 2");
     }
 
+    /// p1-ltree REGRESSION (divergence, fixed 2026-08-01): lquery repeat
+    /// counts go through C's `atoi` == `(int) strtol`, so a digit string that
+    /// TRUNCATES into 0..=LTREE_MAX_LEVELS is accepted with the truncated
+    /// value. Every expectation below is ground-truthed against
+    /// docker postgres:18.3 with the ltree extension installed.
+    #[test]
+    fn lquery_repeat_count_matches_c_atoi_truncation() {
+        // accepted: value truncates by (int) into range
+        for (input, want) in [
+            ("*{4294967301}", "*{5}"),
+            ("*{4294967296}", "*{0}"),
+            ("*{,4294967301}", "*{,5}"),
+            ("a{4294967301,4294967301}", "a{5}"),
+        ] {
+            let img = io::parse_lquery(input.as_bytes())
+                .unwrap_or_else(|e| panic!("{input}: rejected: {}", e.message()));
+            assert_eq!(
+                String::from_utf8(io::deparse_lquery(&img)).unwrap(),
+                want,
+                "{input}"
+            );
+        }
+        // rejected: value truncates negative (or saturates to LONG_MAX -> -1)
+        for input in [
+            "*{2147483648}",
+            "*{99999999999999999999}",
+            "*{9223372036854775807}",
+            "*{18446744073709551616}",
+        ] {
+            let e = io::parse_lquery(input.as_bytes())
+                .expect_err(&format!("{input}: should be rejected"));
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED, "{input}");
+        }
+    }
+
     /// p1-ltree REGRESSION (release blocker, fixed 2026-08-01): ltxtquery's
     /// parser recurses once per '(' and was guarded by a fixed FRAME-COUNT cap
     /// (`depth > 10_000`) instead of C's byte-based check_stack_depth(). At the

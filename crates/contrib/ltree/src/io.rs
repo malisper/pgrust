@@ -207,15 +207,35 @@ struct PLevel {
     variants: Vec<NodeItem>,
 }
 
+/// C's `atoi`, which lquery_in's repeat-count parser relies on for its
+/// out-of-range rejection. `atoi(s)` is `(int) strtol(s, NULL, 10)`, so the
+/// observable behavior is: accumulate in `long` (64-bit here), SATURATE at
+/// `LONG_MAX` on overflow (strtol's ERANGE result), then TRUNCATE to `int`.
+///
+/// The truncation is load-bearing, not a detail: the caller only rejects
+/// `low < 0 || low > LTREE_MAX_LEVELS`, so a digit string that truncates into
+/// 0..=65535 is ACCEPTED with the truncated value. Ground-truthed against
+/// postgres:18.3 — `'*{4294967301}'::lquery` is `*{5}`, `'*{4294967296}'` is
+/// `*{0}`, while `'*{2147483648}'` reports "Low limit (-2147483648)" and every
+/// value at or past LONG_MAX reports "Low limit (-1)". Saturating at i32::MAX
+/// instead (the previous shape) rejected all of these.
 fn atoi(buf: &[u8], i: usize) -> i32 {
     let mut v: i64 = 0;
+    let mut overflow = false;
     let mut j = i;
     while j < buf.len() && buf[j].is_ascii_digit() {
-        v = v * 10 + (buf[j] - b'0') as i64;
-        if v > i32::MAX as i64 {
-            v = i32::MAX as i64;
+        match v
+            .checked_mul(10)
+            .and_then(|t| t.checked_add((buf[j] - b'0') as i64))
+        {
+            Some(nv) => v = nv,
+            // strtol keeps scanning the remaining digits, then returns LONG_MAX.
+            None => overflow = true,
         }
         j += 1;
+    }
+    if overflow {
+        v = i64::MAX;
     }
     v as i32
 }
