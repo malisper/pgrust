@@ -4213,6 +4213,27 @@ pg_spf_build(const char *affpath, const char *dictpath)
 	spf_conf = spf_palloc0(sizeof(IspellDict));
 	NIStartBuild(spf_conf);
 	NIImportAffixes(spf_conf, affpath);
+	/* AF-alias empty-slot normalization (DIVERGENCE-OF-RECORD, driver env
+	 * shim — NOT a spell.c edit): NIImportAffixes palloc0's AffixData, so the
+	 * reserved index-0 alias and any slot the file declares but never fills
+	 * stay NULL. spell.c then NULL-derefs those slots at every downstream use
+	 * (MergeAffix's `*AffixData[a]`, getNextFlagFromString via
+	 * IsAffixFlagInUse, makeCompoundFlags) whenever a dict word or affix line
+	 * references such an alias index — a verbatim-18.3 backend-crash on a
+	 * malformed/edge ispell alias table (found by this differential:
+	 * CI-div-segv2). The pgrust port represents the SAME slots as EMPTY
+	 * (an empty PgVec) and is robust; getAffixFlagSet's own code already
+	 * treats index 0 as the empty alias. Normalize NULL slots to "" here so
+	 * the differential measures the loader's real logic over the whole AF
+	 * domain against the port's hardened behavior, with the raw NULL-deref
+	 * recorded as the finding. Match-or-fix ruling owed (likely upstream). */
+	{
+		int			i;
+
+		for (i = 0; i < spf_conf->nAffixData; i++)
+			if (spf_conf->AffixData[i] == NULL)
+				spf_conf->AffixData[i] = "";
+	}
 	NIImportDictionary(spf_conf, dictpath);
 	NISortDictionary(spf_conf);
 	NISortAffixes(spf_conf);
