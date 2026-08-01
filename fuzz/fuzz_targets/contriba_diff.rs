@@ -1,0 +1,9 @@
+#![no_main]
+//! Differential: contrib fuzzystrmatch + isn shipped Rust vs vendored
+//! PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df) C — see
+//! decoder_fuzz::contriba_diff (lane p1-mb-contriba).
+use libfuzzer_sys::fuzz_target;
+
+fuzz_target!(|data: &[u8]| {
+    decoder_fuzz::contriba_diff(data);
+});

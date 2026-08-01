@@ -437,6 +437,10 @@ bench = false
 [[bin]]
 name = "hstore_diff"
 path = "fuzz_targets/hstore_diff.rs"
+# contriba_diff (p1-mb-contriba): contrib fuzzystrmatch + isn family.
+[[bin]]
+name = "contriba_diff"
+path = "fuzz_targets/contriba_diff.rs"
 test = false
 doc = false
 bench = false

@@ -69,7 +69,8 @@ fn main() {
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the same union
         // merge as the tzfam/miscfam/netfam registrations above.
-        // DEDUPED (single registration above): .file("csrc/pg_libfam_io.c")
+        // DEDUPED (single registration above): // DEDUPED (single registration above): .file("csrc/pg_libfam_io.c")
+        // DEDUPED (single registration above): .file("csrc/pg_tzfam_io.c")
         // COMPILE GATE (array_userfuncs_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_array_userfuncs_io.c is filled
         // with verbatim vendored C (README-TODO-array_userfuncs_diff.md step 1).
@@ -117,11 +118,20 @@ fn main() {
         // pg_rusage.c show + xlogstats.c + common/stringinfo.c core
         // (see pg_miscfam_io.c header; cmdtaglist.h vendored under
         // csrc/miscfam/tcop/).
+        // DEDUPED (single registration above): // DEDUPED (single registration above): .file("csrc/pg_miscfam_io.c")
         // DEDUPED (single registration above): .file("csrc/pg_miscfam_io.c")
+        // contriba_diff oracle (p1-mb-contriba): verbatim 18.3
+        // fuzzystrmatch.c + dmetaphone.c + daitch_mokotoff.c (generated
+        // chart under csrc/contribafam/) + levenshtein.c both expansions +
+        // isn.c with its range-table headers (csrc/contribafam/). Fully
+        // self-shimmed TU; every extern it exports is pg_ca_-prefixed and
+        // all vendored bodies are file-static (see the file header).
+        .file("csrc/pg_contribafam_io.c")
         // netfam_diff oracle (p1-mb-netfam): verbatim 18.3 ifaddr.c pure
         // core + pqformat.c + pqformat.h inlines + common/stringinfo.c
         // behind nf_-renames (see pg_netfam_io.c header for provenance +
         // the encoding/putmessage seam shims).
+        // DEDUPED (single registration above): // DEDUPED (single registration above): .file("csrc/pg_netfam_io.c")
         // DEDUPED (single registration above): .file("csrc/pg_netfam_io.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled

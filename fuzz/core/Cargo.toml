@@ -171,6 +171,13 @@ contrib_cube = { path = "../../crates/contrib/cube" }
 # stringinfo/pqformat/mbutils/hashfn/types_tuple already above
 hstore = { path = "../../crates/contrib/hstore" }
 wparser_def = { path = "../../crates/backend/tsearch/wparser_def" }
+# contriba_diff (p1-mb-contriba); varlena/mbutils/wchar/dfmgr/guc/mcx/types_* already above
+fuzzystrmatch = { path = "../../crates/contrib/fuzzystrmatch" }
+isn = { path = "../../crates/contrib/isn" }
+# contriba_diff GUC environment (isn.weak fc plane): store init + identity
+aclchk_seams = { path = "../../crates/backend/catalog/aclchk_seams" }
+superuser_seams = { path = "../../crates/backend/utils/misc/superuser_seams" }
+miscinit = { path = "../../crates/backend/utils/init/miscinit" }
 
 [build-dependencies]
 cc = "1"

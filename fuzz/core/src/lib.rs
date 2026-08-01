@@ -511,3 +511,6 @@ pub use hstorefam_diff::hstorefam_diff;
 // vendored 18.3 C.
 pub mod wparserfam_diff;
 pub use wparserfam_diff::wparserfam_diff;
+// contriba_diff (p1-mb-contriba): contrib fuzzystrmatch + isn two-crate family.
+pub mod contriba_diff;
+pub use contriba_diff::contriba_diff;

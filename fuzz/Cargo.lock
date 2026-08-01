@@ -1678,6 +1678,7 @@ dependencies = [
 name = "decoder_fuzz"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
  "adt_ascii",
  "adt_bool",
  "adt_cash",
@@ -1730,6 +1731,7 @@ dependencies = [
  "fd",
  "fmgr_core",
  "fmgr_seams",
+ "fuzzystrmatch",
  "guc",
  "guc_tables",
  "hashfn",
@@ -1739,6 +1741,7 @@ dependencies = [
  "ifaddr",
  "indexcmds_seams",
  "integerset",
+ "isn",
  "keywords",
  "libc",
  "localtime",
@@ -1746,6 +1749,7 @@ dependencies = [
  "mbutils",
  "mbutils_seams",
  "mcx",
+ "miscinit",
  "name",
  "namespace_seams",
  "nbt_compare",
@@ -1781,6 +1785,7 @@ dependencies = [
  "stack_depth",
  "strftime",
  "stringinfo",
+ "superuser_seams",
  "syscache_seams",
  "timestamp_seams",
  "ts_locale",
@@ -2246,6 +2251,22 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+]
+
+[[package]]
+name = "fuzzystrmatch"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "dfmgr",
+ "mbutils",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
@@ -2740,6 +2761,21 @@ dependencies = [
  "datum",
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "isn"
+version = "0.0.0"
+dependencies = [
+ "adt_bool",
+ "datum",
+ "dfmgr",
+ "guc",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
 ]
 
 [[package]]
