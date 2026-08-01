@@ -1,0 +1,4 @@
+€, txtsample::text);
+
+
+SELECT COUNT(*) FROM test_tsquery WHERE keyword <  

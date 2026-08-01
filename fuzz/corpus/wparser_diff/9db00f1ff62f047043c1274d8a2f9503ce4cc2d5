@@ -1,0 +1,5 @@
+);
+
+SET default_text_search_config=english;
+
+SELECT to_tsvector(

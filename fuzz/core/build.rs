@@ -52,6 +52,12 @@ fn main() {
         // header for provenance, shims and the records/SRF/jsonb/gist/gin
         // carves).
         .file("csrc/pg_hstorefam_io.c")
+        // wparser_diff oracle (p1-mb-contribc): verbatim 18.3
+        // wparser_def.c tokenizer half (lines 33-1935, through prsd_end),
+        // wpd_-prefixed; encoding walkers resolved against the verbatim
+        // wfam_ copies in pg_wcharfam.c (see the file header for
+        // provenance, shims and the ts_headline carve).
+        .file("csrc/pg_wparserfam_io.c")
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the same union

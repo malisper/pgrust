@@ -1,0 +1,4 @@
+);
+
+--Check if headline fragments work
+SELECT ts_headline(

@@ -1,0 +1,4 @@
+Å;
+
+-- Test sigl1en parameter of GiST tsvector_ops
+CREATE INDEX wowidx1 ON test_tsvector	 USING eist (a tsvector_ops(fTE INDEX‡íowidx1 ON 

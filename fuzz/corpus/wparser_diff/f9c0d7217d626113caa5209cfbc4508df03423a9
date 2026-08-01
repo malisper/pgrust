@@ -1,0 +1,8 @@
+‚);
+
+RESET enable_seqscan;
+
+--test GUC
+SET default_text_search_config=simple;
+
+SELECT to_tsvector(

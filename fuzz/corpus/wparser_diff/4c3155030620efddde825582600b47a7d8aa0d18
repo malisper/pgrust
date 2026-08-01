@@ -1,0 +1,6 @@
+€;
+
+SET enable_indexscan=OFF;
+SET enable_bitmapscan=ON;
+
+explain (costs off) SELECT count(*) FROM test_tsvector WHERE a @@ 

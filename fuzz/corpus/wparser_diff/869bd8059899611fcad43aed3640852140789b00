@@ -1,0 +1,4 @@
+Å);
+
+-- test OR operator
+select websearch_to_tsquery(

@@ -322,7 +322,17 @@ fn char2wchar_default(head: &[u8]) -> PgResult<Vec<u32>> {
         )
         .into());
     }
-    out.truncate(n);
+    // C TParserInit allocates lenstr+1 wchar slots and char2wchar fills n of
+    // them (plus the terminating 0 when it fits), so wstr[poschar] is always
+    // an in-bounds read for poschar < lenstr. Truncating to n made the
+    // predicate reads panic whenever the conversion produced FEWER wchars
+    // than input bytes — an embedded NUL stops mbstowcs at 0 while lenstr
+    // stays 1, so `p_iswhat` indexed an empty vector. Keep C's shape (found
+    // by wparser_diff, lane p1-mb-contribc).
+    out.resize(head.len() + 1, 0);
+    if n < out.len() {
+        out[n] = 0;
+    }
     Ok(out.into_iter().map(|w| w as u32).collect())
 }
 
@@ -349,8 +359,14 @@ pub fn tparser_init(mcx: Mcx<'_>, str_ptr: *const u8, len: usize) -> PgResult<TP
         // SAFETY: caller contract (C TParserInit): str_ptr has len valid bytes.
         let head = unsafe { core::slice::from_raw_parts(str_ptr, len) };
         if ::pg_locale::database_ctype_is_c() {
+            // Same C shape as the wstr arm above: lenstr+1 slots, so every
+            // p_iswhat read stays in bounds even when the conversion yields
+            // fewer wchars than input bytes (pg_mb2wchar_with_len truncates
+            // its result to the converted count).
             let w = ::mbutils::pg_mb2wchar_with_len(mcx, head)?;
-            prs.pgwstr = Some(w.iter().map(|&c| c as u32).collect());
+            let mut v: Vec<u32> = w.iter().map(|&c| c as u32).collect();
+            v.resize(len + 1, 0);
+            prs.pgwstr = Some(v);
         } else {
             prs.wstr = Some(char2wchar_default(head)?);
         }

@@ -1,0 +1,5 @@
+::tsquery @@ ts;
+
+--check OP_PHRASE on index
+create temp table phrase_index_test(fts tsvector);
+insert into phrase_index_test values (

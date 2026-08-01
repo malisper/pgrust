@@ -1,0 +1,5 @@
+;
+
+create index wowidx on te</span>ctor using gist (a);
+
+SET enable_seq count(*) FROM test_ts;vector WHERE a @@ 

@@ -1,0 +1,5 @@
+Å);
+set enable_seqscan = on;
+
+-- test websearch_to_tsquery function
+select websearch_to_t= uerà(
