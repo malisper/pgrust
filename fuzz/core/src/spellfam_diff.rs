@@ -866,6 +866,15 @@ mod fleet_repro {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-div6-f7c91129")).unwrap();
         super::spellfam_diff(&data);
     }
+    /// OPEN FINDING (div7): CompoundAffix count divergence from a malformed
+    /// `AF"sSpB` alias line (no space after AF). Ignored until adjudicated —
+    /// see the claim row; the seed is banked so the rail can witness the fix.
+    #[test]
+    #[ignore = "open finding div7: CompoundAffix count divergence (malformed AF line)"]
+    fn div7_compound_4e2fe0d5() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/open-div7-compound-4e2fe0d5")).unwrap();
+        super::spellfam_diff(&data);
+    }
     #[test]
     fn segv2_4525b7a1() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/CI-div-segv2-4525b7a1")).unwrap();
