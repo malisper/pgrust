@@ -1,0 +1,16 @@
+file	sloc	kani	fuzz	regress	any
+crates/backend/utils/adt/geo/src/boxes.rs	132	0	126	0	126
+crates/backend/utils/adt/geo/src/builtins.rs	494	0	336	0	336
+crates/backend/utils/adt/geo/src/circle.rs	116	0	111	0	111
+crates/backend/utils/adt/geo/src/io.rs	556	0	533	0	533
+crates/backend/utils/adt/geo/src/lib.rs	220	0	217	0	217
+crates/backend/utils/adt/geo/src/line.rs	129	0	125	0	125
+crates/backend/utils/adt/geo/src/lseg.rs	78	0	77	0	77
+crates/backend/utils/adt/geo/src/path.rs	99	0	99	0	99
+crates/backend/utils/adt/geo/src/point.rs	59	0	59	0	59
+crates/backend/utils/adt/geo/src/poly.rs	155	0	154	0	154
+crates/backend/utils/adt/geo/src/proximity.rs	309	0	309	0	309
+crates/backend/utils/adt/geo/src/tests_full.rs	0	0	0	0	0
+crates/backend/utils/adt/geo/src/ws_tests.rs	33	0	0	0	0
+CRATE:crates/backend/utils/adt/geo	2380	0	2146	0	2146
+TOTAL	2380	0	2146	0	2146
