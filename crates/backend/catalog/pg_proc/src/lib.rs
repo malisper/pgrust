@@ -84,12 +84,6 @@ pub const INTERNALlanguageId: Oid = 12;
 pub const ClanguageId: Oid = 13;
 pub const SQLlanguageId: Oid = 14;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: pg_proc {what}")
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]

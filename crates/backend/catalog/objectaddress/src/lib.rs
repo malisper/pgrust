@@ -213,48 +213,116 @@ pub fn TypeNameToString(tn: &TypeName<'_>) -> String {
     out
 }
 
-// LookupTypeNameOid (parse_type.c), plain unparameterized names only.
+// LookupTypeNameOid (parse_type.c) over LookupTypeNameExtended's three
+// lanes: pre-resolved typeOid (names == NIL), %TYPE column references, and
+// plain (possibly qualified) names. setof is not examined here, as in C.
 pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
-    if tn.pct_type || tn.setof {
-        unported("LookupTypeName %TYPE / SETOF");
-    }
-    if tn.typeOid != InvalidOid {
-        unported("pre-resolved TypeName.typeOid lane");
-    }
-    let mut names: [&str; 3] = [""; 3];
-    let nnames = tn.names.len();
-    if nnames > 3 {
-        // C DeconstructQualifiedName (namespace.c): catchable 42601, not a crash.
-        return Err(err(
-            ERRCODE_SYNTAX_ERROR,
-            format!("improper qualified name (too many dotted names): {}", NameListToString(&tn.names)),
-        ));
-    }
-    if nnames == 0 {
-        // names == NIL is the pre-resolved-typeOid lane (parse_type.c);
-        // grammar TypeNames always carry names.
-        unported("pre-resolved TypeName.typeOid lane");
-    }
-    for (i, n) in tn.names.iter().enumerate() {
-        names[i] = n.as_string().expect("TypeName names").sval;
-    }
-    let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
-    let typoid = match schemaname {
-        Some(schemaname) => {
-            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
-            if namespace_id == InvalidOid {
-                InvalidOid
-            } else {
-                syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
-            }
+    let typoid: Oid;
+    if tn.names.is_nil() {
+        // We have the OID already if it's an internally generated TypeName —
+        // but C still fetches the pg_type tuple, so a vanished OID fails
+        // that fetch ("should not happen"): an internal error regardless of
+        // missing_ok, never the user-facing does-not-exist tail.
+        typoid = tn.typeOid;
+        if typoid != InvalidOid && syscache_seams::lookup_pg_type_shape::call(typoid)?.is_none() {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for type {typoid}"
+            ))));
         }
-        None => catalog_namespace::TypenameGetTypidExtended(typname, true)?,
-    };
-    let typoid = if typoid != InvalidOid && !tn.arrayBounds.is_nil() {
-        syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid)
+    } else if tn.pct_type {
+        // Handle %TYPE reference to type of an existing field.
+        let parts: Vec<&str> =
+            tn.names.iter().map(|n| n.as_string().expect("TypeName names").sval).collect();
+        let (relparts, field) = match parts.len() {
+            1 => {
+                return Err(err(
+                    ERRCODE_SYNTAX_ERROR,
+                    format!(
+                        "improper %TYPE reference (too few dotted names): {}",
+                        NameListToString(&tn.names)
+                    ),
+                ))
+            }
+            2..=4 => (&parts[..parts.len() - 1], parts[parts.len() - 1]),
+            _ => {
+                return Err(err(
+                    ERRCODE_SYNTAX_ERROR,
+                    format!(
+                        "improper %TYPE reference (too many dotted names): {}",
+                        NameListToString(&tn.names)
+                    ),
+                ))
+            }
+        };
+        let rv = fill_range_var(relparts)?;
+        // As in C: no lock is taken here, so this can race concurrent DDL.
+        let relid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, missing_ok)?;
+        let attnum = lsyscache::get_attnum(relid, field)?;
+        if attnum == 0 {
+            if !missing_ok {
+                return Err(err(
+                    ERRCODE_UNDEFINED_COLUMN,
+                    format!(
+                        "column \"{field}\" of relation \"{}\" does not exist",
+                        rv.relname
+                    ),
+                ));
+            }
+            typoid = InvalidOid;
+        } else {
+            typoid = lsyscache::get_atttype(relid, attnum)?;
+            // This construct should never have an array indicator.
+            debug_assert!(tn.arrayBounds.is_nil());
+            // Emit the nuisance notice (parse_type.c).
+            elog::ereport(types_error::NOTICE)
+                .errmsg(format!(
+                    "type reference {} converted to {}",
+                    TypeNameToString(tn),
+                    format_type::format_type_be(typoid)?
+                ))
+                .finish(types_error::ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "LookupTypeNameExtended",
+                ))?;
+        }
     } else {
-        typoid
-    };
+        // Normal reference to a type name.
+        let mut names: [&str; 3] = [""; 3];
+        let nnames = tn.names.len();
+        if nnames > 3 {
+            // C DeconstructQualifiedName (namespace.c): catchable 42601, not a crash.
+            return Err(err(
+                ERRCODE_SYNTAX_ERROR,
+                format!(
+                    "improper qualified name (too many dotted names): {}",
+                    NameListToString(&tn.names)
+                ),
+            ));
+        }
+        for (i, n) in tn.names.iter().enumerate() {
+            names[i] = n.as_string().expect("TypeName names").sval;
+        }
+        let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+        let base_typoid = match schemaname {
+            Some(schemaname) => {
+                let namespace_id =
+                    catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
+                if namespace_id == InvalidOid {
+                    InvalidOid
+                } else {
+                    syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
+                }
+            }
+            None => catalog_namespace::TypenameGetTypidExtended(typname, true)?,
+        };
+        // If an array reference, return the array type instead.
+        typoid = if base_typoid != InvalidOid && !tn.arrayBounds.is_nil() {
+            syscache_seams::pg_type_typarray::call(base_typoid)?.unwrap_or(InvalidOid)
+        } else {
+            base_typoid
+        };
+    }
     if typoid == InvalidOid && !missing_ok {
         return Err(err(
             ERRCODE_UNDEFINED_OBJECT,
@@ -1646,4 +1714,71 @@ fn aclcheck_error_type(aclerr: i32, type_oid: Oid) -> PgResult<()> {
         ObjectType::OBJECT_TYPE,
         &format_type::format_type_be(type_oid)?,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KNOWN_TYPE: Oid = 23;
+
+    fn install_seams() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::lookup_pg_type_shape::set(|typid| {
+                Ok((typid == KNOWN_TYPE).then_some(types_tuple::PgTypeShape {
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typstorage: b'p' as i8,
+                    typcollation: 0,
+                }))
+            });
+        });
+    }
+
+    fn pct_typename<'mcx>(mcx: Mcx<'mcx>, parts: &[&'mcx str]) -> TypeName<'mcx> {
+        let nodes: Vec<Node<'mcx>> =
+            parts.iter().map(|p| Node::mk_string(mcx, p).unwrap()).collect();
+        TypeName {
+            names: NodeList::from_slice(mcx, &nodes).unwrap(),
+            pct_type: true,
+            typemod: -1,
+            location: -1,
+            ..Default::default()
+        }
+    }
+
+    // The pre-resolved typeOid lane (names == NIL), previously fenced: the
+    // OID passes through, but a vanished OID fails C's tuple fetch — an
+    // internal error even under missing_ok (parse_type.c "should not
+    // happen"), never the user-facing does-not-exist tail.
+    #[test]
+    fn lookup_type_name_oid_pre_resolved_lane() {
+        install_seams();
+        let tn = TypeName { typeOid: KNOWN_TYPE, typemod: -1, location: -1, ..Default::default() };
+        assert_eq!(LookupTypeNameOid(&tn, false).unwrap(), KNOWN_TYPE);
+        let gone = TypeName { typeOid: 99999, typemod: -1, location: -1, ..Default::default() };
+        for missing_ok in [true, false] {
+            let e = LookupTypeNameOid(&gone, missing_ok).unwrap_err();
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.message, "cache lookup failed for type 99999");
+        }
+    }
+
+    // The %TYPE lane's name-count errors, previously fenced (parse_type.c).
+    #[test]
+    fn pct_type_reference_name_count_errors() {
+        install_seams();
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let e = LookupTypeNameOid(&pct_typename(mcx, &["a"]), false).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.message, "improper %TYPE reference (too few dotted names): a");
+        let e =
+            LookupTypeNameOid(&pct_typename(mcx, &["a", "b", "c", "d", "e"]), false).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.message, "improper %TYPE reference (too many dotted names): a.b.c.d.e");
+    }
 }

@@ -22,12 +22,6 @@ const TSConfigRelationId: Oid = 3602;
 const TSDictionaryRelationId: Oid = 3600;
 const InvalidAttrNumber: i16 = 0;
 
-#[cold]
-#[inline(never)]
-fn walker_unported(what: &str) -> ! {
-    panic!("unported: dependency.c find_expr_references_walker {what}")
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -731,9 +725,10 @@ fn walk_query<'w, 'mcx: 'w>(
             | RTEKind::RTE_TABLEFUNC
             | RTEKind::RTE_FUNCTION
             | RTEKind::RTE_VALUES
-            // C's default arm; groupexprs ride the rtable recursion below.
-            | RTEKind::RTE_GROUP => {}
-            other => walker_unported(&format!("rtekind {other:?}")),
+            // C's default arm; groupexprs ride the rtable recursion below,
+            // and RTE_RESULT carries nothing to depend on.
+            | RTEKind::RTE_GROUP
+            | RTEKind::RTE_RESULT => {}
         }
     }
 
@@ -804,7 +799,13 @@ fn walk_query_fields<'w, 'mcx: 'w>(
             RTEKind::RTE_SUBQUERY => {
                 walk_query(rte.subquery.expect("RTE_SUBQUERY has a subquery"), context)?
             }
-            RTEKind::RTE_JOIN | RTEKind::RTE_CTE => {}
+            // range_table_entry_walker: JOIN aliases are skipped under
+            // QTW_IGNORE_JOINALIASES; CTE/NAMEDTUPLESTORE/RESULT carry
+            // nothing to walk.
+            RTEKind::RTE_JOIN
+            | RTEKind::RTE_CTE
+            | RTEKind::RTE_NAMEDTUPLESTORE
+            | RTEKind::RTE_RESULT => {}
             RTEKind::RTE_TABLEFUNC => {
                 walk_opt(rte.tablefunc, context)?
             }
@@ -813,7 +814,6 @@ fn walk_query_fields<'w, 'mcx: 'w>(
             // range_table_walker without QTW_IGNORE_GROUPEXPRS: the grouping
             // expressions live only here (the tlist holds GROUP Vars).
             RTEKind::RTE_GROUP => walk_list(&rte.groupexprs, context)?,
-            other => walker_unported(&format!("rtekind {other:?}")),
         }
         walk_list(&rte.securityQuals, context)?;
     }
@@ -965,6 +965,45 @@ mod tests {
         assert!(!refs
             .iter()
             .any(|r| r.classId == RELATION_RELATION_ID && r.objectSubId == 0));
+    }
+
+    // RTE_RESULT entries carry nothing to depend on: both rtekind switches
+    // treat them as C's silent default/nothing-to-do arms.
+    #[test]
+    fn rte_result_entries_are_ignored() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let result_rte = Node::mk(
+            mcx,
+            RangeTblEntry { rtekind: RTEKind::RTE_RESULT, ..Default::default() },
+        )
+        .unwrap();
+        let one =
+            Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let target_list = NodeList::from_slice(
+            mcx,
+            &[Node::mk_target_entry(mcx, one, 1, Some("x"), false).unwrap()],
+        )
+        .unwrap();
+        let from_expr = Node::mk_from_expr(
+            mcx,
+            NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+            None,
+        )
+        .unwrap();
+        let query = Node::mk(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make1(mcx, result_rte).unwrap(),
+                targetList: target_list,
+                jointree: Some(from_expr.as_from_expr().unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let refs = find_expr_references(query, &NodeList::nil()).unwrap();
+        assert_eq!(refs, vec![ObjectAddress::set(TYPE_RELATION_ID, INT4OID)]);
     }
 
     #[test]

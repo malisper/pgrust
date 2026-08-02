@@ -94,7 +94,7 @@ ROWS
 # (ALL catalogs, not just pg_class -- a coarse but drift-proof counter).
 # A mismatch is not automatically a bug; it means "reclassify and update me".
 FILECOUNTS=$(cat <<'ROWS'
-7|crates/backend/catalog/aclchk/src/grant.rs
+8|crates/backend/catalog/aclchk/src/grant.rs
 3|crates/backend/catalog/catalog_heap/src/create.rs
 1|crates/backend/catalog/catalog_heap/src/drop.rs
 2|crates/backend/catalog/catalog_heap/src/partition.rs

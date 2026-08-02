@@ -240,10 +240,18 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
                                 addrs.push(ObjectAddress::set(NAMESPACE_CLASS, objoid));
                             }
                         }
-                        REGCONFIG | REGDICTIONARY => panic!(
-                            "find_expr_references_walker (dependency.c): regconfig/\
-                             regdictionary literal; tsearch catalogs unported lane"
-                        ),
+                        REGCONFIG => {
+                            const TSCONFIG_CLASS: Oid = 3602;
+                            if syscache_seams::lookup_pg_ts_config_row::call(objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(TSCONFIG_CLASS, objoid));
+                            }
+                        }
+                        REGDICTIONARY => {
+                            const TSDICT_CLASS: Oid = 3600;
+                            if syscache_seams::lookup_pg_ts_dict_row::call(objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(TSDICT_CLASS, objoid));
+                            }
+                        }
                         REGROLE => {
                             return Err(Box::new(
                                 types_error::PgError::new(
@@ -376,6 +384,24 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
                 let c = node.as_convert_rowtype_expr().expect("ConvertRowtypeExpr");
                 addrs.push(ObjectAddress::set(TYPE_CLASS, c.resulttype));
             }
+            T_FieldStore => {
+                let fstore = node.as_field_store().expect("FieldStore");
+                let reltype = lsyscache::get_typ_typrelid(fstore.resulttype)?;
+                // Like FieldSelect, but multiple column(s) (dependency.c).
+                if reltype != 0 {
+                    for fieldnum in &fstore.fieldnums {
+                        addrs.push(ObjectAddress::sub_set(RELATION_CLASS, reltype, fieldnum));
+                    }
+                } else {
+                    addrs.push(ObjectAddress::set(TYPE_CLASS, fstore.resulttype));
+                }
+            }
+            T_NextValueExpr => {
+                let nve = node
+                    .as_variant::<types_nodes::primnodes::NextValueExpr>()
+                    .expect("NextValueExpr");
+                addrs.push(ObjectAddress::set(RELATION_CLASS, nve.seqid));
+            }
             // C has no SQLValueFunction case: expression_tree_walker leaf,
             // built-in pinned result types, no dependency recorded.
             // The SQL/JSON node set likewise has no dependency.c case:
@@ -383,11 +409,13 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
             // XmlExpr likewise has no dependency.c case: default recursion.
             // CoerceToDomainValue (a domain CHECK's VALUE) likewise has no
             // dependency.c case: default recursion, no dependency recorded.
+            // NamedArgExpr (f(x => 1) in a stored default) likewise has no
+            // dependency.c case: default recursion reaches the argument.
             T_BoolExpr | T_NullTest | T_BooleanTest | T_CaseExpr | T_CaseWhen
             | T_CaseTestExpr | T_CoalesceExpr | T_MinMaxExpr | T_ArrayExpr | T_List
             | T_SQLValueFunction | T_XmlExpr | T_JsonExpr | T_JsonValueExpr
             | T_JsonConstructorExpr | T_JsonIsPredicate | T_JsonBehavior
-            | T_CoerceToDomainValue => {}
+            | T_CoerceToDomainValue | T_NamedArgExpr => {}
             other => panic!(
                 "find_expr_references_walker (dependency.c): {other:?}; unported lane"
             ),
@@ -1254,6 +1282,149 @@ pub fn deleteDependencyRecordsForClass<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     rel.close(RowExclusiveLock)?;
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use types_nodes::Node;
+
+    const REGCONFIG: Oid = 3734;
+    const REGDICTIONARY: Oid = 3769;
+    const TSCONFIG_CLASS: Oid = 3602;
+    const TSDICT_CLASS: Oid = 3600;
+    const INT4OID: Oid = 23;
+    // Marker OIDs the mocked seams answer for.
+    const EXISTING_TS_OBJECT: Oid = 3748;
+    const MISSING_TS_OBJECT: Oid = 99999;
+    const COMPOSITE_TYPE: Oid = 60001;
+    const COMPOSITE_RELTYPE: Oid = 60002;
+
+    fn install_seams() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::lookup_pg_ts_config_row::set(|oid| {
+                Ok((oid == EXISTING_TS_OBJECT).then(|| syscache_seams::PgTsObjectRow {
+                    name: types_tuple::NameData::default(),
+                    namespace_oid: 11,
+                }))
+            });
+            syscache_seams::lookup_pg_ts_dict_row::set(|oid| {
+                Ok((oid == EXISTING_TS_OBJECT).then(|| syscache_seams::PgTsObjectRow {
+                    name: types_tuple::NameData::default(),
+                    namespace_oid: 11,
+                }))
+            });
+            syscache_seams::pg_type_typrelid::set(|typid| {
+                Ok((typid == COMPOSITE_TYPE).then_some(COMPOSITE_RELTYPE))
+            });
+        });
+    }
+
+    fn walk_expr<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> Vec<ObjectAddress> {
+        let mut addrs: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
+        nodes_core::NodeWalker::visit(
+            &mut FindExprRefs { mcx, rel_id: 50001, addrs: &mut addrs },
+            expr,
+        )
+        .unwrap();
+        addrs.iter().copied().collect()
+    }
+
+    fn oid_const<'mcx>(mcx: Mcx<'mcx>, consttype: Oid, value: Oid) -> Node<'mcx> {
+        Node::mk_const(mcx, consttype, -1, 0, 4, Datum::from_oid(value), false, true).unwrap()
+    }
+
+    #[test]
+    fn regconfig_const_records_tsconfig_dependency() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let addrs = walk_expr(mcx, oid_const(mcx, REGCONFIG, EXISTING_TS_OBJECT));
+        assert!(addrs.contains(&ObjectAddress::set(TSCONFIG_CLASS, EXISTING_TS_OBJECT)));
+        // The constant's datatype is recorded as for every Const.
+        assert!(addrs.contains(&ObjectAddress::set(TYPE_CLASS, REGCONFIG)));
+    }
+
+    #[test]
+    fn regconfig_const_skips_dropped_tsconfig() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let addrs = walk_expr(mcx, oid_const(mcx, REGCONFIG, MISSING_TS_OBJECT));
+        assert!(!addrs.iter().any(|a| a.classId == TSCONFIG_CLASS));
+        assert!(addrs.contains(&ObjectAddress::set(TYPE_CLASS, REGCONFIG)));
+    }
+
+    #[test]
+    fn regdictionary_const_records_tsdict_dependency() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let addrs = walk_expr(mcx, oid_const(mcx, REGDICTIONARY, EXISTING_TS_OBJECT));
+        assert!(addrs.contains(&ObjectAddress::set(TSDICT_CLASS, EXISTING_TS_OBJECT)));
+        let addrs = walk_expr(mcx, oid_const(mcx, REGDICTIONARY, MISSING_TS_OBJECT));
+        assert!(!addrs.iter().any(|a| a.classId == TSDICT_CLASS));
+    }
+
+    #[test]
+    fn next_value_expr_records_sequence_dependency() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let nve = Node::mk(
+            mcx,
+            types_nodes::primnodes::NextValueExpr { seqid: 424242, typeId: 20 },
+        )
+        .unwrap();
+        assert_eq!(walk_expr(mcx, nve), vec![ObjectAddress::set(RELATION_CLASS, 424242)]);
+    }
+
+    #[test]
+    fn named_arg_expr_recurses_into_argument() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let arg = Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let nae = Node::mk(
+            mcx,
+            types_nodes::primnodes::NamedArgExpr {
+                arg: Some(arg),
+                name: Some("x"),
+                argnumber: 0,
+                location: -1,
+            },
+        )
+        .unwrap();
+        assert_eq!(walk_expr(mcx, nae), vec![ObjectAddress::set(TYPE_CLASS, INT4OID)]);
+    }
+
+    #[test]
+    fn field_store_records_column_refs() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let arg = Node::mk_const(mcx, COMPOSITE_TYPE, -1, 0, -1, Datum::null(), true, false)
+            .unwrap();
+        let newval =
+            Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+        let fstore = Node::mk(
+            mcx,
+            types_nodes::primnodes::FieldStore {
+                arg,
+                newvals: types_nodes::list::NodeList::from_slice(mcx, &[newval]).unwrap(),
+                fieldnums: types_nodes::list::IntList::from_slice(mcx, &[2]).unwrap(),
+                resulttype: COMPOSITE_TYPE,
+            },
+        )
+        .unwrap();
+        let addrs = walk_expr(mcx, fstore);
+        // The stored-to column, plus the recursed Const datatypes.
+        assert!(addrs.contains(&ObjectAddress::sub_set(RELATION_CLASS, COMPOSITE_RELTYPE, 2)));
+        assert!(addrs.contains(&ObjectAddress::set(TYPE_CLASS, INT4OID)));
+    }
 }
 
 // get_index_constraint: the index's internal-dependency constraint, or InvalidOid.
