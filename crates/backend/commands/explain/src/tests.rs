@@ -1630,3 +1630,16 @@ mod order_by_limit_e2e {
         );
     }
 }
+
+// ExplainNode ForeignScan naming (explain.c): direct-modify operations were
+// previously a release-effective assert; C shows Foreign Insert/Update/Delete
+// with the Operation property, and "???" for anything else.
+#[test]
+fn foreign_scan_names_match_c() {
+    use types_nodes::CmdType::*;
+    assert_eq!(crate::node::foreign_scan_names(CMD_SELECT), ("Foreign Scan", "Foreign Scan", "Select"));
+    assert_eq!(crate::node::foreign_scan_names(CMD_INSERT), ("Foreign Insert", "Foreign Scan", "Insert"));
+    assert_eq!(crate::node::foreign_scan_names(CMD_UPDATE), ("Foreign Update", "Foreign Scan", "Update"));
+    assert_eq!(crate::node::foreign_scan_names(CMD_DELETE), ("Foreign Delete", "Foreign Scan", "Delete"));
+    assert_eq!(crate::node::foreign_scan_names(CMD_UTILITY), ("???", "Foreign Scan", "???"));
+}
