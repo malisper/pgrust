@@ -1,7 +1,6 @@
 // exec_parse/bind/execute/describe_message — the extended-query protocol
 // (postgres.c). Binary-format params decode through the typreceive fc ABI
-// (types_fmgr::wire). Loud arm: BuildParamLogString
-// (log_parameter_max_length_on_error != 0).
+// (types_fmgr::wire).
 use core::cell::Cell;
 use std::ffi::CStr;
 
@@ -527,6 +526,8 @@ pub fn exec_bind_message<'mcx>(
         let param_types = plancache::CachedPlanParamTypes(psrc);
         let mut params: PgVec<'static, ParamExternData> = PgVec::new_in(pmcx);
         params.try_reserve_exact(num_params).map_err(|_| pmcx.oom(num_params))?;
+        // C: char **knownTextValues = NULL (allocate on first use).
+        let mut known_text_values: Option<Vec<Option<String>>> = None;
 
         for paramno in 0..num_params {
             // bind_param_error_callback (postgres.c): every error thrown while
@@ -561,12 +562,27 @@ pub fn exec_bind_message<'mcx>(
                             .map_err(pctx)?;
                         Some(client_to_server_cstring(pmcx, raw).map_err(pctx)?)
                     };
-                    if guc_tables::backing::log_parameter_max_length_on_error() != 0 {
-                        panic!(
-                            "exec_bind_message (postgres.c): knownTextValues/\
-                             BuildParamLogString need the params-logging lane \
-                             (log_parameter_max_length_on_error != 0)"
-                        );
+                    // If we might need to log parameters later, save a copy
+                    // of the converted string (exec_bind_message). C trims
+                    // to maxlen + 2*MAX_MULTIBYTE_CHAR_LEN so
+                    // BuildParamLogString can still include the ellipsis.
+                    let maxlen = guc_tables::backing::log_parameter_max_length_on_error();
+                    if maxlen != 0 {
+                        if let Some(v) = &pstring {
+                            let s = String::from_utf8_lossy(&v[..v.len() - 1]);
+                            let kept = if maxlen < 0 {
+                                s.into_owned()
+                            } else {
+                                let cap = maxlen as usize + 2 * 4; /* MAX_MULTIBYTE_CHAR_LEN */
+                                let mut end = s.len().min(cap);
+                                while end > 0 && !s.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                s[..end].to_string()
+                            };
+                            known_text_values.get_or_insert_with(|| vec![None; num_params])
+                                [paramno] = Some(kept);
+                        }
                     }
                     let cstr = pstring.as_ref().map(|v| {
                         CStr::from_bytes_with_nul(v)
@@ -648,10 +664,32 @@ pub fn exec_bind_message<'mcx>(
             });
         }
 
+        // Once all parameters have been received, prepare for printing them
+        // in future errors, if configured to do so. (This is saved in the
+        // portal, so that they'll appear when the query is executed later.)
+        let param_values_str =
+            if guc_tables::backing::log_parameter_max_length_on_error() != 0 {
+                let known_refs: Vec<Option<&str>> = match &known_text_values {
+                    Some(k) => k.iter().map(|o| o.as_deref()).collect(),
+                    None => vec![None; num_params],
+                };
+                nodes_params::build_param_log_string(
+                    pmcx,
+                    &params,
+                    Some(&known_refs),
+                    guc_tables::backing::log_parameter_max_length_on_error(),
+                )?
+            } else {
+                None
+            };
+
         let slice: &'static [ParamExternData] = params.leak();
         // SAFETY: the datums and the slice live in the portal context;
         // PortalDrop frees the handle before that context dies.
         let h = unsafe { types_portal::params::register(slice) };
+        if let Some(s) = param_values_str {
+            types_portal::params::set_param_values_str(h, std::rc::Rc::from(s.as_str()));
+        }
         // Stored now so an error below reaches PortalDrop's registry cleanup.
         portal.borrow_mut().portalParams = h;
         h
@@ -659,71 +697,80 @@ pub fn exec_bind_message<'mcx>(
         ParamListHandle::NULL
     };
 
-    let num_rformats = pqformat::pq_getmsgint(input_message, 2)? as usize;
-    let mut rformats: PgVec<'mcx, i16> = PgVec::new_in(mcx);
-    rformats.try_reserve_exact(num_rformats).map_err(|_| mcx.oom(num_rformats))?;
-    for _ in 0..num_rformats {
-        rformats.push(pqformat::pq_getmsgint(input_message, 2)? as i16);
-    }
-
-    pqformat::pq_getmsgend(input_message)?;
-    crate::stmt_trace::probe("b.params");
-
-    let cplan = plancache::GetCachedPlan(psrc, params, None, QueryEnvHandle::NULL)?;
-    crate::stmt_trace::probe("b.plan");
-
-    // Retained execution engages only against the shell's own generic plan:
-    // any RevalidateCachedQuery invalidation (DDL, search_path, RLS
-    // environment) replans into a fresh CachedPlan and misses this check.
-    let retained = reused && portal.borrow().cplan == cplan;
-    if retained {
-        // The shell already pins this plan; drop the refcount just taken.
-        plancache::ReleaseCachedPlan(cplan);
-    } else {
-        if reused {
-            portalmem::ShedRetainedExecution(&portal);
+    // Set up another error callback so that all the parameters are logged if
+    // we get an error during the rest of the BIND processing (C pushes
+    // ParamsErrorCallback here and pops it after PortalSetResultFormat; the
+    // propagation-pattern equivalent wraps the same span).
+    let mut bind_tail = || -> PgResult<()> {
+        let num_rformats = pqformat::pq_getmsgint(input_message, 2)? as usize;
+        let mut rformats: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+        rformats.try_reserve_exact(num_rformats).map_err(|_| mcx.oom(num_rformats))?;
+        for _ in 0..num_rformats {
+            rformats.push(pqformat::pq_getmsgint(input_message, 2)? as i16);
         }
-        let stmt_slice = plancache::CachedPlanStmtList(cplan);
-        // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
-        // PortalDrop releases it (which also frees this handle). NIL stays the
-        // null handle (empty query string).
-        let stmts = if stmt_slice.is_empty() {
-            types_portal::StmtListHandle::NULL
+
+        pqformat::pq_getmsgend(input_message)?;
+        crate::stmt_trace::probe("b.params");
+
+        let cplan = plancache::GetCachedPlan(psrc, params, None, QueryEnvHandle::NULL)?;
+        crate::stmt_trace::probe("b.plan");
+
+        // Retained execution engages only against the shell's own generic plan:
+        // any RevalidateCachedQuery invalidation (DDL, search_path, RLS
+        // environment) replans into a fresh CachedPlan and misses this check.
+        let retained = reused && portal.borrow().cplan == cplan;
+        if retained {
+            // The shell already pins this plan; drop the refcount just taken.
+            plancache::ReleaseCachedPlan(cplan);
         } else {
-            unsafe { pquery::stmt_list::register(stmt_slice) }
-        };
-        // No fallible call between GetCachedPlan and PortalDefineQuery (C's
-        // refcount-leak rule; the Copy stores in DefineQuery land first).
-        portalmem::PortalDefineQuery(
-            &portal,
-            (!stmt_name.is_empty()).then(|| stmt_name.as_str()),
-            query_string,
-            plancache::CachedPlanCommandTag(psrc),
-            stmts,
-            cplan,
-        )?;
-        portal.borrow_mut().plansource = types_portal::PlanSourceHandle(psrc.0);
-    }
-
-    for stmt in plancache::CachedPlanStmtList(portal.borrow().cplan) {
-        if stmt.planId != 0 {
-            backend_status_seams::pgstat_report_plan_id::call(stmt.planId, false);
-            break;
+            if reused {
+                portalmem::ShedRetainedExecution(&portal);
+            }
+            let stmt_slice = plancache::CachedPlanStmtList(cplan);
+            // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
+            // PortalDrop releases it (which also frees this handle). NIL stays the
+            // null handle (empty query string).
+            let stmts = if stmt_slice.is_empty() {
+                types_portal::StmtListHandle::NULL
+            } else {
+                unsafe { pquery::stmt_list::register(stmt_slice) }
+            };
+            // No fallible call between GetCachedPlan and PortalDefineQuery (C's
+            // refcount-leak rule; the Copy stores in DefineQuery land first).
+            portalmem::PortalDefineQuery(
+                &portal,
+                (!stmt_name.is_empty()).then(|| stmt_name.as_str()),
+                query_string,
+                plancache::CachedPlanCommandTag(psrc),
+                stmts,
+                cplan,
+            )?;
+            portal.borrow_mut().plansource = types_portal::PlanSourceHandle(psrc.0);
         }
-    }
 
-    if snapshot_set {
-        snapmgr::PopActiveSnapshot()?;
-    }
+        for stmt in plancache::CachedPlanStmtList(portal.borrow().cplan) {
+            if stmt.planId != 0 {
+                backend_status_seams::pgstat_report_plan_id::call(stmt.planId, false);
+                break;
+            }
+        }
 
-    if retained {
-        pquery::PortalStartParked(&portal, params)?;
-    } else {
-        pquery::PortalStart(&portal, params, 0, None)?;
-    }
-    crate::stmt_trace::probe("b.portalstart");
+        if snapshot_set {
+            snapmgr::PopActiveSnapshot()?;
+        }
 
-    pquery::PortalSetResultFormat(&portal, &rformats)?;
+        if retained {
+            pquery::PortalStartParked(&portal, params)?;
+        } else {
+            pquery::PortalStart(&portal, params, 0, None)?;
+        }
+        crate::stmt_trace::probe("b.portalstart");
+
+        pquery::PortalSetResultFormat(&portal, &rformats)?;
+        Ok(())
+    };
+    bind_tail()
+        .map_err(|e| nodes_params::params_error_context(e, portal_name.as_str(), params))?;
 
     if elog::config::where_to_send_output() == CommandDest::Remote {
         pqformat::pq_putemptymessage(pqmsg::BIND_COMPLETE)?;
@@ -901,6 +948,10 @@ pub fn exec_execute_message<'mcx>(
     let max_rows = if max_rows <= 0 { FETCH_ALL } else { max_rows };
 
     let mut qc = QueryCompletion::default();
+    // Okay to run the portal. Set the error callback so that parameters are
+    // logged; they must have been saved during the bind phase (C pushes
+    // ParamsErrorCallback around PortalRun).
+    let portal_params = portal.borrow().portalParams;
     let completed = pquery::PortalRun(
         &portal,
         max_rows,
@@ -908,7 +959,8 @@ pub fn exec_execute_message<'mcx>(
         &mut receiver,
         None, /* altdest aliases dest, as in C */
         Some(&mut qc),
-    )?;
+    )
+    .map_err(|e| nodes_params::params_error_context(e, portal_name, portal_params))?;
     crate::stmt_trace::probe("e.run");
 
     receiver.destroy();

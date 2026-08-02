@@ -1,15 +1,16 @@
 //! params.c residue over the types_portal registry slices. The registry
 //! carries no paramFetch/paramCompile hooks, so C's per-param hook probes are
-//! structurally absent; paramValuesStr lives with the future error-context
-//! consumer (ParamsErrorCallback unported until then).
+//! structurally absent; paramValuesStr lives in the registry entry
+//! (exec_bind_message stores it, ParamsErrorCallback reads it).
 
 use core::fmt::Write;
 
 use datum::Datum;
 use mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, PgString, PgVec};
 use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_portal::params::ParamExternData;
+use types_portal::ParamListHandle;
 
 #[cfg(test)]
 mod tests;
@@ -119,4 +120,24 @@ pub fn build_param_log_string<'mcx>(
         }
     }
     Ok(Some(buf))
+}
+
+/// `ParamsErrorCallback` (params.c) as the propagation-pattern equivalent:
+/// the CONTEXT line C's callback attaches to any error raised while a bound
+/// portal's parameters are in scope. No-op (C's early return) when the
+/// handle is NULL or no paramValuesStr was stored at bind time.
+pub fn params_error_context(
+    mut err: Box<PgError>,
+    portal_name: &str,
+    params: ParamListHandle,
+) -> Box<PgError> {
+    let Some(values) = types_portal::params::param_values_str(params) else {
+        return err;
+    };
+    err.add_context_line(if !portal_name.is_empty() {
+        format!("portal \"{portal_name}\" with parameters: {values}")
+    } else {
+        format!("unnamed portal with parameters: {values}")
+    });
+    err
 }

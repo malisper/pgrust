@@ -13365,6 +13365,7 @@ dependencies = [
  "miscinit_seams",
  "multixact_seams",
  "namespace_seams",
+ "nodes_params",
  "origin_seams",
  "parallel_seams",
  "parse_expr",
