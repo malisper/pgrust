@@ -20015,6 +20015,7 @@ version = "0.1.0"
 dependencies = [
  "adt_tsvector_core",
  "datum",
+ "fmgr_seams",
  "funcapi",
  "heaptuple",
  "libc",
@@ -20022,6 +20023,7 @@ dependencies = [
  "mcx",
  "namespace_seams",
  "pg_locale",
+ "syscache_seams",
  "ts_cache",
  "ts_locale",
  "ts_parse",

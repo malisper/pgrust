@@ -23,5 +23,9 @@ adt_tsvector_core = { path = "../../utils/adt/tsvector_core" }
 ts_parse = { path = "../ts_parse" }
 ts_cache = { path = "../../utils/cache/ts_cache" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 libc = "0.2"
+
+[dev-dependencies]
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
