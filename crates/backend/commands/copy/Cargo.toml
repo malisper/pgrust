@@ -52,6 +52,7 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 table = { path = "../../access/table/table" }
 numutils = { path = "../../utils/adt/numutils" }
+commands_define = { path = "../commands_define" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 heapam = { path = "../../access/heap/heapam" }

@@ -252,7 +252,7 @@ fn fc_file_fdw_validator(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         }
     }
 
-    copy_cmd::ProcessCopyOptions(true, &other_options, None)?;
+    copy_cmd::ProcessCopyOptions(mcx, true, &other_options, None)?;
 
     if catalog == FOREIGN_TABLE_RELATION_ID && filename.is_none() {
         return Err(Box::new(

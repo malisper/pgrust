@@ -127,7 +127,7 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 }
 
 /// `BeginCopyFrom` (copyfrom.c), text/CSV from file or frontend.
-pub fn BeginCopyFrom<'mcx, 's>(
+pub fn BeginCopyFrom<'mcx: 's, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     where_clause: NodeList<'mcx>,
@@ -142,7 +142,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
 // BeginCopyFrom's data_source_cb form (COPY_CALLBACK): tablesync feeds bytes
 // from the publisher's COPY OUT stream. cb(buf, minread) -> bytes written,
 // 0 at end of stream.
-pub fn BeginCopyFromCallback<'mcx, 's>(
+pub fn BeginCopyFromCallback<'mcx: 's, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attnamelist: &NodeList<'_>,
@@ -153,7 +153,7 @@ pub fn BeginCopyFromCallback<'mcx, 's>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn begin_copy_from_guts<'mcx, 's>(
+fn begin_copy_from_guts<'mcx: 's, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     where_clause: NodeList<'mcx>,
@@ -163,7 +163,7 @@ fn begin_copy_from_guts<'mcx, 's>(
     options: &NodeList<'s>,
     source_text: Option<&str>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
-    let opts = ProcessCopyOptions(true, options, source_text)?;
+    let opts = ProcessCopyOptions(mcx, true, options, source_text)?;
     let tup_desc = &rel.rd_att;
     let attnumlist = CopyGetAttnums(mcx, tup_desc, Some(rel), attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
@@ -892,6 +892,10 @@ struct LeafTrig<'mcx> {
     when: trigger::TriggerWhenCache<'mcx>,
     c2r: Option<mcx::PgVec<'mcx, i16>>,
     pcheck: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    // Per-leaf compile caches: stored generation expressions
+    // (ExecComputeStoredGenerated) and virtual-generated NOT NULL probes.
+    gen: Option<mcx::PgVec<'mcx, nodemodifytable::GeneratedExpr<'mcx>>>,
+    vnn: Option<mcx::PgVec<'mcx, nodemodifytable::VirtualNnExpr<'mcx>>>,
     use_multi: bool,
 }
 
@@ -1001,14 +1005,6 @@ fn copy_from_partitioned_body<'mcx>(
                     .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
                 ));
             }
-            if lrel
-                .rd_att
-                .constr
-                .as_deref()
-                .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual)
-            {
-                panic!("CopyFrom: generated columns on a routed-into partition not ported");
-            }
             let td = if lrel.rd_hastriggers {
                 relcache::RelationGetTriggerDesc(lrel.rd_id)?
             } else {
@@ -1027,6 +1023,8 @@ fn copy_from_partitioned_body<'mcx>(
                 when: trigger::TriggerWhenCache::default(),
                 c2r,
                 pcheck: None,
+                gen: None,
+                vnn: None,
                 use_multi,
             });
         }
@@ -1075,7 +1073,7 @@ fn copy_from_partitioned_body<'mcx>(
                 None => &mut rootslot,
             };
             use_slot.base_mut().tts_tableOid = lrel.rd_id;
-            let LeafTrig { td, fmgr, when: when_cache, c2r, pcheck, .. } =
+            let LeafTrig { td, fmgr, when: when_cache, c2r, pcheck, gen, vnn, .. } =
                 leaf_trig[leaf].as_mut().expect("leaf initialized");
             let has_br = td.as_ref().is_some_and(|t| t.trig_insert_before_row);
             // BEFORE ROW INSERT triggers on the leaf (copyfrom.c:1327-1331);
@@ -1094,10 +1092,14 @@ fn copy_from_partitioned_body<'mcx>(
                     continue;
                 }
             }
+            // Compute stored generated columns on the leaf (copyfrom.c:1345-1350).
+            if lrel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+                nodemodifytable::exec_compute_stored_generated(mcx, gen, lrel, use_slot)?;
+            }
             nodemodifytable::exec_constraints(
                 mcx,
                 &mut leaf_checks[leaf],
-                &mut None,
+                vnn,
                 lrel,
                 use_slot,
                 Some(rel),
@@ -1199,12 +1201,15 @@ fn copy_from_partitioned_body<'mcx>(
                 None => exectuples::exec_copy_slot(slot, &mut rootslot, mcx, mcx)?,
             }
             slot.base_mut().tts_tableOid = lrel.rd_id;
-            // Virtual-generated columns on a routed-into partition panic above,
-            // so the virtual-NN compile cache is never populated.
+            let lt = leaf_trig[leaf].as_mut().expect("leaf initialized");
+            // Compute stored generated columns on the leaf (copyfrom.c:1345-1350).
+            if lrel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+                nodemodifytable::exec_compute_stored_generated(mcx, &mut lt.gen, lrel, slot)?;
+            }
             nodemodifytable::exec_constraints(
                 mcx,
                 &mut leaf_checks[leaf],
-                &mut None,
+                &mut lt.vnn,
                 lrel,
                 slot,
                 Some(rel),

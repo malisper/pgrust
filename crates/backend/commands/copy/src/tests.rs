@@ -283,7 +283,9 @@ fn out_csv(s: &[u8], force_quote: bool, single_attr: bool) -> Vec<u8> {
     let mut buf = StringInfo::new_in(mcx).unwrap();
     let mut opts = mk_state(mcx, b',', "").opts;
     opts.csv_mode = true;
-    crate::to::copy_attribute_out_csv(&mut buf, s, &opts, force_quote, single_attr).unwrap();
+    // Callers fold C's pre-conversion null_print comparison into use_quote.
+    let use_quote = force_quote || s == opts.null_print.as_bytes();
+    crate::to::copy_attribute_out_csv(&mut buf, s, &opts, use_quote, single_attr, None).unwrap();
     buf.as_bytes().to_vec()
 }
 
@@ -405,4 +407,164 @@ fn csv_read_line_keeps_quoted_newlines() {
     // \. is not an end-of-copy marker in CSV mode (PG 18 semantics).
     let lines = read_lines_csv(b"\\.\nafter\n");
     assert_eq!(lines, vec![b"\\.".to_vec(), b"after".to_vec()]);
+}
+
+// ---- ProcessCopyOptions non-String option arguments (defGetString /
+// defGetInt64 arms, define.c) ----
+
+fn defelem<'m>(
+    mcx: Mcx<'m>,
+    name: &'m str,
+    arg: Option<types_nodes::Node<'m>>,
+) -> types_nodes::Node<'m> {
+    types_nodes::Node::mk(
+        mcx,
+        types_nodes::parsenodes::DefElem {
+            defname: Some(name),
+            arg,
+            location: -1,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+fn opt_list<'m>(mcx: Mcx<'m>, elems: &[types_nodes::Node<'m>]) -> types_nodes::NodeList<'m> {
+    let mut l = types_nodes::NodeList::nil();
+    for &e in elems {
+        l.lappend(mcx, e).unwrap();
+    }
+    l
+}
+
+// COPY t TO f WITH (delimiter 1): C's defGetString renders the Integer as
+// "1" and the single-byte checks then reject it as a catchable error, not a
+// panic (delimiter "1" is in C's banned \\.a-z0-9 set).
+#[test]
+fn integer_arg_to_string_option_is_catchable() {
+    let mcx = test_ctx().mcx();
+    let arg = types_nodes::Node::mk(mcx, types_nodes::Integer { ival: 1 }).unwrap();
+    let opts = opt_list(mcx, &[defelem(mcx, "delimiter", Some(arg))]);
+    let Err(e) = crate::ProcessCopyOptions(mcx, false, &opts, None) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "COPY delimiter cannot be \"1\"");
+}
+
+// WITH (format 5): Integer through defGetString reaches the format
+// dispatch with "5".
+#[test]
+fn integer_arg_to_format_option() {
+    let mcx = test_ctx().mcx();
+    let arg = types_nodes::Node::mk(mcx, types_nodes::Integer { ival: 5 }).unwrap();
+    let opts = opt_list(mcx, &[defelem(mcx, "format", Some(arg))]);
+    let Err(e) = crate::ProcessCopyOptions(mcx, false, &opts, None) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "COPY format \"5\" not recognized");
+}
+
+// WITH (delimiter (a, b)): a List argument goes through NameListToString,
+// yielding the dot-joined "a.b" C produces, then the length check fires.
+#[test]
+fn list_arg_to_string_option_matches_c() {
+    let mcx = test_ctx().mcx();
+    let a = types_nodes::Node::mk(mcx, types_nodes::String { sval: "a" }).unwrap();
+    let b = types_nodes::Node::mk(mcx, types_nodes::String { sval: "b" }).unwrap();
+    let list = types_nodes::Node::mk_list(mcx, opt_list(mcx, &[a, b])).unwrap();
+    let opts = opt_list(mcx, &[defelem(mcx, "delimiter", Some(list))]);
+    let Err(e) = crate::ProcessCopyOptions(mcx, false, &opts, None) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "COPY delimiter must be a single one-byte character");
+}
+
+// WITH (freeze (on)): C's defGetBoolean falls through to defGetString,
+// which renders the single-element list as "on" -> true.
+#[test]
+fn single_element_list_boolean_quirk() {
+    let mcx = test_ctx().mcx();
+    let on = types_nodes::Node::mk(mcx, types_nodes::String { sval: "on" }).unwrap();
+    let list = types_nodes::Node::mk_list(mcx, opt_list(mcx, &[on])).unwrap();
+    let opts = opt_list(mcx, &[defelem(mcx, "freeze", Some(list))]);
+    let parsed = crate::ProcessCopyOptions(mcx, true, &opts, None).unwrap();
+    assert!(parsed.freeze);
+}
+
+// REJECT_LIMIT with a lexer Float: defGetInt64's int8in arm accepts values
+// beyond int4 (C copy.c defGetCopyRejectLimitOption).
+#[test]
+fn reject_limit_float_arg_via_defgetint64() {
+    let mcx = test_ctx().mcx();
+    let ignore = types_nodes::Node::mk(mcx, types_nodes::String { sval: "ignore" }).unwrap();
+    let big = types_nodes::Node::mk(mcx, types_nodes::Float { fval: "3000000000" }).unwrap();
+    let opts = opt_list(
+        mcx,
+        &[
+            defelem(mcx, "on_error", Some(ignore)),
+            defelem(mcx, "reject_limit", Some(big)),
+        ],
+    );
+    let parsed = crate::ProcessCopyOptions(mcx, true, &opts, None).unwrap();
+    assert_eq!(parsed.reject_limit, 3_000_000_000);
+}
+
+// REJECT_LIMIT with a Boolean argument: defGetInt64's default arm raises
+// C's catchable "requires a numeric value" syntax error.
+#[test]
+fn reject_limit_boolean_arg_is_catchable() {
+    let mcx = test_ctx().mcx();
+    let ignore = types_nodes::Node::mk(mcx, types_nodes::String { sval: "ignore" }).unwrap();
+    let b = types_nodes::Node::mk(mcx, types_nodes::Boolean { boolval: true }).unwrap();
+    let opts = opt_list(
+        mcx,
+        &[
+            defelem(mcx, "on_error", Some(ignore)),
+            defelem(mcx, "reject_limit", Some(b)),
+        ],
+    );
+    let Err(e) = crate::ProcessCopyOptions(mcx, true, &opts, None) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "reject_limit requires a numeric value");
+}
+
+// ---- client-only-encoding escape walks (CopyAttributeOutText/CSV,
+// encoding_embeds_ascii arm) ----
+
+// SJIS 0x95 0x5c is a two-byte character whose trail byte is ASCII '\':
+// the embedded walk must NOT escape it, while the plain walk would.
+#[test]
+fn text_walk_skips_ascii_trail_bytes_under_sjis() {
+    let mcx = test_ctx().mcx();
+    let s = b"a\x95\x5cb";
+    let mut buf = StringInfo::new_in(mcx).unwrap();
+    crate::to::copy_attribute_out_text_embedded(&mut buf, s, b'\t', wchar::PG_SJIS).unwrap();
+    assert_eq!(buf.as_bytes(), b"a\x95\x5cb");
+    // The safe-encoding walk escapes the embedded backslash byte.
+    assert_eq!(out_text(s, b'\t'), b"a\x95\\\\b");
+    // A real ASCII backslash after a complete SJIS character still escapes.
+    let mut buf2 = StringInfo::new_in(mcx).unwrap();
+    crate::to::copy_attribute_out_text_embedded(&mut buf2, b"\x95\x5c\\x", b'\t', wchar::PG_SJIS)
+        .unwrap();
+    assert_eq!(buf2.as_bytes(), b"\x95\x5c\\\\x");
+}
+
+// Same trail-byte blindness for the CSV quote walk: an SJIS character whose
+// trail byte equals the quote must be neither doubled nor trigger quoting.
+#[test]
+fn csv_walk_skips_ascii_trail_bytes_under_sjis() {
+    let mcx = test_ctx().mcx();
+    // 0x81 0x22: SJIS two-byte character with '"' as trail byte.
+    let s = b"a\x81\x22b";
+    let mut opts = mk_state(mcx, b',', "").opts;
+    opts.csv_mode = true;
+    let mut buf = StringInfo::new_in(mcx).unwrap();
+    crate::to::copy_attribute_out_csv(&mut buf, s, &opts, false, false, Some(wchar::PG_SJIS))
+        .unwrap();
+    assert_eq!(buf.as_bytes(), b"a\x81\x22b");
+    // The safe walk sees the '"' byte and quotes + doubles it.
+    let mut buf2 = StringInfo::new_in(mcx).unwrap();
+    crate::to::copy_attribute_out_csv(&mut buf2, s, &opts, false, false, None).unwrap();
+    assert_eq!(buf2.as_bytes(), b"\"a\x81\"\"b\"");
 }

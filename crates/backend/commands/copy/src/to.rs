@@ -55,6 +55,12 @@ pub struct CopyToState<'mcx, 's> {
     force_quote_flags: PgVec<'mcx, bool>,
     file_encoding: i32,
     need_transcoding: bool,
+    // ASCII can be a non-first byte of a multibyte character (client-only
+    // encodings): the escape walks must skip whole characters.
+    encoding_embeds_ascii: bool,
+    // opts.null_print converted to the file encoding (CopyToTextLikeStart);
+    // None while no conversion applies.
+    null_print_client: Option<PgVec<'mcx, u8>>,
     bytes_processed: u64,
     rowcx: MemoryContext,
     query_desc: Option<QueryDescHandle>,
@@ -71,7 +77,7 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 
 /// `BeginCopyTo` (copyto.c), relation and query source arms. `query_rel_id`
 /// is the OID of the base relation an RLS COPY was converted from.
-pub fn BeginCopyTo<'mcx, 's>(
+pub fn BeginCopyTo<'mcx: 's, 's>(
     mcx: Mcx<'mcx>,
     rel: Option<&Relation<'mcx>>,
     raw_query: Option<&RawStmt<'mcx>>,
@@ -89,7 +95,7 @@ pub fn BeginCopyTo<'mcx, 's>(
         }
     }
 
-    let opts = ProcessCopyOptions(false, options, source_text)?;
+    let opts = ProcessCopyOptions(mcx, false, options, source_text)?;
 
     let (query_desc, tupdesc) = match raw_query {
         None => (None, None),
@@ -123,13 +129,7 @@ pub fn BeginCopyTo<'mcx, 's>(
     };
     let need_transcoding = !(file_encoding == mbutils::GetDatabaseEncoding()
         || file_encoding == wchar::PG_SQL_ASCII);
-    if !opts.binary && file_encoding >= wchar::PG_SJIS {
-        // unported: COPY TO with a client-only encoding (pg_encoding_mblen escape walk)
-        return Err(Box::new(
-            PgError::error("COPY TO with a client-only encoding is not supported yet".to_string())
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
+    let encoding_embeds_ascii = wchar::pg_encoding_is_client_only(file_encoding);
 
     let dest = match filename {
         Some(filename) => {
@@ -198,6 +198,8 @@ pub fn BeginCopyTo<'mcx, 's>(
         opts,
         attnumlist,
         force_quote_flags,
+        encoding_embeds_ascii,
+        null_print_client: None,
         file_encoding,
         need_transcoding,
         bytes_processed: 0,
@@ -347,29 +349,59 @@ pub fn DoCopyTo<'mcx>(
         cstate.fe_msgbuf.append_bytes(&0i32.to_be_bytes())?;
     }
 
+    // CopyToTextLikeStart: convert null_print to the file encoding once; it
+    // is sent as-is for NULL columns.
+    if !cstate.opts.binary && cstate.need_transcoding {
+        cstate.null_print_client = mbutils::pg_server_to_any(
+            mcx,
+            cstate.opts.null_print.as_bytes(),
+            cstate.file_encoding,
+        )?;
+    }
+
     if cstate.opts.header_line != crate::CopyHeaderChoice::False {
         let mut hdr_delim = false;
         let single_attr = cstate.attnumlist.len() == 1;
+        let mb_encoding = cstate.encoding_embeds_ascii.then_some(cstate.file_encoding);
         for &attnum in cstate.attnumlist.iter() {
             if hdr_delim {
                 cstate.fe_msgbuf.append_byte(cstate.opts.delim)?;
             }
             hdr_delim = true;
             let colname = tup_desc.attr(attnum as usize - 1).attname;
+            // C's writers transcode internally; the null_print force-quote
+            // comparison happens on the pre-conversion bytes.
+            let matches_null = colname.name_str() == cstate.opts.null_print.as_bytes();
+            let converted;
+            let name_bytes: &[u8] = if cstate.need_transcoding {
+                match mbutils::pg_server_to_any(mcx, colname.name_str(), cstate.file_encoding)? {
+                    Some(c) => {
+                        converted = c;
+                        &converted
+                    }
+                    None => colname.name_str(),
+                }
+            } else {
+                colname.name_str()
+            };
             if cstate.opts.csv_mode {
                 copy_attribute_out_csv(
                     &mut cstate.fe_msgbuf,
-                    colname.name_str(),
+                    name_bytes,
                     &cstate.opts,
-                    false,
+                    matches_null,
                     single_attr,
+                    mb_encoding,
+                )?;
+            } else if let Some(enc) = mb_encoding {
+                copy_attribute_out_text_embedded(
+                    &mut cstate.fe_msgbuf,
+                    name_bytes,
+                    cstate.opts.delim,
+                    enc,
                 )?;
             } else {
-                copy_attribute_out_text(
-                    &mut cstate.fe_msgbuf,
-                    colname.name_str(),
-                    cstate.opts.delim,
-                )?;
+                copy_attribute_out_text(&mut cstate.fe_msgbuf, name_bytes, cstate.opts.delim)?;
             }
         }
         end_of_row(cstate)?;
@@ -478,6 +510,8 @@ fn CopyOneRowTo<'mcx>(
         force_quote_flags,
         need_transcoding,
         file_encoding,
+        encoding_embeds_ascii,
+        null_print_client,
         ..
     } = cstate;
     rowcx.reset();
@@ -513,9 +547,12 @@ fn CopyOneRowTo<'mcx>(
         need_delim = true;
 
         if base.tts_isnull[m] {
-            // null_print is validated ASCII-safe (no \r/\n/delim); C converts
-            // it once per COPY, identity under the live encodings.
-            fe_msgbuf.append_bytes(opts.null_print.as_bytes())?;
+            // null_print_client: converted once per COPY (CopyToTextLikeStart).
+            let np: &[u8] = match null_print_client {
+                Some(v) => v,
+                None => opts.null_print.as_bytes(),
+            };
+            fe_msgbuf.append_bytes(np)?;
             continue;
         }
         let value: Datum = base.tts_values[m];
@@ -523,6 +560,8 @@ fn CopyOneRowTo<'mcx>(
         // SAFETY: text output fns return a NUL-terminated cstring datum
         // (printtup precedent).
         let s = unsafe { CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) }.to_bytes();
+        // C compares against null_print before conversion (copyto.c:1311).
+        let matches_null = opts.csv_mode && s == opts.null_print.as_bytes();
         let s: &[u8] = if *need_transcoding {
             match mbutils::pg_server_to_any(rmcx, s, *file_encoding)? {
                 Some(converted) => {
@@ -535,8 +574,18 @@ fn CopyOneRowTo<'mcx>(
         } else {
             s
         };
+        let mb_encoding = encoding_embeds_ascii.then_some(*file_encoding);
         if opts.csv_mode {
-            copy_attribute_out_csv(fe_msgbuf, s, opts, force_quote_flags[m], single_attr)?;
+            copy_attribute_out_csv(
+                fe_msgbuf,
+                s,
+                opts,
+                force_quote_flags[m] || matches_null,
+                single_attr,
+                mb_encoding,
+            )?;
+        } else if let Some(enc) = mb_encoding {
+            copy_attribute_out_text_embedded(fe_msgbuf, s, opts.delim, enc)?;
         } else {
             copy_attribute_out_text(fe_msgbuf, s, opts.delim)?;
         }
@@ -544,41 +593,66 @@ fn CopyOneRowTo<'mcx>(
     end_of_row(cstate)
 }
 
-/// `CopyAttributeOutCSV` (copyto.c). The null_print comparison happens before
-/// transcoding in C; the transcoded-vs-raw distinction is inert under the
-/// supported (non-ASCII-embedding) encodings, so `s` here is post-conversion.
+// The next multibyte-aware step from byte i of s: pg_encoding_mblen for a
+// high-bit lead byte under an ASCII-embedding encoding, else 1. C's walk can
+// step past a truncated final character (and reads on until a NUL); the
+// clamp keeps the same dump boundary without the overread.
+#[inline]
+fn mb_step(mblen_encoding: Option<i32>, s: &[u8], i: usize) -> usize {
+    match mblen_encoding {
+        Some(enc) if s[i] & 0x80 != 0 => {
+            (wchar::pg_encoding_mblen(enc, &s[i..]) as usize).min(s.len() - i)
+        }
+        _ => 1,
+    }
+}
+
+/// `CopyAttributeOutCSV` (copyto.c). C compares the pre-conversion string
+/// against null_print for forced quoting; callers fold that comparison into
+/// `use_quote` since `s` here is post-conversion. `mblen_encoding` is set for
+/// ASCII-embedding (client-only) file encodings.
 pub(crate) fn copy_attribute_out_csv(
     buf: &mut StringInfo<'_>,
     s: &[u8],
     opts: &CopyFormatOptions<'_>,
     use_quote: bool,
     single_attr: bool,
+    mblen_encoding: Option<i32>,
 ) -> PgResult<()> {
     let delimc = opts.delim;
     let quotec = opts.quote;
     let escapec = opts.escape;
 
-    let mut use_quote = use_quote || s == opts.null_print.as_bytes();
+    let mut use_quote = use_quote;
     if !use_quote {
         // Quote a lone \. so older versions and PQgetline keep loading it.
         if single_attr && s == b"\\." {
             use_quote = true;
         } else {
-            use_quote = s
-                .iter()
-                .any(|&c| c == delimc || c == quotec || c == b'\n' || c == b'\r');
+            let mut i = 0usize;
+            while i < s.len() {
+                let c = s[i];
+                if c == delimc || c == quotec || c == b'\n' || c == b'\r' {
+                    use_quote = true;
+                    break;
+                }
+                i += mb_step(mblen_encoding, s, i);
+            }
         }
     }
 
     if use_quote {
         buf.append_byte(quotec)?;
         let mut start = 0usize;
-        for (i, &c) in s.iter().enumerate() {
+        let mut i = 0usize;
+        while i < s.len() {
+            let c = s[i];
             if c == quotec || c == escapec {
                 buf.append_bytes(&s[start..i])?;
                 buf.append_byte(escapec)?;
                 start = i;
             }
+            i += mb_step(mblen_encoding, s, i);
         }
         buf.append_bytes(&s[start..])?;
         buf.append_byte(quotec)?;
@@ -718,6 +792,61 @@ pub fn copy_attribute_out_text(
     }
     if ptr > start {
         buf.append_bytes(&s[start..ptr])?;
+    }
+    Ok(())
+}
+
+/// `CopyAttributeOutText` (copyto.c), ASCII-embedding (client-only encoding)
+/// arm: identical escape table, but high-bit lead bytes advance by
+/// pg_encoding_mblen so ASCII-looking trail bytes are never escaped.
+pub fn copy_attribute_out_text_embedded(
+    buf: &mut StringInfo<'_>,
+    s: &[u8],
+    delimc: u8,
+    file_encoding: i32,
+) -> PgResult<()> {
+    let enc = Some(file_encoding);
+    let mut start = 0usize;
+    let mut ptr = 0usize;
+    while ptr < s.len() {
+        let c = s[ptr];
+        if c < 0x20 {
+            let esc = match c {
+                b'\x08' => b'b',
+                b'\x0c' => b'f',
+                b'\n' => b'n',
+                b'\r' => b'r',
+                b'\t' => b't',
+                b'\x0b' => b'v',
+                _ => {
+                    if c == delimc {
+                        c
+                    } else {
+                        ptr += 1;
+                        continue;
+                    }
+                }
+            };
+            if ptr > start {
+                buf.append_bytes(&s[start..ptr])?;
+            }
+            buf.append_byte(b'\\')?;
+            buf.append_byte(esc)?;
+            ptr += 1;
+            start = ptr;
+        } else if c == b'\\' || c == delimc {
+            if ptr > start {
+                buf.append_bytes(&s[start..ptr])?;
+            }
+            buf.append_byte(b'\\')?;
+            start = ptr;
+            ptr += 1;
+        } else {
+            ptr += mb_step(enc, s, ptr);
+        }
+    }
+    if ptr > start {
+        buf.append_bytes(&s[start..ptr.min(s.len())])?;
     }
     Ok(())
 }

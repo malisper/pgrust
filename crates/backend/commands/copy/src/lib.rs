@@ -383,20 +383,20 @@ pub fn DoCopy<'mcx>(
     Ok(processed)
 }
 
-fn def_string<'a>(d: &types_nodes::parsenodes::DefElem<'a>) -> PgResult<&'a str> {
-    match d.arg {
-        Some(n) => match n.as_string() {
-            Some(s) => Ok(s.sval),
-            None => panic!(
-                "defGetString (define.c): non-String arg arm not ported for option {:?}",
-                d.defname
-            ),
-        },
-        None => Err(Box::new(
-            PgError::error(format!("{} requires a parameter", d.defname.unwrap_or("")))
-                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
-        )),
-    }
+// defGetString (define.c), via the shared commands_define port; strings
+// formatted from non-String args live in mcx.
+fn def_string<'s>(
+    mcx: Mcx<'s>,
+    d: &types_nodes::parsenodes::DefElem<'s>,
+) -> PgResult<&'s str> {
+    commands_define::defGetString(mcx, d)
+}
+
+// defGetString for helpers that only compare the value: the formatted text
+// is transient, so it lives in a throwaway context.
+fn def_string_transient(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<String> {
+    let ctx = mcx::MemoryContext::new("copy def_string");
+    Ok(commands_define::defGetString(ctx.mcx(), d)?.to_string())
 }
 
 fn def_list_or_star<'s>(
@@ -421,36 +421,9 @@ fn def_list_or_star<'s>(
     ))
 }
 
-// defGetBoolean (define.c), the arms COPY's gram can produce.
+// defGetBoolean (define.c), via the shared commands_define port.
 fn def_boolean(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<bool> {
-    let Some(arg) = d.arg else { return Ok(true) };
-    if let Some(i) = arg.as_integer() {
-        match i.ival {
-            0 => return Ok(false),
-            1 => return Ok(true),
-            _ => {}
-        }
-    } else {
-        let sval = if let Some(b) = arg.as_boolean() {
-            if b.boolval {
-                "true"
-            } else {
-                "false"
-            }
-        } else {
-            def_string(d)?
-        };
-        if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
-            return Ok(true);
-        }
-        if sval.eq_ignore_ascii_case("false") || sval.eq_ignore_ascii_case("off") {
-            return Ok(false);
-        }
-    }
-    Err(Box::new(
-        PgError::error(format!("{} requires a Boolean value", d.defname.unwrap_or("")))
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
-    ))
+    commands_define::defGetBoolean(d)
 }
 
 // defGetCopyHeaderChoice (copy.c).
@@ -466,17 +439,7 @@ fn def_header_choice(
             _ => {}
         }
     } else {
-        let sval = if let Some(b) = arg.as_boolean() {
-            if b.boolval {
-                "true"
-            } else {
-                "false"
-            }
-        } else if let Some(s) = arg.as_string() {
-            s.sval
-        } else {
-            ""
-        };
+        let sval = def_string_transient(d)?;
         if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
             return Ok(CopyHeaderChoice::True);
         }
@@ -508,7 +471,7 @@ fn def_on_error_choice(
     is_from: bool,
     src: Option<&str>,
 ) -> PgResult<CopyOnErrorChoice> {
-    let sval = def_string(d)?;
+    let sval = def_string_transient(d)?;
     if !is_from {
         return Err(Box::new(
             PgError::error("COPY ON_ERROR cannot be used with COPY TO")
@@ -534,7 +497,7 @@ fn def_log_verbosity_choice(
     d: &types_nodes::parsenodes::DefElem<'_>,
     src: Option<&str>,
 ) -> PgResult<CopyLogVerbosityChoice> {
-    let sval = def_string(d)?;
+    let sval = def_string_transient(d)?;
     if sval.eq_ignore_ascii_case("silent") {
         return Ok(CopyLogVerbosityChoice::Silent);
     }
@@ -551,7 +514,7 @@ fn def_log_verbosity_choice(
     ))
 }
 
-// defGetCopyRejectLimitOption (copy.c); the T_Float defGetInt64 arm is loud.
+// defGetCopyRejectLimitOption (copy.c).
 fn def_reject_limit(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<i64> {
     let reject_limit = match d.arg {
         None => {
@@ -563,15 +526,13 @@ fn def_reject_limit(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<i64> {
                 .with_sqlstate(ERRCODE_SYNTAX_ERROR),
             ))
         }
-        Some(n) => match (n.as_integer(), n.as_string()) {
-            (Some(i), _) => i.ival as i64,
-            // The reloptions form (file_fdw): pg_strtoint64 over the text.
-            (None, Some(s)) => numutils::pg_strtoint64(s.sval)?,
-            (None, None) => panic!(
-                "defGetCopyRejectLimitOption (copy.c): T_Float REJECT_LIMIT arm \
-                 (defGetInt64) not ported"
-            ),
-        },
+        // The reloptions form (file_fdw): pg_strtoint64 over the text.
+        Some(n) if n.as_string().is_some() => {
+            numutils::pg_strtoint64(n.as_string().expect("String").sval)?
+        }
+        // defGetInt64: Integer, or a lexer Float holding a valid int8 string;
+        // anything else is a catchable "requires a numeric value" error.
+        Some(_) => commands_define::defGetInt64(d)?,
     };
     if reject_limit <= 0 {
         return Err(Box::new(
@@ -615,6 +576,7 @@ fn cannot_in_parquet(name: &str) -> Box<PgError> {
 /// `ProcessCopyOptions` (copy.c). `src` is the statement source text for
 /// error cursors (C's pstate->p_sourcetext).
 pub fn ProcessCopyOptions<'s>(
+    mcx: Mcx<'s>,
     is_from: bool,
     options: &NodeList<'s>,
     src: Option<&str>,
@@ -667,7 +629,7 @@ pub fn ProcessCopyOptions<'s>(
                     return Err(conflicting_option(src, d.location));
                 }
                 format_specified = true;
-                match def_string(d)? {
+                match def_string(mcx, d)? {
                     "text" => {}
                     "csv" => opts.csv_mode = true,
                     "binary" => opts.binary = true,
@@ -692,19 +654,19 @@ pub fn ProcessCopyOptions<'s>(
                 if delim.is_some() {
                     return Err(conflicting_option(src, d.location));
                 }
-                delim = Some(def_string(d)?);
+                delim = Some(def_string(mcx, d)?);
             }
             "null" => {
                 if null_print.is_some() {
                     return Err(conflicting_option(src, d.location));
                 }
-                null_print = Some(def_string(d)?);
+                null_print = Some(def_string(mcx, d)?);
             }
             "default" => {
                 if opts.default_print.is_some() {
                     return Err(conflicting_option(src, d.location));
                 }
-                opts.default_print = Some(def_string(d)?);
+                opts.default_print = Some(def_string(mcx, d)?);
             }
             "header" => {
                 if header_specified {
@@ -717,13 +679,13 @@ pub fn ProcessCopyOptions<'s>(
                 if quote.is_some() {
                     return Err(conflicting_option(src, d.location));
                 }
-                quote = Some(def_string(d)?);
+                quote = Some(def_string(mcx, d)?);
             }
             "escape" => {
                 if escape.is_some() {
                     return Err(conflicting_option(src, d.location));
                 }
-                escape = Some(def_string(d)?);
+                escape = Some(def_string(mcx, d)?);
             }
             "force_quote" => {
                 if opts.force_quote.is_some() || opts.force_quote_all {
@@ -763,7 +725,7 @@ pub fn ProcessCopyOptions<'s>(
                 if opts.file_encoding >= 0 {
                     return Err(conflicting_option(src, d.location));
                 }
-                opts.file_encoding = mbutils::pg_char_to_encoding(def_string(d)?);
+                opts.file_encoding = mbutils::pg_char_to_encoding(def_string(mcx, d)?);
                 if opts.file_encoding < 0 {
                     return Err(Box::new(
                         PgError::error(format!(
@@ -801,7 +763,7 @@ pub fn ProcessCopyOptions<'s>(
                     return Err(conflicting_option(src, d.location));
                 }
                 match_by_specified = true;
-                match def_string(d)? {
+                match def_string(mcx, d)? {
                     "position" => opts.parquet_match_by_name = false,
                     "name" => opts.parquet_match_by_name = true,
                     sval => {
