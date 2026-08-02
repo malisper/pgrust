@@ -2304,11 +2304,11 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
             node.as_variant::<types_nodes::primnodes::WindowFuncRunCondition>().unwrap().arg,
         ),
         // Query-structure tags cannot appear under a coercion expression;
-        // C's expression_tree_walker default for a genuinely unknown tag is
-        // a hard elog, kept loud here.
+        // anything else would fall out of C's expression_tree_walker default
+        // as an "unrecognized node type" elog, kept loud here.
         other => panic!(
-            "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \
-             backend-nodes-core lane"
+            "expression_returns_set (nodeFuncs.c): unrecognized node type {other:?} \
+             — expression_tree_walker would elog in C"
         ),
     }
 }
