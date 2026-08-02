@@ -1888,11 +1888,12 @@ fn slow_switch<'mcx>(
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
                     Ok(None)
                 }
-                // unported: ExecAlterOwnerStmt object types without a ported
-                // lane — 0A000.
-                other => Err(handler_unsupported(&format!(
-                    "ALTER ... OWNER TO for this object type ({other:?})"
-                ))),
+                // Every grammar-produceable type is routed above; C's
+                // ExecAlterOwnerStmt default (alter.c).
+                other => Err(Box::new(types_error::PgError::error(format!(
+                    "unrecognized AlterOwnerStmt type: {}",
+                    other as i32
+                )))),
             }
         }
 
@@ -2018,12 +2019,13 @@ fn exec_alter_owner_non_et<'mcx>(
                 aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
             event_trigger::AlterEventTriggerOwner(mcx, name, newowner).map(|_| ())
         }
-        // unported: non-event-trigger owner lanes without a ported handler
-        // (defensive — DATABASE/TABLESPACE/EVENT TRIGGER are the grammar's
-        // non-ET forms and all three are handled above) — clean 0A000.
-        other => Err(handler_unsupported(&format!(
-            "ALTER ... OWNER TO for this object type ({other:?})"
-        ))),
+        // DATABASE/TABLESPACE/EVENT TRIGGER are the grammar's only non-ET
+        // forms and all three are handled above; C's ExecAlterOwnerStmt
+        // default (alter.c).
+        other => Err(Box::new(types_error::PgError::error(format!(
+            "unrecognized AlterOwnerStmt type: {}",
+            other as i32
+        )))),
     }
 }
 

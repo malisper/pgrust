@@ -652,8 +652,10 @@ pub fn AlterObjectOwner_internal<'mcx>(
     Ok(())
 }
 
-// ExecAlterOwnerStmt (alter.c). Per-class arms whose target commands are
-// unported stay loud.
+// ExecAlterOwnerStmt (alter.c). TYPE/DOMAIN (typecmds) and the classes
+// without event-trigger support (DATABASE, TABLESPACE, EVENT TRIGGER) are
+// dispatched in tcop before reaching here; DATABASE/SCHEMA arms are kept for
+// C parity of this function.
 pub fn ExecAlterOwnerStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterOwnerStmt<'mcx>) -> PgResult<ObjectAddress> {
     let newowner = aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
 
@@ -741,12 +743,41 @@ pub fn ExecAlterOwnerStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterOwnerStmt<'mcx>) -> 
             AlterObjectOwner_internal(mcx, address.classId, address.objectId, newowner)?;
             Ok(address)
         }
-        // unported: ExecAlterOwnerStmt (alter.c) remaining object-type arms
-        _ => Err(Box::new(
-            types_error::PgError::error(
-                "changing the owner of this type of object is not supported yet",
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        )),
+        // C's default: nothing the grammar produces lands here.
+        other => Err(Box::new(types_error::PgError::error(format!(
+            "unrecognized AlterOwnerStmt type: {}",
+            other as i32
+        )))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_nodes::parsenodes::{RoleSpec, RoleSpecType};
+
+    // ExecAlterOwnerStmt default arm: C's elog(ERROR, "unrecognized
+    // AlterOwnerStmt type: %d") — nothing the grammar produces lands there
+    // (previously a 0A000 fence).
+    #[test]
+    fn exec_alter_owner_stmt_default_matches_c() {
+        miscinit::SetUserIdAndSecContext(types_core::BOOTSTRAP_SUPERUSERID, 0);
+        let ctx = mcx::MemoryContext::new("alter-test");
+        let rolespec = RoleSpec {
+            roletype: RoleSpecType::ROLESPEC_CURRENT_USER,
+            rolename: None,
+            location: -1,
+        };
+        let stmt = AlterOwnerStmt {
+            objectType: ObjectType::OBJECT_TABLE,
+            relation: None,
+            object: None,
+            newowner: Some(&rolespec),
+        };
+        let e = ExecAlterOwnerStmt(ctx.mcx(), &stmt).unwrap_err();
+        assert_eq!(
+            e.message(),
+            format!("unrecognized AlterOwnerStmt type: {}", ObjectType::OBJECT_TABLE as i32)
+        );
     }
 }
