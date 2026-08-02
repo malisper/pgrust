@@ -1388,15 +1388,26 @@ fn rv_query_inplace<'mcx>(
         }
     }
     let new_merge_join_cond = rv_mutate_opt(q.mergeJoinCondition, ctx)?;
+    // C mutates the expressions under WindowClause nodes even when not
+    // interested in SortGroupClause nodes (query_tree_mutator's non-
+    // QTW_EXAMINE_SORTGROUP lane).
     for wc_node in &q.windowClause {
         let wc = wc_node.as_window_clause().expect("windowClause cell");
-        if rv_mutate_opt(wc.startOffset, ctx)?.is_some()
-            || rv_mutate_opt(wc.endOffset, ctx)?.is_some()
-        {
-            panic!(
-                "ReplaceVarsFromTargetList (rewriteManip.c): NEW/OLD reference \
-                 inside a window frame offset (WindowClause rebuild unported)"
-            );
+        let new_start = rv_mutate_opt(wc.startOffset, ctx)?;
+        let new_end = rv_mutate_opt(wc.endOffset, ctx)?;
+        if new_start.is_some() || new_end.is_some() {
+            // SAFETY: exclusive tree (module contract).
+            unsafe {
+                wc_node.with_mut::<types_nodes::parsenodes::WindowClause, _>(|w| {
+                    if new_start.is_some() {
+                        w.startOffset = new_start;
+                    }
+                    if new_end.is_some() {
+                        w.endOffset = new_end;
+                    }
+                })
+            }
+            .expect("WindowClause");
         }
     }
     let new_jointree = match q.jointree {
@@ -1469,10 +1480,33 @@ fn rv_query_inplace<'mcx>(
                     .expect("RangeTblEntry");
                 }
             }
-            RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_GROUP => panic!(
-                "ReplaceVarsFromTargetList (rewriteManip.c): {:?} RTE mutation arm unported",
-                rte.rtekind
-            ),
+            RTEKind::RTE_FUNCTION => {
+                if let Some(new_fns) = rv_mutate_list(&rte.functions, ctx)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<RangeTblEntry, _>(|r| r.functions = new_fns)
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                if let Some(new_tf) = rv_mutate_opt(rte.tablefunc, ctx)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(new_tf))
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_GROUP => {
+                if let Some(new_ge) = rv_mutate_list(&rte.groupexprs, ctx)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<RangeTblEntry, _>(|r| r.groupexprs = new_ge)
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
             _ => {}
         }
         if let Some(new_sq) = rv_mutate_list(&rte.securityQuals, ctx)? {
