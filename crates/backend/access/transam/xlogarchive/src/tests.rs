@@ -190,3 +190,30 @@ fn keep_file_restored_notifies_walsenders() {
         assert_eq!(WAKEUPS.load(Ordering::Relaxed), 1);
     });
 }
+
+// C's `if (reload) WalSndRqstFileReload()` (xlogarchive.c:423): the reload
+// request fires exactly when the restored file REPLACED an existing one — a
+// walsender might hold the replaced segment open.
+#[test]
+fn keep_file_restored_requests_reload_only_when_replacing() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static RELOADS: AtomicU32 = AtomicU32::new(0);
+    with_wal_cwd(|| {
+        walsender_seams::wal_snd_rqst_file_reload::set(|| {
+            RELOADS.fetch_add(1, Ordering::Relaxed);
+        });
+
+        // Fresh destination: no existing file was replaced, no reload request.
+        let seg2 = "000000010000000000000002";
+        std::fs::write("pg_wal/RECOVERYXLOG", b"restored segment").unwrap();
+        KeepFileRestoredFromArchive("pg_wal/RECOVERYXLOG", seg2).unwrap();
+        assert!(Path::new(&format!("pg_wal/{seg2}")).exists());
+        assert_eq!(RELOADS.load(Ordering::Relaxed), 0, "no replacement, no reload request");
+
+        // Existing destination: the restore replaces it, so walsenders are
+        // asked to reload their currently-open segment.
+        std::fs::write("pg_wal/RECOVERYXLOG", b"restored segment v2").unwrap();
+        KeepFileRestoredFromArchive("pg_wal/RECOVERYXLOG", seg2).unwrap();
+        assert_eq!(RELOADS.load(Ordering::Relaxed), 1, "replacement requests a reload");
+    });
+}

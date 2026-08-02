@@ -53,6 +53,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // WalSndRqstFileReload (walsender.c:3588): flag every active walsender
+    // slot's needreload so a cascading walsender re-opens its currently-open
+    // segment, which archive recovery may have replaced
+    // (KeepFileRestoredFromArchive). Installed by walsender.
+    pub fn wal_snd_rqst_file_reload()
+);
+
+seam_core::seam!(
     // SendBaseBackup(cmd): the BASE_BACKUP replication command, installed by the
     // basebackup crate. Off the serial path; walsender dispatches to it.
     pub fn base_backup(cmd: repl_gram::BaseBackupCmd) -> types_error::PgResult<()>
