@@ -36,9 +36,14 @@ fn unquoted_identifier_is_downcased() {
 }
 
 #[test]
-fn quoted_identifier_preserves_case_and_collapses_doubled_quote() {
+fn quoted_identifier_preserves_case_and_terminates_on_every_dquote() {
     assert_eq!(lex("\"FooBar\""), vec![Token::Ident("FooBar".into())]);
-    assert_eq!(lex("\"a\"\"b\""), vec![Token::Ident("a\"b".into())]);
+    // repl_scanner.l's <xd> state has NO {xddouble} rule (unlike <xq>):
+    // `"a""b"` is TWO identifiers, not a`"`b (repl_scanner_diff, 2026-08-01).
+    assert_eq!(
+        lex("\"a\"\"b\""),
+        vec![Token::Ident("a".into()), Token::Ident("b".into())]
+    );
 }
 
 #[test]
@@ -113,9 +118,23 @@ fn unterminated_double_quote_errors() {
 }
 
 #[test]
-fn invalid_streaming_location_errors() {
-    // sscanf overflow: a hex half that does not fit uint32.
-    assert!(replication_lex_all("100000000/0").is_err());
+fn recptr_hex_overflow_truncates_like_sscanf() {
+    // sscanf("%X") never fails on lexer-matched hex runs: strtoul saturates
+    // at ULONG_MAX past 2^64 and the uint32 store truncates (LP64). The
+    // original port errored here; repl_scanner_diff caught the divergence
+    // against the real flex+libc oracle (2026-08-01).
+    assert_eq!(
+        lex("100000000/0"),
+        vec![Token::Recptr(0)] // 0x1_0000_0000 as u32 == 0
+    );
+    assert_eq!(
+        lex("FFFFFFFFF/1"),
+        vec![Token::Recptr(0xFFFF_FFFF_0000_0001)]
+    );
+    assert_eq!(
+        lex("FFFFFFFFFFFFFFFFF/0"), // > 2^64: strtoul saturation
+        vec![Token::Recptr(0xFFFF_FFFF_0000_0000)]
+    );
 }
 
 #[test]

@@ -141,6 +141,11 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    // NB: unlike <xq> (which has an {xqdouble} rule), repl_scanner.l's <xd>
+    // state has NO {xddouble} rule — a second double-quote always TERMINATES
+    // the identifier, so `"a""b"` lexes as Ident(a) Ident(b), never a`"`b.
+    // (The original port collapsed doubled quotes here; repl_scanner_diff
+    // caught the divergence against the real flex machine, 2026-08-01.)
     fn lex_delimited_identifier(&mut self) -> PgResult<Token> {
         debug_assert_eq!(self.input[self.pos], b'"');
         self.pos += 1;
@@ -151,16 +156,11 @@ impl<'a> Scanner<'a> {
             }
             let ch = self.input[self.pos];
             if ch == b'"' {
-                if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == b'"' {
-                    lit.push(b'"');
-                    self.pos += 2;
-                } else {
-                    self.pos += 1;
-                    let mut folded = mcx::slice_in(self.mcx.mcx(), &lit)
-                        .map_err(|_| replication_yyerror("out of memory"))?;
-                    parser_small1::truncate_identifier(&mut folded, true, SCANNER_ENCODING)?;
-                    return Ok(Token::Ident(bytes_to_string(&folded)));
-                }
+                self.pos += 1;
+                let mut folded = mcx::slice_in(self.mcx.mcx(), &lit)
+                    .map_err(|_| replication_yyerror("out of memory"))?;
+                parser_small1::truncate_identifier(&mut folded, true, SCANNER_ENCODING)?;
+                return Ok(Token::Ident(bytes_to_string(&folded)));
             } else {
                 lit.push(ch);
                 self.pos += 1;
@@ -291,21 +291,30 @@ fn parse_recptr(text: &[u8]) -> Option<XLogRecPtr> {
     Some(((hi as u64) << 32) | (lo as u64))
 }
 
+// `sscanf("%X", ...)` semantics on LP64: strtoul saturates at ULONG_MAX
+// (2^64-1) on overflow, then the store truncates to uint32 — so any
+// over-long hex run lands on 0xFFFFFFFF, never an error and never a wrap
+// past 2^64. (The original port errored on >u32 values; repl_scanner_diff
+// caught the divergence — C's `sscanf != 2` arm is unreachable for
+// lexer-matched {hexdigit}+/{hexdigit}+ text.)
 fn parse_hex_u32(bytes: &[u8]) -> Option<u32> {
-    let mut acc: u32 = 0;
+    let mut acc: u64 = 0;
     for &b in bytes {
-        let d = (b as char).to_digit(16)?;
-        acc = acc.checked_mul(16)?.checked_add(d)?;
+        let d = (b as char).to_digit(16)? as u64;
+        acc = acc.saturating_mul(16).saturating_add(d);
     }
-    Some(acc)
+    Some(acc as u32)
 }
 
-// `strtoul(..., 10)` narrowed to `uint32`: reproduces the 32-bit wrap.
+// `strtoul(..., 10)` narrowed to `uint32` on LP64: exact modulo-2^64 value
+// for in-range runs (the uint32 store truncates), ULONG_MAX saturation
+// beyond 2^64 (so 20+-digit runs land on 0xFFFFFFFF, not a 2^64 wrap —
+// repl_scanner_diff caught the original wrapping port).
 fn parse_decimal_u32(bytes: &[u8]) -> u32 {
     let mut acc: u64 = 0;
     for &b in bytes {
         let d = (b - b'0') as u64;
-        acc = acc.wrapping_mul(10).wrapping_add(d);
+        acc = acc.saturating_mul(10).saturating_add(d);
     }
     acc as u32
 }

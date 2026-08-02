@@ -562,3 +562,25 @@ fn ref_hook_state_defaults_none() {
     assert!(pstate.p_ref_hook_state.as_fixed_params().is_none());
     assert!(pstate.p_ref_hook_state.as_var_params().is_none());
 }
+
+#[test]
+fn errposition_single_byte_shortcut_is_unclamped() {
+    // C pg_mbstrlen_with_len's single-byte shortcut returns `limit` VERBATIM
+    // (unclamped by the actual string length), so a past-the-end location
+    // comes back as location + 1 — not len + 1 as the pre-fix slice clamp
+    // produced (parser_small1_diff, 2026-08-01).
+    assert_eq!(parser_errposition_source(Some(b"ab"), 5, PG_LATIN1), 6);
+    // In-range single-byte positions are unchanged.
+    assert_eq!(parser_errposition_source(Some(b"select"), 3, PG_LATIN1), 4);
+}
+
+#[test]
+fn errposition_gb18030_trailing_lead_byte_does_not_panic() {
+    // A lone GB18030 lead byte ending the source: pre-fix mbutils indexed
+    // past the buffer where C reads the NUL terminator; the error routes
+    // through the defensive unwrap_or(location) arm -> location + 1.
+    assert_eq!(
+        parser_errposition_source(Some(b"s\x81"), 2, wchar::PG_GB18030),
+        3
+    );
+}

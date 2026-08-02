@@ -742,11 +742,27 @@ pub fn pg_mblen_with_len(mbstr: &[u8], limit: i32) -> PgResult<i32> {
 /// generalizes `pg_mbstrlen_with_len`).
 pub fn pg_encoding_mblen_with_len(encoding: pg_enc, mbstr: &[u8], limit: i32) -> PgResult<i32> {
     debug_assert!(limit >= 1);
-    let length = pg_encoding_mblen(encoding, mbstr);
+    let length = mblen_cstr_lookahead(encoding, mbstr);
     if length > limit {
         return Err(report_invalid_encoding_int(encoding, mbstr, length, limit));
     }
     Ok(length)
+}
+
+/// C mblen semantics over a slice standing in for a NUL-terminated buffer:
+/// C's mblen may read one lookahead byte past the character start (GB18030
+/// reads s[1]) and finds the readable terminator there; wchar's slice-based
+/// `pg_gb18030_mblen` instead panics on a lone final lead byte (found by
+/// parser_small1_diff, 2026-08-01: truncate_identifier / errposition over a
+/// GB18030 tail byte crashed where C computes a length and then reports
+/// invalid encoding through the normal path). Feed the virtual terminator.
+#[inline]
+fn mblen_cstr_lookahead(encoding: pg_enc, tail: &[u8]) -> i32 {
+    if tail.len() >= 2 {
+        pg_encoding_mblen(encoding, tail)
+    } else {
+        pg_encoding_mblen(encoding, &[tail[0], 0])
+    }
 }
 
 /// No bounds check; only safe on already-verified strings (C `pg_mblen`).
@@ -871,7 +887,9 @@ pub fn pg_encoding_mbcliplen(encoding: pg_enc, mbstr: &[u8], len: i32, limit: i3
     let mut len = len;
     let mut pos = 0usize;
     while len > 0 && mbstr.get(pos).copied().unwrap_or(0) != 0 {
-        let l = pg_encoding_mblen(encoding, &mbstr[pos..]);
+        // C operates on NUL-terminated buffers whose terminator is readable
+        // lookahead; see mblen_cstr_lookahead.
+        let l = mblen_cstr_lookahead(encoding, &mbstr[pos..]);
         if clen + l > limit {
             break;
         }

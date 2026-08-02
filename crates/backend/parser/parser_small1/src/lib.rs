@@ -98,6 +98,13 @@ pub fn parser_errposition_source(
     let Some(src) = sourcetext else {
         return 0;
     };
+    // C pg_mbstrlen_with_len's single-byte shortcut returns `limit`
+    // VERBATIM — unclamped by the actual string length — so a past-the-end
+    // location comes back as location+1. The slice clamp below would
+    // instead return len+1 (caught by parser_small1_diff, 2026-08-01).
+    if wchar::pg_encoding_max_length(encoding) == 1 {
+        return location + 1;
+    }
     let limit = (location as usize).min(src.len());
     // Defensive fallback: sourcetext is validated query/command text, so this
     // should never hit the encoding-error arm; no ereport() to route it to

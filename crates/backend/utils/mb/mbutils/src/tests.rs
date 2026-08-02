@@ -491,3 +491,40 @@ fn encname_lookup_matches_encnames_c() {
     assert_eq!(pg_encoding_to_char(-1), "");
     assert_eq!(pg_encoding_to_char(9999), "");
 }
+
+#[test]
+fn gb18030_lone_lead_byte_reports_invalid_encoding_not_panic() {
+    // A lone GB18030 lead byte ending the buffer: C's mblen reads the
+    // readable NUL terminator (s[1] == 0 is not a digit -> length 2) and
+    // pg_encoding_mblen_with_len then reports invalid encoding (2 > limit 1).
+    // The pre-fix port indexed one past the slice end and PANICKED — a
+    // crash reachable with client_encoding = GB18030 (parser_small1_diff,
+    // 2026-08-01).
+    let err = pg_encoding_mblen_with_len(wchar::PG_GB18030, &[0x81], 1).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "invalid byte sequence for encoding \"GB18030\": 0x81"
+    );
+}
+
+#[test]
+fn gb18030_mbcliplen_lone_lead_byte_clips_not_panic() {
+    // Same lone-lead-byte lookahead in pg_encoding_mbcliplen: C computes
+    // l = 2 via the NUL terminator, clen + 2 > limit and breaks, clipping
+    // before the incomplete character. The pre-fix port panicked on the
+    // slice index instead.
+    assert_eq!(pg_encoding_mbcliplen(wchar::PG_GB18030, &[b'a', 0x81], 2, 2), 1);
+    // Limit permitting, C counts the phantom 2-byte char (terminator
+    // included) exactly like this — parity, not prettiness.
+    assert_eq!(pg_encoding_mbcliplen(wchar::PG_GB18030, &[b'a', 0x81], 2, 5), 3);
+}
+
+#[test]
+fn gb18030_cannot_be_a_database_encoding() {
+    // Sibling-audit witness (p1-wavec landing): pg_mbstrlen / pg_mblen_range /
+    // pg_mblen only ever use database_encoding(), and GB18030 — the ONLY
+    // encoding whose mblen reads s[1] — is client-only, rejected here. Those
+    // siblings therefore cannot reach the lone-lead-byte overrun.
+    assert!(SetDatabaseEncoding(wchar::PG_GB18030).is_err());
+    assert!(!wchar::pg_valid_be_encoding(wchar::PG_GB18030));
+}
