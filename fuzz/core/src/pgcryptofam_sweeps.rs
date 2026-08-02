@@ -48,6 +48,7 @@ fn sweep_ascii_to_bin_all_256_bytes() {
         covered += 1;
     }
     assert_eq!(covered, 256, "ascii_to_bin sweep covered {covered}/256 bytes");
+    println!("SWEEP ascii_to_bin: {covered}/256 byte values");
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,7 @@ fn sweep_to64_full_low_domain_per_width() {
         covered, expected,
         "to64 sweep covered {covered}/{expected} (n=1..=4 observable domains)"
     );
+    println!("SWEEP to64: {covered}/{expected} (n=1..=4 observable domains)");
 }
 
 /// The premise the sweep above rests on, PROVED against the C body rather
@@ -114,6 +116,7 @@ fn sweep_to64_high_bits_are_unobservable() {
         (26 + 20 + 14 + 8) * 4,
         "to64 high-bit sweep covered {covered} pairs"
     );
+    println!("SWEEP to64 high-bit unobservability: {covered}/{} pairs", (26 + 20 + 14 + 8) * 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +146,7 @@ fn sweep_xdes_count_encode_full_24bit_domain() {
         "xdes count sweep covered {covered}/{} of [1, 0xFFFFFF]",
         0xFF_FFFFu32
     );
+    println!("SWEEP xdes count encode: {covered}/{} of [1, 0xFFFFFF]", 0xFF_FFFFu32);
 }
 
 /// The same domain END TO END through the shipped public API: every odd count
@@ -214,6 +218,9 @@ fn sweep_xdes_gen_salt_parity_and_range() {
         checked_odd > 1000 && checked_even > 1000,
         "xdes gen_salt sweep is one-sided: {checked_odd} accepted / {checked_even} refused"
     );
+    println!(
+        "SWEEP xdes gen_salt: {covered} counts ({checked_odd} accepted / {checked_even} refused)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +266,7 @@ fn sweep_bf_encode_full_group_domain() {
         tail2 += 1;
     }
     assert_eq!(tail2, 1 << 16, "bf_encode 2-byte tail covered {tail2}/65536");
+    println!("SWEEP bf_encode: {covered}/16777216 3-byte groups, {tail1}/256 + {tail2}/65536 tails");
 }
 
 /// `BF_decode` over the FULL domain of one 4-char input group (64^4 = 2^24
@@ -302,6 +310,10 @@ fn sweep_bf_decode_full_group_domain_and_rejections() {
         }
     }
     assert_eq!(rejects, 4 * 256, "bf_decode rejection sweep covered {rejects}/1024");
+    println!(
+        "SWEEP bf_decode: {covered}/16777216 alphabet groups, {rejects}/1024 rejection cases \
+         ({off_alphabet_seen} refused)"
+    );
     assert!(
         off_alphabet_seen >= 4 * (256 - 64),
         "bf_decode rejection sweep saw only {off_alphabet_seen} refusals — the \
@@ -328,4 +340,5 @@ fn sweep_bf_round_trip_full_group_domain() {
         covered += 1;
     }
     assert_eq!(covered, 1 << 24, "bf round-trip sweep covered {covered}");
+    println!("SWEEP bf round trip: {covered}/16777216 3-byte groups");
 }
