@@ -403,16 +403,46 @@ fn div_d18_shacrypt_sub_space_salt_byte() {
 }
 
 // ---------------------------------------------------------------------------
-// D11 — "$2x$" sign-extension bug-compat is not implemented (bcrypt lane).
+// D11 — "$2x$" sign-extension bug-compat. RETIRED (lane p1-pgcryptofam-fixes)
+// by porting BF_set_key with C's fourth parameter (crypt-blowfish.c:549-577,
+// selected at :643 by setting[2] == 'x').
+//
+// U&'\00e9abc' is the 5-byte UTF-8 password "\xc3\xa9abc": both leading bytes
+// are >= 0x80, so the bug is live in the first expanded word.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "KNOWN DIVERGENCE D11 (pgrust bug): $2x$ must reproduce the sign-extension bug for password bytes >= 0x80"]
 fn div_d11_bcrypt_2x_sign_extension() {
+    arm();
     let got = crypt_ok("\u{e9}abc", "$2x$06$......................");
     assert_eq!(
         got,
         Ok("$2x$06$......................V57Ks8to0WewzBScSB7UsaowRVkZyEq".to_string()),
         "C 18.3 sign-extends high-bit password bytes under the $2x$ bug-compat flag"
+    );
+}
+
+/// STRUCTURAL fence for the D11 fix (no oracle constant of its own — the
+/// oracle row is div_d11 above). crypt-blowfish.c:566 differs from :568 only
+/// for bytes >= 0x80, so: an all-ASCII password must hash IDENTICALLY under
+/// `$2x$` and `$2a$`, and a high-bit password must NOT. The second half is
+/// what fails if the bug flag is wired but ignored; the first half is what
+/// fails if the bug is applied unconditionally (which would corrupt `$2a$`).
+#[test]
+fn par_bcrypt_sign_extension_is_2x_only() {
+    arm();
+    let ascii_2x = crypt_ok("foox", "$2x$06$......................");
+    let ascii_2a = crypt_ok("foox", "$2a$06$......................");
+    assert_eq!(
+        ascii_2x.as_deref().map(|s| &s[4..]),
+        ascii_2a.as_deref().map(|s| &s[4..]),
+        "an all-ASCII password takes the same path under both minor versions"
+    );
+    let high_2a = crypt_ok("\u{e9}abc", "$2a$06$......................");
+    let high_2x = crypt_ok("\u{e9}abc", "$2x$06$......................");
+    assert_ne!(
+        high_2a.as_deref().map(|s| &s[4..]),
+        high_2x.as_deref().map(|s| &s[4..]),
+        "a high-bit password MUST diverge between $2a$ and $2x$"
     );
 }
 

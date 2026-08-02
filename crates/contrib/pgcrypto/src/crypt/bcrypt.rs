@@ -77,6 +77,55 @@ fn bf_encode(src: &[u8], count: usize) -> Vec<u8> {
     out
 }
 
+/// `BF_set_key` (crypt-blowfish.c:549) — the 18 `expanded_key` words. C walks
+/// the key as a NUL-terminated string and wraps back to the start ON the NUL,
+/// so the terminator is part of the cycle.
+///
+/// `sign_extension_bug` is C's fourth parameter, passed as `setting[2] == 'x'`
+/// at crypt-blowfish.c:643. Under it, byte >= 0x80 is widened through
+/// `(signed char)` to a negative `int` (:566), whose 24 high one-bits are OR-ed
+/// into the accumulator — so one high-bit byte saturates every byte above it
+/// in the same word. That is the historical `$2x$` bug and it is the contract:
+/// `$2x$` exists precisely to keep reproducing it.
+fn bf_set_key(key: &[u8], sign_extension_bug: bool) -> [u32; 18] {
+    let mut expanded = [0u32; 18];
+    let mut ptr = 0usize;
+    for slot in expanded.iter_mut() {
+        let mut tmp: u32 = 0;
+        for _ in 0..4 {
+            // key[key.len()] is C's terminating NUL.
+            let c = if ptr < key.len() { key[ptr] } else { 0 };
+            tmp <<= 8;
+            if sign_extension_bug {
+                tmp |= (c as i8) as i32 as u32;
+            } else {
+                tmp |= c as u32;
+            }
+            if c == 0 {
+                ptr = 0;
+            } else {
+                ptr += 1;
+            }
+        }
+        *slot = tmp;
+    }
+    expanded
+}
+
+/// The `blowfish` crate's key expansions take BYTES and rebuild each word as
+/// `(v << 8) | byte` over a cycling buffer. Serializing the 18 words
+/// big-endian into exactly 72 bytes makes that reconstruction the identity —
+/// the buffer is consumed once, without wrapping — which is how C's
+/// `expanded_key` words (including the sign-extended ones, which are NOT the
+/// concatenation of four key bytes) reach the schedule unaltered.
+fn expanded_key_bytes(expanded: &[u32; 18]) -> [u8; 72] {
+    let mut out = [0u8; 72];
+    for (i, w) in expanded.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+    }
+    out
+}
+
 /// Encode 16 random salt bytes as the 22-char bcrypt base-64 string
 /// (`gen_salt('bf')`).
 pub fn encode_salt64(raw: &[u8; 16]) -> String {
@@ -110,24 +159,20 @@ pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
     let salt_chars = &setting[7..7 + 22];
     let salt = bf_decode(salt_chars, 16).ok_or_else(invalid_salt)?;
 
-    // C's BF_set_key cycles `key` then its terminating NUL, wrapping back to the
-    // start (the trailing NUL is part of the cycle). The `blowfish` crate's
-    // `next_u32_wrap` cycles the slice WITHOUT a NUL, so append one to reproduce
-    // C's exact key stream. (The `$2x$` sign-extension bug variant is not
-    // reproduced; `$2a$`/`$2b$` are the path the regression suite exercises.)
-    let mut key_nul = pw.to_vec();
-    key_nul.push(0);
+    // crypt-blowfish.c:643 selects the sign-extension bug off setting[2].
+    let expanded = bf_set_key(pw, setting[2] == b'x');
+    let key_words = expanded_key_bytes(&expanded);
 
     // EksBlowfish setup: init state, one salted expansion, then 2^cost rounds of
     // alternating key / salt expansion.
     let mut state = Blowfish::bc_init_state();
-    state.salted_expand_key(&salt, &key_nul);
+    state.salted_expand_key(&salt, &key_words);
     for _ in 0..count {
         // C runs CHECK_FOR_INTERRUPTS() at the top of every 2^cost round
         // (crypt-blowfish.c) so a high-cost bcrypt stays cancellable. A
         // raised cancel/die propagates out as the error.
         postgres_seams::check_for_interrupts::call().map_err(CryptError::Pg)?;
-        state.bc_expand_key(&key_nul);
+        state.bc_expand_key(&key_words);
         state.bc_expand_key(&salt);
     }
 
