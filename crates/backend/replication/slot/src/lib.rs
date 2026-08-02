@@ -534,7 +534,16 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
             pgstat::replslot::pgstat_acquire_replslot(ReplicationSlotIndex(s));
         }
 
-        // am_walsender "acquired ... slot" log line: unit unported.
+        if walsender_seams::am_walsender() {
+            let _ = ereport(walsender_slot_log_level())
+                .errmsg(walsender_slot_log_message(
+                    true,
+                    SlotIsLogical(s),
+                    &name_string(&s.data.get().name),
+                ))
+                .finish(loc("ReplicationSlotAcquire"));
+        }
+
         return Ok(());
     }
 }
@@ -542,6 +551,14 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
 pub fn ReplicationSlotRelease() -> PgResult<()> {
     let slot = MyReplicationSlot().expect("ReplicationSlotRelease: no slot acquired");
     assert!(slot.active_pid.get() != 0);
+
+    // C captures the name/kind up front: an ephemeral slot's storage is gone
+    // by the log point below.
+    let walsender_log = if walsender_seams::am_walsender() {
+        Some((name_string(&slot.data.get().name), SlotIsLogical(slot)))
+    } else {
+        None
+    };
 
     if slot.data.get().persistency == RS_EPHEMERAL {
         ReplicationSlotDropAcquired()?;
@@ -576,8 +593,28 @@ pub fn ReplicationSlotRelease() -> PgResult<()> {
         .store(flags, Relaxed);
     LWLockRelease(lwlock::main_lock(procarray::PROC_ARRAY_LOCK))?;
 
-    // am_walsender "released ... slot" log line: walsender unported.
+    if let Some((slotname, is_logical)) = walsender_log {
+        let _ = ereport(walsender_slot_log_level())
+            .errmsg(walsender_slot_log_message(false, is_logical, &slotname))
+            .finish(loc("ReplicationSlotRelease"));
+    }
     Ok(())
+}
+
+// The am_walsender acquired/released log lines (slot.c:702 and the
+// ReplicationSlotRelease tail): LOG under log_replication_commands, DEBUG1
+// otherwise.
+fn walsender_slot_log_level() -> ErrorLevel {
+    if guc_tables::vars::log_replication_commands.read() { LOG } else { DEBUG1 }
+}
+
+fn walsender_slot_log_message(acquired: bool, is_logical: bool, slotname: &str) -> String {
+    match (acquired, is_logical) {
+        (true, true) => format!("acquired logical replication slot \"{slotname}\""),
+        (true, false) => format!("acquired physical replication slot \"{slotname}\""),
+        (false, true) => format!("released logical replication slot \"{slotname}\""),
+        (false, false) => format!("released physical replication slot \"{slotname}\""),
+    }
 }
 
 pub fn ReplicationSlotCleanup(synced_only: bool) -> PgResult<()> {
