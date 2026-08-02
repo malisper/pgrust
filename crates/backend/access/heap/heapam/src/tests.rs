@@ -1595,6 +1595,47 @@ fn multi_insert_places_stamped_tuples() {
     quiesced();
 }
 
+// ExecFetchSlotHeapTuple's copy arm: a Virtual slot materializes a fresh
+// heap-tuple copy for placement (the slot keeps its virtual representation;
+// only tts_tid receives the placed TID, as C).
+#[test]
+fn multi_insert_copies_virtual_slots() {
+    use ::types_slot::TupleSlotKind;
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut virt =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(int4_tupdesc(mcx)));
+    {
+        let base = virt.base_mut();
+        base.tts_values[0] = Datum::from_i32(77);
+        base.tts_isnull[0] = false;
+    }
+    exectuples::exec_store_virtual_tuple(&mut virt);
+    let mut heapish = heap_slot_with(mcx, &tuple_image(0, 0, 41));
+    let mut slots = [&mut virt, &mut heapish];
+    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, 0, None).unwrap();
+
+    for (i, val) in [(1u16, 77i32), (2, 41)] {
+        let stored = page_tuple_at(oid, 0, i);
+        assert_eq!(stored.t_data().xmin_raw(), FAKE_XID, "tuple {i} xmin");
+        // SAFETY: int4 payload at t_hoff within the placed image.
+        let got = unsafe { stored.header_ptr().add(24).cast::<i32>().read_unaligned() };
+        assert_eq!(got, val);
+        assert_eq!(stored.t_self, ItemPointerData::new(0, i));
+    }
+    // The virtual slot stays virtual; its tts_tid carries the placed TID.
+    assert!(matches!(virt, ::types_slot::SlotData::Virtual(_)));
+    assert_eq!(virt.base().tts_tid, ItemPointerData::new(0, 1));
+    quiesced();
+}
+
 // Drop before RelationPutHeapTuple clobbers xmin (copy-from-toast-readback).
 #[test]
 fn multi_insert_toast_copy_survives_to_placement() {

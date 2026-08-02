@@ -490,17 +490,46 @@ pub fn heap_multi_insert<'mcx>(
 
     // std Vecs: droppy owners (contexts) and per-call scratch views — neither
     // may live in an mcx arena (no-drop rule); C pallocs the pointer array.
-    let mut toast_ctxs: Vec<::mcx::MemoryContext> = Vec::new();
+    let mut scratch_ctxs: Vec<::mcx::MemoryContext> = Vec::new();
     let mut heaptuples: Vec<HeapTupleData<'_>> = Vec::with_capacity(ntuples);
     for slot in slots.iter_mut() {
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = relation.rd_id;
+        // ExecFetchSlotHeapTuple: Heap/BufferHeap slots hand out their
+        // materialized tuple in place; any other slot type materializes a
+        // fresh heap-tuple copy (tts_ops->copy_heap_tuple) in the caller's
+        // context — the slot keeps its own representation and only tts_tid
+        // is written back below, as C does.
+        let mut copied: Option<HeapTupleData<'_>> = None;
         let tuple = match &mut **slot {
-            SlotData::Heap(h) => h.tuple.as_mut(),
-            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
-            _ => panic!("heap_multi_insert: non-heap slot copy arm not ported"),
-        }
-        .expect("materialized heap slot holds a tuple");
+            SlotData::Heap(h) => {
+                h.tuple.as_mut().expect("materialized heap slot holds a tuple")
+            }
+            SlotData::BufferHeap(b) => {
+                b.base.tuple.as_mut().expect("materialized heap slot holds a tuple")
+            }
+            other => {
+                let copy_ctx = ::mcx::MemoryContext::new("heap_multi_insert_copy");
+                let mut t = exectuples::exec_copy_slot_heap_tuple(other, mcx, copy_ctx.mcx())?;
+                let ht = t.as_tuple_mut();
+                // SAFETY: image owned by copy_ctx, kept alive in
+                // scratch_ctxs past the last use (page_tuple model).
+                let erased = unsafe {
+                    HeapTupleData::from_raw_parts(
+                        ht.header_ptr().cast_mut(),
+                        ht.t_len,
+                        ht.t_self,
+                        ht.t_tableOid,
+                    )
+                };
+                // Dropping t is heap_freetuple: the aset free-list header
+                // would overwrite t_choice before placement. The image is
+                // bulk-freed with copy_ctx (C: dies with caller context).
+                core::mem::forget(t);
+                scratch_ctxs.push(copy_ctx);
+                copied.insert(erased)
+            }
+        };
         tuple.t_tableOid = relation.rd_id;
         heap_prepare_insert(relation, tuple, xid, cid, options)?;
         if needs_toast(relation, tuple) {
@@ -534,12 +563,13 @@ pub fn heap_multi_insert<'mcx>(
             };
             match erased {
                 Some(erased) => {
-                    toast_ctxs.push(toast_ctx);
+                    scratch_ctxs.push(toast_ctx);
                     heaptuples.push(erased);
                 }
                 None => {
-                    // SAFETY: image owned by the materialized slot, which
-                    // outlives every use in this function.
+                    // SAFETY: image owned by the materialized slot or a
+                    // scratch_ctxs copy context; both outlive every use in
+                    // this function.
                     heaptuples.push(unsafe {
                         HeapTupleData::from_raw_parts(
                             tuple.header_ptr().cast_mut(),
@@ -551,7 +581,8 @@ pub fn heap_multi_insert<'mcx>(
                 }
             }
         } else {
-            // SAFETY: as above; the materialized slot image outlives this call.
+            // SAFETY: as above; the slot (or copy-context) image outlives
+            // this call.
             heaptuples.push(unsafe {
                 HeapTupleData::from_raw_parts(
                     tuple.header_ptr().cast_mut(),
@@ -787,7 +818,7 @@ pub fn heap_multi_insert<'mcx>(
         );
     }
 
-    drop(toast_ctxs);
+    drop(scratch_ctxs);
     Ok(())
 }
 
