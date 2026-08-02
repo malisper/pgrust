@@ -110,12 +110,21 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
             ::types_core::INT8OID => GinElemCmp::Int8,
             ::types_core::OIDOID => GinElemCmp::Oid,
             ::types_core::TEXTOID | ::types_core::VARCHAROID => GinElemCmp::Text,
-            // unported: typcache btree-comparator fallback (user-reachable
-            // via CREATE INDEX USING gin on e.g. a numeric[] column).
+            // Any other element type: the typcache lookup itself
+            // (lookup_type_cache TYPECACHE_CMP_PROC_FINFO), dispatched
+            // through fmgr at compare time.
             other => {
-                return Err(crate::unsupported(format!(
-                    "GIN array_ops over element type {other} is not supported (typcache comparator lane unported)"
-                )))
+                let cmp_proc = ::typcache_seams::type_cache_cmp_proc::call(other)?;
+                if cmp_proc == InvalidOid {
+                    return Err(Box::new(
+                        ::types_error::PgError::error(format!(
+                            "could not identify a comparison function for type {}",
+                            ::format_type::format_type_be(other)?
+                        ))
+                        .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION),
+                    ));
+                }
+                GinElemCmp::Fmgr(cmp_proc)
             }
         }
     } else {

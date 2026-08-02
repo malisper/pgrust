@@ -293,3 +293,5 @@ pub fn init_seams() {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod scanver_tests;

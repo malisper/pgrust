@@ -350,9 +350,10 @@ impl GinBtreeType {
 }
 
 /// array_ops has no GIN_COMPARE_PROC; C falls back to the element type's
-/// default btree comparator via typcache (initGinState). Closed element set,
-/// resolved once at initGinState; None only on states that never compare
-/// (the gincost extractQuery probe).
+/// default btree comparator via typcache (initGinState). The common element
+/// types resolve to specialized arms; any other type carries its typcache
+/// cmp proc oid and dispatches through fmgr (`Fmgr`). None only on states
+/// that never compare (the gincost extractQuery probe).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GinElemCmp {
     None,
@@ -361,6 +362,9 @@ pub enum GinElemCmp {
     Int8,
     Oid,
     Text,
+    /// The element type's default btree comparator (typcache cmp proc oid),
+    /// resolved at initGinState and called through fmgr per compare.
+    Fmgr(::types_core::Oid),
 }
 
 pub const JSP_GIN_OR: u8 = 0;

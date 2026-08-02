@@ -78,6 +78,7 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                     3 => GinElemCmp::Int8,
                     4 => GinElemCmp::Oid,
                     5 => GinElemCmp::Text,
+                    6 => GinElemCmp::Fmgr(c.elem_cmp_proc),
                     other => unported(&format!("rd_amcache gin elem_cmp tag {other}")),
                 },
                 support_collation: c.support_collation,
@@ -96,6 +97,7 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
     let mut cached_cols = [RdAmCacheGinCol {
         opclass: 0,
         elem_cmp: 0,
+        elem_cmp_proc: ::types_core::InvalidOid,
         support_collation: ::types_core::InvalidOid,
         can_partial_match: false,
         key_byval: false,
@@ -120,6 +122,11 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                 GinElemCmp::Int8 => 3,
                 GinElemCmp::Oid => 4,
                 GinElemCmp::Text => 5,
+                GinElemCmp::Fmgr(_) => 6,
+            },
+            elem_cmp_proc: match col.elem_cmp {
+                GinElemCmp::Fmgr(cmp_proc) => cmp_proc,
+                _ => ::types_core::InvalidOid,
             },
             support_collation: col.support_collation,
             can_partial_match: col.can_partial_match,
