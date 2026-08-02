@@ -149,7 +149,7 @@ impl<'mcx> Parser<'mcx> {
                     *llocp,
                     self.settings.encoding,
                 )
-                .map_err(|e| self.udeescape_error(e))?;
+                .map_err(|e| self.udeescape_failure(e))?;
                 let out_tok = if t == tokens::UIDENT {
                     parser_small1::truncate_identifier(
                         &mut decoded,
@@ -177,6 +177,27 @@ impl<'mcx> Parser<'mcx> {
         match e.hint {
             Some(h) => Box::new((*err).with_hint(h)),
             None => err,
+        }
+    }
+
+    // str_udeescape failures: C wraps each escape's processing in
+    // setup_scanner_errposition_callback (parser.c), so BOTH the function's
+    // own escape errors and hard pg_unicode_to_server errors carry an error
+    // cursor pointing at the escape.
+    #[cold]
+    pub(crate) fn udeescape_failure(
+        &self,
+        e: parser_small1::udeescape::UdeescapeFailure,
+    ) -> Box<PgError> {
+        match e {
+            parser_small1::udeescape::UdeescapeFailure::Escape(e) => self.udeescape_error(e),
+            parser_small1::udeescape::UdeescapeFailure::Hard { error, location } => Box::new(
+                (*error).with_cursor_position(parser_small1::parser_errposition_source(
+                    Some(self.scanbuf),
+                    location,
+                    self.settings.encoding,
+                )),
+            ),
         }
     }
 

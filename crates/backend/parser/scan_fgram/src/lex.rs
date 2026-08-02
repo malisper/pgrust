@@ -630,9 +630,14 @@ impl<'mcx> Scanner<'mcx> {
         Ok(())
     }
 
-    // addunicode (scan.l:1408) with pg_unicode_to_server inlined for the
-    // UTF-8 / ASCII cases; other server encodings need the (unported)
-    // conversion subsystem.
+    // addunicode (scan.l:1408) with pg_unicode_to_server's ASCII / UTF-8
+    // fast paths inlined; other server encodings run the mbutils
+    // conversion-proc lane. C wraps the conversion in
+    // setup_scanner_errposition_callback(&scbstate, yyscanner, *(yylloc)),
+    // so its errors carry an error cursor pointing at the escape. C expects
+    // pg_unicode_to_server to complain about any unconvertible code point,
+    // so saw_non_ascii is NOT set (no end-of-string pg_verifymbstr pass for
+    // unicode escapes alone).
     fn addunicode(&mut self, c: u32) -> PgResult<()> {
         if !wchar::is_valid_unicode_codepoint(c) {
             return Err(self.yyerr("invalid Unicode escape value"));
@@ -645,19 +650,20 @@ impl<'mcx> Scanner<'mcx> {
             let len = wchar::unicode_utf8len(c) as usize;
             self.addlit(&buf[..len])?;
         } else {
-            // unported: pg_unicode_to_server's conversion-proc lane. The main
-            // SQL parser pins UTF-8, so this only fires off-path (e.g. the
-            // pg_stat_statements normalizer on a non-UTF8 database) — raise a
-            // clean 0A000 rather than panic.
-            return Err(self.lexerr(
-                ERRCODE_FEATURE_NOT_SUPPORTED,
-                "Unicode escape values above 007F are not supported yet for \
-                 non-UTF8 server encodings",
-                None,
-                None,
-            ));
+            // The scanner's encoding is a port-ism (C reads
+            // GetDatabaseEncoding itself); the conversion below targets the
+            // database encoding, so a drifted consumer must fail loudly
+            // rather than write wrong bytes into the literal.
+            assert_eq!(
+                self.encoding,
+                mbutils::GetDatabaseEncoding(),
+                "scanner encoding drifted from the database encoding"
+            );
+            let bytes = mbutils::pg_unicode_to_server(self.mcx, c).map_err(|e| {
+                Box::new((*e).with_cursor_position(self.scanner_errposition(self.yylloc)))
+            })?;
+            self.addlit(&bytes)?;
         }
-        self.saw_non_ascii = true;
         Ok(())
     }
 

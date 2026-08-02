@@ -2277,9 +2277,38 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
             x.named_args.iter().any(expression_returns_set)
                 || x.args.iter().any(expression_returns_set)
         }
+        NodeTag::T_NamedArgExpr => node
+            .as_named_arg_expr()
+            .unwrap()
+            .arg
+            .is_some_and(expression_returns_set),
+        NodeTag::T_TargetEntry => expression_returns_set(
+            node.as_variant::<types_nodes::TargetEntry>().unwrap().expr,
+        ),
+        NodeTag::T_List => node.as_list().unwrap().iter().any(expression_returns_set),
+        NodeTag::T_FieldStore => {
+            let f = node.as_field_store().unwrap();
+            expression_returns_set(f.arg) || f.newvals.iter().any(expression_returns_set)
+        }
+        // expression_tree_walker's no-subnode primitives.
+        NodeTag::T_SetToDefault | NodeTag::T_NextValueExpr => false,
+        NodeTag::T_InferenceElem => node
+            .as_variant::<types_nodes::primnodes::InferenceElem>()
+            .unwrap()
+            .expr
+            .is_some_and(expression_returns_set),
+        NodeTag::T_ReturningExpr => expression_returns_set(
+            node.as_variant::<types_nodes::primnodes::ReturningExpr>().unwrap().retexpr,
+        ),
+        NodeTag::T_WindowFuncRunCondition => expression_returns_set(
+            node.as_variant::<types_nodes::primnodes::WindowFuncRunCondition>().unwrap().arg,
+        ),
+        // Query-structure tags cannot appear under a coercion expression;
+        // anything else would fall out of C's expression_tree_walker default
+        // as an "unrecognized node type" elog, kept loud here.
         other => panic!(
-            "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \
-             backend-nodes-core lane"
+            "expression_returns_set (nodeFuncs.c): unrecognized node type {other:?} \
+             — expression_tree_walker would elog in C"
         ),
     }
 }

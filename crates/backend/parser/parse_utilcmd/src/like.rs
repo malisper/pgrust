@@ -575,18 +575,6 @@ fn compression_method_name(c: u8) -> &'static str {
     }
 }
 
-// Clean 0A000 for unported generateClonedIndexStmt lanes (user-reachable
-// via CREATE TABLE (LIKE ... INCLUDING INDEXES)).
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn cloned_index_unported(what: &str) -> Box<PgError> {
-    Box::new(
-        PgError::new(ERROR, format!("{what} is not supported yet"))
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
-}
-
 pub fn generateClonedIndexStmt<'mcx>(
     mcx: Mcx<'mcx>,
     heap_rel: Option<&'mcx RangeVar<'mcx>>,
@@ -618,25 +606,9 @@ pub fn generateClonedIndexStmt<'mcx>(
     } else {
         None
     };
-    if source_idx.rd_options.is_some() {
-        // unported: C clones index storage parameters (untransformRelOptions);
-        // clean 0A000 until that lane is ported (dropping them would silently
-        // build a different index).
-        return Err(cloned_index_unported(
-            "LIKE INCLUDING INDEXES on an index with storage parameters",
-        ));
-    }
     // Temporal (WITHOUT OVERLAPS) unique/PK indexes are indisexclusion.
     let iswithoutoverlaps =
         (idxrec.indisprimary || idxrec.indisunique) && idxrec.indisexclusion;
-    // unported: C copies per-column opclass options (untransformRelOptions of
-    // attoptions); dropping them would silently build a different index, so
-    // raise a clean 0A000 until that lane is ported.
-    if index_has_attoptions(mcx, source_idx.rd_id, idxrec.indnkeyatts as usize)? {
-        return Err(cloned_index_unported(
-            "LIKE INCLUDING INDEXES on an index with per-column opclass options",
-        ));
-    }
 
     let mut stmt = IndexStmt {
         relation: heap_rel,
@@ -749,6 +721,13 @@ pub fn generateClonedIndexStmt<'mcx>(
             NodeList::nil()
         };
 
+        // C: per-column opclass options (untransformRelOptions of the index
+        // column's attoptions).
+        let opclassopts = untransform_rel_options(
+            mcx,
+            lsyscache::get_attoptions(mcx, source_idx.rd_id, keyno as i16 + 1)?,
+        )?;
+
         let mut ordering = SortByDir::SORTBY_DEFAULT;
         let mut nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
         if opt & INDOPTION_DESC != 0 {
@@ -770,6 +749,7 @@ pub fn generateClonedIndexStmt<'mcx>(
             )?),
             collation,
             opclass,
+            opclassopts,
             ordering,
             nulls_ordering,
             ..IndexElem::default()
@@ -806,6 +786,10 @@ pub fn generateClonedIndexStmt<'mcx>(
     }
     stmt.indexIncludingParams = including_params;
 
+    // C: copy reloptions if any (the source index's pg_class.reloptions,
+    // untransformRelOptions'd back to WITH-clause DefElems).
+    stmt.options = index_reloptions_defelems(mcx, source_idx.rd_id)?;
+
     if let Some(src) = idxrec.indpred_src.as_ref() {
         let pred = readfuncs::stringToNode(mcx, src.as_str())?;
         let (mapped, found_whole_row) =
@@ -821,11 +805,85 @@ pub fn generateClonedIndexStmt<'mcx>(
     Ok((stmt, constraint_oid))
 }
 
-fn index_has_attoptions<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<bool> {
+// untransformRelOptions (reloptions.c) over a text[] datum, as DefElems:
+// each "name=value" element becomes a DefElem with a String arg; an element
+// without '=' gets a NULL arg. A null datum is NIL.
+fn untransform_rel_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: datum::Datum,
+) -> PgResult<NodeList<'mcx>> {
+    use types_nodes::parsenodes::{DefElem, DefElemAction};
+    const TEXTOID: Oid = 25;
+
+    let mut result = NodeList::nil();
+    if d == datum::Datum::null() {
+        return Ok(result);
+    }
+    // Body past either varlena header; tuple-stored catalog arrays may come
+    // back short-headered or toasted/compressed.
+    let img = varlena_image(d);
+    let b0 = img[0];
+    let body: &[u8] = if b0 == 0x01 || (b0 & 0x03) == 0x02 {
+        &detoast::detoast_attr(mcx, img)?.leak()[4..]
+    } else if b0 & 0x01 != 0 {
+        &img[1..]
+    } else {
+        &img[4..]
+    };
+    // One-dimensional no-null text array (deconstruct_array_builtin's shape
+    // for stored reloptions; TYPALIGN_INT elements).
+    let ndim = i32::from_ne_bytes(body[0..4].try_into().unwrap());
+    if ndim == 0 {
+        return Ok(result);
+    }
+    let dataoffset = i32::from_ne_bytes(body[4..8].try_into().unwrap());
+    assert!(ndim == 1 && dataoffset == 0, "unexpected catalog text[] shape");
+    debug_assert_eq!(i32::from_ne_bytes(body[8..12].try_into().unwrap()), TEXTOID as i32);
+    let dim1 = i32::from_ne_bytes(body[12..16].try_into().unwrap()) as usize;
+    let mut off = 20usize;
+    for _ in 0..dim1 {
+        // att_align_pointer: a zero pad byte means the element was aligned.
+        if body[off] == 0 {
+            off = (off + 3) & !3;
+        }
+        let e0 = body[off];
+        let (hdr, len) = if e0 & 0x01 != 0 {
+            (1usize, (((e0 >> 1) & 0x7F) as usize).saturating_sub(1))
+        } else {
+            let raw = u32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
+            (4usize, (raw >> 2) as usize - 4)
+        };
+        let s = core::str::from_utf8(&body[off + hdr..off + hdr + len])
+            .expect("reloptions text is UTF-8");
+        off += hdr + len;
+        // C splits at the first '='; no '=' leaves a NULL-arg DefElem.
+        let (name, value) = match s.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (s, None),
+        };
+        let arg = match value {
+            Some(v) => Some(Node::mk_string(mcx, str_in(mcx, v)?)?),
+            None => None,
+        };
+        let defel = DefElem {
+            defnamespace: None,
+            defname: Some(str_in(mcx, name)?),
+            arg,
+            defaction: DefElemAction::DEFELEM_UNSPEC,
+            location: -1,
+        };
+        result.lappend(mcx, Node::mk(mcx, defel)?)?;
+    }
+    Ok(result)
+}
+
+// The source index's pg_class.reloptions, untransformed; C reads it from the
+// RELOID syscache in generateClonedIndexStmt.
+fn index_reloptions_defelems<'mcx>(mcx: Mcx<'mcx>, index_id: Oid) -> PgResult<NodeList<'mcx>> {
     use datum::Datum;
     use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    const AttributeRelidNumIndexId: Oid = 2659;
-    const Anum_pg_attribute_attoptions: i32 = 23;
+    const ClassOidIndexId: Oid = 2662;
+    const Anum_pg_class_reloptions: i32 = 33;
     let mut key = ScanKeyData::empty();
     key.sk_attno = 1;
     key.sk_strategy = BTEqualStrategyNumber;
@@ -833,35 +891,27 @@ fn index_has_attoptions<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> Pg
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
     key.sk_argument = Datum::from_oid(index_id);
-    let rel = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, AccessShareLock)?;
+    let rel = table::table_open(mcx, RELATION_RELATION_ID, AccessShareLock)?;
     let mut scan = genam::systable_beginscan(
         mcx,
         &rel,
-        AttributeRelidNumIndexId,
+        ClassOidIndexId,
         true,
         None,
         core::slice::from_ref(&key),
     )?;
-    let mut found = false;
-    let mut seen = 0usize;
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        if seen >= nkeys {
-            break;
-        }
-        seen += 1;
-        let mut isnull = false;
-        // SAFETY: nullable attoptions probed for null-ness only.
-        unsafe {
-            types_tuple::heap_getattr(tup, Anum_pg_attribute_attoptions, rel.descr(), &mut isnull)
-        };
-        if !isnull {
-            found = true;
-            break;
-        }
-    }
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {index_id}"));
+    let mut isnull = false;
+    // SAFETY: nullable text[] under pg_class's descriptor; decoded (strings
+    // copied into mcx) before the scan ends.
+    let d = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_class_reloptions, rel.descr(), &mut isnull)
+    };
+    let options = if isnull { NodeList::nil() } else { untransform_rel_options(mcx, d)? };
     genam::systable_endscan(mcx, scan)?;
     rel.close(AccessShareLock)?;
-    Ok(found)
+    Ok(options)
 }
 
 fn read_indclass<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<PgVec<'mcx, Oid>> {
@@ -1092,4 +1142,64 @@ fn generateClonedExtStatsStmt<'mcx>(
         transformed: true,
         if_not_exists: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_nodes::parsenodes::DefElem;
+
+    fn ctx() -> &'static mcx::MemoryContext {
+        Box::leak(Box::new(mcx::MemoryContext::new("like-test")))
+    }
+
+    // A 4B-headered 1-D text[] image, elements 4B-headered and INT-aligned,
+    // as deconstruct_array_builtin expects stored reloptions to look.
+    fn text_array_image(elems: &[&str]) -> Vec<u8> {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&1i32.to_ne_bytes()); // ndim
+        body.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset (no nulls)
+        body.extend_from_slice(&25i32.to_ne_bytes()); // elemtype = TEXTOID
+        body.extend_from_slice(&(elems.len() as i32).to_ne_bytes()); // dim1
+        body.extend_from_slice(&1i32.to_ne_bytes()); // lbound
+        for e in elems {
+            while body.len() % 4 != 0 {
+                body.push(0);
+            }
+            body.extend_from_slice(&(((e.len() + 4) as u32) << 2).to_ne_bytes());
+            body.extend_from_slice(e.as_bytes());
+        }
+        let mut img = Vec::with_capacity(body.len() + 4);
+        img.extend_from_slice(&(((body.len() + 4) as u32) << 2).to_ne_bytes());
+        img.extend_from_slice(&body);
+        img
+    }
+
+    #[test]
+    fn untransform_rel_options_matches_c() {
+        let mcx = ctx().mcx();
+        // C untransformRelOptions: "name=value" splits at the first '=',
+        // a '='-less element becomes a NULL-arg DefElem.
+        let img = text_array_image(&["fillfactor=70", "no_value_opt", "eq=a=b"]);
+        let list =
+            untransform_rel_options(mcx, datum::Datum::from_usize(img.as_ptr() as usize))
+                .unwrap();
+        let opts: Vec<(&str, Option<&str>)> = list
+            .iter()
+            .map(|n| {
+                let d = n.as_variant::<DefElem>().expect("DefElem");
+                (d.defname.unwrap(), d.arg.map(|a| a.as_string().expect("String arg").sval))
+            })
+            .collect();
+        assert_eq!(
+            opts,
+            [
+                ("fillfactor", Some("70")),
+                ("no_value_opt", None),
+                ("eq", Some("a=b")),
+            ]
+        );
+        // A null datum (no reloptions) is NIL.
+        assert!(untransform_rel_options(mcx, datum::Datum::null()).unwrap().is_nil());
+    }
 }

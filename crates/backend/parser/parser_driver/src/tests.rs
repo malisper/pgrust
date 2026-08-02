@@ -1,11 +1,18 @@
 use mcx::MemoryContext;
 use wchar::PG_UTF8;
 
-use crate::{check_uescapechar, str_udeescape, UdeescapeError};
+use crate::{check_uescapechar, str_udeescape, UdeescapeError, UdeescapeFailure};
 
 fn de(s: &[u8], escape: u8) -> Result<alloc::vec::Vec<u8>, UdeescapeError> {
     let ctx = MemoryContext::new("t");
-    str_udeescape(ctx.mcx(), s, escape, 0, PG_UTF8).map(|v| v[..].to_vec())
+    str_udeescape(ctx.mcx(), s, escape, 0, PG_UTF8).map(|v| v[..].to_vec()).map_err(
+        |e| match e {
+            UdeescapeFailure::Escape(e) => e,
+            UdeescapeFailure::Hard { error, .. } => {
+                panic!("unexpected hard failure: {}", error.message())
+            }
+        },
+    )
 }
 
 #[test]

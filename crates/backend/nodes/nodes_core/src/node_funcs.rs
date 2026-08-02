@@ -1,6 +1,7 @@
-// Closed-set slice of nodeFuncs.c exprType/exprTypmod/exprCollation/
-// exprLocation over the tags this parser lane can produce; migrates to
-// backend-nodes-core when that unit lands its expression accessors.
+// nodeFuncs.c expression accessors. exprType/exprTypmod/exprCollation are
+// closed-set slices over the tags this parser lane can produce (their C
+// default is a hard elog, kept as a loud panic); exprLocation carries every
+// C 18.3 arm plus C's default of -1 for anything else.
 use types_core::{Oid, ParseLoc};
 use types_nodes::{Node, NodeList, NodeTag};
 
@@ -385,6 +386,8 @@ pub fn expr_location_list(list: &NodeList<'_>) -> ParseLoc {
     -1
 }
 
+/// C `exprLocation` (nodeFuncs.c), full 18.3 arm coverage; unknown node
+/// types are C's default, -1.
 pub fn expr_location(node: Node<'_>) -> ParseLoc {
     match node.node_tag() {
         NodeTag::T_Const => node.as_const().unwrap().location,
@@ -442,9 +445,6 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             node.as_subscripting_ref().unwrap().refexpr.map_or(-1, expr_location)
         }
         NodeTag::T_A_ArrayExpr => node.as_a_array_expr().unwrap().location,
-        NodeTag::T_A_Indirection => {
-            node.as_a_indirection().unwrap().arg.map_or(-1, expr_location)
-        }
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
         NodeTag::T_ColumnDef => {
@@ -557,7 +557,82 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         }
         NodeTag::T_RangeVar => node.as_range_var().unwrap().location,
         NodeTag::T_RangeTableSample => node.as_range_table_sample().unwrap().location,
-        other => deferred("exprLocation", other),
+        // C: just use argument's location.
+        NodeTag::T_PlaceHolderVar => {
+            expr_location(node.as_place_holder_var().unwrap().phexpr)
+        }
+        // C: just use argument's location.
+        NodeTag::T_TargetEntry => {
+            expr_location(node.as_variant::<types_nodes::TargetEntry>().unwrap().expr)
+        }
+        // C: use the contained RangeVar's location --- close enough.
+        NodeTag::T_IntoClause => node
+            .as_variant::<types_nodes::rawnodes::IntoClause>()
+            .unwrap()
+            .rel
+            .map_or(-1, expr_location),
+        NodeTag::T_MultiAssignRef => node
+            .as_variant::<types_nodes::rawnodes::MultiAssignRef>()
+            .unwrap()
+            .source
+            .map_or(-1, expr_location),
+        // C: just use argument's location (ignore operator, if any).
+        NodeTag::T_SortBy => node
+            .as_variant::<types_nodes::rawnodes::SortBy>()
+            .unwrap()
+            .node
+            .map_or(-1, expr_location),
+        NodeTag::T_WindowDef => {
+            node.as_variant::<types_nodes::rawnodes::WindowDef>().unwrap().location
+        }
+        NodeTag::T_TypeName => {
+            node.as_variant::<types_nodes::rawnodes::TypeName>().unwrap().location
+        }
+        NodeTag::T_Constraint => {
+            node.as_variant::<types_nodes::rawnodes::Constraint>().unwrap().location
+        }
+        NodeTag::T_FunctionParameter => node
+            .as_variant::<types_nodes::parsenodes::FunctionParameter>()
+            .unwrap()
+            .location,
+        NodeTag::T_WithClause => {
+            node.as_variant::<types_nodes::parsenodes::WithClause>().unwrap().location
+        }
+        NodeTag::T_InferClause => {
+            node.as_variant::<types_nodes::rawnodes::InferClause>().unwrap().location
+        }
+        NodeTag::T_OnConflictClause => {
+            node.as_variant::<types_nodes::rawnodes::OnConflictClause>().unwrap().location
+        }
+        NodeTag::T_CTESearchClause => {
+            node.as_variant::<types_nodes::parsenodes::CTESearchClause>().unwrap().location
+        }
+        NodeTag::T_CTECycleClause => {
+            node.as_variant::<types_nodes::parsenodes::CTECycleClause>().unwrap().location
+        }
+        NodeTag::T_CommonTableExpr => {
+            node.as_variant::<types_nodes::parsenodes::CommonTableExpr>().unwrap().location
+        }
+        // C: just use nested expr's location.
+        NodeTag::T_InferenceElem => node
+            .as_variant::<types_nodes::primnodes::InferenceElem>()
+            .unwrap()
+            .expr
+            .map_or(-1, expr_location),
+        NodeTag::T_PartitionElem => {
+            node.as_variant::<types_nodes::rawnodes::PartitionElem>().unwrap().location
+        }
+        NodeTag::T_PartitionSpec => {
+            node.as_variant::<types_nodes::rawnodes::PartitionSpec>().unwrap().location
+        }
+        NodeTag::T_PartitionBoundSpec => {
+            node.as_variant::<types_nodes::rawnodes::PartitionBoundSpec>().unwrap().location
+        }
+        NodeTag::T_PartitionRangeDatum => {
+            node.as_variant::<types_nodes::rawnodes::PartitionRangeDatum>().unwrap().location
+        }
+        // C: for any other node type it's just unknown.
+        _ => -1,
     }
 }
 

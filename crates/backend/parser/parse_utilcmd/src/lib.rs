@@ -98,32 +98,6 @@ fn typename_type_id_and_mod<'mcx>(
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
-    if tn.pct_type || tn.setof {
-        // unported: C's LookupTypeName resolves %TYPE to the referenced
-        // column's type and ignores SETOF here; clean 0A000 until ported.
-        return Err(unported_feature_at(
-            pstate,
-            tn.location,
-            "%TYPE and SETOF type references",
-        ));
-    }
-    if tn.names.is_nil() {
-        // LookupTypeName pre-resolved arm (makeTypeNameFromOid; LIKE / OF type).
-        assert!(tn.typeOid != InvalidOid, "TypeName without names or typeOid");
-        match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
-            Some(true) => {}
-            _ => unported("shell types (typisdefined = false)"),
-        }
-        // C typenameTypeIdAndMod applies no typtype gate on the pre-resolved
-        // lane (LIKE / OF type); column legality is CheckAttributeType's job.
-        let typmod = typenameTypeMod(mcx, pstate, tn, tn.typeOid)?;
-        return Ok((tn.typeOid, typmod));
-    }
-    if tn.typeOid != InvalidOid {
-        debug_assert!(tn.names.is_nil());
-        return Ok((tn.typeOid, -1));
-    }
-
     // C typenameType attaches parser_errposition(pstate, typeName->location)
     // to every lookup error on this path.
     let at_tn = |mut e: Box<PgError>| {
@@ -136,6 +110,49 @@ fn typename_type_id_and_mod<'mcx>(
         }
         e
     };
+    if tn.names.is_nil() {
+        // LookupTypeName pre-resolved arm (makeTypeNameFromOid; LIKE / OF type).
+        assert!(tn.typeOid != InvalidOid, "TypeName without names or typeOid");
+        let isdefined = match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
+            Some(d) => d,
+            // C LookupTypeNameExtended elogs on a vanished TYPEOID row.
+            None => panic!("cache lookup failed for type {}", tn.typeOid),
+        };
+        // C typenameTypeIdAndMod applies no typtype gate on the pre-resolved
+        // lane (LIKE / OF type); column legality is CheckAttributeType's job.
+        // typenameTypeMod runs inside C's LookupTypeNameExtended, BEFORE
+        // typenameType's shell check: a shell type WITH typmod decoration
+        // reports the 42601 typmod error, not "is only a shell".
+        let typmod = typenameTypeMod(mcx, pstate, tn, tn.typeOid)?;
+        if !isdefined {
+            // C typenameType: shell types are reported, not returned.
+            return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
+        }
+        return Ok((tn.typeOid, typmod));
+    }
+    // C LookupTypeNameExtended ignores SETOF on every lane; the callers that
+    // must reject it (RangeFunction coldeflists etc.) carry their own checks.
+    if tn.pct_type {
+        // %TYPE reference to the type of an existing field (parse_type.c).
+        let typoid = lookup_pct_type(pstate, tn, false)?;
+        if typoid == InvalidOid {
+            // The referenced column's row vanished under us; C's typenameType
+            // reports a NULL LookupTypeName result exactly this way.
+            return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
+        }
+        let isdefined = match syscache_seams::pg_type_isdefined::call(typoid)? {
+            Some(d) => d,
+            None => panic!("cache lookup failed for type {typoid}"),
+        };
+        // C order: typenameTypeMod (inside LookupTypeNameExtended) before
+        // typenameType's shell check.
+        let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
+        if !isdefined {
+            return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
+        }
+        return Ok((typoid, typmod));
+    }
+
     let (typoid, typname) = resolveTypeNames(mcx, tn)?;
     if typoid == InvalidOid {
         return Err(at_tn(type_does_not_exist(typname)));
@@ -150,18 +167,108 @@ fn typename_type_id_and_mod<'mcx>(
         }
         arr
     };
-    match syscache_seams::pg_type_isdefined::call(typoid)? {
-        Some(true) => {}
-        _ => return Err(at_tn(type_is_only_a_shell(typname))),
-    }
+    let isdefined = matches!(syscache_seams::pg_type_isdefined::call(typoid)?, Some(true));
     // C typenameTypeIdAndMod has no typtype gate; column legality is
     // CheckAttributeType's job (heap.c: column "u" has pseudo-type unknown).
     match syscache_seams::pg_type_typtype::call(typoid)? {
         Some(_) => {}
         None => return Err(type_does_not_exist(typname)),
     }
+    // C order: typenameTypeMod (inside LookupTypeNameExtended) before
+    // typenameType's shell check.
     let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
+    if !isdefined {
+        return Err(at_tn(type_is_only_a_shell(typname)));
+    }
     Ok((typoid, typmod))
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn improper_pct_type_reference(which: &str, names: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("improper %TYPE reference (too {which} dotted names): {names}"),
+        )
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+// LookupTypeNameExtended's %TYPE arm (parse_type.c): resolve the referenced
+// column's type and emit C's conversion NOTICE. InvalidOid comes back only
+// under missing_ok or when the column's pg_attribute row vanishes between
+// lookups (C returns NULL from LookupTypeName for both).
+fn lookup_pct_type(
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    tn: &TypeName<'_>,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let at_tn = |mut e: Box<PgError>| {
+        if let Some(ps) = pstate {
+            let pos =
+                parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding());
+            if e.cursor_position.is_none() && pos > 0 {
+                e.cursor_position = Some(pos);
+            }
+        }
+        e
+    };
+    let nnames = tn.names.len();
+    let mut names: [&str; 4] = [""; 4];
+    if (1..=4).contains(&nnames) {
+        for (i, n) in tn.names.iter().enumerate() {
+            names[i] = n.as_string().expect("TypeName names").sval;
+        }
+    }
+    // C's list_length switch; the messages quote NameListToString (no
+    // decorations), not TypeNameToString.
+    let (catalogname, schemaname, relname, field) = match nnames {
+        1 => return Err(at_tn(improper_pct_type_reference("few", &typename_to_string(tn)))),
+        2 => (None, None, names[0], names[1]),
+        3 => (None, Some(names[0]), names[1], names[2]),
+        4 => (Some(names[0]), Some(names[1]), names[2], names[3]),
+        _ => return Err(at_tn(improper_pct_type_reference("many", &typename_to_string(tn)))),
+    };
+    // makeRangeVar defaults: inh = true, permanent.
+    let rv = rel_vocab::RangeVar {
+        catalogname,
+        schemaname,
+        relname,
+        inh: true,
+        relpersistence: types_core::RELPERSISTENCE_PERMANENT,
+        location: tn.location,
+    };
+    // C looks the field up under NoLock (concurrent DDL may bite, per its
+    // XXX comment); a lock would cost and require a permissions check.
+    let relid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, missing_ok)?;
+    let attnum = lsyscache::get_attnum(relid, field)?;
+    if attnum == types_core::InvalidAttrNumber {
+        if missing_ok {
+            return Ok(InvalidOid);
+        }
+        return Err(at_tn(Box::new(
+            PgError::new(
+                ERROR,
+                format!("column \"{field}\" of relation \"{relname}\" does not exist"),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+        )));
+    }
+    let typoid = lsyscache::get_atttype(relid, attnum)?;
+    // C: this construct should never have an array indicator.
+    debug_assert!(tn.arrayBounds.is_nil());
+    // C's nuisance NOTICE (intentionally not errposition'd).
+    elog_seams::ereport::call(PgError::new(
+        types_error::NOTICE,
+        format!(
+            "type reference {} converted to {}",
+            typeNameToString(tn)?,
+            format_type::format_type_be(typoid)?
+        ),
+    ))?;
+    Ok(typoid)
 }
 
 // typenameTypeId (parse_type.c): PREPARE/DDL argument types — no column-lane
@@ -171,19 +278,6 @@ pub fn typenameTypeId<'mcx>(
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
 ) -> PgResult<Oid> {
-    if tn.pct_type || tn.setof {
-        // unported: C's LookupTypeName resolves %TYPE to the referenced
-        // column's type and ignores SETOF here; clean 0A000 until ported.
-        return Err(unported_feature_at(
-            pstate,
-            tn.location,
-            "%TYPE and SETOF type references",
-        ));
-    }
-    if tn.names.is_nil() || tn.typeOid != InvalidOid {
-        unported("pre-resolved TypeName.typeOid lane");
-    }
-    let (typoid, typname) = resolveTypeNames(mcx, tn)?;
     let at_tn = |mut e: Box<PgError>| {
         if let Some(ps) = pstate {
             let pos =
@@ -194,6 +288,45 @@ pub fn typenameTypeId<'mcx>(
         }
         e
     };
+    if tn.names.is_nil() {
+        // LookupTypeName pre-resolved arm (makeTypeNameFromOid consumers).
+        assert!(tn.typeOid != InvalidOid, "TypeName without names or typeOid");
+        let isdefined = match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
+            Some(d) => d,
+            // C LookupTypeNameExtended elogs on a vanished TYPEOID row.
+            None => panic!("cache lookup failed for type {}", tn.typeOid),
+        };
+        // C LookupTypeNameExtended validates typmod decoration even though
+        // this caller discards the value, and does so BEFORE typenameType's
+        // shell check.
+        typenameTypeMod(mcx, pstate, tn, tn.typeOid)?;
+        if !isdefined {
+            // C typenameType: shell types are reported, not returned.
+            return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
+        }
+        return Ok(tn.typeOid);
+    }
+    // C LookupTypeNameExtended ignores SETOF on every lane; callers own any
+    // rejection.
+    if tn.pct_type {
+        // %TYPE reference to the type of an existing field (parse_type.c).
+        let typoid = lookup_pct_type(pstate, tn, false)?;
+        if typoid == InvalidOid {
+            return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
+        }
+        let isdefined = match syscache_seams::pg_type_isdefined::call(typoid)? {
+            Some(d) => d,
+            None => panic!("cache lookup failed for type {typoid}"),
+        };
+        // C order: typenameTypeMod (inside LookupTypeNameExtended) before
+        // typenameType's shell check.
+        typenameTypeMod(mcx, pstate, tn, typoid)?;
+        if !isdefined {
+            return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
+        }
+        return Ok(typoid);
+    }
+    let (typoid, typname) = resolveTypeNames(mcx, tn)?;
     let not_exist = |typname: &str| at_tn(type_does_not_exist(typname));
     if typoid == InvalidOid {
         return Err(not_exist(typname));
@@ -227,18 +360,38 @@ pub fn LookupTypeNameOidExtended<'mcx>(
     tn: &TypeName<'_>,
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    if tn.pct_type || tn.setof {
-        // unported: C's LookupTypeName resolves %TYPE to the referenced
-        // column's type and ignores SETOF here; clean 0A000 until ported
-        // (reachable via CREATE AGGREGATE/OPERATOR argument types).
-        return Err(unported_feature_at(
-            None,
-            tn.location,
-            "%TYPE and SETOF type references",
-        ));
+    if tn.names.is_nil() {
+        // LookupTypeName pre-resolved arm (makeTypeNameFromOid consumers).
+        assert!(tn.typeOid != InvalidOid, "TypeName without names or typeOid");
+        match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
+            Some(true) => {}
+            // unported: C's LookupTypeNameOid returns shell types (their DDL
+            // consumers accept them); pgrust's shell-type USE lanes are
+            // unported, so raise the typenameType-shaped error cleanly.
+            Some(false) => return Err(type_is_only_a_shell(&typeNameToString(tn)?)),
+            // C LookupTypeNameExtended elogs on a vanished TYPEOID row.
+            None => panic!("cache lookup failed for type {}", tn.typeOid),
+        }
+        return Ok(tn.typeOid);
     }
-    if tn.names.is_nil() || tn.typeOid != InvalidOid {
-        unported("pre-resolved TypeName.typeOid lane");
+    // C LookupTypeNameExtended ignores SETOF on every lane (reachable via
+    // CREATE AGGREGATE/OPERATOR argument types); callers own any rejection.
+    if tn.pct_type {
+        // %TYPE reference to the type of an existing field (parse_type.c).
+        let typoid = lookup_pct_type(None, tn, missing_ok)?;
+        if typoid == InvalidOid {
+            if missing_ok {
+                return Ok(InvalidOid);
+            }
+            return Err(type_does_not_exist(&typeNameToString(tn)?));
+        }
+        match syscache_seams::pg_type_isdefined::call(typoid)? {
+            Some(true) => {}
+            // unported: same shell-type USE divergence as the lanes above.
+            Some(false) => return Err(type_is_only_a_shell(&typeNameToString(tn)?)),
+            None => panic!("cache lookup failed for type {typoid}"),
+        }
+        return Ok(typoid);
     }
     let (typoid, typname) = resolve_type_names_ext(mcx, tn, missing_ok)?;
     if typoid == InvalidOid {
@@ -326,14 +479,22 @@ fn resolve_type_names_ext<'mcx, 'tn>(
     Ok((typoid, typname))
 }
 
-// TypeNameToString (parse_type.c), error-message shape only ("[]" appended
-// for array bounds, per appendTypeNameToBuffer).
-fn typeNameToString(tn: &TypeName<'_>) -> String {
-    let mut s = typename_to_string(tn);
+// TypeNameToString (parse_type.c), error-message shape only: dotted names
+// as-is (or format_type_be for a pre-resolved TypeName), then the "%TYPE"
+// and "[]" decorations, per appendTypeNameToBuffer.
+fn typeNameToString(tn: &TypeName<'_>) -> PgResult<String> {
+    let mut s = if tn.names.is_nil() {
+        format_type::format_type_be(tn.typeOid)?
+    } else {
+        typename_to_string(tn)
+    };
+    if tn.pct_type {
+        s.push_str("%TYPE");
+    }
     if !tn.arrayBounds.is_nil() {
         s.push_str("[]");
     }
-    s
+    Ok(s)
 }
 
 #[track_caller]
@@ -396,11 +557,40 @@ pub fn parseTypeStringEsc<'mcx>(
     let Some(tn) = typeStringToTypeNameEsc(mcx, s, esc.as_deref_mut())? else {
         return Ok(None);
     };
-    if tn.pct_type {
-        unported("LookupTypeName %TYPE");
+    if tn.names.is_nil() {
+        // LookupTypeName pre-resolved arm; a parsed type-name string never
+        // produces it (the grammar always emits names) but C handles it.
+        assert!(tn.typeOid != InvalidOid, "TypeName without names or typeOid");
+        let isdefined = match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
+            Some(d) => d,
+            None => return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn)?)),
+        };
+        // C order: typenameTypeMod (inside LookupTypeNameExtended, hard even
+        // under a soft context) before parseTypeString's shell ereturn.
+        let typmod = typenameTypeMod(mcx, None, tn, tn.typeOid)?;
+        if !isdefined {
+            return ereturn(esc, None, *shell_type(&typeNameToString(tn)?));
+        }
+        return Ok(Some((tn.typeOid, typmod)));
     }
-    if tn.typeOid != InvalidOid {
-        unported("pre-resolved TypeName.typeOid lane");
+    if tn.pct_type {
+        // C: LookupTypeName resolves %TYPE here too (missing_ok soft-NULLs a
+        // missing relation or column under a soft context); the type-name
+        // grammar cannot produce %TYPE, but C's lane is generic.
+        let typoid = lookup_pct_type(None, tn, esc.is_some())?;
+        if typoid == InvalidOid {
+            return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn)?));
+        }
+        let isdefined = match syscache_seams::pg_type_isdefined::call(typoid)? {
+            Some(d) => d,
+            None => return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn)?)),
+        };
+        // C order: typenameTypeMod before the shell ereturn.
+        let typmod = typenameTypeMod(mcx, None, tn, typoid)?;
+        if !isdefined {
+            return ereturn(esc, None, *shell_type(&typeNameToString(tn)?));
+        }
+        return Ok(Some((typoid, typmod)));
     }
 
     // C: LookupTypeName(NULL, typeName, ..., missing_ok = escontext is an
@@ -410,16 +600,18 @@ pub fn parseTypeStringEsc<'mcx>(
         typoid = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
     }
     if typoid == InvalidOid {
-        return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn)));
+        return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn)?));
     }
 
-    match syscache_seams::pg_type_isdefined::call(typoid)? {
-        Some(true) => {}
-        Some(false) => return ereturn(esc, None, *shell_type(&typeNameToString(tn))),
-        None => return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn))),
-    }
-
+    let isdefined = match syscache_seams::pg_type_isdefined::call(typoid)? {
+        Some(d) => d,
+        None => return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn)?)),
+    };
+    // C order: typenameTypeMod before the shell ereturn.
     let typmod = typenameTypeMod(mcx, None, tn, typoid)?;
+    if !isdefined {
+        return ereturn(esc, None, *shell_type(&typeNameToString(tn)?));
+    }
     Ok(Some((typoid, typmod)))
 }
 
@@ -451,15 +643,19 @@ pub fn typenameTypeMod<'mcx>(
         return Ok(tn.typemod);
     }
 
+    // C fetched the TYPEOID tuple before typenameTypeMod ran; a vanished row
+    // is LookupTypeNameExtended's "cache lookup failed" elog.
     let io = syscache_seams::pg_type_io_shape::call(typoid)?
-        .unwrap_or_else(|| unported("typmod on a type without an io shape row"));
+        .unwrap_or_else(|| panic!("cache lookup failed for type {typoid}"));
+    // Both messages render TypeNameToString in C (format_type_be for a
+    // pre-resolved TypeName, plus the %TYPE / [] decorations).
     if !io.typisdefined {
         return Err(Box::new(
             PgError::new(
                 ERROR,
                 format!(
                     "type modifier cannot be specified for shell type \"{}\"",
-                    typename_to_string(tn)
+                    typeNameToString(tn)?
                 ),
             )
             .with_sqlstate(ERRCODE_SYNTAX_ERROR),
@@ -469,7 +665,7 @@ pub fn typenameTypeMod<'mcx>(
         return Err(Box::new(
             PgError::new(
                 ERROR,
-                format!("type modifier is not allowed for type \"{}\"", typename_to_string(tn)),
+                format!("type modifier is not allowed for type \"{}\"", typeNameToString(tn)?),
             )
             .with_sqlstate(ERRCODE_SYNTAX_ERROR),
         ));
@@ -1565,16 +1761,16 @@ pub fn transformCreateStmt<'mcx>(
             RangeVarGetAndCheckCreationNamespace(mcx, relation, types_rel::NoLock, true)?.1
         };
         if existing_relid != InvalidOid {
-            // unported: checkMembershipInCurrentExtension only bites inside
-            // an extension script (needs getObjectDescription for its
-            // report); clean 0A000 until that lane is ported.
-            if pg_depend::creating_extension() {
-                return Err(unported_feature_at(
-                    None,
-                    -1,
-                    "CREATE TABLE IF NOT EXISTS inside an extension script",
-                ));
-            }
+            // C: inside an extension script, insist the pre-existing object
+            // is a member of the extension, to avoid security risks (no-op
+            // outside extension scripts).
+            pg_depend::checkMembershipInCurrentExtension(
+                mcx,
+                &pg_depend::ObjectAddress::set(
+                    types_core::catalog::RELATION_RELATION_ID,
+                    existing_relid,
+                ),
+            )?;
             elog_seams::ereport::call(
                 PgError::new(
                     types_error::NOTICE,
@@ -3629,5 +3825,176 @@ mod tests {
         list.lappend(mcx, mk_con(mcx, ConstrType::CONSTR_ATTR_ENFORCED)).unwrap();
         let err = transformConstraintAttrs(&list, None).unwrap_err();
         assert_eq!(err.message(), "multiple ENFORCED/NOT ENFORCED clauses not allowed");
+    }
+
+    fn mk_type_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        names: &[&'static str],
+        pct_type: bool,
+        setof: bool,
+        type_oid: Oid,
+    ) -> &'mcx TypeName<'mcx> {
+        let mut list = NodeList::nil();
+        for n in names {
+            list.lappend(mcx, Node::mk_string(mcx, n).unwrap()).unwrap();
+        }
+        let mut tn = Node::build::<TypeName>(mcx).unwrap();
+        tn.names = list;
+        tn.pct_type = pct_type;
+        tn.setof = setof;
+        tn.typeOid = type_oid;
+        tn.typemod = -1;
+        tn.location = -1;
+        tn.seal().as_variant::<TypeName>().unwrap()
+    }
+
+    // The two %TYPE-only seams the pre-resolved/%TYPE tests need; set-once
+    // per test binary, total over any oid asked.
+    fn install_type_seams() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // INT2OID plays the shell type; everything else is defined.
+            syscache_seams::pg_type_isdefined::set(|typid| Ok(Some(typid != INT2OID)));
+            syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+                Ok(Some(syscache_seams::PgTypeTypcacheShape {
+                    typname: types_tuple::NameData::default(),
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typstorage: b'p' as i8,
+                    typtype: b'b' as i8,
+                    typisdefined: typid != INT2OID,
+                    typrelid: InvalidOid,
+                    typsubscript: InvalidOid,
+                    typelem: InvalidOid,
+                    typarray: InvalidOid,
+                    typcollation: InvalidOid,
+                }))
+            });
+            // typenameTypeMod's TYPEOID row; no typmodin anywhere.
+            syscache_seams::pg_type_io_shape::set(|typid| {
+                Ok(Some(syscache_seams::PgTypeIoShape {
+                    oid: typid,
+                    typinput: InvalidOid,
+                    typoutput: InvalidOid,
+                    typreceive: InvalidOid,
+                    typsend: InvalidOid,
+                    typmodin: InvalidOid,
+                    typmodout: InvalidOid,
+                    typelem: InvalidOid,
+                    typlen: 2,
+                    typbyval: true,
+                    typalign: b's' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: typid != INT2OID,
+                }))
+            });
+        });
+    }
+
+    #[test]
+    fn pct_type_improper_reference_errors() {
+        // C parse_type.c LookupTypeNameExtended %TYPE arm: the dotted-name
+        // count is validated before any catalog access.
+        let mcx = ctx().mcx();
+        let tn = mk_type_name(mcx, &["a"], true, false, InvalidOid);
+        let err = typenameTypeId(mcx, None, tn).unwrap_err();
+        assert_eq!(err.message(), "improper %TYPE reference (too few dotted names): a");
+        assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
+
+        let tn = mk_type_name(mcx, &["a", "b", "c", "d", "e"], true, false, InvalidOid);
+        let err = typenameTypeId(mcx, None, tn).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "improper %TYPE reference (too many dotted names): a.b.c.d.e"
+        );
+        assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
+
+        // Same arm through typenameTypeIdAndMod and LookupTypeNameOid.
+        let tn = mk_type_name(mcx, &["a"], true, false, InvalidOid);
+        let err = typenameTypeIdAndMod(mcx, None, tn).unwrap_err();
+        assert_eq!(err.message(), "improper %TYPE reference (too few dotted names): a");
+        let err = LookupTypeNameOid(mcx, tn).unwrap_err();
+        assert_eq!(err.message(), "improper %TYPE reference (too few dotted names): a");
+    }
+
+    #[test]
+    fn setof_is_ignored_on_lookup_lanes() {
+        // C LookupTypeNameExtended never looks at TypeName.setof; a SETOF
+        // pre-resolved reference resolves to the base type.
+        install_type_seams();
+        let mcx = ctx().mcx();
+        let tn = mk_type_name(mcx, &[], false, true, INT4OID);
+        assert_eq!(typenameTypeIdAndMod(mcx, None, tn).unwrap(), (INT4OID, -1));
+        assert_eq!(typenameTypeId(mcx, None, tn).unwrap(), INT4OID);
+        assert_eq!(LookupTypeNameOid(mcx, tn).unwrap(), INT4OID);
+    }
+
+    #[test]
+    fn pre_resolved_shell_type_is_reported() {
+        // C typenameType: typisdefined = false on the names==NIL lane reports
+        // "type %s is only a shell" with TypeNameToString = format_type_be.
+        install_type_seams();
+        let mcx = ctx().mcx();
+        let tn = mk_type_name(mcx, &[], false, false, INT2OID);
+        let err = typenameTypeIdAndMod(mcx, None, tn).unwrap_err();
+        assert_eq!(err.message(), "type \"smallint\" is only a shell");
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_OBJECT);
+        let err = typenameTypeId(mcx, None, tn).unwrap_err();
+        assert_eq!(err.message(), "type \"smallint\" is only a shell");
+        let err = LookupTypeNameOid(mcx, tn).unwrap_err();
+        assert_eq!(err.message(), "type \"smallint\" is only a shell");
+    }
+
+    #[test]
+    fn shell_type_with_typmods_reports_the_typmod_error_first() {
+        // C runs typenameTypeMod inside LookupTypeNameExtended, BEFORE
+        // typenameType's shell check: a shell type WITH typmod decoration
+        // reports 42601 "type modifier cannot be specified for shell type"
+        // (rendered with TypeNameToString = format_type_be here), not 42704
+        // "is only a shell".
+        install_type_seams();
+        let mcx = ctx().mcx();
+        let mut tn = Node::build::<TypeName>(mcx).unwrap();
+        let mut typmods = NodeList::nil();
+        typmods.lappend(mcx, Node::mk_string(mcx, "1").unwrap()).unwrap();
+        tn.names = NodeList::nil();
+        tn.typmods = typmods;
+        tn.typeOid = INT2OID;
+        tn.typemod = -1;
+        tn.location = -1;
+        let tn = tn.seal().as_variant::<TypeName>().unwrap();
+
+        let expect = "type modifier cannot be specified for shell type \"smallint\"";
+        let err = typenameTypeIdAndMod(mcx, None, tn).unwrap_err();
+        assert_eq!(err.message(), expect);
+        assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        let err = typenameTypeId(mcx, None, tn).unwrap_err();
+        assert_eq!(err.message(), expect);
+    }
+
+    #[test]
+    fn parse_type_string_still_rejects_setof() {
+        // The SETOF rejection lives in typeStringToTypeName (C parser.c), not
+        // in the lookup lanes.
+        let mcx = ctx().mcx();
+        let mut soft = SoftErrorContext::new(true);
+        assert!(parseTypeStringEsc(mcx, "setof int4", Some(&mut soft)).unwrap().is_none());
+        assert_eq!(soft.error().unwrap().message(), "invalid type name \"setof int4\"");
+    }
+
+    #[test]
+    fn check_membership_is_noop_outside_extension_scripts() {
+        // transformCreateStmt's IF NOT EXISTS lane calls
+        // checkMembershipInCurrentExtension unconditionally; outside an
+        // extension script it must stay a no-op (C pg_depend.c).
+        let mcx = ctx().mcx();
+        assert!(!pg_depend::creating_extension());
+        pg_depend::checkMembershipInCurrentExtension(
+            mcx,
+            &pg_depend::ObjectAddress::set(types_core::catalog::RELATION_RELATION_ID, 12345),
+        )
+        .unwrap();
     }
 }

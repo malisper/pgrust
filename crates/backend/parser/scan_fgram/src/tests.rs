@@ -286,3 +286,35 @@ fn embedded_nul_ends_token_stream() {
     let toks = lex_all_with(b"ab\0cd", ScannerSettings::default());
     assert_eq!(toks, vec![(tokens::IDENT, "=ab".into(), 0)]);
 }
+
+#[test]
+fn addunicode_non_utf8_server_runs_the_conversion_lane() {
+    // \u escapes above U+007F now ride mbutils::pg_unicode_to_server on a
+    // non-UTF8 server; with no UTF8-to-server conversion proc loaded, C
+    // reports 0A000 "conversion ... is not supported" (mbutils.c), where
+    // this lane used to raise its own placeholder 0A000. ASCII escapes
+    // convert inline regardless.
+    let saved = mbutils::GetDatabaseEncoding();
+    mbutils::SetDatabaseEncoding(wchar::PG_LATIN1).unwrap();
+    let settings = ScannerSettings { encoding: wchar::PG_LATIN1, ..ScannerSettings::default() };
+
+    let toks = lex_all_with(br"e'\u0041'", settings);
+    assert_eq!(toks[0].1, "=A");
+
+    let ctx = test_ctx();
+    let mut sc = Scanner::new(br"e'\u00e9'", ctx.mcx(), settings);
+    let err = loop {
+        match lex(&mut sc) {
+            Ok(tok) if tok.token == YY_NULL => panic!("no error for the U+00E9 escape"),
+            Ok(_) => {}
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(err.message(), "conversion between UTF8 and LATIN1 is not supported");
+    // C addunicode wraps pg_unicode_to_server in
+    // setup_scanner_errposition_callback(&scbstate, yyscanner, *(yylloc)):
+    // the cursor points at the escape (byte 2, 1-based character 3).
+    assert_eq!(err.cursor_position(), Some(3));
+
+    mbutils::SetDatabaseEncoding(saved).unwrap();
+}
