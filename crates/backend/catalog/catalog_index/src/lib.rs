@@ -557,9 +557,6 @@ pub fn index_create<'mcx>(
         "constr_flags without INDEX_CREATE_ADD_CONSTRAINT"
     );
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_INDEX } else { RELKIND_INDEX };
-    if extra.constr_flags & INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS != 0 {
-        unported("index_create: existing-index constraint flag");
-    }
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
@@ -1430,3 +1427,21 @@ pub use reindex::{
     REINDEX_REL_PROCESS_TOAST, REINDEX_REL_SUPPRESS_INDEX_USE,
 };
 mod reindex;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // index.h constr_flags bits; INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS rides
+    // index_create -> index_constraint_create unfenced (the constraint lane
+    // deletes the index's AUTO column dependencies exactly where C does).
+    #[test]
+    fn constr_flags_match_index_h() {
+        assert_eq!(INDEX_CONSTR_CREATE_MARK_AS_PRIMARY, 1 << 0);
+        assert_eq!(INDEX_CONSTR_CREATE_DEFERRABLE, 1 << 1);
+        assert_eq!(INDEX_CONSTR_CREATE_INIT_DEFERRED, 1 << 2);
+        assert_eq!(INDEX_CONSTR_CREATE_UPDATE_INDEX, 1 << 3);
+        assert_eq!(INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS, 1 << 4);
+        assert_eq!(INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS, 1 << 5);
+    }
+}
