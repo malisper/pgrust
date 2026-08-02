@@ -934,6 +934,29 @@ fn process_sublinks_mutator<'mcx>(
     })
 }
 
+// make_subplan's tuple_fraction chain (subselect.c:208-215). For an EXISTS
+// subplan, tell the lower-level planner to expect that only the first tuple
+// will be retrieved. For ALL and ANY subplans, we will be able to stop
+// evaluating if the test condition fails or matches, so very often not all
+// the tuples will be retrieved; for lack of a better idea, specify 50%
+// retrieval. Every other sublink type -- EXPR, MULTIEXPR, ROWCOMPARE, ARRAY
+// and CTE (which normally rides SS_process_ctes, not this path) -- takes C's
+// else branch of default behavior.
+//
+// NOTE: if you change these numbers, also change cost_subplan() in
+// path/costsize.c.
+pub(crate) fn subplan_tuple_fraction(sub_link_type: SubLinkType) -> f64 {
+    if sub_link_type == SubLinkType::EXISTS_SUBLINK {
+        1.0 // just like a LIMIT 1
+    } else if sub_link_type == SubLinkType::ALL_SUBLINK
+        || sub_link_type == SubLinkType::ANY_SUBLINK
+    {
+        0.5 // 50%
+    } else {
+        0.0 // default behavior
+    }
+}
+
 fn make_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     sublink: &SubLink<'mcx>,
@@ -952,22 +975,12 @@ fn make_subplan<'mcx>(
     let deep = rewrite_manip::copy_query_node(mcx, orig)?;
     let mut subquery = query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
 
+    // If it's an EXISTS subplan, we might be able to simplify it.
     let mut simple_exists = false;
-    let tuple_fraction = match sublink.subLinkType {
-        SubLinkType::EXISTS_SUBLINK => {
-            simple_exists = simplify_exists_query(run, &mut subquery)?;
-            1.0
-        }
-        SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => 0.5,
-        // C's default arm covers EXPR/MULTIEXPR/ROWCOMPARE: whole result.
-        SubLinkType::EXPR_SUBLINK
-        | SubLinkType::ARRAY_SUBLINK
-        | SubLinkType::ROWCOMPARE_SUBLINK
-        | SubLinkType::MULTIEXPR_SUBLINK => 0.0,
-        other => panic!(
-            "make_subplan (subselect.c): {other:?} sublink not ported"
-        ),
-    };
+    if sublink.subLinkType == SubLinkType::EXISTS_SUBLINK {
+        simple_exists = simplify_exists_query(run, &mut subquery)?;
+    }
+    let tuple_fraction = subplan_tuple_fraction(sublink.subLinkType);
 
     debug_assert!(run.root.plan_params.is_empty());
     run.push_root()?;

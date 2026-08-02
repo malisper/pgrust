@@ -2089,22 +2089,22 @@ pub(crate) const WRAP_VARFREE: u8 = 2;
 // by pull_up_simple_subquery). None on paths that cannot make PHVs.
 pub(crate) struct PullupPhCtx<'a, 'mcx> {
     // Cell: replace_vars_in_jointree sets VARFREE around FULL-join quals.
-    wrap_option: core::cell::Cell<u8>,
-    last_ph_id: &'a core::cell::Cell<u32>,
-    rv_cache: &'a core::cell::RefCell<mcx::PgVec<'mcx, Option<Node<'mcx>>>>,
+    pub(crate) wrap_option: core::cell::Cell<u8>,
+    pub(crate) last_ph_id: &'a core::cell::Cell<u32>,
+    pub(crate) rv_cache: &'a core::cell::RefCell<mcx::PgVec<'mcx, Option<Node<'mcx>>>>,
     // C rcon->relids: the subquery's rels including inner-join relids.
-    sub_relids: &'a types_nodes::Bitmapset<'mcx>,
+    pub(crate) sub_relids: &'a types_nodes::Bitmapset<'mcx>,
     // The target RTE's eref (C rcon->target_rte through expandRTE): RECORD
     // whole-row expansion carries its aliases as RowExpr colnames.
-    eref: Option<&'mcx types_nodes::primnodes::Alias<'mcx>>,
+    pub(crate) eref: Option<&'mcx types_nodes::primnodes::Alias<'mcx>>,
     // C rcon->nullinfo: per-RTE outer-join nulling sets over the outer
     // query's jointree, indexed by rti ([0] unused; length = outer rtable
     // length + 1). Set only when the target RTE is lateral, like C.
-    nullinfo: Option<&'a [types_nodes::Bitmapset<'mcx>]>,
+    pub(crate) nullinfo: Option<&'a [types_nodes::Bitmapset<'mcx>]>,
     // C rcon->result_relation: nonzero only under
     // expand_virtual_generated_columns (prepjointree.c:1041), where OLD/NEW
     // RETURNING Vars over the expanded relation can appear.
-    result_relation: i32,
+    pub(crate) result_relation: i32,
 }
 
 // get_nullingrels (prepjointree.c): for each leaf RTE of the outer query,
@@ -2193,7 +2193,7 @@ fn replace_var_expr<'mcx>(
     replace_var_expr_su(mcx, node, varno, tlist, lateral, ph, 0)
 }
 
-fn replace_var_expr_su<'mcx>(
+pub(crate) fn replace_var_expr_su<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     varno: i32,
@@ -2478,10 +2478,17 @@ fn replace_var_expr_su<'mcx>(
             }
             Ok(None)
         }
-        NodeTag::T_Query if sublevels_up > 0 => panic!(
-            "replace_rte_variables (rewriteManip.c): bare Query expression \
-             during pull-up; sublevel-tracking arm unported"
-        ),
+        // replace_rte_variables_mutator's Query arm (rewriteManip.c): recurse
+        // into an RTE subquery or a not-yet-planned sublink subquery with
+        // sublevels_up incremented for the duration.
+        NodeTag::T_Query => {
+            let q = node.as_query().expect("Query");
+            match replace_vars_in_query_value(mcx, q, varno, tlist, lateral, ph, sublevels_up + 1)?
+            {
+                Some(newq) => Ok(Some(Node::mk(mcx, newq)?)),
+                None => Ok(None),
+            }
+        }
         _ => clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
             replace_var_expr_su(mcx, n, varno, tlist, lateral, ph, sublevels_up)
         }),
@@ -4424,17 +4431,6 @@ pub fn expand_virtual_generated_columns<'mcx>(
             table::table_close(rel, types_rel::NoLock)?;
             continue;
         }
-        if parse.onConflict.is_some() {
-            // C rewrites the ON CONFLICT clauses through the same replacement
-            // pass; that arm is unported -- fail clean before execution.
-            table::table_close(rel, types_rel::NoLock)?;
-            return Err(types_error::PgError::error(
-                "ON CONFLICT on a relation with virtual generated columns is not implemented"
-                    .to_string(),
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .into());
-        }
         assert!(!rte.lateral);
         let mut tlist = NodeList::nil();
         for i in 0..rel.rd_att.natts as usize {
@@ -4519,6 +4515,9 @@ pub fn expand_virtual_generated_columns<'mcx>(
         }
         parse.mergeJoinCondition =
             replace_opt(mcx, parse.mergeJoinCondition, varno, &tlist, false, Some(&phc))?;
+        if let Some(oc_node) = parse.onConflict {
+            replace_vars_in_on_conflict(mcx, oc_node, varno, &tlist, &phc)?;
+        }
         let jt = parse.jointree.expect("jointree is a FromExpr");
         let mut new_fromlist = NodeList::nil();
         for child in &jt.fromlist {
@@ -4576,6 +4575,52 @@ pub fn expand_virtual_generated_columns<'mcx>(
         }
     }
     run.glob.last_ph_id = last_ph_id.get();
+    Ok(())
+}
+
+// expression_tree_mutator's T_OnConflictExpr arm (nodeFuncs.c:3585), the leg
+// query_tree_mutator reaches from Query.onConflict (nodeFuncs.c:3790):
+// FLATCOPY then mutate arbiterElems, arbiterWhere, onConflictSet,
+// onConflictWhere and exclRelTlist. `action`, `constraint` and `exclRelIndex`
+// are scalars the FLATCOPY carries over unchanged. (The EXCLUDED
+// pseudo-relation is its own RTE_RELATION rtable entry, so its own virtual
+// generated columns are expanded by the caller's loop at its own rt_index.)
+pub(crate) fn replace_vars_in_on_conflict<'mcx>(
+    mcx: Mcx<'mcx>,
+    oc_node: Node<'mcx>,
+    varno: i32,
+    tlist: &NodeList<'mcx>,
+    phc: &PullupPhCtx<'_, 'mcx>,
+) -> PgResult<()> {
+    let oc = oc_node.as_on_conflict_expr().expect("OnConflictExpr");
+    let arbiter_elems = clauses::walker::mutate_list(mcx, &oc.arbiterElems, &mut |n| {
+        replace_var_expr(mcx, n, varno, tlist, false, Some(phc))
+    })?;
+    let arbiter_where = replace_opt(mcx, oc.arbiterWhere, varno, tlist, false, Some(phc))?;
+    let on_conflict_set = clauses::walker::mutate_list(mcx, &oc.onConflictSet, &mut |n| {
+        replace_var_expr(mcx, n, varno, tlist, false, Some(phc))
+    })?;
+    let on_conflict_where = replace_opt(mcx, oc.onConflictWhere, varno, tlist, false, Some(phc))?;
+    let excl_rel_tlist = clauses::walker::mutate_list(mcx, &oc.exclRelTlist, &mut |n| {
+        replace_var_expr(mcx, n, varno, tlist, false, Some(phc))
+    })?;
+    // SAFETY: pre-seal tree owned by this planner invocation.
+    unsafe {
+        oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+            if let Some(l) = arbiter_elems {
+                o.arbiterElems = l;
+            }
+            o.arbiterWhere = arbiter_where;
+            if let Some(l) = on_conflict_set {
+                o.onConflictSet = l;
+            }
+            o.onConflictWhere = on_conflict_where;
+            if let Some(l) = excl_rel_tlist {
+                o.exclRelTlist = l;
+            }
+        })
+    }
+    .expect("OnConflictExpr");
     Ok(())
 }
 
