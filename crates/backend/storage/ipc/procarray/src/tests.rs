@@ -7,8 +7,8 @@ use types_core::BackendType;
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
 const MAX_CONNECTIONS: i32 = 16;
 // Bump when claim_other() call sites grow: the claimable simulated-backend
-// range is MAX_BACKENDS - MAX_CONNECTIONS (12 today for 12 claim_other()s).
-const MAX_WORKER_PROCESSES: i32 = 5;
+// range is MAX_BACKENDS - MAX_CONNECTIONS (13 today for 13 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 6;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
@@ -1050,4 +1050,84 @@ fn minimum_active_backends_counts_other_active_backends() {
     op.pid.store(0, Relaxed);
     other_proc_end(other, 4001);
     my_pgproc.xid.value.store(InvalidTransactionId, Relaxed);
+}
+
+// ---- CountOtherDBBackends autovacuum SIGTERM (procarray.c:3801-3807) ----
+
+#[test]
+fn count_other_db_backends_sigterms_conflicting_autovacuum() {
+    use std::sync::atomic::AtomicBool;
+
+    let _g = test_lock();
+    let _me = my_backend();
+
+    if !postgres_seams::check_for_interrupts::is_installed() {
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
+    }
+    // Globals are per-thread; setup() sized them only on its own thread.
+    g::SetMaxBackends(MAX_BACKENDS);
+    procsignal::ProcSignalShmemInit();
+
+    const AV_DB: types_core::Oid = 90777;
+    const AV_PID: i32 = 90001;
+
+    // A simulated autovacuum worker connected to AV_DB.
+    let other = claim_other();
+    let proc = GetPGProcByNumber(other);
+    proc.databaseId.store(AV_DB, Relaxed);
+    proc.pid.store(AV_PID, Relaxed);
+    proc.statusFlags.store(PROC_IS_AUTOVACUUM, Relaxed);
+    proc.pgxactoff.store(-1, Relaxed);
+    ProcArrayAdd(other).expect("ProcArrayAdd autovac");
+
+    static GOT_SIGTERM: AtomicBool = AtomicBool::new(false);
+    static AV_READY: AtomicBool = AtomicBool::new(false);
+    GOT_SIGTERM.store(false, Relaxed);
+    AV_READY.store(false, Relaxed);
+
+    // The worker's signal plane: registers its procsignal identity, then
+    // drains until the SIGTERM lands and "exits" (leaves the database).
+    let worker = std::thread::spawn(move || {
+        init_small::globals::SetMyProcNumber(other);
+        init_small::globals::SetMyProcPid(AV_PID);
+        procsignal::ProcSignalInit(&[]).expect("ProcSignalInit");
+        procsignal::pqsignal_thread(
+            libc::SIGTERM,
+            procsignal::ThreadSignalHandler::Simple(|| {
+                GOT_SIGTERM.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        AV_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            procsignal::DrainThreadSignals().expect("drain");
+            if GOT_SIGTERM.load(std::sync::atomic::Ordering::SeqCst) {
+                // Terminated autovacuum: drop out of the target database.
+                GetPGProcByNumber(other).databaseId.store(types_core::InvalidOid, Relaxed);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        procsignal::ProcSignalRelease();
+    });
+    while !AV_READY.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+
+    // DROP DATABASE's interlock: the conflicting autovacuum must be SIGTERMed
+    // and, once it exits, the walk comes back clean well before the 5s cap.
+    let res = CountOtherDBBackends(AV_DB).expect("CountOtherDBBackends");
+    worker.join().unwrap();
+
+    assert!(
+        GOT_SIGTERM.load(std::sync::atomic::Ordering::SeqCst),
+        "conflicting autovacuum worker never received SIGTERM"
+    );
+    assert_eq!(res, None, "autovacuum was killed, so no conflicts remain");
+
+    // Cleanup: detach the simulated worker.
+    ProcArrayRemove(other, InvalidTransactionId).expect("remove autovac");
+    let proc = GetPGProcByNumber(other);
+    proc.pid.store(0, Relaxed);
+    proc.statusFlags.store(0, Relaxed);
 }

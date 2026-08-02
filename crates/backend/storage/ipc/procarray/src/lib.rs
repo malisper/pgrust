@@ -1792,12 +1792,23 @@ pub fn CountUserBackends(roleid: types_core::Oid) -> PgResult<i32> {
     Ok(count)
 }
 
-// C sends SIGTERM to conflicting autovacuum workers each try; no autovacuum
-// exists here, so the walk-and-retry loop is kept without the kill step.
+// CountOtherDBBackends (procarray.c:3751): 50 tries with 100ms sleep between
+// tries makes 5 sec total wait; conflicting autovacuum workers are SIGTERMed
+// (at most MAXAUTOVACPIDS per iteration) after the lock is released, before
+// sleeping.
 pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32, i32)>> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let my_procno = MyProc().expect("no MyProc");
+
+    // max autovacs to SIGTERM per iteration
+    const MAXAUTOVACPIDS: usize = 10;
+    // wasm32: the wasi libc crate exposes no SIG* names; 15 is SIGTERM in
+    // the thread-signal emulation's Linux-numbered space (procsignal wasm arm).
+    #[cfg(not(target_family = "wasm"))]
+    const SIGTERM: i32 = libc::SIGTERM;
+    #[cfg(target_family = "wasm")]
+    const SIGTERM: i32 = 15;
 
     let mut nbackends = 0;
     let mut nprepared = 0;
@@ -1806,12 +1817,15 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
 
         nbackends = 0;
         nprepared = 0;
+        let mut autovac_pids = [0i32; MAXAUTOVACPIDS];
+        let mut nautovacs = 0usize;
         let mut found = false;
 
         LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
         for index in 0..arrayP.numProcs.get() as usize {
             let pgprocno = arrayP.pgprocnos[index].get();
             let proc = &hdr.allProcs[pgprocno as usize];
+            let status_flags = hdr.statusFlags[index].load(Relaxed);
             if proc.databaseId.load(Relaxed) != databaseid {
                 continue;
             }
@@ -1819,22 +1833,29 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
                 continue;
             }
             found = true;
-            if proc.pid.load(Relaxed) == 0 {
+            let pid = proc.pid.load(Relaxed);
+            if pid == 0 {
                 nprepared += 1;
             } else {
-                // C SIGTERMs conflicting autovacuum workers here; none exist
-                // yet — trip if one ever does rather than wait out the 5s.
-                debug_assert!(
-                    hdr.statusFlags[index].load(Relaxed) & PROC_IS_AUTOVACUUM == 0,
-                    "CountOtherDBBackends: autovacuum SIGTERM step unported"
-                );
                 nbackends += 1;
+                if status_flags & PROC_IS_AUTOVACUUM != 0 && nautovacs < MAXAUTOVACPIDS {
+                    autovac_pids[nautovacs] = pid;
+                    nautovacs += 1;
+                }
             }
         }
         LWLockRelease(ProcArrayLock())?;
 
         if !found {
-            return Ok(None);
+            return Ok(None); // no conflicting backends, so done
+        }
+
+        // Send SIGTERM to any conflicting autovacuums before sleeping. We
+        // postpone this step until after the loop because we don't want to
+        // hold ProcArrayLock while issuing kill(). We have no idea what might
+        // block kill() inside the kernel...
+        for &pid in autovac_pids.iter().take(nautovacs) {
+            let _ = procsignal::SendThreadSignal(pid, SIGTERM); // ignore any error
         }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
