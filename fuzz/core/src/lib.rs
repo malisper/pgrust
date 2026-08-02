@@ -764,3 +764,6 @@ pub mod pgcryptofam_diff;
 pub use pgcryptofam_diff::pgcryptofam_diff;
 #[cfg(test)]
 mod pgcryptofam_sweeps;
+// guc_file_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-guc_file_diff.md.
+pub mod guc_file_diff;
+pub use guc_file_diff::guc_file_diff;

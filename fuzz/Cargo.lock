@@ -1868,6 +1868,7 @@ dependencies = [
  "fmgr_seams",
  "fuzzystrmatch",
  "guc",
+ "guc_file",
  "guc_tables",
  "hashfn",
  "heaptuple",

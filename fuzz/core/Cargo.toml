@@ -193,6 +193,7 @@ adt_tsvector_core = { path = "../../crates/backend/utils/adt/tsvector_core" }  #
 adt_tsrank = { path = "../../crates/backend/utils/adt/tsrank" }  # tsrank_diff (scaffold.py)
 
 adt_network = { path = "../../crates/backend/utils/adt/network" }  # network_diff (scaffold.py)
+guc_file = { path = "../../crates/backend/utils/misc/guc_file" }  # guc_file_diff (scaffold.py)
 
 # pgcryptofam_diff (p1-pgcryptofam): contrib/pgcrypto crypt()/gen_salt()/armor
 # family vs the verbatim 18.3 C oracle in csrc/pgcryptofam/.

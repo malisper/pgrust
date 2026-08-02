@@ -185,7 +185,17 @@ pub fn ParseConfigFp(
     let mut ok = true;
     let mut errorcount = 0;
 
-    for (idx, raw_line) in logical_lines(contents).into_iter().enumerate() {
+    let lines = logical_lines(contents);
+    let line_count = lines.len();
+    // Whether the last logical line ends at EOF with no terminating \n. The
+    // C scanner's ConfigFileLineno counts consumed \n tokens: a
+    // near-end-of-line syntax error on such a line reports
+    // ConfigFileLineno - 1 == line_no - 1 (the EOF adjustment of bug 4752
+    // applies only to the successful-setting path, and the error path
+    // keeps the off-by-one — match it exactly; found by guc_file_diff).
+    let last_line_unterminated = contents.last() != Some(&b'\n');
+
+    for (idx, raw_line) in lines.into_iter().enumerate() {
         let line_no = idx as i32 + 1;
         let mut lexer = Lexer::new(raw_line);
         let Some(first) = lexer.next_token() else {
@@ -217,7 +227,12 @@ pub fn ParseConfigFp(
                 }
             }
             Err(ParseLineError::NearEnd) => {
-                report_syntax_error(config_file, line_no, None, elevel, variables)?;
+                let report_line = if idx + 1 == line_count && last_line_unterminated {
+                    line_no - 1
+                } else {
+                    line_no
+                };
+                report_syntax_error(config_file, report_line, None, elevel, variables)?;
                 ok = false;
                 errorcount += 1;
             }

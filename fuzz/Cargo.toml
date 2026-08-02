@@ -539,6 +539,10 @@ bench = false
 [[bin]]
 name = "pgcryptofam_diff"
 path = "fuzz_targets/pgcryptofam_diff.rs"
+# guc_file_diff: scaffolded by fuzz/scaffold.py — see README-TODO-guc_file_diff.md.
+[[bin]]
+name = "guc_file_diff"
+path = "fuzz_targets/guc_file_diff.rs"
 test = false
 doc = false
 bench = false

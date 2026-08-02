@@ -16,6 +16,8 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // guc_file_diff oracle compiles in its OWN cc::Build below
+        // (pg_difffuzz_gucfile): family-local csrc/gucfile shim tree.
         // COMPILE GATE (define_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_define_io.c is filled
         // with verbatim vendored C (README-TODO-define_diff.md step 1).
@@ -1292,6 +1294,32 @@ fn main() {
         .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_pgcryptofam");
     println!("cargo:rerun-if-changed=csrc/pgcryptofam");
+    // guc_file_diff oracle (lane p1-wavef): verbatim 18.3 guc-file.l
+    // (whole-file vendored copy under csrc/gucfile/) compiled from its
+    // committed flex-2.6.4 output guc-file.c, plus the driver TU
+    // pg_guc_file_io.c (verbatim guc_name_compare + ereport/arena shims).
+    // OWN cc::Build: csrc/gucfile/postgres.h is a family-local shim tree
+    // that must not leak into sibling TUs. Every export is gucf_/pg_gucf_
+    // prefixed (or flex's own GUC_yy prefix) — see the shim header.
+    let mut gucfile = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        gucfile.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    gucfile
+        .file("csrc/pg_guc_file_io.c")
+        .file("csrc/gucfile/guc-file.c")
+        // scanner is %option 8bit; CI cluster oracle of record is unsigned-char
+        // aarch64 Linux — pin like contribb/nodesfam so a macOS signed-char
+        // local build cannot manufacture false divergences on \200-\377.
+        .flag("-funsigned-char")
+        .include("csrc/gucfile")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_gucfile");
+    println!("cargo:rerun-if-changed=csrc/pg_guc_file_io.c");
+    println!("cargo:rerun-if-changed=csrc/gucfile");
 
     enforce_sort_symbol_hygiene();
 }
