@@ -825,3 +825,69 @@ fn outer_agg_constraint_checked_against_parent_clause() {
         err.message()
     );
 }
+
+#[test]
+fn grouped_outer_var_in_window_frame_offset_is_substituted() {
+    // C query_tree_mutator rebuilds WindowClause start/end offsets even
+    // without QTW_EXAMINE_SORTGROUP: a subquery's frame offset may carry a
+    // grouped OUTER Var (transformFrameOffset only rejects level-0 Vars),
+    // and substitute_grouped_columns must swap it for the RTE_GROUP Var.
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs.set(true);
+
+    // Outer grouped column t.x (varno 1, attno 1, sortgroupref 1).
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        tle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+
+    // Subquery whose window frame startOffset references the outer t.x.
+    let outer_ref = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
+    let wc = Node::build::<types_nodes::parsenodes::WindowClause>(mcx).unwrap();
+    let mut wc = wc;
+    wc.startOffset = Some(outer_ref);
+    let wc = wc.seal();
+    let mut sub = Node::build::<Query>(mcx).unwrap();
+    sub.windowClause = NodeList::make1(mcx, wc).unwrap();
+    let sub = sub.seal();
+    let sublink = Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: sub,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let sub_tle = Node::mk_target_entry(mcx, sublink, 2, Some("s"), false).unwrap();
+
+    let mut tlist = NodeList::make1(mcx, tle).unwrap();
+    tlist.lappend(mcx, sub_tle).unwrap();
+    let mut qry = query_with_rtable(mcx, tlist);
+    qry.groupClause = group_clause_ref1(mcx);
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
+
+    // The offset now points one level up at the RTE_GROUP RTE (varno 2:
+    // appended after the sole base RTE), not the original relation.
+    let new_off = sub
+        .as_query()
+        .unwrap()
+        .windowClause
+        .nth(0)
+        .as_window_clause()
+        .unwrap()
+        .startOffset
+        .expect("offset survives");
+    let v = new_off.as_var().expect("still a Var");
+    assert_eq!(v.varlevelsup, 1);
+    assert_eq!(v.varno, 2);
+    assert_eq!(v.varattno, 1);
+}

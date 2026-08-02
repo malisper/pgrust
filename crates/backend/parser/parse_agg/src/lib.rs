@@ -1623,28 +1623,27 @@ fn sgc_query_news<'mcx>(
             .expect("OnConflictExpr");
         }
     }
+    // C (query_tree_mutator): the expressions under WindowClause nodes are
+    // mutated even without QTW_EXAMINE_SORTGROUP — a subquery's frame offset
+    // may reference a grouped outer Var (level-0 Vars are rejected by
+    // transformFrameOffset, outer ones are not).
     for wc_node in &q.windowClause {
         let wc = wc_node.as_window_clause().expect("windowClause cell");
-        if sgc_mutate_opt(ctx, wc.startOffset)?.is_some()
-            || sgc_mutate_opt(ctx, wc.endOffset)?.is_some()
-        {
-            // unported: C rebuilds the WindowClause when a grouped outer Var
-            // sits inside a window frame offset (obscure but reachable from
-            // SQL); raise a clean 0A000 until that rebuild is ported.
-            return Err(Box::new(
-                ereport(ERROR)
-                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                    .errmsg(
-                        "grouped outer column references inside a window frame offset \
-                         are not supported yet",
-                    )
-                    .into_error()
-                    .with_error_location(ErrorLocation::new(
-                        "parse_agg.c",
-                        0,
-                        "substitute_grouped_columns",
-                    )),
-            ));
+        let new_start = sgc_mutate_opt(ctx, wc.startOffset)?;
+        let new_end = sgc_mutate_opt(ctx, wc.endOffset)?;
+        if new_start.is_some() || new_end.is_some() {
+            // SAFETY: exclusive parse tree; no derived refs live.
+            unsafe {
+                wc_node.with_mut::<types_nodes::parsenodes::WindowClause, _>(|w| {
+                    if new_start.is_some() {
+                        w.startOffset = new_start;
+                    }
+                    if new_end.is_some() {
+                        w.endOffset = new_end;
+                    }
+                })
+            }
+            .expect("WindowClause");
         }
     }
     let new_jointree = match q.jointree {
