@@ -2502,7 +2502,11 @@ mod tests {
 
     #[test]
     fn replay_committed_corpus() {
-        let _serial = crate::c_oracle_serial();
+        // NO test-level c_oracle_serial here: the driver takes oracle_serial
+        // at entry (each unit is its own critical section), and the
+        // attribution probe below spawns a FRESH THREAD calling the driver —
+        // under an outer guard held by this thread that probe deadlocks the
+        // whole suite (CI cluster job ...61114 hung 1800s exactly this way).
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/timestamp_diff");
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         let mut n = 0usize;
