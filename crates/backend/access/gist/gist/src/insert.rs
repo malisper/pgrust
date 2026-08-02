@@ -1230,15 +1230,19 @@ fn gistprunepage(
     }
 
     if !deletable.is_empty() {
-        // unported: index_compute_xid_horizon_for_tuples (standby conflict
-        // horizon; C gistprunepage computes it iff XLogStandbyInfoActive() &&
-        // RelationNeedsWAL). Clean 0A000 in place of the old panic: nothing
-        // has been mutated yet (page edit + WAL follow below), so failing the
-        // triggering DML here is unwind-safe. A fabricated horizon would
-        // silently break hot-standby conflict detection for C replayers.
+        // Standby conflict horizon, computed iff XLogStandbyInfoActive() &&
+        // RelationNeedsWAL (C gistprunepage), through the genam seam (genam
+        // sits above the AM crates via indexam).
         let snapshot_conflict_horizon: ::types_core::TransactionId =
             if transam_xlog_seams::xlog_standby_info_active::call() && relation_needs_wal(rel) {
-                unported_xid_horizon()?
+                let cx = ::mcx::MemoryContext::new_bump("gistprunepage");
+                ::genam_seams::index_compute_xid_horizon_for_tuples::call(
+                    cx.mcx(),
+                    rel,
+                    heap_rel,
+                    buffer.buffer(),
+                    &deletable,
+                )?
             } else {
                 0
             };
@@ -1266,15 +1270,3 @@ const _: () = {
     let _ = ItemPointerData::invalid;
 };
 
-// unported: shared 0A000 for the missing xid-horizon callee (see
-// gistprunepage); mirrors genam::index_compute_xid_horizon_for_tuples.
-#[cold]
-#[inline(never)]
-fn unported_xid_horizon() -> ::types_error::PgResult<::types_core::TransactionId> {
-    Err(Box::new(
-        ::types_error::PgError::error(
-            "reuse of dead index entries is not supported (index_compute_xid_horizon_for_tuples unported)",
-        )
-        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
-}

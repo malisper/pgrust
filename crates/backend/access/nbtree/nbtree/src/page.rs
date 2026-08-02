@@ -16,7 +16,6 @@ use ::types_rel::Relation;
 use ::types_storage::bufpage::{ItemIdData, PageMut, PageRef, SizeOfPageHeaderData};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
-use crate::unported_phase2;
 
 const PD_SPECIAL_OFF: usize = 16;
 const _: () = assert!(core::mem::size_of::<BTPageOpaqueData>() == 16);
@@ -46,15 +45,50 @@ pub fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
     unsafe { page.item_raw_unchecked(id).0 }
 }
 
-// BTPageGetMeta: contents start at MAXALIGN(SizeOfPageHeaderData).
+// BTPageGetMeta: contents start at MAXALIGN(SizeOfPageHeaderData). Parsed
+// field-wise from the raw image: on a pre-v4 metapage the bytes past its
+// (shorter) pd_lower are arbitrary, and materializing btm_allequalimage's
+// byte as `bool` before the version check would be UB for a non-0/1 byte
+// (C reads those fields only after the version check).
 pub fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
-    // SAFETY: metapage contents at +24, 8-aligned, 48B in-bounds.
-    unsafe {
-        page.as_ptr()
-            .add(SizeOfPageHeaderData)
-            .cast::<BTMetaPageData>()
-            .read()
+    // SAFETY: metapage contents at +24, 48B in-bounds.
+    let b: [u8; 48] = unsafe { page.as_ptr().add(SizeOfPageHeaderData).cast::<[u8; 48]>().read() };
+    let word = |i: usize| u32::from_ne_bytes(b[i..i + 4].try_into().expect("4B"));
+    BTMetaPageData {
+        btm_magic: word(0),
+        btm_version: word(4),
+        btm_root: word(8),
+        btm_level: word(12),
+        btm_fastroot: word(16),
+        btm_fastlevel: word(20),
+        btm_last_cleanup_num_delpages: word(24),
+        btm_last_cleanup_num_heap_tuples: f64::from_ne_bytes(
+            b[32..40].try_into().expect("8B"),
+        ),
+        btm_allequalimage: b[40] != 0,
     }
+}
+
+/// _bt_upgrademetapage: upgrade a v2/v3 (pre-pg_upgrade) meta page to
+/// version 3, the last version that can be updated without broadly affecting
+/// on-disk compatibility (a REINDEX is required to upgrade to v4). Purely an
+/// image upgrade; the caller holds the exclusive lock and WAL-logs.
+pub(crate) fn bt_upgrademetapage(pin: &BufferPin, metad: &mut BTMetaPageData) {
+    // It must be really a meta page of upgradable version.
+    debug_assert!(P_ISMETA(&page_opaque(&pin.page())));
+    debug_assert!(metad.btm_version < BTREE_NOVAC_VERSION);
+    debug_assert!(metad.btm_version >= BTREE_MIN_VERSION);
+
+    // Set version number and fill extra fields added into version 3.
+    metad.btm_version = BTREE_NOVAC_VERSION;
+    metad.btm_last_cleanup_num_delpages = 0;
+    metad.btm_last_cleanup_num_heap_tuples = -1.0;
+    // Only a REINDEX can set this field (a pre-v4 image cannot carry it).
+    metad.btm_allequalimage = false;
+
+    // write_meta stores the full v3+ image and adjusts pd_lower (the
+    // _bt_initmetapage convention C's upgrade re-applies).
+    write_meta(pin, metad);
 }
 
 #[track_caller]
@@ -309,10 +343,10 @@ pub(crate) fn bt_getroot<'mcx>(
             );
         }
 
-        if page_meta(&metapin.page()).btm_version < BTREE_NOVAC_VERSION {
-            unported_phase2("_bt_upgrademetapage (v2/v3 pg_upgrade metapages)");
-        }
         let mut metad = page_meta(&metapin.page());
+        if metad.btm_version < BTREE_NOVAC_VERSION {
+            bt_upgrademetapage(&metapin, &mut metad);
+        }
         metad.btm_root = rootblkno;
         metad.btm_level = 0;
         metad.btm_fastroot = rootblkno;

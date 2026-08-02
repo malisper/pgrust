@@ -43,7 +43,7 @@ use crate::page::{
 use crate::utils::{
     bt_checkkeys, bt_killitems, bt_scanbehind_checkkeys, bt_set_startikey, bt_start_array_keys,
 };
-use crate::{check_for_interrupts, unported_phase2};
+use crate::check_for_interrupts;
 
 const INVERT_COMPARE_RESULT: fn(i32) -> i32 = |r| if r < 0 { 1 } else { -r };
 const MAXALIGN: fn(usize) -> usize = |l| (l + 7) & !7;

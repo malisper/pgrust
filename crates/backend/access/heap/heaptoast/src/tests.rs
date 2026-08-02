@@ -78,6 +78,7 @@ fn install_seams() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         crate::init_seams();
+        install_default_toast_compression_guc();
 
         bufmgr_seams::read_buffer::set(|rel, block| {
             with_fake(|f| {
@@ -617,10 +618,27 @@ fn constants_match_c() {
     assert_eq!(toastdesc::TOAST_POINTER_SIZE, 18);
 }
 
+// default_toast_compression accessor backed by a test-controlled value;
+// serialized by GUC_LOCK (the slot is process-global).
+static DEFAULT_TOAST_COMPRESSION: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(::guc_tables::consts::TOAST_PGLZ_COMPRESSION);
+static GUC_LOCK: Mutex<()> = Mutex::new(());
+
+fn install_default_toast_compression_guc() {
+    ::guc_tables::vars::default_toast_compression.install_if_absent(
+        ::guc_tables::GucVarAccessors {
+            get: || DEFAULT_TOAST_COMPRESSION.load(Ordering::Relaxed),
+            set: |v| DEFAULT_TOAST_COMPRESSION.store(v, Ordering::Relaxed),
+        },
+    );
+}
+
 #[test]
 fn compress_datum_thresholds() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
+    install_default_toast_compression_guc();
+    let _guard = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // below PGLZ_strategy_default->min_input_size (32): C skips compression
     let tiny = text_value(mcx, &[b'a'; 8]);
@@ -641,6 +659,52 @@ fn compress_datum_thresholds() {
     );
     let back = detoast::toast_decompress_datum(mcx, &out).unwrap();
     assert_eq!(&back[VARHDRSZ..], &[b'a'; 1000][..]);
+}
+
+// toast_compress_datum consults the live default_toast_compression GUC for
+// an invalid attcompression (C: cmethod = default_toast_compression).
+#[test]
+fn compress_datum_invalid_cmethod_consults_default_guc() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    install_default_toast_compression_guc();
+    let _guard = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let comp = text_value(mcx, &[b'a'; 1000]);
+
+    // Default pglz: the invalid method falls through to the GUC's value.
+    DEFAULT_TOAST_COMPRESSION.store(
+        ::guc_tables::consts::TOAST_PGLZ_COMPRESSION,
+        Ordering::Relaxed,
+    );
+    let out = toast_compress_datum(mcx, &comp, 0).unwrap().unwrap();
+    assert_eq!(
+        toastdesc::toast_compress_method(&out).unwrap(),
+        toastdesc::TOAST_PGLZ_COMPRESSION_ID
+    );
+
+    // The read is live: an lz4 default is consulted and hits the clean
+    // tree-wide lz4 rejection (the GUC itself never accepts lz4 today).
+    DEFAULT_TOAST_COMPRESSION.store(
+        ::guc_tables::consts::TOAST_LZ4_COMPRESSION,
+        Ordering::Relaxed,
+    );
+    let err = toast_compress_datum(mcx, &comp, 0).unwrap_err();
+    assert_eq!(err.message(), "compression method lz4 not supported");
+
+    // An explicitly valid cmethod never consults the GUC.
+    let out = toast_compress_datum(mcx, &comp, toastdesc::TOAST_PGLZ_COMPRESSION as i8)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        toastdesc::toast_compress_method(&out).unwrap(),
+        toastdesc::TOAST_PGLZ_COMPRESSION_ID
+    );
+
+    DEFAULT_TOAST_COMPRESSION.store(
+        ::guc_tables::consts::TOAST_PGLZ_COMPRESSION,
+        Ordering::Relaxed,
+    );
 }
 
 #[test]

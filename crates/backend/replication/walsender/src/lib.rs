@@ -252,6 +252,19 @@ pub fn HandleWalSndInitStopping() {
     }
 }
 
+// WalSndRqstFileReload (walsender.c:3588): request walsenders to reload the
+// currently-open WAL file — archive recovery may have replaced it
+// (KeepFileRestoredFromArchive); XLogSendPhysical consumes the flag.
+pub fn WalSndRqstFileReload() {
+    for slot in WalSndCtl().walsnds.iter() {
+        let mut w = slot.lock().expect("walsnd mutex");
+        if w.pid == 0 {
+            continue;
+        }
+        w.needreload = true;
+    }
+}
+
 // WalSndInitStopping (walsender.c:3796): checkpointer tells every walsender
 // to move to the stopping state before the shutdown checkpoint.
 pub fn WalSndInitStopping() {
@@ -1239,6 +1252,7 @@ pub fn init_seams() {
     walsender_seams::init_wal_sender::set(InitWalSender);
     walsender_seams::wal_snd_error_cleanup::set(WalSndErrorCleanup);
     walsender_seams::wal_snd_wakeup::set(wakeup::WalSndWakeup);
+    walsender_seams::wal_snd_rqst_file_reload::set(WalSndRqstFileReload);
     // WalSndLastCycleHandler (walsender.c:3475).
     walsender_seams::handle_walsnd_init_stopping::set(HandleWalSndInitStopping);
     walsender_seams::wal_snd_init_stopping::set(WalSndInitStopping);
@@ -1248,4 +1262,37 @@ pub fn init_seams() {
         latch_seams::set_latch_my_latch::call();
     });
     walsender_seams::pg_stat_wal_senders_snapshot::set(pg_stat_wal_senders_snapshot);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // WalSndRqstFileReload flags every ACTIVE slot's needreload and leaves
+    // free slots (pid == 0) untouched, as C's per-slot pid gate does.
+    #[test]
+    fn rqst_file_reload_flags_only_active_slots() {
+        let ctl = WalSndCtl();
+        assert!(ctl.walsnds.len() >= 2, "boot max_wal_senders covers two slots");
+        {
+            let mut w = ctl.walsnds[0].lock().expect("walsnd mutex");
+            w.pid = 4711;
+            w.needreload = false;
+        }
+
+        WalSndRqstFileReload();
+
+        assert!(
+            ctl.walsnds[0].lock().expect("walsnd mutex").needreload,
+            "active slot asked to reload"
+        );
+        assert!(
+            !ctl.walsnds[1].lock().expect("walsnd mutex").needreload,
+            "free slot left alone"
+        );
+
+        let mut w = ctl.walsnds[0].lock().expect("walsnd mutex");
+        w.pid = 0;
+        w.needreload = false;
+    }
 }

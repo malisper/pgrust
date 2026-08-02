@@ -28,6 +28,7 @@ use types_tuple::HeapTupleData;
 pub fn init_seams() {
     genam_seams::systable_scan_catalog::set(systable_scan_catalog);
     genam_seams::build_index_value_description::set(build_index_value_description);
+    genam_seams::index_compute_xid_horizon_for_tuples::set(index_compute_xid_horizon_for_tuples);
 }
 
 fn build_index_value_description(
@@ -492,23 +493,63 @@ pub fn BuildIndexValueDescription<'mcx>(
     Ok(Some(buf))
 }
 
-// unported: needs tableam table_index_delete_tuples / heapam
-// heap_index_delete_tuples (callers hash/gist LP_DEAD reuse). A clean 0A000
-// instead of a panic: both callers reach this before any page or WAL
-// mutation, so the error unwind is safe and only fails the triggering DML
-// statement.
-pub fn index_compute_xid_horizon_for_tuples(
-    _irel: &Relation<'_>,
-    _hrel: &Relation<'_>,
-    _ibuf: types_core::primitive::Buffer,
-    _itemnos: &[types_core::primitive::OffsetNumber],
+/// index_compute_xid_horizon_for_tuples: a table_index_delete_tuples shim
+/// used by index AMs (hash/gist) that only need a snapshotConflictHorizon
+/// value, and only expect to delete index tuples that are already known
+/// deletable (LP_DEAD-marked line pointers). Caller holds a pin + exclusive
+/// lock on `ibuf`; `itemnos` is nonempty. Index AMs below genam in the crate
+/// graph reach this through the genam_seams mirror.
+pub fn index_compute_xid_horizon_for_tuples<'mcx>(
+    mcx: Mcx<'mcx>,
+    irel: &Relation<'mcx>,
+    hrel: &Relation<'mcx>,
+    ibuf: types_core::primitive::Buffer,
+    itemnos: &[types_core::primitive::OffsetNumber],
 ) -> PgResult<TransactionId> {
-    Err(Box::new(
-        PgError::error(
-            "reuse of dead index entries is not supported (index_compute_xid_horizon_for_tuples unported)",
-        )
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
+    debug_assert!(!itemnos.is_empty());
+
+    let mut delstate = tableam::TM_IndexDeleteOp {
+        irel: irel.alias(),
+        iblknum: bufmgr_seams::buffer_get_block_number::call(ibuf),
+        bottomup: false,
+        bottomupfreespace: 0,
+        ndeltids: 0,
+        deltids: mcx::vec_with_capacity_in(mcx, itemnos.len())?,
+        status: mcx::vec_with_capacity_in(mcx, itemnos.len())?,
+    };
+
+    // Identify what the index tuples about to be deleted point to.
+    // SAFETY: caller holds a pin + exclusive lock on ibuf.
+    let ipage = unsafe {
+        types_storage::bufpage::PageRef::from_raw(bufmgr_seams::buffer_get_page::call(ibuf))
+    };
+    for (i, &offnum) in itemnos.iter().enumerate() {
+        let iitemid = ipage.item_id(offnum);
+        debug_assert!(iitemid.is_dead());
+        let (itup, _) = ipage.item_raw(iitemid);
+        // SAFETY: itup is a live IndexTuple image on the locked page; t_tid
+        // is its leading 6 bytes (ItemPointerCopy(&itup->t_tid, ..)).
+        let tid = unsafe {
+            itup.cast::<types_tuple::itemptr::ItemPointerData>().read_unaligned()
+        };
+        delstate.deltids.push(tableam::TM_IndexDelete { tid, id: i as i16 });
+        delstate.status.push(tableam::TM_IndexStatus {
+            idxoffnum: offnum,
+            knowndeletable: true, // LP_DEAD-marked
+            promising: false,     // unused
+            freespace: 0,         // unused
+        });
+        delstate.ndeltids += 1;
+    }
+
+    // determine the actual xid horizon
+    let snapshot_conflict_horizon =
+        tableam::table_index_delete_tuples(mcx, hrel, &mut delstate)?;
+
+    // tableam agrees that all items are deletable
+    debug_assert_eq!(delstate.ndeltids as usize, itemnos.len());
+
+    Ok(snapshot_conflict_horizon)
 }
 
 // idxkey[i].sk_attno = j+1 where key[i].sk_attno == indkey[j].

@@ -1540,16 +1540,48 @@ pub fn vac_bulkdel_one_index<'mcx>(
     istat: Option<::types_nbtree::IndexBulkDeleteResult>,
     dead_items: &[::types_tuple::itemptr::ItemPointerData],
 ) -> PgResult<::types_nbtree::IndexBulkDeleteResult> {
-    indexam::index_bulk_delete(mcx, ivinfo, istat, dead_items)
+    let istat = indexam::index_bulk_delete(mcx, ivinfo, istat, dead_items)?;
+
+    elog::ereport(ivinfo.message_level)
+        .errmsg(format!(
+            "scanned index \"{}\" to remove {} row versions",
+            ivinfo.index.name(),
+            dead_items.len()
+        ))
+        .finish(loc("vac_bulkdel_one_index"))?;
+
+    Ok(istat)
 }
 
-/// vac_cleanup_one_index (ereport chatter elided; logging lane).
+/// vac_cleanup_one_index.
 pub fn vac_cleanup_one_index<'mcx>(
     mcx: Mcx<'mcx>,
     ivinfo: &nbtree::IndexVacuumInfo<'_, 'mcx>,
     istat: Option<::types_nbtree::IndexBulkDeleteResult>,
 ) -> PgResult<Option<::types_nbtree::IndexBulkDeleteResult>> {
-    indexam::index_vacuum_cleanup(mcx, ivinfo, istat)
+    let istat = indexam::index_vacuum_cleanup(mcx, ivinfo, istat)?;
+
+    if let Some(istat) = &istat {
+        elog::ereport(ivinfo.message_level)
+            .errmsg(format!(
+                "index \"{}\" now contains {:.0} row versions in {} pages",
+                ivinfo.index.name(),
+                istat.num_index_tuples,
+                istat.num_pages
+            ))
+            .errdetail(format!(
+                "{:.0} index row versions were removed.\n\
+                 {} index pages were newly deleted.\n\
+                 {} index pages are currently deleted, of which {} are currently reusable.",
+                istat.tuples_removed,
+                istat.pages_newly_deleted,
+                istat.pages_deleted,
+                istat.pages_free
+            ))
+            .finish(loc("vac_cleanup_one_index"))?;
+    }
+
+    Ok(istat)
 }
 
 pub fn vacuum_delay_point(is_analyze: bool) -> PgResult<()> {
@@ -1656,3 +1688,179 @@ fn loc(routine: &'static str) -> ::types_error::ErrorLocation {
     ::types_error::ErrorLocation::new(site.file(), site.line() as i32, routine)
 }
 
+#[cfg(test)]
+mod ivinfo_tests {
+    //! vac_cleanup_one_index emits C's per-index summary at
+    //! ivinfo.message_level (vacuum.c:2677) — the VACUUM VERBOSE lane the
+    //! IndexVacuumInfo message_level port restored.
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    use ::mcx::{Mcx, MemoryContext, PgVec};
+    use ::types_core::{
+        Oid, BTREE_AM_OID, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    };
+    use ::types_error::{PgError, INFO};
+    use ::types_nbtree::IndexBulkDeleteResult;
+    use ::types_rel::{
+        FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, LOCKMODE,
+        RELKIND_INDEX, REPLICA_IDENTITY_DEFAULT,
+    };
+    use ::types_tuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
+
+    thread_local! {
+        static CAPTURED: RefCell<Vec<PgError>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn capture_hook(err: &PgError, output_to_server: &mut bool) {
+        CAPTURED.with(|c| c.borrow_mut().push(err.clone()));
+        *output_to_server = false;
+    }
+
+    fn noop_close(_oid: Oid, _mode: LOCKMODE) -> ::types_error::PgResult<()> {
+        Ok(())
+    }
+
+    fn btree_index_rel(mcx: Mcx<'_>) -> Relation<'_> {
+        let att = FormData_pg_attribute {
+            attnum: 1,
+            atttypid: 23,
+            attlen: 4,
+            attbyval: true,
+            attalign: ::types_tuple::TYPALIGN_INT,
+            ..Default::default()
+        };
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+        let mut relname = NameData::default();
+        relname.namestrcpy("iv_idx");
+        let data = RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
+            rd_id: 27000,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: 27000, dbId: 5 },
+            },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 99,
+                reltype: 0,
+                relowner: 10,
+                relam: BTREE_AM_OID,
+                relfilenode: 27000,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: -1.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relisshared: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                relkind: RELKIND_INDEX,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: true,
+                relreplident: REPLICA_IDENTITY_DEFAULT,
+                relispartition: false,
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            rd_att: Rc::new(TupleDescData {
+                natts: 1,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: -1,
+                constr: None,
+                compact_attrs: compact,
+                attrs,
+            }),
+            rd_index: None,
+            rd_opcintype: PgVec::new_in(mcx),
+            rd_opfamily: PgVec::new_in(mcx),
+            rd_indoption: PgVec::new_in(mcx),
+            rd_indcollation: PgVec::new_in(mcx),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, Some(noop_close))
+    }
+
+    #[test]
+    fn cleanup_one_index_reports_index_stats_at_message_level() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let rel = btree_index_rel(mcx);
+        // analyze_only: btvacuumcleanup returns the given stats without any
+        // page access, isolating the report lane.
+        let ivinfo = nbtree::IndexVacuumInfo {
+            index: &rel,
+            heaprel: &rel,
+            analyze_only: true,
+            report_progress: false,
+            estimated_count: true,
+            message_level: INFO,
+            num_heap_tuples: 100.0,
+            strategy: None,
+        };
+        let stats = IndexBulkDeleteResult {
+            num_pages: 7,
+            estimated_count: false,
+            num_index_tuples: 42.0,
+            tuples_removed: 5.0,
+            pages_newly_deleted: 1,
+            pages_deleted: 2,
+            pages_free: 1,
+        };
+
+        CAPTURED.with(|c| c.borrow_mut().clear());
+        // Route INFO to the server-log lane so the emit hook sees it (a bare
+        // test session has no client; log_min_messages boots at WARNING).
+        let prev_min = elog::config::log_min_messages();
+        elog::config::set_log_min_messages(::types_error::DEBUG2);
+        let prev = elog::set_emit_log_hook(Some(capture_hook));
+        let out = super::vac_cleanup_one_index(mcx, &ivinfo, Some(stats)).unwrap();
+        elog::set_emit_log_hook(prev);
+        elog::config::set_log_min_messages(prev_min);
+
+        assert!(out.is_some());
+        let reports = CAPTURED.with(|c| c.borrow().clone());
+        let report = reports
+            .iter()
+            .find(|e| e.message().starts_with("index \"iv_idx\""))
+            .expect("cleanup summary emitted");
+        assert_eq!(report.level(), INFO);
+        assert_eq!(
+            report.message(),
+            "index \"iv_idx\" now contains 42 row versions in 7 pages"
+        );
+        assert_eq!(
+            report.detail(),
+            Some(
+                "5 index row versions were removed.\n\
+                 1 index pages were newly deleted.\n\
+                 2 index pages are currently deleted, of which 1 are currently reusable."
+            )
+        );
+    }
+}

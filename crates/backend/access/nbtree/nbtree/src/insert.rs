@@ -1253,7 +1253,7 @@ unsafe fn bt_insertonpg<'mcx>(
         if let Some(metapin) = metabuf.as_ref() {
             let mut metad = crate::page::page_meta(&metapin.page());
             if metad.btm_version < BTREE_NOVAC_VERSION {
-                unported_phase2("_bt_upgrademetapage (v2/v3 pg_upgrade metapages)");
+                crate::page::bt_upgrademetapage(metapin, &mut metad);
             }
             metad.btm_fastroot = buf.block_number();
             metad.btm_fastlevel = level;
@@ -2000,8 +2000,11 @@ unsafe fn bt_newlevel<'mcx>(
     core::ptr::copy_nonoverlapping(hk, right_item.as_mut_ptr(), right_item_sz);
     bt_tuple_set_downlink(right_item.as_mut_ptr(), rbkno);
 
-    if crate::page::page_meta(&metabuf.page()).btm_version < BTREE_NOVAC_VERSION {
-        unported_phase2("_bt_upgrademetapage (v2/v3 pg_upgrade metapages)");
+    {
+        let mut metad = crate::page::page_meta(&metabuf.page());
+        if metad.btm_version < BTREE_NOVAC_VERSION {
+            crate::page::bt_upgrademetapage(&metabuf, &mut metad);
+        }
     }
 
     let rootlevel = page_opaque(&lpage).btpo_level + 1;

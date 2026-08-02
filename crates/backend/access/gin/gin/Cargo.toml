@@ -27,6 +27,10 @@ freespace = { path = "../../../storage/freespace/freespace" }
 init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+format_type = { path = "../../../utils/adt/format_type" }
 gin_trgm_seams = { path = "../gin_trgm_seams" }
 gin_hstore_seams = { path = "../gin_hstore_seams" }
 gin_btree_seams = { path = "../gin_btree_seams" }

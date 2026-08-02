@@ -31,15 +31,6 @@ fn wrong_slot() -> ! {
     panic!("heap AM callback requires a BufferHeapTuple slot (C Assert(TTS_IS_BUFFERTUPLE))")
 }
 
-#[cold]
-#[inline(never)]
-fn snapshot_any_unported(what: &'static str) -> ! {
-    panic!(
-        "backend-access-heap-heapam-handler: SnapshotAny {what} unported \
-         (visibility seam requires a real snapshot)"
-    )
-}
-
 // relscan.h IndexFetchHeapData; xs_base.rel folded in, xs_cbuf as the pin guard.
 pub struct IndexFetchHeapData<'mcx> {
     pub xs_rel: Relation<'mcx>,
@@ -123,9 +114,15 @@ pub fn heapam_index_fetch_tuple<'mcx>(
     if !matches!(slot, SlotData::BufferHeap(_)) {
         wrong_slot();
     }
+    // C SnapshotAny (the None arm): the static type-only snapshot; every
+    // tuple version is visible (HeapTupleSatisfiesAny).
+    let snapshot_any;
     let snap: &SnapshotData<'_> = match snapshot.as_deref() {
         Some(s) => s,
-        None => snapshot_any_unported("index fetch"),
+        None => {
+            snapshot_any = SnapshotData::sentinel(mcx, ::types_snapshot::SNAPSHOT_ANY);
+            &snapshot_any
+        }
     };
 
     // Skip the buffer-switching logic when mid-HOT chain.
@@ -210,10 +207,12 @@ pub fn heapam_index_fetch_batch_fill<'mcx>(
     rest: &[ItemPointerData],
     snapshot: &Snapshot<'mcx>,
 ) -> PgResult<()> {
-    let snap: &SnapshotData<'_> = match snapshot.as_deref() {
-        Some(s) => s,
-        None => snapshot_any_unported("index fetch batch"),
-    };
+    // The batch lever is MVCC-only (fill-time-independent verdicts); both
+    // callers gate on IsMVCCSnapshot, so a None (SnapshotAny) here is a
+    // caller contract violation, not a reachable lane.
+    let snap: &SnapshotData<'_> = snapshot
+        .as_deref()
+        .expect("index fetch batch requires an MVCC snapshot (caller-gated)");
     debug_assert!(IsMVCCSnapshot(snap));
     debug_assert!(rest.len() < MaxHeapTuplesPerPage);
 
@@ -329,9 +328,14 @@ pub fn heapam_fetch_row_version<'mcx>(
     if !matches!(slot, SlotData::BufferHeap(_)) {
         wrong_slot();
     }
+    // C SnapshotAny (the None arm): every tuple version is visible.
+    let snapshot_any;
     let snap = match snapshot.as_deref() {
         Some(s) => s,
-        None => snapshot_any_unported("row-version fetch"),
+        None => {
+            snapshot_any = SnapshotData::sentinel(mcx, ::types_snapshot::SNAPSHOT_ANY);
+            &snapshot_any
+        }
     };
 
     let mut res = heap_fetch(relation, snap, *tid, false)?;
@@ -363,9 +367,17 @@ pub fn heapam_tuple_get_latest_tid(
     scan: &mut HeapScanDescData<'_>,
     tid: &mut ItemPointerData,
 ) -> PgResult<()> {
+    // C SnapshotAny (the None arm): every tuple version is visible. The
+    // sentinel is type-only; the scratch context never allocates.
+    let scratch;
+    let snapshot_any;
     let snap = match scan.rs_base.rs_snapshot.as_deref() {
         Some(s) => s,
-        None => snapshot_any_unported("get_latest_tid"),
+        None => {
+            scratch = ::mcx::MemoryContext::new_bump("SnapshotAny sentinel");
+            snapshot_any = SnapshotData::sentinel(scratch.mcx(), ::types_snapshot::SNAPSHOT_ANY);
+            &snapshot_any
+        }
     };
     *tid = heap_get_latest_tid(&scan.rs_base.rs_rd, snap, *tid)?;
     Ok(())

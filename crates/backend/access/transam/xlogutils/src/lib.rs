@@ -707,8 +707,15 @@ pub fn read_local_xlog_page_no_wait(
     read_local_xlog_page_guts(state, targetPagePtr, reqLen, targetRecPtr, cur_page, false)
 }
 
-// CHECK_FOR_INTERRUPTS(): ProcessInterrupts (tcop/postgres.c) is unported.
-fn check_for_interrupts() {}
+// CHECK_FOR_INTERRUPTS() — route a pending interrupt through the ported
+// ProcessInterrupts seam (the spgist/gin/hash pattern), so a query cancel
+// landing inside the WAL-read wait loop is honored as C's is.
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
+}
 
 fn read_local_xlog_page_guts(
     state: &mut XLogReaderState,
@@ -745,7 +752,7 @@ fn read_local_xlog_page_guts(
                 break;
             }
 
-            check_for_interrupts();
+            check_for_interrupts()?;
             unsafe { libc::usleep(1000) };
         } else {
             // Historical timeline: read only to the switch point.
@@ -813,4 +820,33 @@ pub fn init_seams() {
         get: ignore_invalid_pages,
         set: set_ignore_invalid_pages,
     });
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    //! check_for_interrupts (read_local_xlog_page_guts' wait loop): a pending
+    //! interrupt routes through the ported ProcessInterrupts seam instead of
+    //! the former empty no-op, so query cancel is honored mid-WAL-wait as C's
+    //! CHECK_FOR_INTERRUPTS is.
+    use ::types_error::{PgError, ERRCODE_QUERY_CANCELED};
+
+    #[test]
+    fn pending_interrupt_routes_through_process_interrupts_seam() {
+        init_small::globals::SetInterruptPending(false);
+        assert!(super::check_for_interrupts().is_ok());
+
+        postgres_seams::check_for_interrupts::set(|| {
+            init_small::globals::SetInterruptPending(false);
+            Err(Box::new(
+                PgError::error("canceling statement due to user request")
+                    .with_sqlstate(ERRCODE_QUERY_CANCELED),
+            ))
+        });
+
+        init_small::globals::SetInterruptPending(true);
+        let err = super::check_for_interrupts().unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
+        assert!(!init_small::globals::InterruptPending());
+        assert!(super::check_for_interrupts().is_ok());
+    }
 }

@@ -1,9 +1,10 @@
 //! xlogarchive.c. Recovery-side entry points (RestoreArchivedFile,
 //! ExecuteRecoveryCommand, KeepFileRestoredFromArchive) are callable but have
-//! no in-tree caller yet (recovery core owns them); Windows-only arms and
-//! walsender wakeups (walsender unported: no walsender thread can exist, so
-//! the wakeups are exact no-ops) are absent. BuildRestoreCommand is re-exported
-//! from the `archive` crate (C home src/common/archive.c).
+//! no in-tree caller yet (recovery core owns them); Windows-only arms are
+//! absent. Walsender notifications (WalSndRqstFileReload, WalSndWakeup) route
+//! through walsender_seams seams (no-ops until the walsender unit installs
+//! them). BuildRestoreCommand is re-exported from the `archive` crate (C home
+//! src/common/archive.c).
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
@@ -205,6 +206,7 @@ pub fn ExecuteRecoveryCommand(
 pub fn KeepFileRestoredFromArchive(path: &str, xlogfname: &str) -> PgResult<()> {
     let xlogfpath = format!("{XLOGDIR}/{xlogfname}");
 
+    let mut reload = false;
     if file_exists(&xlogfpath) {
         if fd::pg_unlink(&xlogfpath) != 0 {
             ereport(FATAL)
@@ -213,17 +215,35 @@ pub fn KeepFileRestoredFromArchive(path: &str, xlogfname: &str) -> PgResult<()> 
                 .errmsg(format!("could not remove file \"{xlogfpath}\": %m"))
                 .finish(loc("KeepFileRestoredFromArchive"))?;
         }
+        reload = true;
     }
 
     fd::durable_rename(path, &xlogfpath, ERROR)?;
 
+    // Create .done file forcibly to prevent the restored segment from being
+    // archived again later.
     if !XLogArchivingAlways() {
         XLogArchiveForceDone(xlogfname)?;
     } else {
         XLogArchiveNotify(xlogfname)?;
     }
 
-    // WalSndWakeup(true, false): walsender unported (see module doc).
+    // If the existing file was replaced, since walsenders might have it open,
+    // request them to reload a currently-open segment. This is only required
+    // for WAL segments, walsenders don't hold other files open, but there's
+    // no harm in doing this too often, and we don't know what kind of a file
+    // we're dealing with here. The seams are installed iff the walsender unit
+    // is linked (the startup/xlogrecovery convention).
+    if reload && walsender_seams::wal_snd_rqst_file_reload::is_installed() {
+        walsender_seams::wal_snd_rqst_file_reload::call();
+    }
+
+    // Signal walsender that new WAL has arrived. Again, this isn't necessary
+    // if we restored something other than a WAL segment, but it does no harm
+    // either.
+    if walsender_seams::wal_snd_wakeup::is_installed() {
+        walsender_seams::wal_snd_wakeup::call(true, false);
+    }
     Ok(())
 }
 

@@ -25,10 +25,10 @@ const SIZEOF_ITEM_ID_DATA: usize = 4;
 const SIZEOF_INDEX_TUPLE_DATA_MAXALIGNED: usize = 8;
 const VARHDRSZ: usize = 4;
 
-fn check_for_interrupts() {
-    if init_small::globals::InterruptPending() {
-        panic!("unported: ProcessInterrupts (tcop/postgres.c) reached from gist build");
-    }
+fn check_for_interrupts() -> PgResult<()> {
+    // CHECK_FOR_INTERRUPTS() — routes through the ported ProcessInterrupts
+    // seam via the gist crate's shared helper.
+    gist::check_for_interrupts()
 }
 
 fn lock(pin: &BufferPin, mode: i32) -> PgResult<()> {
@@ -185,7 +185,7 @@ pub fn gist_process_itup(
     startblkno: BlockNumber,
     startlevel: i32,
 ) -> PgResult<bool> {
-    check_for_interrupts();
+    check_for_interrupts()?;
 
     let mut result = false;
     let mut blkno = startblkno;

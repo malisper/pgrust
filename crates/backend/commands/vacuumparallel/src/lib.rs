@@ -698,7 +698,9 @@ impl PvPoolPass {
             index: indrel,
             heaprel: cx.heaprel,
             analyze_only: false,
+            report_progress: false,
             estimated_count: shared.estimated_count.load(SeqCst),
+            message_level: ::types_error::DEBUG2,
             num_heap_tuples: f64::from_bits(shared.reltuples.load(SeqCst)),
             strategy: cx.bstrategy.clone(),
         };
@@ -1687,7 +1689,9 @@ fn parallel_vacuum_process_one_index(
         index: indrel,
         heaprel,
         analyze_only: false,
+        report_progress: false,
         estimated_count: shared.estimated_count.load(SeqCst),
+        message_level: ::types_error::DEBUG2,
         num_heap_tuples: f64::from_bits(shared.reltuples.load(SeqCst)),
         strategy: bstrategy.clone(),
     };

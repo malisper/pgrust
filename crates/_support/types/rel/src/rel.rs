@@ -97,6 +97,9 @@ pub struct RdAmCacheGinCol {
     pub opclass: u8,
     /// array_ops element comparator tag (gin's GinElemCmp mirror).
     pub elem_cmp: u8,
+    /// Fmgr-tag payload: the element type's typcache cmp proc oid
+    /// (InvalidOid for every other tag).
+    pub elem_cmp_proc: Oid,
     pub support_collation: Oid,
     pub can_partial_match: bool,
     pub key_byval: bool,

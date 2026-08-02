@@ -44,3 +44,17 @@ seam_core::seam!(
         consume: &mut dyn FnMut(&HeapTupleData<'_>) -> PgResult<bool>,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // index_compute_xid_horizon_for_tuples (genam.c) for index AMs below
+    // genam in the crate graph (hash/gist LP_DEAD reuse; genam -> indexam ->
+    // the AM crates). Caller holds a pin + exclusive lock on `ibuf`; the
+    // `itemnos` line pointers are LP_DEAD-marked and nonempty.
+    pub fn index_compute_xid_horizon_for_tuples<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        irel: &'a types_rel::Relation<'mcx>,
+        hrel: &'a types_rel::Relation<'mcx>,
+        ibuf: types_core::Buffer,
+        itemnos: &'a [types_core::OffsetNumber],
+    ) -> PgResult<types_core::TransactionId>
+);

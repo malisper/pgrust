@@ -374,27 +374,51 @@ fn xlog_send_physical_emit(
     let next_tli = crate::SEND_TIME_LINE_NEXT_TLI.with(|c| c.get());
 
     let mut wal_buf = vec![0u8; nbytes];
-    let mut chunk_start = startptr;
-    let mut off = 0usize;
-    while chunk_start < endptr {
-        let seg_no = chunk_start / segsize_u;
-        let seg_end = (seg_no + 1) * segsize_u;
-        let chunk_end = seg_end.min(endptr);
-        let chunk_len = (chunk_end - chunk_start) as usize;
-        let tli = if historic && seg_no == end_seg_no { next_tli } else { send_tli };
-        if xlogreader_seams::wal_read::call(
-            &mut reader.v,
-            &mut wal_buf[off..off + chunk_len],
-            chunk_start,
-            chunk_len,
-            tli,
-        )?
-        .is_err()
-        {
-            return wal_read_raise_error();
+    // C's `retry:` label (walsender.c:3332).
+    loop {
+        let mut chunk_start = startptr;
+        let mut off = 0usize;
+        while chunk_start < endptr {
+            let seg_no = chunk_start / segsize_u;
+            let seg_end = (seg_no + 1) * segsize_u;
+            let chunk_end = seg_end.min(endptr);
+            let chunk_len = (chunk_end - chunk_start) as usize;
+            let tli = if historic && seg_no == end_seg_no { next_tli } else { send_tli };
+            if xlogreader_seams::wal_read::call(
+                &mut reader.v,
+                &mut wal_buf[off..off + chunk_len],
+                chunk_start,
+                chunk_len,
+                tli,
+            )?
+            .is_err()
+            {
+                return wal_read_raise_error();
+            }
+            chunk_start = chunk_end;
+            off += chunk_len;
         }
-        chunk_start = chunk_end;
-        off += chunk_len;
+
+        // C checks with xlogreader->seg.ws_tli, the TLI of the last-opened file.
+        transam_xlog::CheckXLogRemoved(startptr / segsize_u, reader.v.seg.ws_tli)?;
+
+        // During recovery, the currently-open WAL file might be replaced with
+        // the file of the same name retrieved from archive. So we always need
+        // to check what we read was valid after reading into the buffer. If
+        // it's invalid, we try to open and read the file again.
+        if am_cascading() {
+            let reload = {
+                let mut w = crate::my_walsnd().lock().expect("walsnd mutex");
+                let reload = w.needreload;
+                w.needreload = false;
+                reload
+            };
+            if reload && reader.v.seg.ws_file >= 0 {
+                xlogutils::wal_segment_close(&mut reader.v);
+                continue;
+            }
+        }
+        break;
     }
 
     crate::OUTPUT_MESSAGE.with(|b| {
@@ -412,8 +436,6 @@ fn xlog_send_physical_emit(
 
     crate::OUTPUT_MESSAGE.with(|b| pqcomm::pq_putmessage_noblock(b'd', &b.borrow()))?;
 
-    // C checks with xlogreader->seg.ws_tli, the TLI of the last-opened file.
-    transam_xlog::CheckXLogRemoved(startptr / segsize_u, reader.v.seg.ws_tli)?;
     Ok(())
 }
 

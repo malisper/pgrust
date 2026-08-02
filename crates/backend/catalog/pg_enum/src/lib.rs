@@ -1,5 +1,6 @@
-// pg_enum.c. LOUD divergence: parallel-DSM serialize/restore of the
-// uncommitted tables.
+// pg_enum.c. Parallel serialize/restore of the uncommitted tables rides the
+// ParallelShared struct (thread-native DSM rendering) instead of a flat
+// Oid-array image.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use core::cell::{Cell, RefCell};
@@ -80,6 +81,43 @@ pub fn AtEOXact_Enum() {
         let mut u = u.borrow_mut();
         u.types = None;
         u.values = None;
+    });
+}
+
+/// SerializeUncommittedEnums, thread-native rendering: the parallel snapshot
+/// carries the (types, values) sets as owned lists (C flattens both HTABs
+/// into one InvalidOid-terminated Oid array in the DSM).
+pub fn SerializeUncommittedEnums() -> (Vec<Oid>, Vec<Oid>) {
+    UNCOMMITTED.with(|u| {
+        let u = u.borrow();
+        (
+            u.types.as_deref().map(<[Oid]>::to_vec).unwrap_or_default(),
+            u.values.as_deref().map(<[Oid]>::to_vec).unwrap_or_default(),
+        )
+    })
+}
+
+/// RestoreUncommittedEnums (parallel worker side).
+pub fn RestoreUncommittedEnums(types: &[Oid], values: &[Oid]) {
+    UNCOMMITTED.with(|u| {
+        let mut u = u.borrow_mut();
+        debug_assert!(u.types.is_none() && u.values.is_none());
+        // If either list is empty then don't even bother to create that
+        // table (C keeps the NULL table pointer).
+        if !types.is_empty() {
+            let smcx = u.mcx();
+            let t = u.types.get_or_insert_with(|| PgVec::new_in(smcx));
+            for &oid in types {
+                t.push(oid);
+            }
+        }
+        if !values.is_empty() {
+            let smcx = u.mcx();
+            let v = u.values.get_or_insert_with(|| PgVec::new_in(smcx));
+            for &oid in values {
+                v.push(oid);
+            }
+        }
     });
 }
 
@@ -615,6 +653,33 @@ mod tests {
             compact_attrs: compact,
             attrs,
         }
+    }
+
+    // SerializeUncommittedEnums/RestoreUncommittedEnums round-trip (the
+    // parallel-DSM lane): the worker-side restore reproduces the leader's
+    // uncommitted sets, and AtEOXact_Enum clears them.
+    #[test]
+    fn uncommitted_enums_serialize_restore_round_trip() {
+        assert!(!HasUncommittedEnums());
+        let (t, v) = SerializeUncommittedEnums();
+        assert!(t.is_empty() && v.is_empty());
+
+        // Leader-shaped state restored into this (worker) thread.
+        RestoreUncommittedEnums(&[3500], &[3600, 3601]);
+        assert!(HasUncommittedEnums());
+        assert!(EnumUncommitted(3600));
+        assert!(EnumUncommitted(3601));
+        assert!(!EnumUncommitted(3602));
+        let (t, v) = SerializeUncommittedEnums();
+        assert_eq!(t, vec![3500]);
+        assert_eq!(v, vec![3600, 3601]);
+
+        // AtEOXact_Enum clears both sets; empty lists then restore to the
+        // C NULL-table shape (no tables created).
+        AtEOXact_Enum();
+        assert!(!HasUncommittedEnums());
+        RestoreUncommittedEnums(&[], &[]);
+        assert!(!HasUncommittedEnums());
     }
 
     // Miri gate for decode_member's raw NAMEDATALEN copy: the formed tuple

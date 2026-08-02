@@ -173,6 +173,11 @@ pub struct ParallelShared {
     transaction_snapshot: Option<snapmgr::SerializedSnapshot>,
     clientconninfo: Vec<u8>,
     relmap: relmapper::SerializedActiveRelMaps,
+    // SerializeUncommittedEnums (catalog/pg_enum.c): the leader's two
+    // uncommitted-enum sets (types, values); C flattens both HTABs into one
+    // InvalidOid-terminated Oid array in the DSM.
+    uncommitted_enum_types: Vec<Oid>,
+    uncommitted_enum_values: Vec<Oid>,
     // SharedRecordTypmodRegistry (typcache.c/session.c): unlike the rest of
     // session.c's DSM (skipped — threads share the address space), the
     // record-type registry is thread_local in TypCacheState and so still
@@ -389,17 +394,13 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
     // Session DSM (C GetSessionDsmHandle nworkers=0 arm): threads share the
     // address space; not transferred (docs/parallel-query-design.md).
 
-    // Unported C arm (SerializeUncommittedEnums, catalog/pg_enum.c). A clean
-    // ERROR — not a panic — so the transaction aborts and the session stays
-    // usable (the panic-leaves-session-wedged hazard class).
-    if nworkers > 0 && pg_enum::HasUncommittedEnums() {
-        return ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "cannot start parallel workers with uncommitted enum values: SerializeUncommittedEnums (catalog/pg_enum.c) unported",
-            )
-            .finish(loc(0, "InitializeParallelDSM"));
-    }
+    // SerializeUncommittedEnums (catalog/pg_enum.c): snapshot the leader's
+    // uncommitted-enum sets for the workers (C writes them into the DSM).
+    let (uncommitted_enum_types, uncommitted_enum_values) = if nworkers > 0 {
+        pg_enum::SerializeUncommittedEnums()
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let (current_user_id, sec_context) = miscinit::GetUserIdAndSecContext();
     let (temp_ns, temp_toast_ns) = catalog_namespace::GetTempNamespaceState();
@@ -471,6 +472,8 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         transaction_snapshot,
         clientconninfo,
         relmap: relmapper::SerializeRelationMap(),
+        uncommitted_enum_types,
+        uncommitted_enum_values,
         // Guarded for typcache-less rigs (substrate/gather e2e harnesses).
         record_registry: if typcache_seams::record_registry_handle::is_installed() {
             typcache_seams::record_registry_handle::call()
@@ -535,11 +538,12 @@ pub fn statement_task_shared(
     if g::InterruptHoldoffCount() != 0 || g::CritSectionCount() != 0 {
         return Ok(None);
     }
-    // Unported C arm (SerializeUncommittedEnums): the launched path raises
-    // a clean ERROR; the statement task simply refuses — the incumbent
-    // loop serves the statement. (In practice unreachable: uncommitted
-    // enums co-occur with pending invalidations, which the arm's binder
-    // policy gate already refused.)
+    // The launched path serializes the leader's uncommitted-enum sets
+    // (SerializeUncommittedEnums, InitializeParallelDSM above); this
+    // pgrust-only dop-1 lever refuses instead of filling them — the
+    // incumbent loop serves the statement. (In practice unreachable:
+    // uncommitted enums co-occur with pending invalidations, which the
+    // arm's binder policy gate already refused.)
     if pg_enum::HasUncommittedEnums() {
         return Ok(None);
     }
@@ -608,6 +612,9 @@ pub fn statement_task_shared(
         transaction_snapshot,
         clientconninfo,
         relmap: relmapper::SerializeRelationMap(),
+        // Refused above when HasUncommittedEnums, so the sets are empty here.
+        uncommitted_enum_types: Vec::new(),
+        uncommitted_enum_values: Vec::new(),
         record_registry: if typcache_seams::record_registry_handle::is_installed() {
             typcache_seams::record_registry_handle::call()
         } else {
@@ -1630,6 +1637,12 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     catalog_namespace::SetTempNamespaceState(
         shared.temp_namespace_id,
         shared.temp_toast_namespace_id,
+    );
+
+    // Restore uncommitted enums.
+    pg_enum::RestoreUncommittedEnums(
+        &shared.uncommitted_enum_types,
+        &shared.uncommitted_enum_values,
     );
 
     miscinit::RestoreClientConnectionInfo(&shared.clientconninfo)?;

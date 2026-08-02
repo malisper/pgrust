@@ -34,9 +34,10 @@ snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 transam_seams = { path = "../../transam/transam_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
-bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }
