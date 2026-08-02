@@ -751,12 +751,10 @@ pub fn fc_pg_stop_making_pinned_objects(
     Ok(Datum::from_usize(0))
 }
 
-pub fn fc_system_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    match miscinit::GetSystemUser() {
-        Some(s) => crate::text_datum(fcinfo.result_mcx(), s.as_bytes()),
-        None => Ok(fcinfo.return_null()),
-    }
-}
+// system_user (oid 6311) is registered CANONICALLY by the name crate
+// (name::builtins::NAME_BUILTINS via fmgr_core ported.rs; C home miscinit.c)
+// — the sqlsmith-sweep stopgap here had to go: an extra row colliding with a
+// live canonical row is a boot-time panic (install_extra_builtins).
 
 pub fn fc_pg_client_encoding(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mut n = types_tuple::NameData::default();
@@ -1287,7 +1285,6 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(3436, "pg_promote", 2, fc_pg_promote),
     b(2172, "pg_backup_start", 2, fc_pg_backup_start),
     b(2739, "pg_backup_stop", 1, fc_pg_backup_stop),
-    b(6311, "system_user", 0, fc_system_user),
     b(810, "pg_client_encoding", 0, fc_pg_client_encoding),
     b(2034, "pg_conf_load_time", 0, fc_pg_conf_load_time),
     b(315, "pg_jit_available", 0, fc_pg_jit_available),
