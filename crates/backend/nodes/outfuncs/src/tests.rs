@@ -33,6 +33,29 @@ fn int4_const(v: i32) -> Const {
     }
 }
 
+// RTE_RESULT writes no kind-specific fields (C _outRangeTblEntry's
+// RTE_RESULT arm) and round-trips through _readRangeTblEntry.
+#[test]
+fn rte_result_roundtrips() {
+    use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_RESULT;
+    rte.inFromCl = true;
+    let node = rte.seal();
+    let s = nodeToString(mcx, node).unwrap();
+    assert_eq!(
+        s.as_str(),
+        "{RANGETBLENTRY :alias <> :eref <> :rtekind 8 :lateral false \
+         :inFromCl true :securityQuals <>}"
+    );
+    let back = readfuncs::stringToNode(mcx, s.as_str()).unwrap();
+    let rte = back.as_range_tbl_entry().unwrap();
+    assert_eq!(rte.rtekind, RTEKind::RTE_RESULT);
+    assert!(rte.inFromCl);
+}
+
 #[test]
 fn const_matches_live_adbin() {
     let ctx = MemoryContext::new("t");
