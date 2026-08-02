@@ -670,3 +670,9 @@ pub use int_diff::int_diff;
 // network_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-network_diff.md.
 pub mod network_diff;
 pub use network_diff::network_diff;
+
+// pgcryptofam (p1-pgcryptofam): FFI surface of the verbatim 18.3
+// contrib/pgcrypto crypt()/gen_salt()/armor oracle (csrc/pgcryptofam/).
+// Declarations + thin wrappers only; the differential driver is a
+// separate step.
+pub mod pgcryptofam;

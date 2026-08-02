@@ -1104,6 +1104,122 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/pg_nodesfam_io.c");
     println!("cargo:rerun-if-changed=csrc/nodesfam");
 
+    // pgcryptofam_diff oracle (p1-pgcryptofam): verbatim 18.3
+    // contrib/pgcrypto crypt()/gen_salt()/armor family — px-crypt.c
+    // dispatch over crypt-{des,md5,blowfish,sha,gensalt}.c plus
+    // pgp-armor.c — with its OWN copies of the src/common hash primitives
+    // (md5/sha1/sha2/cryptohash/base64, copied from the already-verbatim
+    // cryptofam tree) and the src/common string layer
+    // (stringinfo/psprintf/string) + src/port
+    // (snprintf/pgstrcasecmp/strlcpy). Own cc::Build: its shim postgres.h
+    // (arena palloc + setjmp ereport channel recording sqlstate/elevel/
+    // NOTICE text) must never shadow any other family's.
+    //
+    // SYMBOL ISOLATION: every extern the vendored TUs export is renamed
+    // pgcryptofam_* at compile time (the hashenc/cryptofam precedent) —
+    // the hash primitives and the stringinfo/printf layers all have
+    // verbatim twins in other family archives, and GNU ld on the CI cluster
+    // hard-errors on duplicates that Apple ld64 resolves silently.
+    // Driver entries carry the unique pg_diff_pgcryptofam_ prefix in
+    // source; shim plumbing is pgcryptofam_-named in source.
+    const PGCRYPTOFAM_SYMS: &[&str] = &[
+        // contrib/pgcrypto public surface
+        "px_crypt", "px_gen_salt", "px_crypt_md5", "px_crypt_shacrypt",
+        "px_crypt_des", "_crypt_blowfish_rn",
+        "_crypt_gensalt_traditional_rn", "_crypt_gensalt_extended_rn",
+        "_crypt_gensalt_md5_rn", "_crypt_gensalt_blowfish_rn",
+        "_crypt_gensalt_sha256_rn", "_crypt_gensalt_sha512_rn",
+        "pgp_armor_encode", "pgp_armor_decode", "pgp_extract_armor_headers",
+        // px.c
+        "px_THROW_ERROR", "px_strerror", "px_memset", "px_resolve_alias",
+        "px_set_debug_handler", "px_debug", "px_find_combo",
+        // shim-owned but PG-named (provider mocks + crypto-mode plumbing)
+        "px_find_digest", "px_find_cipher", "CheckFIPSMode",
+        "CheckBuiltinCryptoMode", "builtin_crypto_enabled",
+        "pg_strong_random", "pg_mblen_cstr",
+        // src/common/stringinfo.c
+        "makeStringInfo", "makeStringInfoExt", "initStringInfo",
+        "initStringInfoExt", "resetStringInfo", "appendStringInfo",
+        "appendStringInfoVA", "appendStringInfoString",
+        "appendStringInfoChar", "appendStringInfoSpaces",
+        "appendBinaryStringInfo", "appendBinaryStringInfoNT",
+        "enlargeStringInfo", "destroyStringInfo",
+        // src/common/psprintf.c
+        "psprintf", "pvsnprintf",
+        // src/common/string.c
+        "pg_str_endswith", "strtoint", "pg_clean_ascii", "pg_is_ascii",
+        "pg_strip_crlf",
+        // src/port/pgstrcasecmp.c
+        "pg_strcasecmp", "pg_strncasecmp", "pg_toupper", "pg_tolower",
+        "pg_ascii_toupper", "pg_ascii_tolower",
+        // src/port/snprintf.c (strlcpy is renamed inside shim/postgres.h
+        // instead — a command-line -D loses to Apple <string.h>'s
+        // _FORTIFY re-#define, the csrc/portfam precedent)
+        "pg_vsnprintf", "pg_snprintf", "pg_vsprintf", "pg_sprintf",
+        "pg_vfprintf", "pg_fprintf", "pg_vprintf", "pg_printf",
+        "pg_strfromd",
+    ];
+    let mut pgcryptofam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        pgcryptofam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // CRYPTO_SHARED_SYMS covers this family's own copies of the verbatim
+    // hash primitives (md5/sha/cryptohash/b64 + the hmac/scram/crc names
+    // it does not compile — harmless extra defines).
+    for s in CRYPTO_SHARED_SYMS.iter().chain(PGCRYPTOFAM_SYMS) {
+        pgcryptofam.define(s, format!("pgcryptofam_{s}").as_str());
+    }
+    // -O2 PIN: production PostgreSQL builds at -O2; keep the oracle there
+    // (same rationale as the contribb/nodesfam pins above).
+    pgcryptofam.opt_level(2);
+    for f in [
+        // driver entries + harness plumbing
+        "pg_diff_pgcryptofam.c",
+        "pgcryptofam_shim.c",
+        // whole-TU verbatim inclusions exporting file statics
+        "wrap_crypt_des.c",
+        "wrap_crypt_md5.c",
+        "wrap_crypt_blowfish.c",
+        "wrap_crypt_gensalt.c",
+        // verbatim TUs compiled directly
+        "vendor/px-crypt.c",
+        "vendor/crypt-sha.c",
+        "vendor/pgp-armor.c",
+        "vendor/px.c",
+        "vendor/stringinfo.c",
+        "vendor/psprintf.c",
+        "vendor/string.c",
+        "vendor/snprintf.c",
+        "vendor/pgstrcasecmp.c",
+        "vendor/strlcpy.c",
+        "vendor/md5.c",
+        "vendor/md5_common.c",
+        "vendor/sha1.c",
+        "vendor/sha2.c",
+        "vendor/cryptohash.c",
+        "vendor/base64.c",
+    ] {
+        pgcryptofam.file(format!("csrc/pgcryptofam/{f}"));
+    }
+    pgcryptofam
+        // -funsigned-char PIN (contribb/nodesfam class): plain-char
+        // signedness is implementation-defined; the oracle of record is
+        // the CI cluster Linux/aarch64 build where char is UNSIGNED. Without
+        // it a macOS (signed-char) local build diverges on salt/password
+        // bytes >= 0x80 (crypt-des ascii_to_bin comparisons, blowfish
+        // BF_atoi64 indexing, crypt-sha signed-char promotion).
+        .flag("-funsigned-char")
+        .include("csrc/pgcryptofam/shim")
+        .include("csrc/pgcryptofam/vendor/include")
+        .include("csrc/pgcryptofam")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_pgcryptofam");
+    println!("cargo:rerun-if-changed=csrc/pgcryptofam");
+
     enforce_sort_symbol_hygiene();
 }
 
