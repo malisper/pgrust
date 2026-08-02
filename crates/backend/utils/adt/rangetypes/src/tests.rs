@@ -1054,3 +1054,49 @@ fn range_deparse_over_ceiling_bound_raises_stringinfo_error() {
         )
     );
 }
+
+/// Task #85 (RELEASE BLOCKER): `SELECT v::text` on a deeply-nested range
+/// value (a range whose subtype is another range type) OS-OOM-killed the
+/// server. Each nesting level's range_out feeds the previous level's text
+/// back through range_deparse, and bound quoting doubles every '"' — so the
+/// deparse buffer grows exponentially with depth while nothing enforced C's
+/// MaxAllocSize ceiling. C builds this in a StringInfo; enlargeStringInfo
+/// raises errcode 54000 (program_limit_exceeded) "string buffer exceeds
+/// maximum allowed length (1073741823 bytes)" at the first over-ceiling
+/// append. This drives the same iterated amplification: the crossing level
+/// must return that exact catchable error. Pre-fix this test FAILS — the
+/// over-ceiling level returns Ok after consuming gigabytes.
+#[test]
+fn range_deparse_nested_amplification_hits_ceiling_catchably() {
+    use ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED;
+    // Level-0 bound: 1 MiB of '"' — forces quoting and per-level doubling,
+    // the amplification a nested range ::text cast produces.
+    let mut bound = std::vec![b'"'; 1 << 20];
+    for _depth in 0..16 {
+        let ctx = MemoryContext::new("t85");
+        let r = crate::io::range_deparse(ctx.mcx(), RANGE_LB_INC, Some(&bound), Some(b"x"));
+        match r {
+            Ok(v) => {
+                assert!(
+                    v.len() <= ::mcx::MAX_ALLOC_SIZE,
+                    "over-ceiling nested deparse succeeded ({} bytes)",
+                    v.len()
+                );
+                // Drop the NUL; the output is the next nesting level's bound.
+                bound = v[..v.len() - 1].to_vec();
+            }
+            Err(e) => {
+                assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+                assert_eq!(
+                    e.message(),
+                    std::format!(
+                        "string buffer exceeds maximum allowed length ({} bytes)",
+                        ::mcx::MAX_ALLOC_SIZE
+                    )
+                );
+                return;
+            }
+        }
+    }
+    panic!("nested range deparse never hit the MaxAllocSize ceiling");
+}
