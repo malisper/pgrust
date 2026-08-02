@@ -1544,11 +1544,7 @@ pub fn vac_bulkdel_one_index<'mcx>(
             ivinfo.index.name(),
             dead_items.len()
         ))
-        .finish(::types_error::ErrorLocation::new(
-            "src/backend/commands/vacuum.c",
-            2658,
-            "vac_bulkdel_one_index",
-        ))?;
+        .finish(loc("vac_bulkdel_one_index"))?;
 
     Ok(istat)
 }
@@ -1578,11 +1574,7 @@ pub fn vac_cleanup_one_index<'mcx>(
                 istat.pages_deleted,
                 istat.pages_free
             ))
-            .finish(::types_error::ErrorLocation::new(
-                "src/backend/commands/vacuum.c",
-                2677,
-                "vac_cleanup_one_index",
-            ))?;
+            .finish(loc("vac_cleanup_one_index"))?;
     }
 
     Ok(istat)
