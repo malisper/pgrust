@@ -80,6 +80,20 @@ fn unported(what: &str) -> ! {
     panic!("unported callee reached from decode.c: {what}")
 }
 
+// decode.c:175: the catchable ERROR raised when a standby decoding WAL sees
+// the primary's wal_level drop below logical.
+#[cold]
+#[inline(never)]
+fn wal_level_below_logical_on_primary() -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(
+            "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary"
+                .to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+    )
+}
+
 thread_local! {
     // Truncate relid arrays outlive the decode call inside ReorderBuffer changes.
     static DECODE_CTX: &'static MemoryContext =
@@ -157,10 +171,16 @@ fn xlog_decode(ctx: &mut LogicalDecodingContext, buf: XLogRecordBuffer) -> PgRes
         }
         transam_xlog::XLOG_CHECKPOINT_ONLINE => {}
         transam_xlog::XLOG_PARAMETER_CHANGE => {
-            // xl_parameter_change.wal_level is at offset 20.
+            // xl_parameter_change.wal_level is at offset 20. If wal_level on
+            // the primary is reduced to less than logical, prevent existing
+            // logical slots from being used (decode.c:167-177).
             let wal_level = u32_at(ctx.reader.XLogRecGetData(), 20) as i32;
             if wal_level < transam_xlog::WAL_LEVEL_LOGICAL {
-                unported("xlog_decode: wal_level dropped below logical (standby-only)");
+                // This can occur only on a standby: a primary would not allow
+                // a restart with wal_level < logical while a pre-existing
+                // logical slot exists.
+                debug_assert!(transam_xlog::RecoveryInProgress());
+                return Err(wal_level_below_logical_on_primary());
             }
         }
         transam_xlog::XLOG_NOOP
@@ -1083,4 +1103,22 @@ pub fn DecodingContextFindStartpoint(ctx: &mut LogicalDecodingContext) -> PgResu
         slot.data.set(d);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // xlog_decode's XLOG_PARAMETER_CHANGE arm (decode.c:167-177): the standby
+    // guard is a catchable ERROR with SQLSTATE 55000 and C's exact message.
+    #[test]
+    fn param_change_wal_level_error_shape() {
+        let e = super::wal_level_below_logical_on_primary();
+        assert_eq!(
+            e.sqlstate(),
+            types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+        );
+        assert_eq!(
+            e.message(),
+            "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary"
+        );
+    }
 }
