@@ -85,7 +85,8 @@ struct TypeRow {
     typtypmod: i32,
     typcollation: Oid,
     typdefaultbin: Option<String>,
-    typacl_isnull: bool,
+    // Decoded aclitem[] payload of a non-null typacl.
+    typacl_payload: Option<Vec<u8>>,
 }
 
 fn oid_key(attno: AttrNumber, oid: Oid) -> types_scan::scankey::ScanKeyData {
@@ -137,7 +138,15 @@ fn fetch_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<TypeRow> {
     let end = namebytes.iter().position(|&b| b == 0).unwrap_or(64);
     let typname = core::str::from_utf8(&namebytes[..end]).expect("typname UTF-8").to_string();
     let mut acl_isnull = false;
-    get(Anum_pg_type_typacl, &mut acl_isnull);
+    let acl_datum = get(Anum_pg_type_typacl, &mut acl_isnull);
+    let typacl_payload = if acl_isnull {
+        None
+    } else {
+        let p = acl_datum.as_usize() as *const u8;
+        // SAFETY: live aclitem[] varlena image through its extent.
+        let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        Some(varlena::open_image(mcx, image)?.as_bytes().to_vec())
+    };
     let mut bin_isnull = false;
     let bin_datum = get(Anum_pg_type_typdefaultbin, &mut bin_isnull);
     let typdefaultbin = if bin_isnull {
@@ -172,7 +181,7 @@ fn fetch_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<TypeRow> {
         typtypmod: get(Anum_pg_type_typtypmod, &mut isnull).as_i32(),
         typcollation: get(Anum_pg_type_typcollation, &mut isnull).as_oid(),
         typdefaultbin,
-        typacl_isnull: acl_isnull,
+        typacl_payload,
     };
     genam::systable_endscan(mcx, scan)?;
     rel.close(AccessShareLock)?;
@@ -863,17 +872,23 @@ pub fn RenameType<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
     if stmt.renameType == ObjectType::OBJECT_DOMAIN && row.typtype != TYPTYPE_DOMAIN {
         return Err(not_a_domain(type_oid)?);
     }
-    if row.typtype == TYPTYPE_COMPOSITE {
-        // unported: RenameType composite types (RenameRelationInternal chase)
-        return Err(Box::new(
-            PgError::error("renaming a composite type is not supported yet")
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+    // A composite type must be free-standing, not a table's rowtype; use
+    // ALTER TABLE for that.
+    if row.typtype == TYPTYPE_COMPOSITE
+        && lsyscache::get_rel_relkind(row.typrelid)? != b'c' as i8
+    {
+        return Err(is_a_table_row_type(type_oid)?);
     }
     if row.typelem != InvalidOid && row.typsubscript == F_ARRAY_SUBSCRIPT_HANDLER {
         return Err(cannot_alter_array_type(type_oid, row.typelem)?);
     }
-    pg_type::RenameTypeInternal(mcx, type_oid, new_type_name, row.typnamespace)
+    // If the type is composite, rename the associated pg_class entry too;
+    // RenameRelationInternal calls RenameTypeInternal automatically.
+    if row.typtype == TYPTYPE_COMPOSITE {
+        tablecmds_seams::rename_relation_internal::call(mcx, row.typrelid, new_type_name, false)
+    } else {
+        pg_type::RenameTypeInternal(mcx, type_oid, new_type_name, row.typnamespace)
+    }
 }
 
 // RenameConstraint (tablecmds.c) OBJECT_DOMCONSTRAINT arm: domain constraints
@@ -920,15 +935,43 @@ pub fn AlterTypeOwner<'mcx>(
     }
 
     if row.typowner != new_owner_id {
+        // Superusers can always do it.
         if !superuser::superuser_arg(miscinit::GetUserId())? {
-            // unported: AlterTypeOwner non-superuser checks
-            // (check_can_set_role/ACL_CREATE)
-            return Err(Box::new(
-                PgError::error(
-                    "changing the owner of a type as a non-superuser is not supported yet",
-                )
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
+            // Otherwise, must be owner of the existing object.
+            if !aclchk::object_ownercheck(TYPE_RELATION_ID, type_oid, miscinit::GetUserId())? {
+                return Err(must_be_owner_of_type(type_oid)?);
+            }
+            // Must be able to become new owner (check_can_set_role, acl.c).
+            if !adt_acl::member_can_set_role(miscinit::GetUserId(), new_owner_id)? {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "must be able to SET ROLE \"{}\"",
+                            miscinit::GetUserNameFromId(mcx, new_owner_id, false)?
+                                .expect("noerr=false")
+                                .as_str()
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+                ));
+            }
+            // New owner must have CREATE privilege on namespace.
+            let aclresult = aclchk::object_aclcheck(
+                types_core::NAMESPACE_RELATION_ID,
+                row.typnamespace,
+                new_owner_id,
+                adt_acl::ACL_CREATE,
+            )?;
+            if aclresult != aclchk::ACLCHECK_OK {
+                aclchk::aclcheck_error(
+                    aclresult,
+                    ObjectType::OBJECT_SCHEMA,
+                    lsyscache::get_namespace_name(mcx, row.typnamespace)?
+                        .as_deref()
+                        .unwrap_or(""),
+                )?;
+            }
         }
         AlterTypeOwner_oid(mcx, type_oid, new_owner_id, true)?;
     }
@@ -1529,10 +1572,25 @@ fn rebuild_alter_type_dependencies<'mcx>(
         addrs_normal[n] = ObjectAddress::set(types_core::NAMESPACE_RELATION_ID, row.typnamespace);
         n += 1;
         pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, type_oid, row.typowner)?;
-        assert!(
-            row.typacl_isnull,
-            "AlterTypeRecurse: non-null typacl dependency rebuild (recordDependencyOnNewAcl) unported"
-        );
+        // Dependencies on roles mentioned in the ACL
+        // (recordDependencyOnNewAcl, aclchk.c).
+        if let Some(payload) = &row.typacl_payload {
+            let n = adt_acl::varlena::check_acl_payload(payload)?;
+            let mut acl: PgVec<'mcx, adt_acl::AclItem> = mcx::vec_with_capacity_in(mcx, n)?;
+            for i in 0..n {
+                acl.push(adt_acl::varlena::read_acl_item(payload, i));
+            }
+            let members = adt_acl::aclmembers(mcx, &acl)?;
+            pg_shdepend::updateAclDependencies(
+                mcx,
+                TYPE_RELATION_ID,
+                type_oid,
+                0,
+                row.typowner,
+                &[],
+                &members,
+            )?;
+        }
     }
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, true)?;
     const PROCEDURE_RELATION_ID: Oid = 1255;

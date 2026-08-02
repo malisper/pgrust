@@ -1,7 +1,7 @@
 // typecmds.c DefineDomain lane (CREATE DOMAIN with NOT NULL/CHECK/NULL
-// constraints) + enum lane (DefineEnum/AlterEnum/checkEnumOwner) + ALTER
-// DOMAIN/ALTER TYPE lane (alter.rs). COLLATE and inherited base-type
-// defaults are loud.
+// constraints, inherited base-type defaults) + enum lane
+// (DefineEnum/AlterEnum/checkEnumOwner) + ALTER DOMAIN/ALTER TYPE lane
+// (alter.rs). COLLATE is loud.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod alter;
@@ -70,7 +70,23 @@ struct BaseTypeRow {
     typalign: i8,
     typstorage: i8,
     typcollation: Oid,
-    has_default: bool,
+    // Inherited default value / binary value (typecmds.c:798-812).
+    typdefault: Option<String>,
+    typdefaultbin: Option<String>,
+}
+
+// A nullable text column read as an owned String (TextDatumGetCString).
+fn read_text_column(mcx: Mcx<'_>, d: Datum, isnull: bool) -> PgResult<Option<String>> {
+    if isnull {
+        return Ok(None);
+    }
+    let p = d.as_usize() as *const u8;
+    // SAFETY: live text varlena image through its extent.
+    let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(mcx, image)?;
+    Ok(Some(
+        core::str::from_utf8(payload.as_bytes()).expect("text column UTF-8").to_string(),
+    ))
 }
 
 fn base_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<BaseTypeRow> {
@@ -124,12 +140,10 @@ fn base_type_row<'mcx>(mcx: Mcx<'mcx>, typeoid: Oid) -> PgResult<BaseTypeRow> {
         typalign: get(Anum_pg_type_typalign, &mut isnull).as_i8(),
         typstorage: get(Anum_pg_type_typstorage, &mut isnull).as_i8(),
         typcollation: get(Anum_pg_type_typcollation, &mut isnull).as_oid(),
-        has_default: {
-            let mut null_bin = false;
-            let mut null_def = false;
-            get(Anum_pg_type_typdefaultbin, &mut null_bin);
-            get(Anum_pg_type_typdefault, &mut null_def);
-            !(null_bin && null_def)
+        typdefault: read_text_column(mcx, get(Anum_pg_type_typdefault, &mut isnull), isnull)?,
+        typdefaultbin: {
+            let d = get(Anum_pg_type_typdefaultbin, &mut isnull);
+            read_text_column(mcx, d, isnull)?
         },
     };
     genam::systable_endscan(mcx, scan)?;
@@ -229,21 +243,15 @@ pub fn DefineDomain<'mcx>(
         ));
     }
 
-    if base.has_default {
-        // unported: DefineDomain inherited base-type typdefault
-        return Err(Box::new(
-            types_error::PgError::error(
-                "CREATE DOMAIN over a type with a default value is not supported yet",
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
-
     let mut typ_not_null = false;
     let mut null_defined = false;
     let mut saw_default = false;
-    let mut default_value: Option<String> = None;
-    let mut default_value_bin: Option<mcx::PgString<'mcx>> = None;
+    // Inherited base-type default; a local DEFAULT constraint overrides it.
+    let mut default_value: Option<String> = base.typdefault.clone();
+    let mut default_value_bin: Option<mcx::PgString<'mcx>> = match &base.typdefaultbin {
+        Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+        None => None,
+    };
     let mut default_expr_node: Option<types_nodes::Node<'mcx>> = None;
     for cnode in stmt.constraints.iter() {
         if cnode.node_tag() != NodeTag::T_Constraint {
@@ -272,12 +280,17 @@ pub fn DefineDomain<'mcx>(
                         0,
                         None,
                     )?;
-                    // A plain NULL constant is no default; a CoerceToDomain
-                    // over a base domain is kept so this default overrides
-                    // the base domain's (typecmds.c:864-880).
+                    // A plain NULL constant drops any inherited default; a
+                    // CoerceToDomain over a base domain is kept so this
+                    // default overrides the base domain's
+                    // (typecmds.c:864-880).
                     let is_null_const =
                         default_expr.as_const().is_some_and(|c| c.constisnull);
-                    if !is_null_const {
+                    if is_null_const {
+                        default_expr_node = None;
+                        default_value = None;
+                        default_value_bin = None;
+                    } else {
                         default_value = Some(ruleutils::deparse_expression_pretty(
                             mcx,
                             default_expr,
@@ -444,6 +457,14 @@ pub fn DefineDomain<'mcx>(
     // C records the typdefaultbin expression's dependencies inside
     // GenerateTypeDependencies (pg_type.c:576-581,710-711); pg_type cannot
     // depend on catalog_dependency, so the same records are written here.
+    // An inherited default has no cooked node yet: rebuild it from the bin.
+    let default_expr_node = match default_expr_node {
+        Some(e) => Some(e),
+        None => match &default_value_bin {
+            Some(bin) => Some(readfuncs::stringToNode(mcx, bin.as_str())?),
+            None => None,
+        },
+    };
     if let Some(expr) = default_expr_node {
         catalog_dependency::recordDependencyOnExpr(
             mcx,
@@ -1526,6 +1547,25 @@ mod tests {
         let e = domain_err(&pstate, ERRCODE_SYNTAX_ERROR, "multiple default expressions", 10);
         assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
         assert_eq!(e.message(), "multiple default expressions");
+    }
+
+    // The DefineDomain inherited-default reads: a NULL column yields no
+    // default; a non-null text column reads back C's TextDatumGetCString.
+    #[test]
+    fn read_text_column_matches_c() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        assert!(read_text_column(mcx, Datum::null(), true).unwrap().is_none());
+        let payload = b"nextval('s'::regclass)";
+        let mut image: PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, 4 + payload.len()).unwrap();
+        image.resize(4, 0);
+        mcx::vec_append_bytes(&mut image, payload).unwrap();
+        let v = datum::Varlena::from_image(image);
+        let d = Datum::from_usize(v.as_bytes().as_ptr() as usize);
+        assert_eq!(
+            read_text_column(mcx, d, false).unwrap().as_deref(),
+            Some("nextval('s'::regclass)")
+        );
     }
 }
 
