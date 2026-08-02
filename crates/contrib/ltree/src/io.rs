@@ -547,9 +547,30 @@ fn serialize_lquery(
     Ok(out)
 }
 
-pub fn deparse_lquery(image: &[u8]) -> Vec<u8> {
+pub fn deparse_lquery(image: &[u8]) -> Result<Vec<u8>, PgError> {
     let q = Lquery::new(image);
-    let mut out = Vec::new();
+    // C sizes the output buffer up front and pallocs exactly that much:
+    // per level 1 (dot) + either 1 ('!') + numvar*4 ('|' + "%@*") + the
+    // level's stored totallen, plus 2*11+3 for a {low,high}, or 2*11+4 for
+    // a star level. Dense multi-variant levels amplify to ~1.25x the stored
+    // size, so a valid (sub-MaxAllocSize) lquery can push this past the
+    // palloc ceiling; the catchable invalid-request error fires before
+    // anything is emitted, with the estimate as its size.
+    let mut totallen: usize = 1;
+    for lvl in q.levels() {
+        totallen += 1;
+        let numvar = lvl.numvar();
+        if numvar > 0 {
+            totallen += 1 + numvar * 4 + lvl.totallen();
+            if lvl.flag() & LQL_COUNT != 0 {
+                totallen += 2 * 11 + 3;
+            }
+        } else {
+            totallen += 2 * 11 + 4;
+        }
+    }
+    ::mcx::check_alloc_size(totallen).map_err(|e| *e)?;
+    let mut out = Vec::with_capacity(totallen);
     for (i, lvl) in q.levels().enumerate() {
         if i != 0 {
             out.push(b'.');
@@ -599,7 +620,7 @@ pub fn deparse_lquery(image: &[u8]) -> Vec<u8> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 

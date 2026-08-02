@@ -92,7 +92,7 @@ fn fc_ltree_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
 
 fn fc_lquery_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let img = unsafe { arg_image(fcinfo, 0)? };
-    ret_cstring(fcinfo, &io::deparse_lquery(&img))
+    ret_cstring(fcinfo, &io::deparse_lquery(&img)?)
 }
 
 fn fc_ltxtq_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -150,7 +150,7 @@ fn fc_ltree_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
 
 fn fc_lquery_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let img = unsafe { arg_image(fcinfo, 0)? };
-    ret_send_versioned(fcinfo, &io::deparse_lquery(&img))
+    ret_send_versioned(fcinfo, &io::deparse_lquery(&img)?)
 }
 
 fn fc_ltxtq_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -1072,7 +1072,7 @@ mod tests {
                 .collect();
             let r = match kind {
                 "ltree" => io::parse_ltree(&buf).map(|i| io::deparse_ltree(&i)),
-                "lquery" => io::parse_lquery(&buf).map(|i| io::deparse_lquery(&i)),
+                "lquery" => io::parse_lquery(&buf).and_then(|i| io::deparse_lquery(&i)),
                 "ltxtquery" => io::parse_ltxtquery(&buf)
                     .and_then(|i| io::deparse_ltxtquery(&i)),
                 k => panic!("bad kind {k}"),
@@ -1102,7 +1102,7 @@ mod tests {
             let img = io::parse_lquery(input.as_bytes())
                 .unwrap_or_else(|e| panic!("{input}: rejected: {}", e.message()));
             assert_eq!(
-                String::from_utf8(io::deparse_lquery(&img)).unwrap(),
+                String::from_utf8(io::deparse_lquery(&img).unwrap()).unwrap(),
                 want,
                 "{input}"
             );
@@ -1206,5 +1206,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// MaxAllocSize ceiling (task #85 sibling sweep): C's deparse_lquery
+    /// pallocs its estimate (~1.25x the stored size for dense multi-variant
+    /// levels), so a valid sub-1GB lquery whose estimate crosses MaxAllocSize
+    /// raises palloc's catchable "invalid memory alloc request size" BEFORE
+    /// emitting. Pre-fix this test FAILS: the deparse succeeds and hands the
+    /// over-ceiling cstring on to the (later, differently-sized) result copy.
+    #[test]
+    fn lquery_out_over_ceiling_estimate_raises_palloc_error() {
+        // Level: numvar one-char variants (LVAR = 8 hdr + maxalign(1) = 16
+        // bytes each) + LQL_COUNT. Stored 65520 fits the u16 totallen; C's
+        // per-level estimate is 2 + numvar*4 + 65520 + 25 = 81923.
+        const NUMVAR: usize = 4094;
+        const LVL_TOTALLEN: usize = 16 + NUMVAR * 16; // 65520
+        const NLEVEL: usize = 13107;
+        let estimate: usize = 1 + NLEVEL * (2 + NUMVAR * 4 + LVL_TOTALLEN + 2 * 11 + 3);
+        assert!(estimate > 0x3FFF_FFFF, "fixture must cross MaxAllocSize");
+
+        let mut level = vec![0u8; LVL_TOTALLEN];
+        repr::write_u16(&mut level, 0, LVL_TOTALLEN as u16); // totallen
+        repr::write_u16(&mut level, 2, repr::LQL_COUNT); // flag
+        repr::write_u16(&mut level, 4, NUMVAR as u16); // numvar
+        repr::write_u16(&mut level, 6, 1); // low
+        repr::write_u16(&mut level, 8, 2); // high
+        for j in 0..NUMVAR {
+            let off = 16 + j * 16;
+            repr::write_u16(&mut level, off + 4, 1); // LVAR len
+            level[off + 8] = b'a'; // name
+        }
+
+        let total = repr::LQUERY_HDRSIZE + NLEVEL * repr::maxalign(LVL_TOTALLEN);
+        assert!(total <= 0x3FFF_FFFF, "fixture image must itself be valid");
+        let mut img = Vec::with_capacity(total);
+        img.extend_from_slice(&[0u8; repr::LQUERY_HDRSIZE]);
+        repr::set_varsize(&mut img, total);
+        repr::write_u16(&mut img, 4, NLEVEL as u16); // numlevel
+        for _ in 0..NLEVEL {
+            img.extend_from_slice(&level);
+        }
+
+        let err = io::deparse_lquery(&img)
+            .expect_err("over-ceiling lquery deparse estimate must raise palloc's error");
+        assert_eq!(
+            err.message(),
+            format!("invalid memory alloc request size {estimate}")
+        );
     }
 }
