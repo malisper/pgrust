@@ -1014,29 +1014,15 @@ pub(crate) fn ATExecAddInherit<'mcx>(
     let parent_oid =
         catalog_namespace::RangeVarGetRelid(&rv, types_rel::ShareUpdateExclusiveLock, false)?;
     let parent_rel = table::table_open(mcx, parent_oid, NoLock)?;
-    // ATSimplePermissions(parent); foreign tables loud.
-    if !aclchk::object_ownercheck(
-        types_core::RELATION_RELATION_ID,
-        parent_oid,
-        miscinit::GetUserId(),
-    )? {
-        aclchk::aclcheck_error(
-            aclchk::ACLCHECK_NOT_OWNER,
-            crate::get_relkind_objtype(parent_rel.rd_rel.relkind),
-            parent_rel.name(),
-        )?;
-    }
-    if parent_rel.rd_rel.relkind != RELKIND_RELATION
-        && parent_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE
-    {
-        // unported: ATExecAddInherit parent relkinds outside table/partitioned
-        return Err(Box::new(
-            PgError::error(
-                "ALTER TABLE ... INHERIT for this type of parent relation is not supported yet",
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
+    // Must be owner of both parent and child -- child was checked by
+    // ATSimplePermissions call in ATPrepCmd.
+    crate::alter::ATSimplePermissions(
+        types_nodes::parsenodes::AlterTableType::AT_AddInherit,
+        &parent_rel,
+        crate::alter::ATT_TABLE
+            | crate::alter::ATT_PARTITIONED_TABLE
+            | crate::alter::ATT_FOREIGN_TABLE,
+    )?;
     let parent_name = parent_rel.name().to_string();
     let child_name = child_rel.name().to_string();
     if parent_rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP

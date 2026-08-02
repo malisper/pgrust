@@ -555,15 +555,15 @@ fn ATCheckPartitionsNotInUse<'mcx>(
     Ok(())
 }
 
-const ATT_TABLE: i32 = 0x0001;
+pub(crate) const ATT_TABLE: i32 = 0x0001;
 const ATT_VIEW: i32 = 0x0002;
 const ATT_MATVIEW: i32 = 0x0004;
 const ATT_INDEX: i32 = 0x0008;
 const ATT_COMPOSITE_TYPE: i32 = 0x0010;
-const ATT_FOREIGN_TABLE: i32 = 0x0020;
+pub(crate) const ATT_FOREIGN_TABLE: i32 = 0x0020;
 const ATT_PARTITIONED_INDEX: i32 = 0x0040;
 const ATT_SEQUENCE: i32 = 0x0080;
-const ATT_PARTITIONED_TABLE: i32 = 0x0100;
+pub(crate) const ATT_PARTITIONED_TABLE: i32 = 0x0100;
 
 // The ATSimplePermissions allowed_targets per ATPrepCmd case arm; None for
 // arms C leaves unchecked (AT_ChangeOwner).
@@ -695,12 +695,8 @@ fn alter_table_type_to_string(cmdtype: AlterTableType) -> Option<&'static str> {
     })
 }
 
-fn ATSimplePermissions(
-    cmdtype: AlterTableType,
-    rel: &Relation<'_>,
-    allowed_targets: i32,
-) -> PgResult<()> {
-    let actual_target = match rel.rd_rel.relkind {
+pub(crate) fn at_simple_actual_target(relkind: u8) -> i32 {
+    match relkind {
         RELKIND_RELATION => ATT_TABLE,
         types_rel::RELKIND_PARTITIONED_TABLE => ATT_PARTITIONED_TABLE,
         types_rel::RELKIND_VIEW => ATT_VIEW,
@@ -711,7 +707,15 @@ fn ATSimplePermissions(
         types_rel::RELKIND_FOREIGN_TABLE => ATT_FOREIGN_TABLE,
         types_rel::RELKIND_SEQUENCE => ATT_SEQUENCE,
         _ => 0,
-    };
+    }
+}
+
+pub(crate) fn ATSimplePermissions(
+    cmdtype: AlterTableType,
+    rel: &Relation<'_>,
+    allowed_targets: i32,
+) -> PgResult<()> {
+    let actual_target = at_simple_actual_target(rel.rd_rel.relkind);
     if actual_target & allowed_targets == 0 {
         let Some(action_str) = alter_table_type_to_string(cmdtype) else {
             panic!("invalid ALTER action attempted on relation \"{}\"", rel.name());
@@ -1680,15 +1684,6 @@ fn ATRewriteTableOne<'mcx>(
         rel.close(NoLock)?;
     }
     if tab.rewrite > 0 && tab.relkind != types_rel::RELKIND_SEQUENCE {
-        if tab.rewrite
-            & !(AT_REWRITE_COLUMN_REWRITE
-                | AT_REWRITE_DEFAULT_VAL
-                | AT_REWRITE_ALTER_PERSISTENCE
-                | AT_REWRITE_ACCESS_METHOD)
-            != 0
-        {
-            unported("ATRewriteTable rewrite flags");
-        }
         let old_heap = table::table_open(mcx, tab.relid, NoLock)?;
         if catalog::IsSystemRelation(&old_heap) {
             return Err(Box::new(
@@ -3530,6 +3525,23 @@ fn not_an_identity_column(col_name: &str, relname: &str) -> Box<PgError> {
     )
 }
 
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn cannot_unlog_published_table(relname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!(
+                "cannot change table \"{relname}\" to unlogged because it is part of a \
+                 publication"
+            ),
+        )
+        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .with_detail("Unlogged relations cannot be replicated."),
+    )
+}
+
 fn ATExecClusterOn<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -3554,8 +3566,7 @@ fn ATExecClusterOn<'mcx>(
     commands_cluster::mark_index_clustered(mcx, rel, index_oid, false)
 }
 
-// ATPrepChangePersistence. GetRelationPublications is const-empty
-// (publications unported), so the publication guard cannot fire.
+// ATPrepChangePersistence.
 fn ATPrepChangePersistence<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,
@@ -3579,6 +3590,12 @@ fn ATPrepChangePersistence<'mcx>(
         types_core::catalog::RELPERSISTENCE_PERMANENT if to_logged => return Ok(()),
         types_core::RELPERSISTENCE_UNLOGGED if !to_logged => return Ok(()),
         _ => {}
+    }
+
+    // C: UNLOGGED tables can't be published, so reject SET UNLOGGED on a
+    // table that is part of any publication.
+    if !to_logged && !pg_publication::GetRelationPublications(mcx, rel.rd_id)?.is_empty() {
+        return Err(cannot_unlog_published_table(rel.name()));
     }
 
     let pg_con =
@@ -4228,8 +4245,36 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
     Ok(())
 }
 
-// set_attnotnull (tablecmds.c); NotNullImpliedByRelConstraints proof unported
-// so phase 3 always verifies when queue_validation.
+// NotNullImpliedByRelConstraints (tablecmds.c): do rel's existing
+// constraints imply NOT NULL for the given attribute?
+fn NotNullImpliedByRelConstraints<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attnum: AttrNumber,
+) -> PgResult<bool> {
+    let att = rel.rd_att.attr(attnum as usize - 1);
+    let nnulltest = crate::attach::make_notnull_test(mcx, att)?;
+    if crate::attach::ConstraintImpliedByRelConstraint(
+        mcx,
+        rel,
+        &[nnulltest],
+        PgVec::new_in(mcx),
+    )? {
+        elog_seams::ereport::call(PgError::new(
+            types_error::DEBUG1,
+            format!(
+                "existing constraints on column \"{}.{}\" are sufficient to prove that it \
+                 does not contain nulls",
+                rel.name(),
+                String::from_utf8_lossy(att.attname.name_str())
+            ),
+        ))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+// set_attnotnull (tablecmds.c).
 fn set_attnotnull<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
@@ -4249,7 +4294,9 @@ fn set_attnotnull<'mcx>(
             attnum,
             &[(Anum_pg_attribute_attnotnull, Datum::from_bool(true))],
         )?;
-        if queue_validation {
+        // If the nullness isn't already proven by validated constraints,
+        // have ALTER TABLE phase 3 test for it.
+        if queue_validation && !NotNullImpliedByRelConstraints(mcx, rel, attnum)? {
             let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
             wqueue[tabidx].verify_new_notnull = true;
         }
@@ -7872,4 +7919,96 @@ fn ATExecAlterColumnGenericOptions<'mcx>(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ATSimplePermissions relkind identity for ATTACH PARTITION: C allows
+    // ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE and rejects the
+    // rest with 42809 (tablecmds.c ATExecAttachPartition).
+    #[test]
+    fn attach_partition_target_set_matches_c() {
+        let allowed = ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE;
+        for relkind in [
+            RELKIND_RELATION,
+            types_rel::RELKIND_PARTITIONED_TABLE,
+            types_rel::RELKIND_FOREIGN_TABLE,
+        ] {
+            assert_ne!(at_simple_actual_target(relkind) & allowed, 0);
+        }
+        for relkind in [
+            types_rel::RELKIND_VIEW,
+            types_rel::RELKIND_MATVIEW,
+            types_rel::RELKIND_INDEX,
+            types_rel::RELKIND_PARTITIONED_INDEX,
+            types_rel::RELKIND_COMPOSITE_TYPE,
+            types_rel::RELKIND_SEQUENCE,
+            b'?',
+        ] {
+            assert_eq!(at_simple_actual_target(relkind) & allowed, 0);
+        }
+        assert_eq!(
+            alter_table_type_to_string(AlterTableType::AT_AttachPartition),
+            Some("ATTACH PARTITION")
+        );
+    }
+
+    // ATExecAddInherit parent targets: same C set, INHERIT action word.
+    #[test]
+    fn add_inherit_target_set_matches_c() {
+        let allowed = ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE;
+        assert_ne!(
+            at_simple_actual_target(types_rel::RELKIND_FOREIGN_TABLE) & allowed,
+            0
+        );
+        assert_eq!(at_simple_actual_target(types_rel::RELKIND_SEQUENCE) & allowed, 0);
+        assert_eq!(
+            alter_table_type_to_string(AlterTableType::AT_AddInherit),
+            Some("INHERIT")
+        );
+    }
+
+    // ATPrepChangePersistence publication guard error identity
+    // (tablecmds.c ~18856): 55000 + C's message and detail.
+    #[test]
+    fn set_unlogged_published_error_identity() {
+        let e = cannot_unlog_published_table("tpub");
+        assert_eq!(
+            e.message(),
+            "cannot change table \"tpub\" to unlogged because it is part of a publication"
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(e.detail(), Some("Unlogged relations cannot be replicated."));
+    }
+
+    // NotNullImpliedByRelConstraints builds C's NullTest probe: IS NOT NULL
+    // over a varno-1 Var carrying the column's type identity, argisrow=false.
+    #[test]
+    fn notnull_probe_shape_matches_c() {
+        let root = mcx::session_root("notnull-probe-test");
+        let mcx = root.mcx();
+        let mut att = types_tuple::FormData_pg_attribute::default();
+        att.attnum = 3;
+        att.atttypid = 25; // text
+        att.atttypmod = -1;
+        att.attcollation = 100;
+        let n = crate::attach::make_notnull_test(mcx, &att).unwrap();
+        let nt = n
+            .as_variant::<types_nodes::primnodes::NullTest>()
+            .expect("NullTest");
+        assert_eq!(
+            nt.nulltesttype,
+            types_nodes::primnodes::NullTestType::IS_NOT_NULL
+        );
+        assert!(!nt.argisrow);
+        assert_eq!(nt.location, -1);
+        let var = nt.arg.expect("arg").as_var().expect("Var");
+        assert_eq!(var.varno, 1);
+        assert_eq!(var.varattno, 3);
+        assert_eq!(var.vartype, 25);
+        assert_eq!(var.vartypmod, -1);
+        assert_eq!(var.varcollid, 100);
+    }
 }

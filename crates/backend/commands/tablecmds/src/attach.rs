@@ -118,27 +118,15 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
 
     let attachrel = open_by_rangevar(mcx, cmd.name.expect("PartitionCmd.name"), AccessExclusiveLock)?;
 
-    match attachrel.rd_rel.relkind {
-        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE | types_rel::RELKIND_FOREIGN_TABLE => {}
-        // unported: ATTACH PARTITION of remaining relkinds
-        _ => {
-            return Err(err(
-                "ATTACH PARTITION for this type of relation is not supported yet".to_string(),
-                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-            ))
-        }
-    }
-    if !aclchk::object_ownercheck(
-        types_core::RELATION_RELATION_ID,
-        attachrel.rd_id,
-        miscinit::GetUserId(),
-    )? {
-        aclchk::aclcheck_error(
-            aclchk::ACLCHECK_NOT_OWNER,
-            crate::get_relkind_objtype(attachrel.rd_rel.relkind),
-            attachrel.name(),
-        )?;
-    }
+    // Must be owner of both parent and source table -- parent was checked by
+    // ATSimplePermissions call in ATPrepCmd.
+    crate::alter::ATSimplePermissions(
+        types_nodes::parsenodes::AlterTableType::AT_AttachPartition,
+        &attachrel,
+        crate::alter::ATT_TABLE
+            | crate::alter::ATT_PARTITIONED_TABLE
+            | crate::alter::ATT_FOREIGN_TABLE,
+    )?;
 
     if attachrel.rd_rel.relispartition {
         return Err(err(
@@ -950,8 +938,8 @@ fn AttachPartitionEnsureIndexes<'mcx>(
     Ok(())
 }
 
-// PartConstraintImpliedByRelConstraint + ConstraintImpliedByRelConstraint
-// (tablecmds.c:20051-20164) over the landed predtest engine.
+// PartConstraintImpliedByRelConstraint (tablecmds.c:20051-20103) over the
+// landed predtest engine.
 pub(crate) fn PartConstraintImpliedByRelConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     scanrel: &Relation<'mcx>,
@@ -964,32 +952,65 @@ pub(crate) fn PartConstraintImpliedByRelConstraint<'mcx>(
             for i in 0..desc.natts as usize {
                 let att = desc.attr(i);
                 if att.attnotnull && !att.attisdropped {
-                    let var = Node::mk(
-                        mcx,
-                        Var {
-                            varno: 1,
-                            varattno: att.attnum,
-                            vartype: att.atttypid,
-                            vartypmod: att.atttypmod,
-                            varcollid: att.attcollation,
-                            varnosyn: 1,
-                            varattnosyn: att.attnum,
-                            ..Default::default()
-                        },
-                    )?;
-                    let ntest = Node::mk(
-                        mcx,
-                        NullTest {
-                            arg: Some(var),
-                            nulltesttype: NullTestType::IS_NOT_NULL,
-                            argisrow: false,
-                            location: -1,
-                        },
-                    )?;
-                    exist_constraint.push(ntest);
+                    exist_constraint.push(make_notnull_test(mcx, att)?);
                 }
             }
         }
+    }
+    let mut pred: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for n in part_constraint.iter() {
+        pred.push(n);
+    }
+    ConstraintImpliedByRelConstraint(mcx, scanrel, &pred, exist_constraint)
+}
+
+// An IS NOT NULL NullTest over column att of varno 1, as C builds it in
+// PartConstraintImpliedByRelConstraint and NotNullImpliedByRelConstraints.
+// argisrow=false is correct even for a composite column, because attnotnull
+// does not represent a SQL-spec IS NOT NULL test in such a case, just
+// IS DISTINCT FROM NULL.
+pub(crate) fn make_notnull_test<'mcx>(
+    mcx: Mcx<'mcx>,
+    att: &types_tuple::FormData_pg_attribute,
+) -> PgResult<Node<'mcx>> {
+    let var = Node::mk(
+        mcx,
+        Var {
+            varno: 1,
+            varattno: att.attnum,
+            vartype: att.atttypid,
+            vartypmod: att.atttypmod,
+            varcollid: att.attcollation,
+            varnosyn: 1,
+            varattnosyn: att.attnum,
+            ..Default::default()
+        },
+    )?;
+    Node::mk(
+        mcx,
+        NullTest {
+            arg: Some(var),
+            nulltesttype: NullTestType::IS_NOT_NULL,
+            argisrow: false,
+            location: -1,
+        },
+    )
+}
+
+// ConstraintImpliedByRelConstraint (tablecmds.c:20106-20164): do scanrel's
+// validated CHECK constraints, plus the caller-proven conditions, imply the
+// test constraint? Both lists are in implicit-AND form. Takes ownership of
+// proven_constraint and appends the CHECK expressions to it, as C's
+// list_copy + list_concat does.
+pub(crate) fn ConstraintImpliedByRelConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    scanrel: &Relation<'mcx>,
+    test_constraint: &[Node<'mcx>],
+    proven_constraint: PgVec<'mcx, Node<'mcx>>,
+) -> PgResult<bool> {
+    let desc = scanrel.descr();
+    let mut exist_constraint = proven_constraint;
+    if let Some(constr) = desc.constr.as_deref() {
         for chk in constr.check.iter() {
             if !chk.ccvalid {
                 continue;
@@ -1006,11 +1027,7 @@ pub(crate) fn PartConstraintImpliedByRelConstraint<'mcx>(
             }
         }
     }
-    let mut pred: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
-    for n in part_constraint.iter() {
-        pred.push(n);
-    }
-    planner::predtest::predicate_implied_by(mcx, &pred, &exist_constraint, true)
+    planner::predtest::predicate_implied_by(mcx, test_constraint, &exist_constraint, true)
 }
 
 // QueuePartitionConstraintValidation (tablecmds.c:20177): skip the scan when

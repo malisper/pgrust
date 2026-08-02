@@ -46,12 +46,6 @@ const SequenceRelidIndexId: Oid = 5002;
 const Natts_pg_sequence: usize = 8;
 const RM_SEQ_ID: u8 = 15;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: sequence {what}")
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -731,11 +725,10 @@ pub fn DefineSequence<'mcx>(
                 true,
             )?;
         if seqoid != types_core::InvalidOid {
-            // checkMembershipInCurrentExtension only bites inside an
-            // extension script (parse_utilcmd CREATE TABLE INE precedent).
-            if pg_depend::creating_extension() {
-                unported("CREATE SEQUENCE IF NOT EXISTS inside an extension script");
-            }
+            // If we are in an extension script, insist that the pre-existing
+            // object be a member of the extension, to avoid security risks.
+            let address = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, seqoid);
+            pg_depend::checkMembershipInCurrentExtension(mcx, &address)?;
             elog::ereport(NOTICE)
                 .errcode(ERRCODE_DUPLICATE_TABLE)
                 .errmsg(format!("relation \"{}\" already exists, skipping", rvv.relname))
@@ -1004,6 +997,26 @@ pub fn SequenceChangePersistence(mcx: Mcx<'_>, relid: Oid, newrelpersistence: u8
     seqrel.close(NoLock)
 }
 
+// makeRangeVarFromNameList (makefuncs.c): (catalogname, schemaname, relname);
+// a catalog-qualified name passes here and relation_openrv applies the
+// cross-database check.
+fn make_range_var_parts_from_name_list<'a>(
+    names: &[&'a str],
+) -> PgResult<(Option<&'a str>, Option<&'a str>, &'a str)> {
+    match *names {
+        [r] => Ok((None, None, r)),
+        [s, r] => Ok((None, Some(s), r)),
+        [c, s, r] => Ok((Some(c), Some(s), r)),
+        _ => Err(err(
+            format!(
+                "improper relation name (too many dotted names): {}",
+                names.join(".")
+            ),
+            ERRCODE_SYNTAX_ERROR,
+        )),
+    }
+}
+
 fn process_owned_by<'mcx>(
     mcx: Mcx<'mcx>,
     seqrel: &Relation<'mcx>,
@@ -1030,24 +1043,16 @@ fn process_owned_by<'mcx>(
                 .into());
         }
     } else {
-        if nnames > 3 {
-            // unported: OWNED BY with a catalog-qualified name
-            // (makeRangeVarFromNameList catalog arm)
-            return Err(err(
-                "OWNED BY with a catalog-qualified table name is not supported yet".to_string(),
-                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-            ));
+        let mut names: Vec<&str> = Vec::with_capacity(nnames);
+        for n in owned_by.iter() {
+            names.push(n.as_string().expect("OWNED BY name").sval);
         }
-        let mut parts = [""; 3];
-        for (i, n) in owned_by.iter().enumerate() {
-            parts[i] = n.as_string().expect("OWNED BY name").sval;
-        }
-        let attrname = parts[nnames - 1];
-        let (schemaname, relname) =
-            if nnames == 3 { (Some(parts[0]), parts[1]) } else { (None, parts[0]) };
+        let attrname = names[nnames - 1];
+        let (catalogname, schemaname, relname) =
+            make_range_var_parts_from_name_list(&names[..nnames - 1])?;
 
         let rv = rel_vocab::RangeVar {
-            catalogname: None,
+            catalogname,
             schemaname,
             relname,
             inh: true,
@@ -1715,5 +1720,30 @@ mod tests {
         assert_eq!(tup.last_value(), -9);
         assert_eq!(tup.log_cnt(), 0);
         assert!(!tup.is_called());
+    }
+
+    // makeRangeVarFromNameList (makefuncs.c): OWNED BY accepts up to a
+    // catalog-qualified (3-part) table name; more parts raise C's catchable
+    // syntax error with the dot-joined name.
+    #[test]
+    fn owned_by_name_list_arms_match_c() {
+        assert_eq!(
+            make_range_var_parts_from_name_list(&["t"]).unwrap(),
+            (None, None, "t")
+        );
+        assert_eq!(
+            make_range_var_parts_from_name_list(&["s", "t"]).unwrap(),
+            (None, Some("s"), "t")
+        );
+        assert_eq!(
+            make_range_var_parts_from_name_list(&["db", "s", "t"]).unwrap(),
+            (Some("db"), Some("s"), "t")
+        );
+        let e = make_range_var_parts_from_name_list(&["db", "s", "t", "x"]).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "improper relation name (too many dotted names): db.s.t.x"
+        );
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
     }
 }

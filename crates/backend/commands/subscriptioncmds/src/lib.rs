@@ -741,7 +741,7 @@ pub fn CreateSubscription<'mcx>(
                 let twophase_enabled = opts.twophase && !opts.copy_data && ntables > 0;
                 connect::walrcv_create_slot(&mut wrconn, slot, twophase_enabled, opts.failover)?;
                 if twophase_enabled {
-                    panic!("unported: UpdateTwoPhaseState (two-phase subscription)");
+                    UpdateTwoPhaseState(mcx, subid, LOGICALREP_TWOPHASE_STATE_ENABLED)?;
                 }
                 let _ = elog::elog(
                     types_error::NOTICE,
@@ -812,6 +812,49 @@ fn CheckAlterSubOption(
         )?;
     }
     Ok(())
+}
+
+// UpdateTwoPhaseState (subscriptioncmds.c): note the changed two-phase state
+// of a subscription in pg_subscription.
+pub fn UpdateTwoPhaseState(mcx: Mcx<'_>, suboid: Oid, new_state: u8) -> PgResult<()> {
+    debug_assert!(matches!(
+        new_state,
+        LOGICALREP_TWOPHASE_STATE_DISABLED
+            | LOGICALREP_TWOPHASE_STATE_PENDING
+            | LOGICALREP_TWOPHASE_STATE_ENABLED
+    ));
+    let rel = table::table_open(mcx, SubscriptionRelationId, RowExclusiveLock)?;
+    let Some(tup) = SearchSysCacheCopy(
+        mcx,
+        SUBSCRIPTIONOID,
+        SysCacheKey::Value(Datum::from_oid(suboid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?
+    else {
+        panic!("cache lookup failed for subscription oid {suboid}");
+    };
+
+    let mut values = [Datum::null(); Natts_pg_subscription];
+    let mut nulls = [false; Natts_pg_subscription];
+    let mut replaces = [false; Natts_pg_subscription];
+    values[(Anum_pg_subscription_subtwophasestate - 1) as usize] =
+        Datum::from_char(new_state as i8);
+    replaces[(Anum_pg_subscription_subtwophasestate - 1) as usize] = true;
+
+    let mut new_tup = heaptuple::heap_modify_tuple(
+        mcx,
+        tup.as_tuple(),
+        rel.descr(),
+        &values,
+        &nulls,
+        &replaces,
+    )?;
+    let otid = tup.as_tuple().t_self;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut new_tup)?;
+
+    rel.close(RowExclusiveLock)
 }
 
 pub fn AlterSubscription<'mcx>(
@@ -952,8 +995,18 @@ pub fn AlterSubscription<'mcx>(
 
                 // logicalrep_workers_find: no logical replication workers can
                 // exist here, so the worker-running error branch is dead.
-                if update_two_phase && sub.twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED {
-                    panic!("unported: LookupGXactBySubid (disabling two_phase on an enabled-state subscription)");
+                // two_phase cannot be disabled if any uncommitted prepared
+                // transactions carry this subscription's GID pattern.
+                if update_two_phase
+                    && sub.twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED
+                    && twophase::LookupGXactBySubid(subid)
+                {
+                    return Err((*err(
+                        "cannot disable \"two_phase\" when prepared transactions exist",
+                        ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    ))
+                    .with_hint("Resolve these transactions and try again.")
+                    .into());
                 }
 
                 values[(Anum_pg_subscription_subtwophasestate - 1) as usize] =

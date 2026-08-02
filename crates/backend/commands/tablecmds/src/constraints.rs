@@ -217,10 +217,10 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
             continue;
         }
         if cdef.contype != ConstrType::CONSTR_CHECK {
-            panic!(
-                "AddRelationNewConstraints (heap.c): {:?} arm unported (CHECK only)",
-                cdef.contype
-            );
+            // C's if/else-if chain has no other arm: any contype besides
+            // CHECK/NOT NULL is silently ignored here (callers never pass
+            // one).
+            continue;
         }
         let expr = match cdef.raw_expr {
             Some(e) => {
@@ -992,11 +992,18 @@ pub(crate) fn set_relation_num_checks<'mcx>(
     Ok(())
 }
 
-pub(crate) fn collect_raw_defaults<'mcx>(
+// DefineRelation's rawDefaults/cookedDefaults split (tablecmds.c:988-1025):
+// raw defaults wait for AddRelationNewConstraints; cooked ones (already
+// transformed, e.g. by MergeAttributes) are stored directly at creation.
+pub(crate) fn collect_column_defaults<'mcx>(
     mcx: Mcx<'mcx>,
     table_elts: &NodeList<'mcx>,
-) -> PgResult<PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)>> {
-    let mut out: PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)> = PgVec::new_in(mcx);
+) -> PgResult<(
+    PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)>,
+    PgVec<'mcx, (AttrNumber, Node<'mcx>)>,
+)> {
+    let mut raw: PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)> = PgVec::new_in(mcx);
+    let mut cooked: PgVec<'mcx, (AttrNumber, Node<'mcx>)> = PgVec::new_in(mcx);
     for (i, elt) in table_elts.iter().enumerate() {
         if elt.node_tag() != NodeTag::T_ColumnDef {
             continue;
@@ -1004,14 +1011,14 @@ pub(crate) fn collect_raw_defaults<'mcx>(
         let cd = elt
             .as_variant::<types_nodes::rawnodes::ColumnDef>()
             .expect("ColumnDef");
-        if cd.cooked_default.is_some() {
-            panic!("DefineRelation (tablecmds.c): cooked_default (inheritance) unported");
-        }
-        if let Some(raw) = cd.raw_default {
-            out.push(((i + 1) as AttrNumber, raw, cd.generated));
+        if let Some(rawex) = cd.raw_default {
+            debug_assert!(cd.cooked_default.is_none());
+            raw.push(((i + 1) as AttrNumber, rawex, cd.generated));
+        } else if let Some(cookedex) = cd.cooked_default {
+            cooked.push(((i + 1) as AttrNumber, cookedex));
         }
     }
-    Ok(out)
+    Ok((raw, cooked))
 }
 
 fn bytes_in<'mcx>(mcx: Mcx<'mcx>, b: &[u8]) -> PgResult<&'mcx [u8]> {
@@ -1059,4 +1066,66 @@ fn check_constraint_exists(name: &str) -> Box<PgError> {
         PgError::error(format!("check constraint \"{name}\" already exists"))
             .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_nodes::rawnodes::ColumnDef;
+
+    fn coldef<'m>(
+        mcx: Mcx<'m>,
+        raw: Option<Node<'m>>,
+        cooked: Option<Node<'m>>,
+        generated: u8,
+    ) -> Node<'m> {
+        let mut def = Node::build::<ColumnDef>(mcx).unwrap();
+        def.colname = Some("c");
+        def.raw_default = raw;
+        def.cooked_default = cooked;
+        def.generated = generated;
+        def.seal()
+    }
+
+    fn dummy_expr<'m>(mcx: Mcx<'m>) -> Node<'m> {
+        Node::build::<ColumnDef>(mcx).unwrap().seal()
+    }
+
+    // DefineRelation's split (tablecmds.c:988-1025): raw defaults keep their
+    // 1-based column position and generation flag; a cooked (pre-transformed)
+    // default lands in the cooked list instead of erroring.
+    #[test]
+    fn collect_column_defaults_splits_raw_and_cooked() {
+        let root = mcx::session_root("cooked-defaults-test");
+        let mcx = root.mcx();
+        let raw1 = dummy_expr(mcx);
+        let cooked2 = dummy_expr(mcx);
+        let raw3 = dummy_expr(mcx);
+        let mut elts = NodeList::nil();
+        elts.lappend(mcx, coldef(mcx, Some(raw1), None, 0)).unwrap();
+        elts.lappend(mcx, coldef(mcx, None, Some(cooked2), 0)).unwrap();
+        elts.lappend(mcx, coldef(mcx, Some(raw3), None, b's')).unwrap();
+        elts.lappend(mcx, coldef(mcx, None, None, 0)).unwrap();
+        let (raw, cooked) = collect_column_defaults(mcx, &elts).unwrap();
+        assert_eq!(raw.len(), 2);
+        assert_eq!(raw[0].0, 1);
+        assert_eq!(raw[0].2, 0);
+        assert_eq!(raw[1].0, 3);
+        assert_eq!(raw[1].2, b's');
+        assert_eq!(cooked.len(), 1);
+        assert_eq!(cooked[0].0, 2);
+    }
+
+    // C prefers the raw arm; cooked on the same column is asserted-away, and
+    // a column with neither contributes nothing.
+    #[test]
+    fn collect_column_defaults_empty_when_no_defaults() {
+        let root = mcx::session_root("cooked-defaults-empty-test");
+        let mcx = root.mcx();
+        let mut elts = NodeList::nil();
+        elts.lappend(mcx, coldef(mcx, None, None, 0)).unwrap();
+        let (raw, cooked) = collect_column_defaults(mcx, &elts).unwrap();
+        assert!(raw.is_empty());
+        assert!(cooked.is_empty());
+    }
 }
