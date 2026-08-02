@@ -271,6 +271,16 @@ fn main() {
         ("pg_mblen_range", "tsvio_pg_mblen_range"),
         ("ArrayGetNItems", "tsrio_ArrayGetNItems"),
         ("ArrayGetNItemsSafe", "tsrio_ArrayGetNItemsSafe"),
+        // oracle-integrity sweep (task #98): the family's verbatim
+        // port/qsort.c + qsort_arg.c exported UNPREFIXED pg_qsort /
+        // qsort_arg / pg_qsort_strcmp — the tidbitmap link-race class
+        // (whichever archive the linker visits first silently supplies
+        // every other family's sort). Rename family-wide; bodies stay
+        // verbatim, tsvec/postgres.h's `#define qsort pg_qsort` chains
+        // into the rename so every verbatim call site follows.
+        ("pg_qsort", "tsv_pg_qsort"),
+        ("qsort_arg", "tsv_qsort_arg"),
+        ("pg_qsort_strcmp", "tsv_pg_qsort_strcmp"),
     ] {
         tsvec.define(s, r);
     }
@@ -632,6 +642,12 @@ fn main() {
         "varstr_cmp", "parse_bool", "parse_bool_with_len",
         "int4in", "int8in", "pg_ltoa", "pg_ultoa_n",
         "pg_strtoint64", "pg_strtoint64_safe", "qsort_arg",
+        // oracle-integrity sweep (task #98): pg_qsort joins the family
+        // rename set — csrc/jsonpath/pg_qsort.c instantiates the verbatim
+        // port/qsort.c sort_template as (jporcl_)pg_qsort, and the
+        // `qsort` define below routes the verbatim engine's qsort() calls
+        // to it (port.h parity: the backend's qsort IS pg_qsort).
+        "pg_qsort",
         "RE_compile_and_cache", "RE_compile_and_execute",
         // p1-microbatch CI-build fix (2026-07-31): the jsonpath family's
         // vendored Spencer engine (csrc/jsonpath/regex/) exports the same
@@ -683,6 +699,13 @@ fn main() {
     for s in JSONPATH_SHARED_SYMS {
         jsonpath.define(s, format!("jporcl_{s}").as_str());
     }
+    // oracle-integrity sweep (task #98): the backend's qsort IS pg_qsort
+    // (port.h line 478 `#define qsort pg_qsort`), and that define is part
+    // of every verbatim body's real header closure. Without it the
+    // family's vendored regex engine (regex/regc_nfa.c) bound LIBC qsort
+    // — the spgkdtree wrong-oracle class. jporcl_pg_qsort is the verbatim
+    // sort_template instantiation in csrc/jsonpath/pg_qsort.c.
+    jsonpath.define("qsort", "jporcl_pg_qsort");
     for f in [
         "jsonpath.c", "jsonpath_gram.c", "jsonpath_scan.c",
         "pg_numeric_min.c", "pg_formatting_min.c", "pg_stringinfo.c",
@@ -692,7 +715,7 @@ fn main() {
         // jsonpath_exec.c + jsonb_util.c + regexec.c, the pg_jsonb_min.c
         // extract file, qsort_arg, and the exec env/driver entries.
         "jsonpath_exec.c", "jsonb_util.c", "pg_jsonb_min.c",
-        "pg_qsort_arg.c", "pg_jsonpath_exec_env.c",
+        "pg_qsort_arg.c", "pg_qsort.c", "pg_jsonpath_exec_env.c",
         "regex/regexec.c",
     ] {
         jsonpath.file(format!("csrc/jsonpath/{f}"));
@@ -721,6 +744,14 @@ fn main() {
         // (regc_pg_locale.c references them in branches dead under the
         // pinned C collation, but they must compile); no-op on macOS.
         .define("_GNU_SOURCE", None)
+        // oracle-integrity sweep (task #98): the backend's qsort IS
+        // pg_qsort (port.h line 478); without this define the verbatim
+        // engine bodies (regc_nfa.c sortins/sortouts/carc_cmp sorts)
+        // bound LIBC qsort — the spgkdtree wrong-oracle class.
+        // regexfam_pg_qsort = verbatim sort_template instantiation in
+        // csrc/regexfam/pg_regexfam_qsort.c.
+        .define("qsort", "regexfam_pg_qsort")
+        .file("csrc/regexfam/pg_regexfam_qsort.c")
         .file("csrc/regexfam/regcomp.c")
         .file("csrc/regexfam/regexec.c")
         .file("csrc/regexfam/regerror.c")
@@ -1068,4 +1099,111 @@ fn main() {
         .compile("pg_difffuzz_nodesfam");
     println!("cargo:rerun-if-changed=csrc/pg_nodesfam_io.c");
     println!("cargo:rerun-if-changed=csrc/nodesfam");
+
+    enforce_sort_symbol_hygiene();
+}
+
+/// Oracle-integrity guard (task #98): FAIL the build when any oracle
+/// archive traffics in an UNPREFIXED sort/compare symbol.
+///
+/// Two defect classes this catches, both shipped this week:
+///  - tidbitmap class: an archive EXPORTS an unprefixed qsort_arg /
+///    pg_qsort — then LINK ORDER silently decides which implementation
+///    every other family's verbatim body gets.
+///  - spgkdtree class: a verbatim PG body left with an UNDEFINED
+///    unprefixed qsort — the backend's qsort IS pg_qsort (port.h
+///    `#define qsort pg_qsort`), so binding libc silently changes
+///    tie order exactly where tie-order fidelity is load-bearing.
+///
+/// Runs on every profile (build.rs is release-effective by construction)
+/// and fails LOUD if it cannot run (no fail-open).
+fn enforce_sort_symbol_hygiene() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    // Unprefixed names banned as DEFINED externals (collision/link-race
+    // class) and as UNDEFINED references (libc-binding class). bsearch is
+    // banned only as a DEFINED external: PG itself calls libc bsearch, so
+    // a `U bsearch` is C-parity, but an archive EXPORTING `bsearch` would
+    // hijack it process-wide.
+    const BAN_ALWAYS: &[&str] = &[
+        "qsort", "qsort_arg", "qsort_interruptible", "pg_qsort",
+        "pg_qsort_strcmp", "med3", "qsort_med3", "qsort_arg_med3",
+        "pg_qsort_med3", "qsort_swap", "qsort_arg_swap", "pg_qsort_swap",
+        "qsort_swapn", "qsort_arg_swapn", "pg_qsort_swapn",
+    ];
+    const BAN_DEFINED_ONLY: &[&str] = &["bsearch"];
+
+    let mut archives: Vec<std::path::PathBuf> = std::fs::read_dir(&out_dir)
+        .expect("read OUT_DIR")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "a")
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("libpg_difffuzz_"))
+        })
+        .collect();
+    archives.sort();
+    assert!(
+        !archives.is_empty(),
+        "sort-symbol guard: no libpg_difffuzz_*.a found in OUT_DIR — guard would be vacuous"
+    );
+
+    let nm = ["nm", "llvm-nm"]
+        .iter()
+        .find(|c| {
+            std::process::Command::new(*c)
+                .arg("--version")
+                .output()
+                .is_ok()
+        })
+        .expect("sort-symbol guard: neither `nm` nor `llvm-nm` available; refusing to fail open");
+
+    let mut violations = Vec::new();
+    for a in &archives {
+        let out = std::process::Command::new(nm)
+            .arg("-g") // external symbols only; TU-local (static) sorts are fine
+            .arg("-o")
+            .arg(a)
+            .output()
+            .unwrap_or_else(|e| panic!("sort-symbol guard: {nm} failed on {}: {e}", a.display()));
+        assert!(
+            out.status.success(),
+            "sort-symbol guard: {nm} exited nonzero on {}",
+            a.display()
+        );
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            // formats: "<archive>:<obj>: <addr> <TYPE> <name>" or
+            //          "<archive>:<obj>:          U <name>"  (GNU: "obj:...")
+            let mut it = line.split_whitespace().rev();
+            let (Some(name), Some(kind)) = (it.next(), it.next()) else { continue };
+            if kind.len() != 1 {
+                continue;
+            }
+            let bare = name.strip_prefix('_').unwrap_or(name); // Mach-O underscore
+            let defined = kind != "U";
+            let banned = BAN_ALWAYS.contains(&bare)
+                || (defined && BAN_DEFINED_ONLY.contains(&bare));
+            if banned {
+                violations.push(format!(
+                    "{}: {} `{}` ({})",
+                    a.file_name().unwrap().to_string_lossy(),
+                    if defined { "EXPORTS" } else { "REFERENCES undefined" },
+                    bare,
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "\n== oracle sort-symbol hygiene violations (task #98 guard) ==\n\
+         Every oracle archive must keep sort/compare symbols family-prefixed;\n\
+         an unprefixed export is a link race (tidbitmap class) and an\n\
+         unprefixed undefined qsort binds LIBC where the backend means\n\
+         pg_qsort (spgkdtree class). Offenders:\n{}\n",
+        violations.join("\n")
+    );
+    println!(
+        "cargo:warning=sort-symbol guard: {} archives clean",
+        archives.len()
+    );
 }

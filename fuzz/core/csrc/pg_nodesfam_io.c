@@ -380,12 +380,24 @@ hash_bytes(const unsigned char *k, int keylen)
 	abort();					/* bms_hash_value: link-only */
 }
 
-void
-pg_qsort(void *base, size_t nel, size_t elsize,
-		 int (*cmp) (const void *, const void *))
-{
-	qsort(base, nel, elsize, cmp);	/* list_sort support: link-only here */
-}
+/*
+ * pg_qsort for list_sort: VERBATIM port/qsort.c instantiation of
+ * lib/sort_template.h (vendored whole under nodesfam/include/lib/).
+ *
+ * oracle-integrity sweep (task #98): this used to be a libc qsort()
+ * trampoline commented "link-only", but unlike the abort() link-only
+ * shims above it would SILENTLY sort with libc's tie order if list_sort
+ * ever became reachable — the spgkdtree wrong-oracle class. The
+ * backend's qsort IS pg_qsort (port.h `#define qsort pg_qsort`), so the
+ * oracle's must be too.
+ */
+#define ST_SORT pg_qsort
+#define ST_ELEMENT_TYPE_VOID
+#define ST_COMPARE_RUNTIME_POINTER
+#define ST_SCOPE
+#define ST_DECLARE
+#define ST_DEFINE
+#include "lib/sort_template.h"
 
 /* ======================= SECTION D: driver entries ===================== */
 

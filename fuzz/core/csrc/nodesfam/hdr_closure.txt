@@ -59,6 +59,7 @@ foreign/fdwapi.h
 lib/ilist.h
 lib/pairingheap.h
 lib/simplehash.h
+lib/sort_template.h
 lib/stringinfo.h
 miscadmin.h
 nodes/bitmapset.h
