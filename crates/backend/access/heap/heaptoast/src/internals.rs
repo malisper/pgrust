@@ -43,8 +43,6 @@ fn invalid_compression_method(cmethod: i8) -> Box<PgError> {
 }
 
 /// C `toast_compress_datum`: `None` is C's NULL (incompressible).
-/// default_toast_compression GUC is unported; its boot default (pglz) is
-/// the invalid-method fallback here.
 pub fn toast_compress_datum<'mcx>(
     mcx: Mcx<'mcx>,
     value: &[u8],
@@ -58,10 +56,11 @@ pub fn toast_compress_datum<'mcx>(
         (&value[VARHDRSZ..], value.len() - VARHDRSZ)
     };
 
+    // If the compression method is not valid, use the current default.
     let cmethod = if compression_method_is_valid(cmethod as u8) {
         cmethod as u8
     } else {
-        TOAST_PGLZ_COMPRESSION
+        ::guc_tables::vars::default_toast_compression.read() as u8
     };
 
     let tmp = match cmethod {

@@ -23,6 +23,7 @@ detoast_seams = { path = "../../common/detoast_seams" }
 toastdesc = { path = "../../common/toastdesc" }
 toast_internals_seams = { path = "../../common/toast_internals_seams" }
 heaptoast_seams = { path = "../heaptoast_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
 heapam = { path = "../heapam" }
 table = { path = "../../table/table" }
 genam = { path = "../../index/genam" }
