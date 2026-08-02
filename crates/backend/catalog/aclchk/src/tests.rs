@@ -46,3 +46,44 @@ fn install_seams() {
         ACLCHECK_OK
     );
 }
+
+#[test]
+fn record_extension_init_priv_noop_outside_extension_script() {
+    // The creating_extension gate must short-circuit before any catalog
+    // access: this test runs with no database, so reaching the worker would
+    // fail loudly.
+    assert!(!pg_depend::creating_extension());
+    let ctx = mcx::MemoryContext::new("t");
+    grant::record_extension_init_priv(ctx.mcx(), 50001, RELATION_RELATION_ID, 0, &[]).unwrap();
+}
+
+#[test]
+fn init_priv_privtype_matches_pg_init_privs_h() {
+    assert_eq!(grant::INITPRIVS_EXTENSION, b'e' as i8);
+}
+
+#[test]
+fn init_priv_owner_route_covers_grantable_syscache_classes() {
+    // (cacheid, owner attnum) per objectaddress.c's ObjectProperty rows.
+    assert_eq!(
+        grant::init_priv_owner_route(types_core::FOREIGN_DATA_WRAPPER_RELATION_ID),
+        (cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID, 3, "foreign-data wrapper"),
+    );
+    assert_eq!(
+        grant::init_priv_owner_route(types_core::FOREIGN_SERVER_RELATION_ID),
+        (cache_syscache::cacheinfo::FOREIGNSERVEROID, 3, "foreign server"),
+    );
+    // pg_class.relowner.
+    assert_eq!(grant::init_priv_owner_route(RELATION_RELATION_ID).1, 6);
+}
+
+#[test]
+fn pg_aclmask_defensive_arms_error_catchably() {
+    use types_nodes::parsenodes::ObjectType;
+    // C's elog(ERROR) arms: no grantable rights on these types; a catchable
+    // error, never a process panic.
+    let e = pg_aclmask_for_grant(ObjectType::OBJECT_STATISTIC_EXT, 1, 0, 10, 0).unwrap_err();
+    assert_eq!(e.message, "grantable rights not supported for statistics objects");
+    let e = pg_aclmask_for_grant(ObjectType::OBJECT_EVENT_TRIGGER, 1, 0, 10, 0).unwrap_err();
+    assert_eq!(e.message, "grantable rights not supported for event triggers");
+}

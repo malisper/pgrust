@@ -900,8 +900,8 @@ fn exec_grant_relation<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) 
             catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
             unlock_class_tuple(&otid)?;
 
-            // recordExtensionInitPriv: no-op outside CREATE EXTENSION, which
-            // is unported.
+            // Update initial privileges for extensions.
+            record_extension_init_priv(mcx, rel_oid, RELATION_RELATION_ID, 0, &new_acl)?;
 
             pg_depend::updateAclDependencies(
                 mcx,
@@ -1150,6 +1150,9 @@ fn exec_grant_attribute<'mcx>(
         let otid = attr_tuple.tuple().t_self;
         catalog_indexing::CatalogTupleUpdate(mcx, att_relation, &otid, &mut newtuple)?;
 
+        // Update initial privileges for extensions (an empty ACL is C's NULL).
+        record_extension_init_priv(mcx, rel_oid, RELATION_RELATION_ID, attnum as i32, &new_acl)?;
+
         pg_depend::updateAclDependencies(
             mcx,
             RELATION_RELATION_ID,
@@ -1330,11 +1333,142 @@ const Anum_pg_init_privs_objsubid: types_core::AttrNumber = 3;
 const Anum_pg_init_privs_privtype: types_core::AttrNumber = 4;
 const Anum_pg_init_privs_initprivs: types_core::AttrNumber = 5;
 const Natts_pg_init_privs: usize = 5;
+pub(crate) const INITPRIVS_EXTENSION: i8 = b'e' as i8;
+
+// recordExtensionInitPriv (aclchk.c): only GRANT/REVOKE executed while an
+// extension script runs (creating_extension) records initial privileges.
+// C's second trigger, binary_upgrade_record_init_privs, has no pgrust
+// counterpart (binary upgrade unported).
+pub(crate) fn record_extension_init_priv<'mcx>(
+    mcx: Mcx<'mcx>,
+    objoid: Oid,
+    classoid: Oid,
+    objsubid: i32,
+    new_acl: &[AclItem],
+) -> PgResult<()> {
+    if !pg_depend::creating_extension() {
+        return Ok(());
+    }
+    record_extension_init_priv_worker(mcx, objoid, classoid, objsubid, new_acl)
+}
+
+// recordExtensionInitPrivWorker (aclchk.c): update, delete or insert the
+// pg_init_privs row for (objoid, classoid, objsubid); an empty new ACL is
+// C's NULL/zero-entry ACL (drop the row).
+fn record_extension_init_priv_worker<'mcx>(
+    mcx: Mcx<'mcx>,
+    objoid: Oid,
+    classoid: Oid,
+    objsubid: i32,
+    new_acl: &[AclItem],
+) -> PgResult<()> {
+    let newmembers = aclmembers(mcx, new_acl)?;
+
+    let rel = table::table_open(mcx, InitPrivsRelationId, RowExclusiveLock)?;
+    let desc = rel.descr();
+    let keys = [
+        pg_largeobject::oid_key(Anum_pg_init_privs_objoid, objoid),
+        pg_largeobject::oid_key(Anum_pg_init_privs_classoid, classoid),
+        int4_key(Anum_pg_init_privs_objsubid, objsubid),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, InitPrivsObjIndexId, true, None, &keys)?;
+
+    // There should exist only one entry or none.
+    let old = match genam::systable_getnext(mcx, &mut scan)? {
+        None => None,
+        Some(tup) => {
+            let mut isnull = false;
+            // SAFETY: fixed catalog columns under the relation's descriptor.
+            let acl_datum = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_init_privs_initprivs as i32,
+                    desc,
+                    &mut isnull,
+                )
+            };
+            debug_assert!(!isnull);
+            let old_acl = with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?;
+            // SAFETY: as above.
+            let privtype = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_init_privs_privtype as i32,
+                    desc,
+                    &mut isnull,
+                )
+            };
+            Some((tup.t_self, old_acl, privtype))
+        }
+    };
+    match old {
+        Some((tid, old_acl, privtype)) => {
+            // Update pg_shdepend for roles mentioned in the old/new ACLs.
+            let oldmembers = aclmembers(mcx, &old_acl)?;
+            pg_shdepend::updateInitAclDependencies(
+                mcx,
+                classoid,
+                objoid,
+                objsubid,
+                &oldmembers,
+                &newmembers,
+            )?;
+            if !new_acl.is_empty() {
+                // C heap_modify_tuple; an identical row image is rebuilt instead.
+                let acl_img = acl_image(mcx, new_acl)?;
+                let values = [
+                    Datum::from_oid(objoid),
+                    Datum::from_oid(classoid),
+                    Datum::from_i32(objsubid),
+                    privtype,
+                    Datum::from_usize(acl_img.as_ptr() as usize),
+                ];
+                let nulls = [false; Natts_pg_init_privs];
+                let mut newtuple = heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+                catalog_indexing::CatalogTupleUpdate(mcx, &rel, &tid, &mut newtuple)?;
+            } else {
+                catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+            }
+        }
+        // Only add a new entry if the new ACL is non-empty.
+        None if !new_acl.is_empty() => {
+            let acl_img = acl_image(mcx, new_acl)?;
+            let values = [
+                Datum::from_oid(objoid),
+                Datum::from_oid(classoid),
+                Datum::from_i32(objsubid),
+                // This function only handles initial privileges of extensions.
+                Datum::from_char(INITPRIVS_EXTENSION),
+                Datum::from_usize(acl_img.as_ptr() as usize),
+            ];
+            let nulls = [false; Natts_pg_init_privs];
+            let mut tuple = heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+            catalog_indexing::CatalogTupleInsert(mcx, &rel, &mut tuple)?;
+            pg_shdepend::updateInitAclDependencies(
+                mcx,
+                classoid,
+                objoid,
+                objsubid,
+                &[],
+                &newmembers,
+            )?;
+        }
+        None => {}
+    }
+
+    genam::systable_endscan(mcx, scan)?;
+    // Prevent error when processing objects multiple times.
+    xact::CommandCounterIncrement()?;
+    rel.close(RowExclusiveLock)
+}
 
 // objectaddress.c's get_object_catcache_oid/get_object_attnum_owner subset;
-// hosted here because catalog_objectaddress depends on this crate.
-fn init_priv_owner(classid: Oid, objid: Oid) -> PgResult<Oid> {
-    let (cacheid, owner_attnum, descr) = if classid == RELATION_RELATION_ID {
+// hosted here because catalog_objectaddress depends on this crate. Covers
+// every class the GRANT lanes can record init privs for through a syscache;
+// pg_largeobject_metadata and pg_parameter_acl stay out, as in C (no
+// syscache / no owner column respectively).
+pub(crate) fn init_priv_owner_route(classid: Oid) -> (i32, i32, &'static str) {
+    if classid == RELATION_RELATION_ID {
         (RELOID, ANUM_PG_CLASS_RELOWNER, "relation")
     } else if classid == TYPE_RELATION_ID {
         (cache_syscache::cacheinfo::TYPEOID, 4, "type")
@@ -1348,9 +1482,21 @@ fn init_priv_owner(classid: Oid, objid: Oid) -> PgResult<Oid> {
         (CLASS_LANGUAGE.cacheid, CLASS_LANGUAGE.owner_attnum, CLASS_LANGUAGE.descr)
     } else if classid == CLASS_NAMESPACE.classid {
         (CLASS_NAMESPACE.cacheid, CLASS_NAMESPACE.owner_attnum, CLASS_NAMESPACE.descr)
+    } else if classid == CLASS_FDW.classid {
+        (CLASS_FDW.cacheid, CLASS_FDW.owner_attnum, CLASS_FDW.descr)
+    } else if classid == CLASS_FOREIGN_SERVER.classid {
+        (
+            CLASS_FOREIGN_SERVER.cacheid,
+            CLASS_FOREIGN_SERVER.owner_attnum,
+            CLASS_FOREIGN_SERVER.descr,
+        )
     } else {
         panic!("RemoveRoleFromInitPriv (aclchk.c): owner lookup for object class {classid} unported")
-    };
+    }
+}
+
+fn init_priv_owner(classid: Oid, objid: Oid) -> PgResult<Oid> {
+    let (cacheid, owner_attnum, descr) = init_priv_owner_route(classid);
 
     let Some(tuple) = SearchSysCache1(cacheid, SysCacheKey::Value(Datum::from_oid(objid)))? else {
         return Err(Box::new(PgError::error(format!(
@@ -1612,8 +1758,7 @@ fn exec_grant_type_check(cls: &GrantClass, tuple: &catcache::CatCTuple) -> PgRes
     Ok(())
 }
 
-// ExecGrant_common (aclchk.c). recordExtensionInitPriv: no-op outside
-// CREATE EXTENSION, which is unported.
+// ExecGrant_common (aclchk.c).
 fn exec_grant_common<'mcx>(
     mcx: Mcx<'mcx>,
     istmt: &mut InternalGrant<'_, '_>,
@@ -1705,6 +1850,9 @@ fn exec_grant_common<'mcx>(
         )?;
         catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
         unlock_catalog_tuple(cls, &otid)?;
+
+        // Update initial privileges for extensions.
+        record_extension_init_priv(mcx, objectid, cls.classid, 0, &new_acl)?;
 
         pg_depend::updateAclDependencies(
             mcx,
@@ -1833,6 +1981,9 @@ fn exec_grant_largeobject<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_
             heaptuple::heap_modify_tuple(mcx, tuple, desc, &values, &nulls, &replaces)?;
         catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
 
+        // Update initial privileges for extensions.
+        record_extension_init_priv(mcx, loid, LargeObjectRelationId, 0, &new_acl)?;
+
         pg_depend::updateAclDependencies(
             mcx,
             LargeObjectRelationId,
@@ -1870,8 +2021,7 @@ fn text_attr(d: Datum) -> String {
     }
 }
 
-// ExecGrant_Parameter (aclchk.c). recordExtensionInitPriv: no-op outside
-// CREATE EXTENSION, which is unported.
+// ExecGrant_Parameter (aclchk.c).
 fn exec_grant_parameter<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) -> PgResult<()> {
     use pg_parameter_acl::{
         Anum_pg_parameter_acl_paracl, Anum_pg_parameter_acl_parname, Natts_pg_parameter_acl,
@@ -1965,6 +2115,15 @@ fn exec_grant_parameter<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>)
             )?;
             catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
         }
+
+        // Update initial privileges for extensions.
+        record_extension_init_priv(
+            mcx,
+            parameter_id,
+            catalog::ParameterAclRelationId,
+            0,
+            &new_acl,
+        )?;
 
         pg_depend::updateAclDependencies(
             mcx,

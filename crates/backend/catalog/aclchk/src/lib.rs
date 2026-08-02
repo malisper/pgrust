@@ -719,6 +719,10 @@ pub(crate) fn pg_aclmask_for_grant(
         ObjectType::OBJECT_SCHEMA => {
             object_aclmask(NAMESPACE_RELATION_ID, object_oid, roleid, mask, how)
         }
+        // C elog(ERROR): defensive, unreachable from the GRANT lanes.
+        ObjectType::OBJECT_STATISTIC_EXT => Err(Box::new(PgError::error(
+            "grantable rights not supported for statistics objects".to_string(),
+        ))),
         ObjectType::OBJECT_TYPE => {
             object_aclmask(TYPE_RELATION_ID, object_oid, roleid, mask, how)
         }
@@ -742,6 +746,10 @@ pub(crate) fn pg_aclmask_for_grant(
         ObjectType::OBJECT_FOREIGN_SERVER => {
             object_aclmask(types_core::FOREIGN_SERVER_RELATION_ID, object_oid, roleid, mask, how)
         }
+        // C elog(ERROR): defensive, unreachable from the GRANT lanes.
+        ObjectType::OBJECT_EVENT_TRIGGER => Err(Box::new(PgError::error(
+            "grantable rights not supported for event triggers".to_string(),
+        ))),
         other => panic!("pg_aclmask (aclchk.c): object type {} arm unported", other as i32),
     }
 }
