@@ -61,7 +61,7 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::Path;
-use std::sync::Once;
+use std::sync::{Mutex, MutexGuard, Once};
 
 use types_error::{DEBUG1, ERROR, LOG};
 
@@ -102,6 +102,17 @@ fn contains_include(payload: &[u8]) -> bool {
 
 static INIT: Once = Once::new();
 
+/// The verbatim flex scanner owns plain (non-thread-local) statics
+/// (ConfigFileLineno, GUC_flex_fatal_jmp) and must stay byte-verbatim, so
+/// the whole oracle call + accessor read-out is one critical section.
+/// libFuzzer is single-threaded; this only matters for `cargo test`, which
+/// runs targets in parallel threads (it corrupted results before the lock).
+static ORACLE: Mutex<()> = Mutex::new(());
+
+fn lock_oracle() -> MutexGuard<'static, ()> {
+    ORACLE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn guc_file_diff(data: &[u8]) {
     INIT.call_once(|| {
         // Silence the Rust server-log emission path (fuzz-process hygiene
@@ -123,7 +134,8 @@ pub fn guc_file_diff(data: &[u8]) {
         return; // census domain restriction; see module header
     }
 
-    // ---- C oracle ----
+    // ---- C oracle ---- (held until the last accessor read below)
+    let _oracle = lock_oracle();
     let c_thrown = unsafe { pg_gucf_run(payload.as_ptr(), payload.len(), elevel.0) } != 0;
 
     // ---- shipped Rust ----

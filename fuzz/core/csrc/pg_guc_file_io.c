@@ -104,8 +104,8 @@ guc_name_compare(const char *namea, const char *nameb)
 
 #define GUCF_ARENA_MAX 65536
 
-static void *gucf_arena[GUCF_ARENA_MAX];
-static size_t gucf_arena_n;
+static _Thread_local void *gucf_arena[GUCF_ARENA_MAX];
+static _Thread_local size_t gucf_arena_n;
 
 static void
 gucf_arena_reset(void)
@@ -181,22 +181,22 @@ gucf_arena_strdup(const char *s)
  * SECTION C: ereport capture (environment mock)
  * ===================================================================== */
 
-static sigjmp_buf gucf_driver_jmp;
-static int	gucf_driver_jmp_armed;
+static _Thread_local sigjmp_buf gucf_driver_jmp;
+static _Thread_local int gucf_driver_jmp_armed;
 
-static int	gucf_pending_elevel;
-static int	gucf_pending_code;
-static char gucf_pending_msg[4096];
+static _Thread_local int gucf_pending_elevel;
+static _Thread_local int gucf_pending_code;
+static _Thread_local char gucf_pending_msg[4096];
 
-static int	gucf_thrown;		/* 1 after an elevel >= ERROR report */
-static int	gucf_thrown_elevel;
-static int	gucf_thrown_code;
-static char gucf_thrown_msg[4096];
+static _Thread_local int gucf_thrown;		/* 1 after an elevel >= ERROR report */
+static _Thread_local int gucf_thrown_elevel;
+static _Thread_local int gucf_thrown_code;
+static _Thread_local char gucf_thrown_msg[4096];
 
 /* count + last of the sub-ERROR reports (PG's log-only channel) */
-static int	gucf_logged_count;
-static int	gucf_logged_last_elevel;
-static int	gucf_logged_last_code;
+static _Thread_local int gucf_logged_count;
+static _Thread_local int gucf_logged_last_elevel;
+static _Thread_local int gucf_logged_last_code;
 
 void
 gucf_ereport_begin(int elevel)
@@ -316,9 +316,9 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
  * SECTION E: driver entry + accessors (fuzz plumbing, pg_gucf_ prefix)
  * ===================================================================== */
 
-static ConfigVariable *gucf_head;
-static int	gucf_ok;
-static int	gucf_returned;
+static _Thread_local ConfigVariable *gucf_head;
+static _Thread_local int gucf_ok;
+static _Thread_local int gucf_returned;
 
 /* returns 0 = ParseConfigFp returned, 1 = error thrown (longjmp) */
 int

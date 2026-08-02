@@ -305,7 +305,12 @@ pub fn FreeConfigVariables(list: &mut Vec<ConfigVariable>) {
 // backslash escapes.
 pub fn DeescapeQuotedString(s: &str) -> String {
     let bytes = s.as_bytes();
-    debug_assert!(bytes.len() >= 2 && bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'');
+    // C only Asserts the surrounding quotes, and Assert() is compiled out in
+    // the release build that is the behavior of record. The assertion is in
+    // fact REACHABLE upstream: a STRING token containing an embedded NUL is
+    // truncated by strlen/pstrdup (see token_text), leaving a string with no
+    // trailing quote, which this loop then handles exactly as C's does. A
+    // debug_assert here would be a ported-in constraint C does not enforce.
 
     let mut out = Vec::with_capacity(bytes.len().saturating_sub(2));
     let mut i = 1;
@@ -477,15 +482,12 @@ impl<'a> Lexer<'a> {
             // The catch-all `.` consumes one byte and returns GUC_ERROR (also
             // the unterminated-quote path).
             self.pos += 1;
-            return Some(Token {
-                kind: TokenKind::Error,
-                text: String::from_utf8_lossy(&[first]).into_owned(),
-            });
+            return Some(Token { kind: TokenKind::Error, text: token_text(&[first]) });
         }
 
         let text = &rest[..best_len];
         self.pos += best_len;
-        Some(Token { kind: best_kind, text: String::from_utf8_lossy(text).into_owned() })
+        Some(Token { kind: best_kind, text: token_text(text) })
     }
 
     fn skip_ws(&mut self) {
@@ -522,6 +524,18 @@ fn parse_line(lexer: &mut Lexer<'_>, first: Token) -> Result<(String, String), P
     }
 
     Ok((name, value))
+}
+
+// Token text as C materializes it. The scanner advances over the FULL match
+// (yyleng), but every consumer copies it as a C string — pstrdup(yytext) for
+// names/values, %s for the syntax-error messages, strlen() inside
+// DeescapeQuotedString. All of those stop at the first NUL byte, so a match
+// containing an embedded NUL yields a TRUNCATED string on the C side while
+// the scan position still advances past the whole token. Reproduce that
+// exactly (found by guc_file_diff: "a\0b = 1" and "x = 'nul\0byte'").
+fn token_text(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 fn match_id(rest: &[u8]) -> usize {
@@ -590,25 +604,38 @@ fn match_unquoted_string(rest: &[u8]) -> usize {
         .count()
 }
 
+// INTEGER = {SIGN}?({DIGIT}+|0x{HEXDIGIT}+){UNIT_LETTER}*. The two mantissa
+// alternatives are independent flex alternatives, and the rule as a whole
+// takes the LONGEST overall match — so a failed 0x form must fall back to
+// the decimal form rather than failing the rule. "0x" therefore lexes as
+// INTEGER (digits "0" + unit letter "x"), not as an error, and "0x1f" wins
+// with the hex form. Found by guc_file_diff (pgrust returned a syntax error
+// where C accepted the setting).
 fn match_integer(rest: &[u8]) -> usize {
-    let mut i = match_sign(rest);
-    let body = &rest[i..];
-    let mantissa = if let Some(hex) = body.strip_prefix(b"0x") {
-        let n = hex.iter().take_while(|b| b.is_ascii_hexdigit()).count();
-        if n == 0 {
-            return 0;
-        }
-        2 + n
-    } else {
-        let n = body.iter().take_while(|b| b.is_ascii_digit()).count();
-        if n == 0 {
-            return 0;
-        }
-        n
+    let sign = match_sign(rest);
+    let body = &rest[sign..];
+
+    let hex_mantissa = match body.strip_prefix(b"0x") {
+        Some(hex) => match hex.iter().take_while(|b| b.is_ascii_hexdigit()).count() {
+            0 => 0,
+            n => 2 + n,
+        },
+        None => 0,
     };
-    i += mantissa;
-    i += rest[i..].iter().take_while(|b| b.is_ascii_alphabetic()).count();
-    i
+    let dec_mantissa = body.iter().take_while(|b| b.is_ascii_digit()).count();
+
+    let mut best = 0;
+    for mantissa in [hex_mantissa, dec_mantissa] {
+        if mantissa == 0 {
+            continue;
+        }
+        let mut end = sign + mantissa;
+        end += rest[end..].iter().take_while(|b| b.is_ascii_alphabetic()).count();
+        if end > best {
+            best = end;
+        }
+    }
+    best
 }
 
 fn match_real(rest: &[u8]) -> usize {
