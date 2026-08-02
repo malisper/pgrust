@@ -914,6 +914,17 @@ pub fn index_constraint_create<'mcx>(
     let deferrable = constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE != 0;
     let initdeferred = constr_flags & INDEX_CONSTR_CREATE_INIT_DEFERRED != 0;
     debug_assert!(!initdeferred || deferrable);
+    // C's order: the system-table restriction fires before the expressions
+    // check and before any AUTO-dependency deletion (index.c).
+    if !allow_system_table_mods
+        && catalog::IsSystemRelation(heapRelation)
+        && !miscinit_seams::is_bootstrap_processing_mode::call()
+    {
+        return Err(err(
+            "user-defined indexes on system catalog tables are not supported".to_string(),
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
     if !indexInfo.ii_Expressions.is_nil()
         && constraintType != pg_constraint::CONSTRAINT_EXCLUSION
     {
@@ -927,15 +938,6 @@ pub fn index_constraint_create<'mcx>(
             RELATION_RELATION_ID,
             pg_depend::DependencyType::Auto,
         )?;
-    }
-    if !allow_system_table_mods
-        && catalog::IsSystemRelation(heapRelation)
-        && !miscinit_seams::is_bootstrap_processing_mode::call()
-    {
-        return Err(err(
-            "user-defined indexes on system catalog tables are not supported".to_string(),
-            ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
     }
 
     let mut entry = pg_constraint::ConstraintEntry::base(
