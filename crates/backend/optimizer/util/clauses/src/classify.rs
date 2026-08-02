@@ -210,8 +210,21 @@ pub fn contain_volatile_functions_not_nextval(clause: Node<'_>) -> PgResult<bool
     ContainVolatile { not_nextval: true }.visit(clause)
 }
 
-pub fn contain_volatile_functions_after_planning(_expr: Node<'_>) -> PgResult<bool> {
-    panic!("contain_volatile_functions_after_planning deferred: expression_planner unported");
+// contain_volatile_functions_after_planning (clauses.c:657): the wrapper that
+// is safe to use from outside the planner, because it first runs the
+// expression through expression_planner (planner.c:6779) -- eval_const_expressions
+// to convert named-argument calls, insert default arguments and simplify
+// constant subexprs, then fix_opfuncids to fill in missing opfuncid values.
+pub fn contain_volatile_functions_after_planning<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<bool> {
+    // We assume here that expression_planner() won't scribble on its input.
+    let expr = crate::eval_const_expressions(mcx, expr)?;
+    nodes_core::fix_opfuncids(expr)?;
+
+    // Now we can search for volatile functions.
+    contain_volatile_functions(expr)
 }
 
 struct MaxParallelHazard {
@@ -656,8 +669,38 @@ pub fn num_relids(_clause: Node<'_>) -> i32 {
     panic!("NumRelids deferred: needs pull_varnos over PlannerInfo outer_join_rels");
 }
 
-pub fn commute_op_expr(_clause: Node<'_>) {
-    panic!("CommuteOpExpr deferred: in-place OpExpr commutation (indxpath consumer unported)");
+// CommuteOpExpr (clauses.c:2147): commute a binary operator clause.
+// XXX the clause is destructively modified!
+pub fn commute_op_expr(clause: Node<'_>) -> PgResult<()> {
+    // Sanity checks: caller is at fault if these fail.
+    let Some(expr) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+        return Err(Box::new(types_error::PgError::error(
+            "cannot commute non-binary-operator clause".to_string(),
+        )));
+    };
+    let opno = expr.opno;
+    let opoid = lsyscache::get_commutator(opno)?;
+
+    if opoid == 0 {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "could not find commutator for operator {opno}"
+        ))));
+    }
+
+    // modify the clause in-place!
+    // opresulttype, opretset, opcollid, inputcollid need not change.
+    // SAFETY: C destructively modifies the caller's clause; the caller owns
+    // it exclusively (same contract as convert_saop_to_hashed_saop above).
+    unsafe {
+        clause
+            .with_mut::<types_nodes::primnodes::OpExpr, _>(|o| {
+                o.opno = opoid;
+                o.opfuncid = 0;
+                o.args.as_mut_slice().swap(0, 1);
+            })
+            .expect("OpExpr");
+    }
+    Ok(())
 }
 
 pub struct WindowFuncLists<'mcx> {
