@@ -109,6 +109,15 @@ fn install_seams() {
                 typisdefined: true,
             }))
         });
+        // pg_proc.proowner for initialize_peragg's component-fn ACL checks
+        // (nodeWindowAgg.c:2911): the fixture aggregates are catalog-owned.
+        syscache_seams::lookup_pg_proc_secdef::set(|_funcoid| {
+            Ok(Some(::syscache_seams::PgProcSecdefShape {
+                proowner: 10,
+                prosecdef: false,
+                proconfig: None,
+            }))
+        });
         // pg_aggregate.dat rows for count() 2803 / sum(int4) 2108.
         syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
             Ok(match aggfnoid {
