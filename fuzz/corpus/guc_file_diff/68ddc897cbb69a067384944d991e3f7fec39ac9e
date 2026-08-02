@@ -1,0 +1,7 @@
+   name = value
+ (The "=" is optional.)  Whitespace may be used.  Comments are introduced with
+ "postgres -c log_connections+all".  Some parameters can be changed at run time
+ Memory units:  B  = bytes            Tome units:  us  = microseconds
+                kB = kilobytes                     ms  = millirequires restart)
+unix_socket_directories = '/tmp'	# comma-separated list of directories
+unix_socket_group = ''			# (change requires restart)

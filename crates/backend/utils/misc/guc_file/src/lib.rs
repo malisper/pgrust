@@ -593,40 +593,48 @@ fn match_qualified_id(rest: &[u8]) -> usize {
     left + 1 + right
 }
 
-// STRING = \'([^'\\\n]|\\.|\'\')*\'. The body must DECOMPOSE into those
-// elements, so scanning is deterministic, not a search for the last quote: a
-// doubled '' is body content and the scan continues; a LONE quote is the
-// terminator and the match ends there. Greedily consuming '' is what makes
-// the match maximal — there is no longer alternative, because continuing
-// past a lone quote would leave an unmatchable single quote in the body.
-// (Found by guc_file_diff: "ate''='doubled''quote''end'" lexed as one long
-// STRING in pgrust where flex produces ID + STRING '' + EQUALS + ...).
+// STRING = \'([^'\\\n]|\\.|\'\')*\'. flex takes the LONGEST match, and the
+// DFA backtracks: a doubled '' may be body content OR the closing quote
+// followed by an unrelated quote, and only the longest decomposition that
+// actually terminates counts. So record a candidate end at EVERY quote and
+// keep scanning through doubled quotes; a LONE quote can only be the
+// terminator, and nothing valid follows it.
+//
+// Consequence on a run of N quotes: matches exist exactly at even lengths,
+// so the match is the largest even number <= N (verified against the
+// vendored scanner for N = 1..41). Two guc_file_diff divergences came from
+// getting this wrong: scanning on past a lone quote (over-long match on
+// "ate''='doubled''quote''end'"), then failing an odd run outright instead
+// of backtracking one pair ("'" x 39).
 fn match_string(rest: &[u8]) -> usize {
     if rest.first() != Some(&b'\'') {
         return 0;
     }
     let mut i = 1;
+    let mut best = 0;
     while i < rest.len() {
         match rest[i] {
             b'\n' => break,
             b'\\' => {
-                // \\. cannot match a newline (`.` excludes it) or run off the end.
+                // \\. matches any single char except newline, and cannot run
+                // off the end of the buffer.
                 if i + 1 >= rest.len() || rest[i + 1] == b'\n' {
                     break;
                 }
                 i += 2;
             }
             b'\'' => {
+                best = i + 1; // the string can validly close here
                 if rest.get(i + 1) == Some(&b'\'') {
-                    i += 2; // '' — body content, keep scanning
+                    i += 2; // ...or '' is body content; keep looking for longer
                 } else {
-                    return i + 1; // lone quote — the terminator
+                    break; // a lone quote is the terminator
                 }
             }
             _ => i += 1,
         }
     }
-    0 // unterminated: the STRING rule does not match at all
+    best
 }
 
 fn match_unquoted_string(rest: &[u8]) -> usize {
