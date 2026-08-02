@@ -492,14 +492,19 @@ pub fn cost_probe(setting: &[u8]) -> (PgcryptofamKind, i64) {
 /// writes `n` itoa64 chars of `v`, low bits first.
 pub fn c_to64(v: u64, n: usize) -> Vec<u8> {
     assert!(n <= 11, "to64 emits at most ceil(64/6) chars");
-    let mut buf = vec![0i8; n];
-    unsafe { pg_diff_pgcryptofam_to64(buf.as_mut_ptr(), v as c_ulong, n as c_int) };
-    buf.into_iter().map(|b| b as u8).collect()
+    // Buffer is u8 and the pointer is CAST to c_char: `c_char` is `i8` on
+    // macOS aarch64 but `u8` on Linux aarch64, so an i8-typed buffer compiles
+    // on the laptop and fails on the CI cluster (this cost one build-failed job).
+    let mut buf = vec![0u8; n];
+    with_oracle(|| unsafe {
+        pg_diff_pgcryptofam_to64(buf.as_mut_ptr().cast::<c_char>(), v as c_ulong, n as c_int)
+    });
+    buf
 }
 
 /// Exhaustive-diff helper: crypt-des.c's file-static `ascii_to_bin`.
 pub fn c_ascii_to_bin(ch: u8) -> i32 {
-    unsafe { pg_diff_pgcryptofam_ascii_to_bin(ch as c_char) }
+    with_oracle(|| unsafe { pg_diff_pgcryptofam_ascii_to_bin(ch as c_char) })
 }
 
 /// Exhaustive-diff helper: crypt-blowfish.c's file-static `BF_encode`
@@ -511,10 +516,16 @@ pub fn c_bf_encode(src: &[u8], size: usize) -> Vec<u8> {
     let bytes: &mut [u8; 24] = unsafe { &mut *(words.as_mut_ptr() as *mut [u8; 24]) };
     bytes[..size].copy_from_slice(&src[..size]);
     let outlen = (size * 4).div_ceil(3);
-    let mut out = vec![0i8; outlen + 4];
-    unsafe { pg_diff_pgcryptofam_bf_encode(out.as_mut_ptr(), words.as_ptr(), size as c_int) };
+    let mut out = vec![0u8; outlen + 4];
+    with_oracle(|| unsafe {
+        pg_diff_pgcryptofam_bf_encode(
+            out.as_mut_ptr().cast::<c_char>(),
+            words.as_ptr(),
+            size as c_int,
+        )
+    });
     out.truncate(outlen);
-    out.into_iter().map(|b| b as u8).collect()
+    out
 }
 
 /// Exhaustive-diff helper: crypt-blowfish.c's file-static `BF_decode`.
@@ -543,9 +554,11 @@ pub fn c_bf_decode(src: &[u8], size: usize) -> Option<Vec<u8>> {
 /// Exhaustive-diff helper: the 4-char xdes iteration-count encoding slice
 /// of `_crypt_gensalt_extended_rn` (crypt-gensalt.c's `_crypt_itoa64`).
 pub fn c_xdes_count_encode(count: u32) -> [u8; 4] {
-    let mut out = [0i8; 4];
-    unsafe { pg_diff_pgcryptofam_xdes_count_encode(count as c_ulong, out.as_mut_ptr()) };
-    out.map(|b| b as u8)
+    let mut out = [0u8; 4];
+    with_oracle(|| unsafe {
+        pg_diff_pgcryptofam_xdes_count_encode(count as c_ulong, out.as_mut_ptr().cast::<c_char>())
+    });
+    out
 }
 
 #[cfg(test)]
