@@ -802,3 +802,61 @@ mod complex_projection_record {
         assert_eq!(fs.resulttype, TEXTOID);
     }
 }
+
+#[test]
+fn stored_default_families_type_through_expr_type() {
+    // func_get_detail's defaults lane types stored proargdefaults with the
+    // shared nodeFuncs.c exprType; families the old local closed set lacked
+    // (a CURRENT_TIMESTAMP SQLValueFunction, an OpExpr) must type cleanly.
+    const TIMESTAMPTZOID: Oid = 1184;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let svf = Node::mk(
+        mcx,
+        types_nodes::primnodes::SQLValueFunction {
+            op: types_nodes::primnodes::SQLValueFunctionOp::SVFOP_CURRENT_TIMESTAMP,
+            r#type: TIMESTAMPTZOID,
+            typmod: -1,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(nodes_core::expr_type(svf), TIMESTAMPTZOID);
+
+    let op = Node::mk(
+        mcx,
+        types_nodes::primnodes::OpExpr {
+            opno: 551,
+            opfuncid: 177,
+            opresulttype: INT4OID,
+            opretset: false,
+            opcollid: InvalidOid,
+            inputcollid: InvalidOid,
+            args: NodeList::nil(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(nodes_core::expr_type(op), INT4OID);
+}
+
+#[test]
+fn expr_location_handles_tags_beyond_the_old_closed_set() {
+    // The error-cursor helper now rides the full nodeFuncs.c exprLocation
+    // port: NamedArgExpr (absent from the old local copy) reports the
+    // leftmost of its own location and its argument's, per C.
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let arg = Node::mk_const(mcx, 25, -1, 100, -1, datum::Datum::null(), true, false).unwrap();
+    let na = Node::mk(
+        mcx,
+        types_nodes::primnodes::NamedArgExpr {
+            arg: Some(arg),
+            name: Some("x"),
+            argnumber: 0,
+            location: 9,
+        },
+    )
+    .unwrap();
+    assert_eq!(crate::expr_location(na), 9);
+}

@@ -675,3 +675,67 @@ fn on_conflict_expr_mutator_identity_and_rebuild() {
     assert_eq!(new_oc.exclRelIndex, 2);
     assert_eq!(new_oc.onConflictSet.len(), 1);
 }
+
+#[test]
+fn expr_location_covers_c_arms_and_defaults_to_minus_one() {
+    use types_nodes::parsenodes::DefElem;
+    use types_nodes::primnodes::{Const, TargetEntry};
+    use types_nodes::rawnodes::{SortBy, WindowDef};
+
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let con = Node::mk(
+        mcx,
+        Const {
+            consttype: 23,
+            consttypmod: -1,
+            constcollid: 0,
+            constlen: 4,
+            constvalue: datum::Datum::from_i32(1),
+            constisnull: false,
+            constbyval: true,
+            location: 7,
+        },
+    )
+    .unwrap();
+
+    // C exprLocation: SortBy reports its argument's location (the operator,
+    // if any, is ignored).
+    let sb = Node::mk(mcx, SortBy { node: Some(con), ..SortBy::default() }).unwrap();
+    assert_eq!(node_funcs::expr_location(sb), 7);
+
+    // WindowDef carries its own location.
+    let wd = Node::mk(mcx, WindowDef { location: 11, ..WindowDef::default() }).unwrap();
+    assert_eq!(node_funcs::expr_location(wd), 11);
+
+    // TargetEntry reports its expression's location.
+    let te = Node::mk(
+        mcx,
+        TargetEntry {
+            expr: con,
+            resno: 1,
+            resname: None,
+            ressortgroupref: 0,
+            resorigtbl: 0,
+            resorigcol: 0,
+            resjunk: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(node_funcs::expr_location(te), 7);
+
+    // C's default arm: a tag exprLocation has no case for is "just unknown"
+    // (-1), even when the node carries a location field.
+    let de = Node::mk(
+        mcx,
+        DefElem {
+            defnamespace: None,
+            defname: Some("x"),
+            arg: None,
+            defaction: types_nodes::parsenodes::DefElemAction::DEFELEM_UNSPEC,
+            location: 33,
+        },
+    )
+    .unwrap();
+    assert_eq!(node_funcs::expr_location(de), -1);
+}

@@ -8,6 +8,7 @@ use coerce::{COERCION_EXPLICIT, COERCION_IMPLICIT, COERCION_PATH_COERCEVIAIO,
     COERCION_PATH_RELABELTYPE, TYPCATEGORY_INVALID, TYPCATEGORY_STRING};
 use elog::ereport;
 use mcx::{Mcx, PgVec};
+use nodes_core::expr_location;
 use parser_small1::{parser_errposition, ParseState};
 use types_core::catalog::{RECORDOID, UNKNOWNOID, VOIDOID};
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
@@ -1345,25 +1346,6 @@ fn FuncNameAsType(parts: &[&str]) -> PgResult<Oid> {
     }
 }
 
-// exprType over the node families proargdefaults carries (system_functions
-// defaults are Consts, occasionally coerced).
-fn default_expr_type(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().consttype,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
-        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
-        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
-        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
-        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
-        tag => panic!("default_expr_type: node family {tag:?} not ported"),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn func_get_detail<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1849,71 +1831,6 @@ fn variadic_not_array(pstate: &ParseState<'_, '_>, fargs: &NodeList<'_>) -> Box<
     )
 }
 
-// C exprLocation (nodeFuncs.c) over transformed call arguments; closed-set
-// copy of parse_expr::node_funcs (dependency cycle forbids sharing).
-fn expr_location(node: Node<'_>) -> ParseLoc {
-    fn leftmost(a: ParseLoc, b: ParseLoc) -> ParseLoc {
-        if a < 0 { b } else if b < 0 { a } else { a.min(b) }
-    }
-    fn list_loc(l: &NodeList<'_>) -> ParseLoc {
-        let mut loc = -1;
-        for n in l.iter() {
-            loc = leftmost(loc, expr_location(n));
-            if loc == 0 {
-                break;
-            }
-        }
-        loc
-    }
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().location,
-        NodeTag::T_Var => node.as_var().unwrap().location,
-        NodeTag::T_Param => node.as_param().unwrap().location,
-        NodeTag::T_Aggref => node.as_aggref().unwrap().location,
-        NodeTag::T_WindowFunc => node.as_window_func().unwrap().location,
-        NodeTag::T_OpExpr => {
-            let op = node.as_op_expr().unwrap();
-            leftmost(op.location, list_loc(&op.args))
-        }
-        NodeTag::T_FuncExpr => {
-            let f = node.as_func_expr().unwrap();
-            leftmost(f.location, list_loc(&f.args))
-        }
-        NodeTag::T_RelabelType => {
-            let r = node.as_relabel_type().unwrap();
-            leftmost(r.location, expr_location(r.arg))
-        }
-        NodeTag::T_CoerceViaIO => {
-            let c = node.as_coerce_via_io().unwrap();
-            leftmost(c.location, expr_location(c.arg))
-        }
-        NodeTag::T_ArrayCoerceExpr => {
-            let a = node.as_array_coerce_expr().unwrap();
-            leftmost(a.location, expr_location(a.arg))
-        }
-        NodeTag::T_ConvertRowtypeExpr => {
-            let c = node.as_convert_rowtype_expr().unwrap();
-            leftmost(c.location, expr_location(c.arg))
-        }
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,
-        NodeTag::T_CaseTestExpr => -1,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().location,
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().location,
-        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
-        NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
-        NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
-        NodeTag::T_BoolExpr => {
-            let b = node.as_bool_expr().unwrap();
-            leftmost(b.location, list_loc(&b.args))
-        }
-        NodeTag::T_NullTest => {
-            let n = node.as_null_test().unwrap();
-            leftmost(n.location, n.arg.map_or(-1, expr_location))
-        }
-        other => panic!("exprLocation (nodeFuncs.c): arm for {other:?} unported"),
-    }
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -2157,9 +2074,9 @@ pub fn LookupFuncName(
 }
 
 // LookupFuncWithArgs (parse_func.c) over a grammar ObjectWithArgs (objargs
-// TypeNames; args_unspecified => any-arity lookup). Divergence: the
-// PROCEDURE/ROUTINE include_out_arguments second pass is not ported
-// (OUT-parameter procedures).
+// TypeNames; args_unspecified => any-arity lookup), including the
+// PROCEDURE/ROUTINE include_out_arguments second pass (OUT-parameter
+// procedures).
 pub fn LookupFuncWithArgs(
     objtype: ObjectType,
     func: &types_nodes::parsenodes::ObjectWithArgs<'_>,
