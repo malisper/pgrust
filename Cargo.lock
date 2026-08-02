@@ -15446,6 +15446,7 @@ dependencies = [
  "elog",
  "guc_tables",
  "keywords",
+ "mbutils",
  "mcx",
  "numutils",
  "parser_small1",
