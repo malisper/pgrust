@@ -703,6 +703,10 @@ pub(crate) fn writetup(
                 let size = if *byref_typlen == -1 {
                     // SAFETY: live plain varlena image (putdatum rejects toast).
                     unsafe { ::types_tuple::varatt::varsize_any(p) }
+                } else if *byref_typlen == -2 {
+                    // C datumGetSize: strlen + 1 — the NUL rides the tape.
+                    // SAFETY: live NUL-terminated cstring copy.
+                    unsafe { core::ffi::CStr::from_ptr(p.cast()) }.to_bytes_with_nul().len()
                 } else {
                     *byref_typlen as usize
                 };

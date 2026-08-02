@@ -1028,7 +1028,7 @@ impl Tuplesort {
     }
 
     /// `tuplesort_begin_datum`; by-ref datums datumCopy into tuplecontext
-    /// (cstring typlen -2 is a loud panic).
+    /// (varlena, fixed-length, and cstring typlen -2 images alike).
     pub fn begin_datum(
         datum_type: Oid,
         sort_operator: Oid,
@@ -1038,12 +1038,6 @@ impl Tuplesort {
         sortopt: i32,
     ) -> PgResult<Tuplesort> {
         let (typlen, typbyval) = lsyscache::get_typlenbyval(datum_type)?;
-        if !typbyval && typlen < -1 {
-            panic!(
-                "tuplesort_begin_datum: cstring-typlen by-ref datum sort not ported \
-                 for type {datum_type}"
-            );
-        }
         let init = SortSupportInit {
             ssup_collation: sort_collation,
             ssup_nulls_first: nulls_first_flag,
@@ -1722,6 +1716,10 @@ impl Tuplesort {
                     } else {
                         ::types_tuple::varatt::varsize_any(src)
                     }
+                } else if byref_typlen == -2 {
+                    // C datumGetSize: a cstring datum is strlen + 1; the
+                    // copy keeps its NUL terminator.
+                    core::ffi::CStr::from_ptr(src.cast()).to_bytes_with_nul().len()
                 } else {
                     byref_typlen as usize
                 }
@@ -2819,7 +2817,7 @@ impl<'m> TuplesortData<'m> {
 
 // free_typlen sentinel: the image is a minimal/index tuple carrying t_len.
 // Datum sorts store their begin-time typlen instead (datum images have no
-// header: >0 fixed, -1 varlena).
+// header: >0 fixed, -1 varlena, -2 NUL-terminated cstring).
 const FREE_SIZE_TLEN: i16 = i16::MIN;
 
 /// Put-time allocation size of a live sort tuple: the minimal-tuple image's
@@ -2834,6 +2832,12 @@ fn stup_alloc_size(free_typlen: i16, stup: &SortTuple) -> usize {
         (unsafe { (*stup.tuple).t_len }) as usize
     } else if free_typlen > 0 {
         free_typlen as usize
+    } else if free_typlen == -2 {
+        // C datumGetSize: strlen + 1.
+        // SAFETY: live tuplecontext cstring copy (putdatum kept the NUL).
+        unsafe { core::ffi::CStr::from_ptr(stup.tuple.cast_const().cast()) }
+            .to_bytes_with_nul()
+            .len()
     } else {
         // SAFETY: live tuplecontext varlena image.
         unsafe { ::types_tuple::varatt::varsize_any(stup.tuple.cast_const().cast::<u8>()) }
