@@ -1178,10 +1178,16 @@ fn read_prosrc_any<'mcx>(mcx: Mcx<'mcx>, funcoid: Oid) -> PgResult<PgString<'mcx
 }
 
 fn fc_fmgr_internal_validator(
-    _flinfo: Option<&mut FmgrInfo>,
+    flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     let funcoid = fcinfo.arg(0).as_oid();
+    // C reads the validator's own OID off flinfo->fn_oid; a builtin carrier
+    // always has it, but fall back to this function's catalog OID.
+    let validator_oid = flinfo.as_deref().map_or(2246, |f| f.fn_oid);
+    if !pg_proc::check_function_validator_access(validator_oid, funcoid)? {
+        return Ok(Datum::null());
+    }
     // C ignores check_function_bodies here: the name won't appear later.
     let cx = MemoryContext::new("fmgr_internal_validator");
     let prosrc = read_prosrc_any(cx.mcx(), funcoid)?;
@@ -1194,14 +1200,19 @@ fn fc_fmgr_internal_validator(
     Ok(Datum::null())
 }
 
-// fmgr_sql_validator (pg_proc.c:820). DIVERGENCE:
-// CheckFunctionValidatorAccess is unported.
+// fmgr_sql_validator (pg_proc.c:820).
 fn fc_fmgr_sql_validator(
-    _flinfo: Option<&mut FmgrInfo>,
+    flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     use types_core::catalog::RECORDOID;
     let funcoid = fcinfo.arg(0).as_oid();
+    // C reads the validator's own OID off flinfo->fn_oid; a builtin carrier
+    // always has it, but fall back to this function's catalog OID.
+    let validator_oid = flinfo.as_deref().map_or(2248, |f| f.fn_oid);
+    if !pg_proc::check_function_validator_access(validator_oid, funcoid)? {
+        return Ok(Datum::null());
+    }
     let cx = MemoryContext::new("fmgr_sql_validator");
     let mcx = cx.mcx();
 

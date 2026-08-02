@@ -1047,13 +1047,13 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-// CheckFunctionValidatorAccess (fmgr.c), the two catalog gates: validators
-// are called with user-specified OIDs, so a bad OID must be a user-facing
-// error, and a function of another language is rejected against that
-// language's lanvalidator. DIVERGENCE (pre-existing scope): the two
-// object_aclcheck permission gates (language USAGE, function EXECUTE) stay
-// unported; they only bite non-superuser callers.
-fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult<()> {
+// CheckFunctionValidatorAccess (fmgr.c:2145): validators are called with
+// user-specified OIDs, so a bad OID must be a user-facing error; a function
+// of another language is rejected against that language's lanvalidator; and
+// the caller needs USAGE on the language plus EXECUTE on the function —
+// exactly what reaching the validator through CREATE FUNCTION would demand.
+// C returns false only for future expansion, hence the bool.
+pub fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult<bool> {
     let Some(proc_shape) = syscache_seams::lookup_pg_proc_fmgr::call(funcoid)? else {
         return Err(PgError::error(format!("function with OID {funcoid} does not exist"))
             .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION)
@@ -1074,7 +1074,50 @@ fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult
         .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE)
         .into());
     }
-    Ok(())
+
+    let userid = miscinit_seams::get_user_id::call();
+
+    // first validate that we have permissions to use the language
+    let aclresult = aclchk_seams::object_aclcheck::call(
+        types_core::catalog::LANGUAGE_RELATION_ID,
+        proc_shape.prolang,
+        userid,
+        types_nodes::parsenodes::ACL_USAGE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        let lanname = syscache_seams::lookup_pg_language_name::call(proc_shape.prolang)?;
+        aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::OBJECT_LANGUAGE as i32,
+            lanname
+                .as_ref()
+                .map(|n| core::str::from_utf8(n.name_str()).unwrap_or(""))
+                .unwrap_or(""),
+        )?;
+    }
+
+    // Check whether we are allowed to execute the function itself. If we can
+    // execute it, there should be no possible side-effect of
+    // compiling/validation that execution can't have.
+    let aclresult = aclchk_seams::object_aclcheck::call(
+        types_core::catalog::PROCEDURE_RELATION_ID,
+        funcoid,
+        userid,
+        types_nodes::parsenodes::ACL_EXECUTE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        let proname = syscache_seams::pg_proc_proname::call(funcoid)?;
+        aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION as i32,
+            proname
+                .as_ref()
+                .map(|n| core::str::from_utf8(n.name_str()).unwrap_or(""))
+                .unwrap_or(""),
+        )?;
+    }
+
+    Ok(true)
 }
 
 // fmgr_c_validator (pg_proc.c). The load runs regardless of
@@ -1088,7 +1131,9 @@ fn fc_fmgr_c_validator(
     // C reads the validator's own OID off flinfo->fn_oid; a builtin carrier
     // always has it, but fall back to this function's catalog OID.
     let validator_oid = flinfo.as_deref().map_or(FMGR_C_VALIDATOR_OID, |f| f.fn_oid);
-    check_function_validator_access(validator_oid, funcoid)?;
+    if !check_function_validator_access(validator_oid, funcoid)? {
+        return Ok(Datum::null());
+    }
     let cx = mcx::MemoryContext::new("fmgr_c_validator");
     // Past the gate the function IS a C-language function; pg_proc rows for
     // those always carry prosrc+probin. C's SysCacheGetAttrNotNull turns a
@@ -1172,6 +1217,135 @@ pub fn IsThereFunctionInNamespace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // CheckFunctionValidatorAccess (fmgr.c:2145) over faked syscache: the
+    // catalog gates plus the two ACL gates (language USAGE as the caller,
+    // function EXECUTE as the caller).
+    mod validator_access {
+        use super::super::*;
+        use std::sync::Once;
+
+        const SQL_LANG: Oid = 14;
+        const C_LANG: Oid = 13;
+        const RESTRICTED_LANG: Oid = 15;
+        const F_OK: Oid = 800; // sql-language, everything permitted
+        const F_OTHERLANG: Oid = 801; // c-language: wrong validator for 2248
+        const F_LANG_DENIED: Oid = 802; // restricted-language: no USAGE
+        const F_EXEC_DENIED: Oid = 803; // sql-language: no EXECUTE
+
+        static SEAMS: Once = Once::new();
+
+        fn install_seams() {
+            SEAMS.call_once(|| {
+                miscinit_seams::get_user_id::set(|| 10);
+                syscache_seams::lookup_pg_proc_fmgr::set(|funcoid| {
+                    let prolang = match funcoid {
+                        F_OK | F_EXEC_DENIED => SQL_LANG,
+                        F_OTHERLANG => C_LANG,
+                        F_LANG_DENIED => RESTRICTED_LANG,
+                        _ => return Ok(None),
+                    };
+                    Ok(Some(syscache_seams::PgProcFmgrShape {
+                        prolang,
+                        prorettype: 23,
+                        pronargs: 0,
+                        proisstrict: false,
+                        proretset: false,
+                        prosecdef: false,
+                        proconfig_isnull: true,
+                    }))
+                });
+                syscache_seams::lookup_pg_language_fmgr::set(|langoid| {
+                    let lanvalidator = match langoid {
+                        SQL_LANG | RESTRICTED_LANG => 2248,
+                        C_LANG => 2247,
+                        _ => return Ok(None),
+                    };
+                    Ok(Some(syscache_seams::PgLanguageFmgrShape {
+                        lanplcallfoid: 0,
+                        laninline: 0,
+                        lanvalidator,
+                    }))
+                });
+                syscache_seams::lookup_pg_language_name::set(|langoid| {
+                    let name = match langoid {
+                        SQL_LANG => "sql",
+                        C_LANG => "c",
+                        RESTRICTED_LANG => "restricted",
+                        _ => return Ok(None),
+                    };
+                    let mut nd = types_tuple::NameData::default();
+                    nd.namestrcpy(name);
+                    Ok(Some(nd))
+                });
+                syscache_seams::pg_proc_proname::set(|funcoid| {
+                    if !(800..=803).contains(&funcoid) {
+                        return Ok(None);
+                    }
+                    let mut nd = types_tuple::NameData::default();
+                    nd.namestrcpy("myfunc");
+                    Ok(Some(nd))
+                });
+                aclchk_seams::object_aclcheck::set(|classid, objid, roleid, _mode| {
+                    assert_eq!(roleid, 10);
+                    let denied = (classid == types_core::catalog::LANGUAGE_RELATION_ID
+                        && objid == RESTRICTED_LANG)
+                        || (classid == types_core::catalog::PROCEDURE_RELATION_ID
+                            && objid == F_EXEC_DENIED);
+                    Ok(i32::from(denied))
+                });
+                aclchk_seams::aclcheck_error::set(|_aclresult, objtype, name| {
+                    Err(PgError::error(format!("aclcheck_error:{objtype}:{name}"))
+                        .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE)
+                        .into())
+                });
+            });
+        }
+
+        #[test]
+        fn permitted_caller_passes() {
+            install_seams();
+            assert!(check_function_validator_access(2248, F_OK).unwrap());
+        }
+
+        #[test]
+        fn missing_function_is_user_facing_error() {
+            install_seams();
+            let e = check_function_validator_access(2248, 999).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+            assert_eq!(e.message(), "function with OID 999 does not exist");
+        }
+
+        #[test]
+        fn wrong_language_validator_is_rejected() {
+            install_seams();
+            let e = check_function_validator_access(2248, F_OTHERLANG).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_INSUFFICIENT_PRIVILEGE);
+            assert_eq!(
+                e.message(),
+                format!(
+                    "language validation function 2248 called for language {C_LANG} \
+                     instead of 2247"
+                )
+            );
+        }
+
+        #[test]
+        fn language_usage_denied_routes_through_aclcheck_error() {
+            install_seams();
+            let e = check_function_validator_access(2248, F_LANG_DENIED).unwrap_err();
+            let objtype = types_nodes::parsenodes::ObjectType::OBJECT_LANGUAGE as i32;
+            assert_eq!(e.message(), format!("aclcheck_error:{objtype}:restricted"));
+        }
+
+        #[test]
+        fn function_execute_denied_routes_through_aclcheck_error() {
+            install_seams();
+            let e = check_function_validator_access(2248, F_EXEC_DENIED).unwrap_err();
+            let objtype = types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION as i32;
+            assert_eq!(e.message(), format!("aclcheck_error:{objtype}:myfunc"));
+        }
+    }
 
     #[test]
     fn proargdefaults_text_excludes_varlena_header() {
