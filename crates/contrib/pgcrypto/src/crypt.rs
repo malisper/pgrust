@@ -34,56 +34,182 @@ impl From<String> for CryptError {
     }
 }
 
-fn random_salt_chars(n: usize) -> Result<Vec<u8>, String> {
-    let mut raw = vec![0u8; n];
-    if !pg_strong_random(&mut raw) {
-        return Err("Failed to generate random number".to_string());
+// px-crypt.h round constants.
+const PX_XDES_ROUNDS: i32 = 29 * 25; // 725
+const PX_BF_ROUNDS: i32 = 6;
+const PX_SHACRYPT_SALT_MAX_LEN: usize = 16;
+const PX_SHACRYPT_ROUNDS_DEFAULT: i32 = 5000;
+const PX_SHACRYPT_ROUNDS_MIN: i32 = 1000;
+const PX_SHACRYPT_ROUNDS_MAX: i32 = 999_999_999;
+
+// px_strerror (px.c:53-55) for the codes px_gen_salt can return; pgcrypto.c
+// renders them as errmsg("gen_salt: %s", ...).
+const PXE_UNKNOWN_SALT_ALGO: &str = "gen_salt: Unknown salt algorithm";
+const PXE_BAD_SALT_ROUNDS: &str = "gen_salt: Incorrect number of rounds";
+const PXE_NO_RANDOM: &str = "gen_salt: Failed to generate strong random bits";
+
+/// `_crypt_itoa64[value & 0x3f]` over the low 24 bits of a little-endian
+/// 3-byte group — crypt-gensalt.c's shared "pack 3 random bytes into 4 salt
+/// chars" step.
+fn itoa64_triplet(input: &[u8], out: &mut String) {
+    let value = (input[0] as u32) | ((input[1] as u32) << 8) | ((input[2] as u32) << 16);
+    for shift in [0, 6, 12, 18] {
+        out.push(ITOA64[((value >> shift) & 0x3f) as usize] as char);
     }
-    Ok(raw.iter().map(|&b| ITOA64[(b & 0x3f) as usize]).collect())
 }
 
-pub fn gen_salt(salt_type: &str, rounds: i32) -> Result<String, CryptError> {
-    let lower = salt_type.to_ascii_lowercase();
-    Ok(match lower.as_str() {
-        "des" => String::from_utf8_lossy(&random_salt_chars(2)?).into_owned(),
-        "md5" => format!("$1${}", String::from_utf8_lossy(&random_salt_chars(8)?)),
-        "xdes" => {
-            let n = if rounds == 0 { 7250 } else { rounds };
-            let count = (n as u32) | 1;
-            let mut enc = [0u8; 4];
-            let mut c = count;
-            for b in enc.iter_mut() {
-                *b = ITOA64[(c & 0x3f) as usize];
-                c >>= 6;
-            }
-            format!(
-                "_{}{}",
-                String::from_utf8_lossy(&enc),
-                String::from_utf8_lossy(&random_salt_chars(4)?)
-            )
+// crypt-gensalt.c generators. `count` is C's `unsigned long` parameter, which
+// px_gen_salt fills from an `int` — so a negative `rounds` arrives as a huge
+// value, which is exactly how des/md5 (whose gen_list rows have def_rounds 0
+// and are therefore NOT range-checked) come to reject it.
+//
+// Every generator also guards `output_size`; px_gen_salt always passes
+// PX_MAX_SALT_LEN (128), which clears all of them, so those guards have no
+// runtime form here.
+type GenFn = fn(count: u64, input: &[u8]) -> Option<String>;
+
+/// `_crypt_gensalt_traditional_rn` (crypt-gensalt.c:25).
+fn gensalt_traditional(count: u64, input: &[u8]) -> Option<String> {
+    if input.len() < 2 || (count != 0 && count != 25) {
+        return None;
+    }
+    Some(
+        [ITOA64[(input[0] & 0x3f) as usize], ITOA64[(input[1] & 0x3f) as usize]]
+            .iter()
+            .map(|&b| b as char)
+            .collect(),
+    )
+}
+
+/// `_crypt_gensalt_extended_rn` (crypt-gensalt.c:42). An EVEN iteration count
+/// makes weak DES keys easy to spot in the hash, so upstream REFUSES it rather
+/// than repairing it.
+fn gensalt_extended(mut count: u64, input: &[u8]) -> Option<String> {
+    if input.len() < 3 || (count != 0 && (count > 0xffffff || count & 1 == 0)) {
+        return None;
+    }
+    if count == 0 {
+        count = 725;
+    }
+    let mut out = String::from('_');
+    for shift in [0, 6, 12, 18] {
+        out.push(ITOA64[((count >> shift) & 0x3f) as usize] as char);
+    }
+    itoa64_triplet(input, &mut out);
+    Some(out)
+}
+
+/// `_crypt_gensalt_md5_rn` (crypt-gensalt.c:78). The second triplet is emitted
+/// only when the caller supplied >= 6 input bytes; the md5 gen_list row asks
+/// for 6, so both are always written.
+fn gensalt_md5(count: u64, input: &[u8]) -> Option<String> {
+    if input.len() < 3 || (count != 0 && count != 1000) {
+        return None;
+    }
+    let mut out = String::from("$1$");
+    itoa64_triplet(input, &mut out);
+    if input.len() >= 6 {
+        itoa64_triplet(&input[3..], &mut out);
+    }
+    Some(out)
+}
+
+/// `_crypt_gensalt_blowfish_rn` (crypt-gensalt.c:158).
+fn gensalt_blowfish(mut count: u64, input: &[u8]) -> Option<String> {
+    if input.len() < 16 || (count != 0 && !(4..=31).contains(&count)) {
+        return None;
+    }
+    if count == 0 {
+        count = 5;
+    }
+    let raw: [u8; 16] = input[..16].try_into().ok()?;
+    Some(format!(
+        "$2a${}{}${}",
+        (b'0' + (count / 10) as u8) as char,
+        (b'0' + (count % 10) as u8) as char,
+        bcrypt::encode_salt64(&raw)
+    ))
+}
+
+/// `_crypt_gensalt_sha` (crypt-gensalt.c:224), shared by the sha256/sha512
+/// generators, which differ only in the magic byte they pre-write.
+fn gensalt_sha(magic: char, count: u64, input: &[u8]) -> Option<String> {
+    if input.len() != PX_SHACRYPT_SALT_MAX_LEN {
+        return None;
+    }
+    let mut out = format!("${magic}$rounds={count}$");
+    for &b in input {
+        out.push(ITOA64[(b & 0x3f) as usize] as char);
+    }
+    Some(out)
+}
+
+fn gensalt_sha256(count: u64, input: &[u8]) -> Option<String> {
+    gensalt_sha('5', count, input)
+}
+
+fn gensalt_sha512(count: u64, input: &[u8]) -> Option<String> {
+    gensalt_sha('6', count, input)
+}
+
+struct Generator {
+    name: &'static str,
+    gen: GenFn,
+    input_len: usize,
+    def_rounds: i32,
+    min_rounds: i32,
+    max_rounds: i32,
+}
+
+/// `gen_list` (px-crypt.c:137-153). `def_rounds == 0` means px_gen_salt does
+/// NOT range-check at all for that row — the generator's own `count` guard is
+/// the only check (des accepts 0 or 25, md5 accepts 0 or 1000).
+static GEN_LIST: &[Generator] = &[
+    Generator { name: "des", gen: gensalt_traditional, input_len: 2, def_rounds: 0, min_rounds: 0, max_rounds: 0 },
+    Generator { name: "md5", gen: gensalt_md5, input_len: 6, def_rounds: 0, min_rounds: 0, max_rounds: 0 },
+    Generator { name: "xdes", gen: gensalt_extended, input_len: 3, def_rounds: PX_XDES_ROUNDS, min_rounds: 1, max_rounds: 0xFFFFFF },
+    Generator { name: "bf", gen: gensalt_blowfish, input_len: 16, def_rounds: PX_BF_ROUNDS, min_rounds: 4, max_rounds: 31 },
+    Generator {
+        name: "sha256crypt",
+        gen: gensalt_sha256,
+        input_len: PX_SHACRYPT_SALT_MAX_LEN,
+        def_rounds: PX_SHACRYPT_ROUNDS_DEFAULT,
+        min_rounds: PX_SHACRYPT_ROUNDS_MIN,
+        max_rounds: PX_SHACRYPT_ROUNDS_MAX,
+    },
+    Generator {
+        name: "sha512crypt",
+        gen: gensalt_sha512,
+        input_len: PX_SHACRYPT_SALT_MAX_LEN,
+        def_rounds: PX_SHACRYPT_ROUNDS_DEFAULT,
+        min_rounds: PX_SHACRYPT_ROUNDS_MIN,
+        max_rounds: PX_SHACRYPT_ROUNDS_MAX,
+    },
+];
+
+/// `px_gen_salt` (px-crypt.c:155).
+pub fn gen_salt(salt_type: &str, mut rounds: i32) -> Result<String, CryptError> {
+    // C matches with pg_strcasecmp.
+    let Some(g) = GEN_LIST.iter().find(|g| g.name.eq_ignore_ascii_case(salt_type)) else {
+        return Err(PXE_UNKNOWN_SALT_ALGO.to_string().into());
+    };
+
+    if g.def_rounds != 0 {
+        if rounds == 0 {
+            rounds = g.def_rounds;
         }
-        "bf" => {
-            let r = if rounds == 0 { 6 } else { rounds };
-            if !(4..=31).contains(&r) {
-                return Err("gen_salt: Incorrect number of rounds".to_string().into());
-            }
-            let mut raw = [0u8; 16];
-            if !pg_strong_random(&mut raw) {
-                return Err("Failed to generate random number".to_string().into());
-            }
-            format!("$2a${r:02}${}", bcrypt::encode_salt64(&raw))
+        if rounds < g.min_rounds || rounds > g.max_rounds {
+            return Err(PXE_BAD_SALT_ROUNDS.to_string().into());
         }
-        "sha256crypt" | "sha512crypt" => {
-            let r = if rounds == 0 { 5000 } else { rounds };
-            if !(1000..=999_999_999).contains(&r) {
-                return Err("gen_salt: Incorrect number of rounds".to_string().into());
-            }
-            let salt = random_salt_chars(16)?;
-            let magic = if lower == "sha256crypt" { '5' } else { '6' };
-            format!("${magic}$rounds={r}${}", String::from_utf8_lossy(&salt))
-        }
-        _ => return Err("gen_salt: Unknown salt algorithm".to_string().into()),
-    })
+    }
+
+    let mut rbuf = vec![0u8; g.input_len];
+    if !pg_strong_random(&mut rbuf) {
+        return Err(PXE_NO_RANDOM.to_string().into());
+    }
+
+    // C widens the `int` rounds to the generator's `unsigned long` parameter.
+    (g.gen)(rounds as i64 as u64, &rbuf).ok_or_else(|| PXE_BAD_SALT_ROUNDS.to_string().into())
 }
 
 // px-crypt.c:37-78 run_crypt_des / run_crypt_md5 / run_crypt_bf /

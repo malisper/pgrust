@@ -18,10 +18,11 @@
 //!
 //! A test named `div_*` documents a defect row: while the defect was open it
 //! was `#[ignore]`d, and un-ignoring it is the fix gate. Lane p1-shaport's
-//! native crypt-sha.c port retired D6, D7, D13, D14, D16, D17, D18 — those
-//! seven are ACTIVE (un-ignored) below. D1-D5 and D11 remain open/ignored
-//! (other lanes own them). A test named `par_*` asserts a parity that already
-//! held and must not regress.
+//! native crypt-sha.c port retired D6, D7, D13, D14, D16, D17, D18; lane
+//! p1-pgcryptofam-fixes retired D1, D2 (px_crypt_list ported as a table),
+//! D3, D4, D5 (gen_list ported as a table) and D11 ($2x$ sign-extension
+//! bug-compat). EVERY `div_*` row in this file is now ACTIVE. A test named
+//! `par_*` asserts a parity that already held and must not regress.
 
 use super::{crypt, gen_salt, CryptError};
 
@@ -111,9 +112,10 @@ fn div_d2_dollar2b_is_des_in_c() {
 // Captured 18.3:
 //     SELECT gen_salt('xdes')    => _J9..D/q8      (count chars "J9..")
 //     SELECT gen_salt('xdes', 0) => _J9..hrzq      (count chars "J9..")
+// RETIRED (lane p1-pgcryptofam-fixes): gen_list ported as a table, so the
+// default comes from PX_XDES_ROUNDS (px-crypt.h:43) instead of a literal.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "KNOWN DIVERGENCE D3 (pgrust bug): xdes default rounds must be PX_XDES_ROUNDS=725, pgrust uses 7250"]
 fn div_d3_xdes_default_rounds_is_725() {
     const ITOA64: &[u8; 64] =
         b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -137,9 +139,11 @@ fn div_d3_xdes_default_rounds_is_725() {
 // D4 — gen_salt('xdes', <even>) : C ERRORS, pgrust silently forces it odd.
 // Captured 18.3:
 //     SELECT gen_salt('xdes', 100) => ERROR:  gen_salt: Incorrect number of rounds
+// RETIRED (lane p1-pgcryptofam-fixes): _crypt_gensalt_extended_rn's own
+// `!(count & 1)` guard (crypt-gensalt.c:50) is ported — it REFUSES an even
+// count where pgrust used to OR it odd.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "KNOWN DIVERGENCE D4 (pgrust bug): C rejects an EVEN xdes round count; pgrust ORs it to odd and succeeds"]
 fn div_d4_xdes_even_rounds_must_error() {
     for rounds in [2, 100, 1000, 16_777_214] {
         assert_eq!(
@@ -157,9 +161,11 @@ fn div_d4_xdes_even_rounds_must_error() {
 //     SELECT gen_salt('xdes', -5)       => ERROR:  gen_salt: Incorrect number of rounds
 //     SELECT gen_salt('xdes', 16777216) => ERROR:  gen_salt: Incorrect number of rounds
 //     SELECT gen_salt('xdes', 16777215) => _zzzz/9Vu   (accepted; odd, == max)
+// RETIRED (lane p1-pgcryptofam-fixes): px_gen_salt's `rounds < min_rounds ||
+// rounds > max_rounds` check (px-crypt.c:176) is ported and driven by the
+// gen_list row's [1, 0xFFFFFF].
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "KNOWN DIVERGENCE D5 (pgrust bug): xdes rounds has no [1, 0xFFFFFF] range check; C rejects negative and >0xFFFFFF"]
 fn div_d5_xdes_rounds_range_checked() {
     for rounds in [-5, -1, i32::MIN, 16_777_216, i32::MAX] {
         assert_eq!(
@@ -568,6 +574,35 @@ fn par_gen_salt_bounds_and_unknown_algo() {
             gen_salt_ok(ty, 0).is_ok(),
             "C 18.3 matches gen_salt type case-insensitively (pg_strcasecmp): {ty}"
         );
+    }
+}
+
+/// D20 (found while porting gen_list; NOT in the p1-pgcrypto dossier and NOT
+/// yet re-captured from a live server — the lane's 18.3 container was
+/// unavailable, so this row's provenance is the C SOURCE, not an execution).
+///
+/// The `des` and `md5` gen_list rows have `def_rounds == 0`, so px_gen_salt
+/// skips its range check entirely (px-crypt.c:171) and hands `rounds` straight
+/// to the generator, whose own guard is `count && count != 25`
+/// (crypt-gensalt.c:29) resp. `count && count != 1000` (:83). A NULL return
+/// becomes PXE_BAD_SALT_ROUNDS. So C accepts only 0 or the algorithm's fixed
+/// count, and rejects everything else — including negatives, which arrive as
+/// huge `unsigned long` values. pgrust previously ignored `rounds` for both.
+#[test]
+fn div_d20_des_md5_gen_salt_rounds_are_checked() {
+    for (ty, ok_count) in [("des", 25), ("md5", 1000)] {
+        assert!(gen_salt_ok(ty, 0).is_ok(), "{ty}: rounds=0 takes the default path");
+        assert!(
+            gen_salt_ok(ty, ok_count).is_ok(),
+            "{ty}: the algorithm's own fixed count is accepted"
+        );
+        for bad in [1, 5, -5, i32::MIN, i32::MAX] {
+            assert_eq!(
+                gen_salt_ok(ty, bad),
+                Err("gen_salt: Incorrect number of rounds".to_string()),
+                "{ty} rounds={bad} fails the generator's count guard"
+            );
+        }
     }
 }
 
