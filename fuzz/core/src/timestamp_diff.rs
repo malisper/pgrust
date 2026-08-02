@@ -2506,12 +2506,31 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/timestamp_diff");
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         let mut n = 0usize;
+        let mut failed: Vec<String> = Vec::new();
         for e in entries.flatten() {
             if let Ok(bytes) = std::fs::read(e.path()) {
-                timestamp_diff(&bytes);
+                // Name the failing UNIT (fix/mutants-rail): the CI cluster rail
+                // baseline reproduces a divergence here that no sorted-order
+                // replay does — replay order is readdir order, so the finding
+                // is (state-setting unit, victim unit) and the panic alone
+                // names neither. Catch per unit, print file + bytes + ordinal,
+                // keep the test red.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    timestamp_diff(&bytes)
+                }));
+                if r.is_err() {
+                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    eprintln!(
+                        "REPLAY-FAIL unit={} ordinal={n} len={} hex={hex}",
+                        e.path().display(),
+                        bytes.len()
+                    );
+                    failed.push(format!("{} (ordinal {n})", e.path().display()));
+                }
                 n += 1;
             }
         }
-        eprintln!("replayed {n} corpus inputs");
+        eprintln!("replayed {n} corpus inputs, {} failed", failed.len());
+        assert!(failed.is_empty(), "corpus units diverged (order-dependent state suspected — see REPLAY-FAIL lines above): {failed:?}");
     }
 }
