@@ -971,6 +971,12 @@ fn run_program<'mcx>(
                 let r = crate::jsonbsubs::fetch(st, cur)?;
                 write_out(*out, r.value, r.isnull);
             }
+            Step::JsonbSbsrefOld { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                crate::jsonbsubs::fetch_old(st, cur)?;
+            }
             Step::JsonbSbsrefAssign { state, out } => {
                 // SAFETY: as ArrayExprEval.
                 let st = unsafe { &mut *state.as_ptr() };
@@ -4484,6 +4490,12 @@ pub(crate) fn exec_one_step<'mcx>(
             let r = crate::jsonbsubs::fetch(st, cur)?;
             write_out(out, r.value, r.isnull);
         }
+        Step::JsonbSbsrefOld { state: sref, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            crate::jsonbsubs::fetch_old(st, cur)?;
+        }
         Step::JsonbSbsrefAssign { state: sref, out } => {
             // SAFETY: as ArrayExprEval.
             let st = unsafe { &mut *sref.as_ptr() };
@@ -4764,6 +4776,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::SbsrefAssign { .. }
         | Step::JsonbSbsrefSubscripts { .. }
         | Step::JsonbSbsrefFetch { .. }
+        | Step::JsonbSbsrefOld { .. }
         | Step::JsonbSbsrefAssign { .. }
         | Step::HstoreSbsrefFetch { .. }
         | Step::HstoreSbsrefAssign { .. }

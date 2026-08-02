@@ -184,10 +184,10 @@ pub fn exec_init_expr_subplans_agg<'mcx>(
     Ok(Some(state))
 }
 
-/// [`exec_init_expr`] permitting an externally-supplied CaseTestExpr value
-/// (C EEOP_CASE_TESTVAL's econtext caseValue leg, the JSON_TABLE colvalexpr
-/// shape): the caller writes the cell via [`ExprState::set_case_test`]
-/// before each evaluation.
+/// [`exec_init_expr`] for an expression fed an externally-supplied
+/// CaseTestExpr value (C EEOP_CASE_TESTVAL's econtext caseValue leg, the
+/// JSON_TABLE colvalexpr shape): the caller writes the cell via
+/// [`ExprState::set_case_test`] before each evaluation.
 pub fn exec_init_expr_with_case_test<'mcx>(
     mcx: Mcx<'mcx>,
     node: Option<Node<'mcx>>,
@@ -197,7 +197,6 @@ pub fn exec_init_expr_with_case_test<'mcx>(
         return Ok(None);
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
-    state.allow_ext_case_test = true;
     create_expr_setup_steps(&mut state, mcx, &[node], None, params, None)?;
     let rout = state.result_out();
     init_expr_rec(node, &mut state, mcx, rout, None, params, None)?;
@@ -2068,7 +2067,11 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_CaseExpr => init_case_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CaseTestExpr => match state.innermost_case {
             Some(slot) => push_step(state, mcx, Step::CaseTestVal { slot, out }),
-            None if state.allow_ext_case_test => {
+            // C EEOP_CASE_TESTVAL_EXT: no enclosing construct arms a test
+            // value, so the step reads the externally supplied econtext
+            // caseValue — here one compile-allocated cell the caller writes
+            // via set_case_test; unset it reads NULL, like a fresh econtext.
+            None => {
                 let slot = match state.ext_case_test {
                     Some(s) => s,
                     None => {
@@ -2079,12 +2082,6 @@ pub(crate) fn init_expr_rec<'mcx>(
                 };
                 push_step(state, mcx, Step::CaseTestVal { slot, out })
             }
-            // unported: EEOP_CASE_TESTVAL_EXT (externally supplied econtext
-            // caseValue — domain checks / ArrayCoerceExpr).
-            None => Err(feature_unported(
-                "CaseTestExpr with an externally supplied test value \
-                 (domain checks over ArrayCoerceExpr)",
-            )),
         },
         NodeTag::T_NullTest => {
             use ::types_nodes::primnodes::NullTestType;
@@ -2267,11 +2264,21 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_CoerceToDomain => init_coerce_to_domain(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CoerceToDomainValue => match state.innermost_domain {
             Some(src) => push_step(state, mcx, Step::DomainTestval { src, out }),
-            // unported: EEOP_DOMAIN_TESTVAL_EXT (CoerceToDomainValue outside
-            // a domain-check compile).
-            None => Err(feature_unported(
-                "VALUE reference outside a domain check constraint",
-            )),
+            // C EEOP_DOMAIN_TESTVAL_EXT: VALUE outside a domain-check compile
+            // reads the externally supplied econtext domainValue — here one
+            // compile-allocated cell the caller writes via set_domain_test;
+            // unset it reads NULL, like a fresh econtext.
+            None => {
+                let slot = match state.ext_domain_test {
+                    Some(s) => s,
+                    None => {
+                        let s = alloc_nullable_datum(mcx)?;
+                        state.ext_domain_test = Some(s);
+                        s
+                    }
+                };
+                push_step(state, mcx, Step::DomainTestval { src: OutRef(slot), out })
+            }
         },
         // Each arg evaluates into the result slot; a non-null short-circuits.
         NodeTag::T_CoalesceExpr => {
@@ -2809,6 +2816,7 @@ fn init_jsonb_subscripting_ref<'mcx>(
         index_oids,
         index,
         replace: ::datum::NullableDatum::null(),
+        prev: ::datum::NullableDatum::null(),
         resmcx: None,
     };
     let stp = alloc_state(mcx, st)?;
@@ -2841,15 +2849,20 @@ fn init_jsonb_subscripting_ref<'mcx>(
     if is_assignment {
         let assgn = sbsref.refassgnexpr.unwrap();
         if assgn_needs_old(assgn) {
-            // unported: jsonb_subscript_fetch_old (EEOP_SBSREF_OLD, jsonbsubs.c).
-            return Err(feature_unported(
-                "jsonb subscripted assignment referencing the old element",
-            ));
+            push_step(state, mcx, Step::JsonbSbsrefOld { state: stp, out })?;
         }
         let replace_slot = unsafe {
             NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
         };
+        // SBSREF_OLD puts the extracted value into `prev`; pass it down via
+        // the CaseTestExpr mechanism (C innermost_caseval).
+        let prev_slot = unsafe {
+            NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).prev))
+        };
+        let save_innermost = state.innermost_case;
+        state.innermost_case = Some(prev_slot);
         init_expr_rec(assgn, state, mcx, OutRef(replace_slot), agg, params, sub)?;
+        state.innermost_case = save_innermost;
         push_step(state, mcx, Step::JsonbSbsrefAssign { state: stp, out })?;
     } else {
         push_step(state, mcx, Step::JsonbSbsrefFetch { state: stp, out })?;

@@ -29,10 +29,18 @@ fn install_seams() {
         namespace_seams::is_temp_namespace::set(|_| false);
         syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
         syscache_seams::pg_type_element_shape::set(|typid| {
-            Ok((typid == 1007).then(|| syscache_seams::PgTypeElementShape {
-                typelem: 23,
-                typsubscript: lsyscache::F_ARRAY_SUBSCRIPT_HANDLER,
-            }))
+            Ok(match typid {
+                1007 => Some(syscache_seams::PgTypeElementShape {
+                    typelem: 23,
+                    typsubscript: lsyscache::F_ARRAY_SUBSCRIPT_HANDLER,
+                }),
+                // jsonb: F_JSONB_SUBSCRIPT_HANDLER
+                3802 => Some(syscache_seams::PgTypeElementShape {
+                    typelem: 0,
+                    typsubscript: 6098,
+                }),
+                _ => None,
+            })
         });
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
@@ -2557,27 +2565,122 @@ mod json {
         });
     }
 
+    // EEOP_CASE_TESTVAL_EXT via the plain compile entry: a bare CaseTestExpr
+    // reads the external cell — unarmed it is NULL, exactly a fresh econtext's
+    // caseValue (CreateExprContext zeroes it); armed it feeds the value.
     #[test]
-    fn ext_case_test_without_permission_is_clean_feature_error() {
+    fn ext_case_test_compiles_under_plain_init_and_reads_external_cell() {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
                 CaseTestExpr { typeId: INT4OID, typeMod: -1, collation: 0 },
             )
             .unwrap();
-            let err = match exec_init_expr(mcx, Some(ct), ParamBind::NONE) {
-                Ok(_) => panic!("expected a feature error"),
-                Err(e) => e,
-            };
-            assert_eq!(
-                err.sqlstate(),
-                ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED
-            );
-            assert!(
-                err.message().contains("not yet implemented"),
-                "{}",
-                err.message()
-            );
+            let mut state = exec_init_expr(mcx, Some(ct), ParamBind::NONE).unwrap().unwrap();
+            state.arm_result_mcx(mcx);
+            let mut slots = EvalSlots::default();
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert!(r.isnull, "unarmed econtext caseValue reads as NULL");
+            state.set_case_test(NullableDatum { value: Datum::from_i32(41), isnull: false });
+            let mut slots = EvalSlots::default();
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, 41));
+        });
+    }
+
+    // EEOP_DOMAIN_TESTVAL_EXT: a CoerceToDomainValue outside a domain-check
+    // compile reads the external domainValue cell; unarmed it is NULL.
+    #[test]
+    fn ext_domain_test_value_reads_external_cell() {
+        with_mcx(|mcx| {
+            let dv = Node::mk(
+                mcx,
+                ::types_nodes::primnodes::CoerceToDomainValue {
+                    typeId: INT4OID,
+                    typeMod: -1,
+                    collation: 0,
+                    location: -1,
+                },
+            )
+            .unwrap();
+            let mut state = exec_init_expr(mcx, Some(dv), ParamBind::NONE).unwrap().unwrap();
+            state.arm_result_mcx(mcx);
+            let mut slots = EvalSlots::default();
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert!(r.isnull, "unarmed econtext domainValue reads as NULL");
+            state.set_domain_test(NullableDatum { value: Datum::from_i32(7), isnull: false });
+            let mut slots = EvalSlots::default();
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
+        });
+    }
+
+    fn text_const<'m>(mcx: Mcx<'m>, s: &str) -> Node<'m> {
+        let t = varlena::cstring_to_text(mcx, s.as_bytes()).unwrap();
+        Node::mk_const(mcx, TEXTOID_T, -1, 100, -1, ::types_fmgr::varlena_result(t), false, false)
+            .unwrap()
+    }
+
+    fn jsonb_sbsref<'m>(
+        mcx: Mcx<'m>,
+        refexpr: Node<'m>,
+        key: &str,
+        assgn: Option<Node<'m>>,
+    ) -> Node<'m> {
+        let mut upper = ::types_nodes::OptNodeList::nil();
+        upper.lappend(mcx, Some(text_const(mcx, key))).unwrap();
+        Node::mk(
+            mcx,
+            ::types_nodes::primnodes::SubscriptingRef {
+                refcontainertype: JSONBOID_T,
+                refelemtype: JSONBOID_T,
+                refrestype: JSONBOID_T,
+                reftypmod: -1,
+                refcollid: 0,
+                refupperindexpr: upper,
+                reflowerindexpr: ::types_nodes::OptNodeList::nil(),
+                refexpr: Some(refexpr),
+                refassgnexpr: assgn,
+            },
+        )
+        .unwrap()
+    }
+
+    // jsonb_subscript_fetch_old (EEOP_SBSREF_OLD): a nested subscripted
+    // assignment's inner level reads the old element through the CaseTestExpr
+    // channel. Shape: j['a'] := (old)['b'] := 2 over {"a": {"b": 1}}.
+    #[test]
+    fn jsonb_nested_subscript_assignment_fetches_old_element() {
+        with_mcx(|mcx| {
+            let ct = Node::mk(
+                mcx,
+                CaseTestExpr { typeId: JSONBOID_T, typeMod: -1, collation: 0 },
+            )
+            .unwrap();
+            let inner = jsonb_sbsref(mcx, ct, "b", Some(jsonb_const(mcx, "2")));
+            let outer =
+                jsonb_sbsref(mcx, jsonb_const(mcx, r#"{"a": {"b": 1}}"#), "a", Some(inner));
+            let r = eval(mcx, outer).unwrap();
+            assert!(!r.isnull);
+            assert_eq!(jsonb_datum_string(mcx, r.value), r#"{"a": {"b": 2}}"#);
+        });
+    }
+
+    // The old-fetch of a missing key yields NULL prev; the inner assignment
+    // then builds a fresh object (expectArray=false for a text subscript).
+    #[test]
+    fn jsonb_nested_subscript_assignment_old_element_missing() {
+        with_mcx(|mcx| {
+            let ct = Node::mk(
+                mcx,
+                CaseTestExpr { typeId: JSONBOID_T, typeMod: -1, collation: 0 },
+            )
+            .unwrap();
+            let inner = jsonb_sbsref(mcx, ct, "b", Some(jsonb_const(mcx, "7")));
+            let outer = jsonb_sbsref(mcx, jsonb_const(mcx, r#"{"x": 1}"#), "a", Some(inner));
+            let r = eval(mcx, outer).unwrap();
+            assert!(!r.isnull);
+            assert_eq!(jsonb_datum_string(mcx, r.value), r#"{"a": {"b": 7}, "x": 1}"#);
         });
     }
 }

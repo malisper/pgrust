@@ -18,6 +18,7 @@ pub struct JsonbSbsState {
     pub index_oids: NonNull<Oid>,
     pub index: NonNull<Datum>,
     pub replace: NullableDatum,
+    pub prev: NullableDatum,
     pub resmcx: ResMcx,
 }
 
@@ -67,6 +68,25 @@ pub fn fetch(st: &mut JsonbSbsState, cur: NullableDatum) -> PgResult<NullableDat
     // SAFETY: as check_subscripts.
     let index = unsafe { core::slice::from_raw_parts(st.index.as_ptr(), st.nupper as usize) };
     adt_jsonb::subs::subscript_fetch(mcx, cur.value, index)
+}
+
+// jsonb_subscript_fetch_old: the regular fetch, except a null jsonb yields a
+// null element and the result lands in prev (C prevvalue/prevnull). C reads
+// the raw sbsrefstate->upperindex datums here; that coincides with the
+// converted workspace index for text subscripts (the only shape that can
+// reach the old-fetch with a live value) and reading the raw int4 datum as a
+// text pointer is not reproducible in Rust, so this uses the converted index.
+pub fn fetch_old(st: &mut JsonbSbsState, cur: NullableDatum) -> PgResult<()> {
+    if cur.isnull {
+        // whole jsonb is null, so any element is too
+        st.prev = NullableDatum::null();
+    } else {
+        let mcx = res_mcx(&st.resmcx);
+        // SAFETY: as check_subscripts.
+        let index = unsafe { core::slice::from_raw_parts(st.index.as_ptr(), st.nupper as usize) };
+        st.prev = adt_jsonb::subs::subscript_fetch(mcx, cur.value, index)?;
+    }
+    Ok(())
 }
 
 pub fn assign(st: &mut JsonbSbsState, cur: NullableDatum) -> PgResult<NullableDatum> {

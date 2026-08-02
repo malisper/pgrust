@@ -74,7 +74,8 @@ pub enum Step {
     JumpIfNotTrue { jumpdone: u32, out: OutRef },
     JumpIfNotNull { jumpdone: u32, out: OutRef },
     // slot: the owning CASE's compile-allocated testval workspace
-    // (C d.casetest.value/isnull; the EXT econtext form is unported).
+    // (C d.casetest.value/isnull); the EXT econtext forms point slot at the
+    // state's ext_case_test/ext_domain_test cell instead.
     CaseTestVal { slot: NonNull<NullableDatum>, out: OutRef },
     // C EEOP_MAKE_READONLY, in place on the CASE testval workspace
     // (source and target alias there in C too).
@@ -264,6 +265,7 @@ pub enum Step {
         out: OutRef,
     },
     JsonbSbsrefFetch { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
+    JsonbSbsrefOld { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
     JsonbSbsrefAssign { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
     HstoreSbsrefFetch { state: NonNull<crate::hstoresubs::HstoreSbsState>, out: OutRef },
     HstoreSbsrefAssign { state: NonNull<crate::hstoresubs::HstoreSbsState>, out: OutRef },
@@ -1538,10 +1540,12 @@ pub struct ExprState<'mcx> {
     // C ExprState.escontext: compile-time only; behavior-expr coercions under
     // a JsonExpr compile against the owning JsonExprState's ErrorSaveNode.
     pub(crate) escontext: Option<NonNull<::types_fmgr::ErrorSaveNode>>,
-    // C EEOP_CASE_TESTVAL_EXT stand-in: econtext caseValue collapses to one
+    // C EEOP_CASE_TESTVAL_EXT: econtext caseValue collapses to one
     // compile-allocated cell the caller writes via set_case_test (JSON_TABLE).
     pub(crate) ext_case_test: Option<NonNull<NullableDatum>>,
-    pub(crate) allow_ext_case_test: bool,
+    // C EEOP_DOMAIN_TESTVAL_EXT: econtext domainValue, same one-cell shape,
+    // written via set_domain_test.
+    pub(crate) ext_domain_test: Option<NonNull<NullableDatum>>,
     // Copy-and-patch kernel entry (jit.rs); the code block itself is owned by
     // the executor session collector, which outlives this state.
     pub(crate) jit: Option<crate::jit::JitHandle>,
@@ -1584,7 +1588,7 @@ impl<'mcx> ExprState<'mcx> {
                 alloc_mcx_slots: PgVec::new_in(mcx),
                 escontext: None,
                 ext_case_test: None,
-                allow_ext_case_test: false,
+                ext_domain_test: None,
                 jit: None,
                 merge_action_cell: None,
                 allow_merge_support: false,
@@ -1815,13 +1819,28 @@ impl<'mcx> ExprState<'mcx> {
 
     /// Writes the externally-supplied CaseTestExpr value (C econtext
     /// caseValue_datum/caseValue_isNull) read by EEOP_CASE_TESTVAL steps
-    /// compiled through [`crate::exec_init_expr_with_case_test`].
+    /// compiled outside any enclosing CASE (C's EEOP_CASE_TESTVAL_EXT).
     pub fn set_case_test(&mut self, nd: NullableDatum) {
         debug_assert!(
             self.ext_case_test.is_some(),
             "set_case_test on a program with no external CaseTestExpr"
         );
         if let Some(cell) = self.ext_case_test {
+            // SAFETY: compile-allocated 'mcx cell, sole writer here.
+            unsafe { cell.write(nd) };
+        }
+    }
+
+    /// Writes the externally-supplied CoerceToDomainValue value (C econtext
+    /// domainValue_datum/domainValue_isNull) read by EEOP_DOMAIN_TESTVAL
+    /// steps compiled outside a domain-check compile (C's
+    /// EEOP_DOMAIN_TESTVAL_EXT).
+    pub fn set_domain_test(&mut self, nd: NullableDatum) {
+        debug_assert!(
+            self.ext_domain_test.is_some(),
+            "set_domain_test on a program with no external CoerceToDomainValue"
+        );
+        if let Some(cell) = self.ext_domain_test {
             // SAFETY: compile-allocated 'mcx cell, sole writer here.
             unsafe { cell.write(nd) };
         }
