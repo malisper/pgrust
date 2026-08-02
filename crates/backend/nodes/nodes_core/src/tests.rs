@@ -675,3 +675,36 @@ fn on_conflict_expr_mutator_identity_and_rebuild() {
     assert_eq!(new_oc.exclRelIndex, 2);
     assert_eq!(new_oc.onConflictSet.len(), 1);
 }
+
+// InferenceElem reads through its expr (C exprType/exprCollation arms);
+// exprTypmod's default for tags without an arm is C's -1, not an error.
+#[test]
+fn expr_accessors_inference_elem_and_typmod_default() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk(
+        mcx,
+        types_nodes::primnodes::Var {
+            varno: 1,
+            varattno: 1,
+            vartype: 25,
+            vartypmod: 7,
+            varcollid: 100,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ie = Node::mk(
+        mcx,
+        types_nodes::primnodes::InferenceElem {
+            expr: Some(var),
+            infercollid: 0,
+            inferopclass: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(node_funcs::expr_type(ie), 25);
+    assert_eq!(node_funcs::expr_collation(ie), 100);
+    // InferenceElem has no exprTypmod arm in C: default -1.
+    assert_eq!(node_funcs::expr_typmod(ie), -1);
+}
