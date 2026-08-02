@@ -1,8 +1,7 @@
 //! pg_constraint.c create lane: CreateConstraintEntry full C surface
 //! (CHECK/NOT NULL/PRIMARY/UNIQUE/FOREIGN; exclusion vocab arrives with its
-//! DDL) with C's auto/normal dependency records. Divergence: CHECK
-//! expression dependencies (recordDependencyOnSingleRelExpr) are not
-//! recorded (dependency.c walker unported).
+//! DDL) with C's auto/normal dependency records; CHECK expression
+//! dependencies ride pg_depend's recordDependencyOnSingleRelExpr walker.
 
 #![allow(non_snake_case, non_upper_case_globals)]
 
