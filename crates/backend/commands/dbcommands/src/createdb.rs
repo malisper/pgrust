@@ -11,7 +11,7 @@ use types_error::{
     PgResult, ERRCODE_DUPLICATE_DATABASE, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_DATABASE,
-    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE, WARNING,
 };
 use types_nodes::parsenodes::{CreatedbStmt, DefElem};
 use types_nodes::NodeTag;
@@ -32,6 +32,16 @@ use crate::{
     check_db_file_conflict, database_is_invalid_form, get_db_info, have_createdb_privilege, loc,
     GLOBALTABLESPACE_OID, TableSpaceRelationId, XLOG_DBASE_CREATE_FILE_COPY,
 };
+
+// collprovider_name (pg_collation.h).
+fn collprovider_name(c: u8) -> &'static str {
+    match c {
+        COLLPROVIDER_BUILTIN => "builtin",
+        COLLPROVIDER_ICU => "icu",
+        COLLPROVIDER_LIBC => "libc",
+        _ => "???",
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CreateDBStrategy {
@@ -463,6 +473,9 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
         dblocprovider = src.datlocprovider;
     }
     let mut dblocale_v: Option<&str> = dblocale;
+    // C compares dblocale != src_locale by pointer below: true exactly when
+    // this default assignment supplied the locale.
+    let dblocale_from_template = dblocale_v.is_none() && dblocprovider == src.datlocprovider;
     if dblocale_v.is_none() && dblocprovider == src.datlocprovider {
         dblocale_v = src_locale;
     }
@@ -478,36 +491,48 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .into());
     }
 
+    // check_locale failures carry a provider-routing hint (dbcommands.c).
+    let locale_hint = |b: elog::ErrorBuilder| -> elog::ErrorBuilder {
+        if dblocprovider == COLLPROVIDER_BUILTIN {
+            b.errhint(
+                "If the locale name is specific to the builtin provider, use BUILTIN_LOCALE."
+                    .to_string(),
+            )
+        } else if dblocprovider == COLLPROVIDER_ICU {
+            b.errhint(
+                "If the locale name is specific to the ICU provider, use ICU_LOCALE.".to_string(),
+            )
+        } else {
+            b
+        }
+    };
     let (ok, canon) = pg_locale::check_locale(LC_COLLATE, dbcollate_v)?;
     if !ok {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-            .errmsg(format!("invalid LC_COLLATE locale name: \"{dbcollate_v}\""))
-            .into_error()
-            .into());
+        return Err(locale_hint(
+            ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!("invalid LC_COLLATE locale name: \"{dbcollate_v}\"")),
+        )
+        .into_error()
+        .into());
     }
     let dbcollate_s: String = canon.unwrap_or_else(|| dbcollate_v.to_owned());
     let (ok, canon) = pg_locale::check_locale(LC_CTYPE, dbctype_v)?;
     if !ok {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-            .errmsg(format!("invalid LC_CTYPE locale name: \"{dbctype_v}\""))
-            .into_error()
-            .into());
+        return Err(locale_hint(
+            ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!("invalid LC_CTYPE locale name: \"{dbctype_v}\"")),
+        )
+        .into_error()
+        .into());
     }
     let dbctype_s: String = canon.unwrap_or_else(|| dbctype_v.to_owned());
 
     check_encoding_locale_matches(encoding, &dbcollate_s, &dbctype_s)?;
 
-    if dblocprovider != COLLPROVIDER_LIBC {
-        // unported: createdb builtin/icu locale-provider validation lane
-        return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("locale providers other than libc are not supported yet".to_string())
-            .into_error()
-            .into());
-    }
-    if builtinlocale_el.is_some() {
+    // Validate provider-specific parameters.
+    if dblocprovider != COLLPROVIDER_BUILTIN && builtinlocale_el.is_some() {
         return Err(ereport(ERROR)
             .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
             .errmsg(
@@ -516,19 +541,79 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .into_error()
             .into());
     }
-    if iculocale_el.is_some() {
-        return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
-            .errmsg("ICU locale cannot be specified unless locale provider is ICU".to_string())
-            .into_error()
-            .into());
+    if dblocprovider != COLLPROVIDER_ICU {
+        if iculocale_el.is_some() {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                .errmsg("ICU locale cannot be specified unless locale provider is ICU".to_string())
+                .into_error()
+                .into());
+        }
+        if dbicurules.is_some() {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                .errmsg("ICU rules cannot be specified unless locale provider is ICU".to_string())
+                .into_error()
+                .into());
+        }
     }
-    if dbicurules.is_some() {
-        return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
-            .errmsg("ICU rules cannot be specified unless locale provider is ICU".to_string())
-            .into_error()
-            .into());
+
+    // Validate and canonicalize the locale for the provider.
+    let mut dblocale_s: Option<String> = dblocale_v.map(|s| s.to_owned());
+    if dblocprovider == COLLPROVIDER_BUILTIN {
+        // Happens if template0 uses the libc provider but the new database
+        // uses builtin.
+        let Some(locale) = dblocale_s.as_deref() else {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("LOCALE or BUILTIN_LOCALE must be specified".to_string())
+                .into_error()
+                .into());
+        };
+        dblocale_s = Some(pg_locale::builtin_validate_locale(encoding, locale)?.to_owned());
+    } else if dblocprovider == COLLPROVIDER_ICU {
+        if !catalog_namespace::is_encoding_supported_by_icu(encoding) {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!(
+                    "encoding \"{}\" is not supported with ICU provider",
+                    mbutils::pg_encoding_to_char(encoding)
+                ))
+                .into_error()
+                .into());
+        }
+        // Happens if template0 uses the libc provider but the new database
+        // uses icu.
+        if dblocale_s.is_none() {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("LOCALE or ICU_LOCALE must be specified".to_string())
+                .into_error()
+                .into());
+        }
+        // During binary upgrade, or when the locale came from the template
+        // database, preserve the locale string; otherwise canonicalize to a
+        // language tag.
+        if !init_small::globals::IsBinaryUpgrade() && !dblocale_from_template {
+            let locale = dblocale_s.as_deref().expect("checked non-NULL above");
+            let elevel =
+                types_error::ErrorLevel(guc_tables::vars::icu_validation_level.read());
+            if let Some(langtag) = pg_locale::icu_language_tag(locale, elevel)? {
+                if langtag != locale {
+                    ereport(NOTICE)
+                        .errmsg(format!(
+                            "using standard form \"{langtag}\" for ICU locale \"{locale}\""
+                        ))
+                        .finish(loc("createdb"))?;
+                    dblocale_s = Some(langtag);
+                }
+            }
+        }
+        pg_locale::icu_validate_locale(dblocale_s.as_deref().expect("checked non-NULL above"))?;
+    }
+    // For libc, the locale comes from datcollate and datctype.
+    if dblocprovider == COLLPROVIDER_LIBC {
+        dblocale_s = None;
     }
     if dbtemplate != "template0" {
         if encoding != src.encoding {
@@ -573,14 +658,68 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                 .into());
         }
         if dblocprovider != src.datlocprovider {
-            panic!("createdb: template locale provider mismatch arm unported (builtin/icu lane)");
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!(
+                    "new locale provider ({}) does not match locale provider of the template database ({})",
+                    collprovider_name(dblocprovider),
+                    collprovider_name(src.datlocprovider)
+                ))
+                .errhint(
+                    "Use the same locale provider as in the template database, or use template0 as template."
+                        .to_string(),
+                )
+                .into_error()
+                .into());
+        }
+        if dblocprovider == COLLPROVIDER_ICU {
+            // C Asserts both locales; providers match, so both are ICU-set.
+            let val1 = dblocale_s.as_deref().expect("ICU database carries a locale");
+            let val2 = src_locale.expect("ICU template carries a locale");
+            if val1 != val2 {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg(format!(
+                        "new ICU locale ({val1}) is incompatible with the ICU locale of the template database ({val2})"
+                    ))
+                    .errhint(
+                        "Use the same ICU locale as in the template database, or use template0 as template."
+                            .to_string(),
+                    )
+                    .into_error()
+                    .into());
+            }
+            let val1 = dbicurules.unwrap_or("");
+            let val2 = src_icurules.unwrap_or("");
+            if val1 != val2 {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg(format!(
+                        "new ICU collation rules ({val1}) are incompatible with the ICU collation rules of the template database ({val2})"
+                    ))
+                    .errhint(
+                        "Use the same ICU collation rules as in the template database, or use template0 as template."
+                            .to_string(),
+                    )
+                    .into_error()
+                    .into());
+            }
         }
     }
 
-    // Template collversion check + fill-in (libc arm).
+    // Template collversion check + fill-in. For libc the versioned locale is
+    // datcollate; other providers version datlocale.
+    let versioned_locale = |dbcollate_s: &str, dblocale_s: &Option<String>| -> String {
+        if dblocprovider == COLLPROVIDER_LIBC {
+            dbcollate_s.to_owned()
+        } else {
+            dblocale_s.as_deref().expect("non-libc provider carries a locale").to_owned()
+        }
+    };
     if let Some(src_collversion) = src.datcollversion.as_ref() {
         if collversion_el.is_none() {
-            let actual = pg_locale::get_collation_actual_version(dblocprovider, &dbcollate_s)?;
+            let locale = versioned_locale(&dbcollate_s, &dblocale_s);
+            let actual = pg_locale::get_collation_actual_version(dblocprovider, &locale)?;
             let Some(actual) = actual else {
                 return Err(ereport(ERROR)
                     .errmsg(format!(
@@ -598,6 +737,10 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                         "The template database was created using collation version {}, but the operating system provides version {actual}.",
                         src_collversion.as_str()
                     ))
+                    .errhint(format!(
+                        "Rebuild all objects in the template database that use the default collation and run ALTER DATABASE {} REFRESH COLLATION VERSION, or build PostgreSQL with the right library version.",
+                        format_type::quote_identifier(dbtemplate)
+                    ))
                     .into_error()
                     .into());
             }
@@ -608,7 +751,8 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
         dbcollversion_s = src.datcollversion.as_ref().map(|s| s.as_str().to_owned());
     }
     if dbcollversion_s.is_none() {
-        dbcollversion_s = pg_locale::get_collation_actual_version(dblocprovider, &dbcollate_s)?;
+        let locale = versioned_locale(&dbcollate_s, &dblocale_s);
+        dbcollversion_s = pg_locale::get_collation_actual_version(dblocprovider, &locale)?;
     }
 
     let src_deftablespace = src.dattablespace;
@@ -738,9 +882,22 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
     values[12] = Datum::from_usize(collate_text.as_bytes().as_ptr() as usize);
     values[13] = Datum::from_usize(ctype_text.as_bytes().as_ptr() as usize);
     // datlocale is null under the libc provider.
-    nulls[14] = true;
-    // ICU rules never set under libc.
-    nulls[15] = true;
+    let locale_text = match dblocale_s.as_deref() {
+        Some(l) => Some(varlena::cstring_to_text(mcx, l.as_bytes())?),
+        None => None,
+    };
+    match &locale_text {
+        Some(v) => values[14] = Datum::from_usize(v.as_bytes().as_ptr() as usize),
+        None => nulls[14] = true,
+    }
+    let icurules_text = match dbicurules {
+        Some(r) => Some(varlena::cstring_to_text(mcx, r.as_bytes())?),
+        None => None,
+    };
+    match &icurules_text {
+        Some(v) => values[15] = Datum::from_usize(v.as_bytes().as_ptr() as usize),
+        None => nulls[15] = true,
+    }
     match &collversion_text {
         Some(v) => values[16] = Datum::from_usize(v.as_bytes().as_ptr() as usize),
         None => nulls[16] = true,
@@ -784,4 +941,36 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
     xact::ForceSyncCommit();
 
     Ok(dboid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Provider-lane helpers (previously the whole non-libc lane was a 0A000
+    // fence): collprovider_name spellings for the template-mismatch message,
+    // and the BUILTIN lane's validation/canonicalization with C's errors.
+    #[test]
+    fn provider_lane_helpers_match_c() {
+        assert_eq!(collprovider_name(COLLPROVIDER_BUILTIN), "builtin");
+        assert_eq!(collprovider_name(COLLPROVIDER_ICU), "icu");
+        assert_eq!(collprovider_name(COLLPROVIDER_LIBC), "libc");
+        assert_eq!(collprovider_name(b'x'), "???");
+
+        assert_eq!(pg_locale::builtin_validate_locale(PG_UTF8, "C.UTF8").unwrap(), "C.UTF-8");
+        assert_eq!(pg_locale::builtin_validate_locale(PG_UTF8, "C.UTF-8").unwrap(), "C.UTF-8");
+        // "C" works under any encoding (builtin_locale_encoding = -1).
+        assert_eq!(pg_locale::builtin_validate_locale(PG_SQL_ASCII, "C").unwrap(), "C");
+        let e = pg_locale::builtin_validate_locale(PG_UTF8, "en_US").unwrap_err();
+        assert_eq!(e.message(), "invalid locale name \"en_US\" for builtin provider");
+        // C.UTF-8 is pinned to UTF8.
+        let e = pg_locale::builtin_validate_locale(PG_SQL_ASCII, "C.UTF-8").unwrap_err();
+        assert_eq!(
+            e.message(),
+            format!(
+                "encoding \"{}\" does not match locale \"C.UTF-8\"",
+                mbutils::pg_encoding_to_char(PG_SQL_ASCII)
+            )
+        );
+    }
 }

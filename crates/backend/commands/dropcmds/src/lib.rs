@@ -136,10 +136,6 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
             let name = object.as_string().expect("publication name is a String node").sval;
             format!("publication \"{name}\" does not exist, skipping")
         }
-        ObjectType::OBJECT_SUBSCRIPTION => {
-            let name = object.as_string().expect("subscription name is a String node").sval;
-            format!("subscription \"{name}\" does not exist, skipping")
-        }
         ObjectType::OBJECT_COLLATION
         | ObjectType::OBJECT_STATISTIC_EXT
         | ObjectType::OBJECT_TSPARSER
@@ -317,14 +313,23 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
                 }
             }
         }
-        // unported: does_not_exist_skipping remaining object-type arms
-        _ => {
-            return Err(Box::new(
-                types_error::PgError::error(
-                    "DROP ... IF EXISTS is not supported yet for this type of object",
-                )
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-            ))
+        // Reached only via remove_foreign_objects' own NOTICE path today;
+        // kept for C parity of this function.
+        ObjectType::OBJECT_FDW => {
+            let name = object.as_string().expect("foreign-data wrapper name is a String node").sval;
+            format!("foreign-data wrapper \"{name}\" does not exist, skipping")
+        }
+        ObjectType::OBJECT_FOREIGN_SERVER => {
+            let name = object.as_string().expect("server name is a String node").sval;
+            format!("server \"{name}\" does not exist, skipping")
+        }
+        // C: relations & friends are handled elsewhere; the rest are not used
+        // or needed. Both buckets elog(ERROR, "unsupported object type").
+        other => {
+            return Err(Box::new(types_error::PgError::error(format!(
+                "unsupported object type: {}",
+                other as i32
+            ))))
         }
     };
     notice(msg)
@@ -446,4 +451,67 @@ fn remove_foreign_objects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResu
     }
     catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static NOTICES: Mutex<Vec<std::string::String>> = Mutex::new(Vec::new());
+
+    fn capture(
+        _elevel: types_error::ErrorLevel,
+        msg: std::string::String,
+        _detail: Option<std::string::String>,
+    ) -> PgResult<()> {
+        NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+        Ok(())
+    }
+
+    fn string_node<'mcx>(mcx: Mcx<'mcx>, s: &'mcx str) -> Node<'mcx> {
+        Node::mk(mcx, types_nodes::String { sval: s }).unwrap()
+    }
+
+    // does_not_exist_skipping: name-only arms emit C's NOTICE text; object
+    // types C routes elsewhere raise elog(ERROR, "unsupported object type")
+    // (previously a 0A000 fence).
+    #[test]
+    fn does_not_exist_skipping_matches_c() {
+        let ctx = mcx::MemoryContext::new("dropcmds-test");
+        let mcx = ctx.mcx();
+        elog_seams::ereport_msg::set(capture);
+
+        does_not_exist_skipping(ObjectType::OBJECT_FDW, string_node(mcx, "w1")).unwrap();
+        does_not_exist_skipping(ObjectType::OBJECT_FOREIGN_SERVER, string_node(mcx, "s1"))
+            .unwrap();
+        does_not_exist_skipping(ObjectType::OBJECT_SCHEMA, string_node(mcx, "n1")).unwrap();
+        {
+            let notices = NOTICES.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                notices.as_slice(),
+                [
+                    "foreign-data wrapper \"w1\" does not exist, skipping",
+                    "server \"s1\" does not exist, skipping",
+                    "schema \"n1\" does not exist, skipping",
+                ]
+            );
+        }
+
+        // C puts OBJECT_TABLE (handled elsewhere) and OBJECT_SUBSCRIPTION
+        // (separate statement) in the internal-error bucket.
+        let e = does_not_exist_skipping(ObjectType::OBJECT_TABLE, string_node(mcx, "t1"))
+            .unwrap_err();
+        assert_eq!(
+            e.message(),
+            format!("unsupported object type: {}", ObjectType::OBJECT_TABLE as i32)
+        );
+        let e =
+            does_not_exist_skipping(ObjectType::OBJECT_SUBSCRIPTION, string_node(mcx, "sub1"))
+                .unwrap_err();
+        assert_eq!(
+            e.message(),
+            format!("unsupported object type: {}", ObjectType::OBJECT_SUBSCRIPTION as i32)
+        );
+    }
 }

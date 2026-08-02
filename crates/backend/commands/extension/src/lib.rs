@@ -43,12 +43,6 @@ pub const Anum_pg_extension_extconfig: i32 = 7;
 pub const Anum_pg_extension_extcondition: i32 = 8;
 pub const Natts_pg_extension: usize = 8;
 
-#[cold]
-#[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported: extension.c {what}")
-}
-
 pub fn get_extension_oid(extname: &str, missing_ok: bool) -> PgResult<Oid> {
     let result = GetSysCacheOid(
         EXTENSIONNAME,

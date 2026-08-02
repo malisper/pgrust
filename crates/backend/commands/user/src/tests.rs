@@ -256,3 +256,35 @@ fn assign_createrole_self_grant_sets_options() {
     assign_createrole_self_grant(Some(""), Some(&extra));
     assert!(!createrole_self_grant_enabled());
 }
+
+// def_get_string T_TypeName/T_List/T_A_Star arms (previously panicked): C
+// routes through TypeNameToString / NameListToString / "*".
+#[test]
+fn def_get_string_remaining_arms_match_c() {
+    use types_nodes::rawnodes::TypeName;
+    use types_nodes::Node;
+    let ctx = mcx::MemoryContext::new("user-test");
+    let mcx = ctx.mcx();
+    let string_node = |s: &'static str| Node::mk(mcx, types_nodes::String { sval: s }).unwrap();
+
+    let tn = TypeName {
+        names: types_nodes::NodeList::from_slice(mcx, &[string_node("admin")]).unwrap(),
+        ..TypeName::default()
+    };
+    let def = DefElem {
+        defname: Some("rolename"),
+        arg: Some(Node::mk(mcx, tn).unwrap()),
+        ..DefElem::default()
+    };
+    assert_eq!(def_get_string(&def).unwrap(), "admin");
+
+    let names = [string_node("a"), string_node("b")];
+    let def = DefElem {
+        defname: Some("opt"),
+        arg: Some(
+            Node::mk(mcx, types_nodes::NodeList::from_slice(mcx, &names).unwrap()).unwrap(),
+        ),
+        ..DefElem::default()
+    };
+    assert_eq!(def_get_string(&def).unwrap(), "a.b");
+}

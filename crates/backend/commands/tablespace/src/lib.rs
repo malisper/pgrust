@@ -894,10 +894,11 @@ pub fn AlterTableSpaceOptions<'mcx>(
     Ok(tablespaceoid)
 }
 
-// AlterObjectOwner_internal (alter.c) specialized to pg_tablespace: the
-// generic get_object_address/catalog-property route is unported. Tuple-level
-// InplaceUpdateTupleLock is not taken (no inplace updaters touch
-// pg_tablespace rows).
+// AlterObjectOwner_internal (alter.c) specialized to pg_tablespace; tcop's
+// non-event-trigger AlterOwnerStmt path dispatches here by name (tablespaces
+// have no event-trigger support). Same checks/updates as commands_alter's
+// generic route; tuple-level InplaceUpdateTupleLock is not taken (no inplace
+// updaters touch pg_tablespace rows).
 pub fn AlterTableSpaceOwner(mcx: Mcx<'_>, name: &str, new_owner_id: Oid) -> PgResult<()> {
     let rel = table::table_open(mcx, TableSpaceRelationId, RowExclusiveLock)?;
 

@@ -438,9 +438,11 @@ pub(crate) fn collecting() -> bool {
         .with(|s| s.borrow().last().map(|st| !st.command_collection_inhibited).unwrap_or(false))
 }
 
-// creating_extension (extension.c) — extensions unported; never in-extension.
+// creating_extension (extension.c:79) — the live thread-local is hosted by
+// pg_depend (one layer below its C home); read it so commands collected while
+// a CREATE/ALTER EXTENSION script runs are marked in_extension, as C does.
 pub(crate) fn creating_extension() -> bool {
-    false
+    pg_depend::creating_extension()
 }
 
 pub fn EventTriggerCollectSimpleCommand(
@@ -637,4 +639,61 @@ pub fn init_seams() {
             plancache::ResetPlanCache();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push_collecting_state() {
+        CURRENT_STATE.with(|s| {
+            s.borrow_mut().push(EventTriggerQueryState {
+                sql_drop_list: Vec::new(),
+                in_sql_drop: false,
+                table_rewrite_oid: InvalidOid,
+                table_rewrite_reason: 0,
+                command_collection_inhibited: false,
+                command_list: Vec::new(),
+                current_command: Vec::new(),
+            });
+        });
+    }
+
+    fn pop_state() {
+        CURRENT_STATE.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+
+    // creating_extension: collection reads pg_depend's live thread-local, so
+    // DDL run from a CREATE EXTENSION script is marked in_extension exactly
+    // as C's collect sites read extension.c's global (event_trigger.c:1732).
+    #[test]
+    fn collect_simple_command_reads_creating_extension() {
+        push_collecting_state();
+        let tag = cmdtag::GetCommandTagEnum(b"CREATE TABLE");
+        pg_depend::set_creating_extension(true);
+        EventTriggerCollectSimpleCommand(
+            ObjectAddress::set(types_core::RELATION_RELATION_ID, 50010),
+            ObjectAddress::set(InvalidOid, InvalidOid),
+            tag,
+        );
+        pg_depend::set_creating_extension(false);
+        EventTriggerCollectSimpleCommand(
+            ObjectAddress::set(types_core::RELATION_RELATION_ID, 50011),
+            ObjectAddress::set(InvalidOid, InvalidOid),
+            tag,
+        );
+        let flags = CURRENT_STATE.with(|s| {
+            s.borrow()
+                .last()
+                .unwrap()
+                .command_list
+                .iter()
+                .map(|c| c.in_extension)
+                .collect::<Vec<_>>()
+        });
+        pop_state();
+        assert_eq!(flags, vec![true, false]);
+    }
 }

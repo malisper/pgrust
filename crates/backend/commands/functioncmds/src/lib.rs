@@ -42,12 +42,6 @@ const Anum_pg_language_lanvalidator: i32 = 8;
 
 #[cold]
 #[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: functioncmds {what}")
-}
-
-#[cold]
-#[inline(never)]
 pub(crate) fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
@@ -357,31 +351,38 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
     if tn.pct_type {
         return resolve_pct_type(mcx, tn);
     }
-    if tn.typeOid != InvalidOid {
-        unported("pre-resolved TypeName.typeOid");
-    }
 
-    // C DeconstructQualifiedName's default arm raises the improper-qualified-name
-    // error itself for 0 or >3 parts; collect every part so it can.
-    let names: Vec<&str> =
-        tn.names.iter().map(|n| n.as_string().expect("TypeName names").sval).collect();
-    let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names)?;
+    let (typoid, typname): (Oid, &'a str) = if tn.names.is_nil() {
+        // LookupTypeNameExtended (parse_type.c): an internally generated
+        // TypeName carries its OID already. The display name is only read on
+        // the does-not-exist arm, which a pre-resolved OID cannot reach.
+        (tn.typeOid, "")
+    } else {
+        // C DeconstructQualifiedName's default arm raises the
+        // improper-qualified-name error itself for 0 or >3 parts; collect
+        // every part so it can.
+        let names: Vec<&str> =
+            tn.names.iter().map(|n| n.as_string().expect("TypeName names").sval).collect();
+        let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names)?;
 
-    let typoid = match schemaname {
-        Some(schemaname) => {
-            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
-            syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
-        }
-        None => {
-            let mut found = InvalidOid;
-            for &namespace_id in catalog_namespace::fetch_search_path(mcx, true)?.iter() {
-                found = syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?;
-                if found != InvalidOid {
-                    break;
-                }
+        let typoid = match schemaname {
+            Some(schemaname) => {
+                let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+                syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
             }
-            found
-        }
+            None => {
+                let mut found = InvalidOid;
+                for &namespace_id in catalog_namespace::fetch_search_path(mcx, true)?.iter() {
+                    found =
+                        syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?;
+                    if found != InvalidOid {
+                        break;
+                    }
+                }
+                found
+            }
+        };
+        (typoid, typname)
     };
     // LookupTypeNameExtended (parse_type.c): an array reference yields the
     // array type of the base.
@@ -1871,6 +1872,18 @@ pub fn CallStmtResultDesc<'mcx>(
 mod tests {
     use super::*;
     use mcx::MemoryContext;
+
+    // resolve_type_oid pre-resolved lane (LookupTypeNameExtended parse_type.c:
+    // names == NIL means the OID rides on the TypeName) — previously fenced.
+    #[test]
+    fn resolve_type_oid_pre_resolved_lane() {
+        let cx = MemoryContext::new("resolve_type_oid test");
+        let mcx = cx.mcx();
+        let tn = TypeName { typeOid: 23, ..TypeName::default() };
+        let (oid, name) = resolve_type_oid(mcx, &tn).unwrap();
+        assert_eq!(oid, 23);
+        assert_eq!(name, "");
+    }
 
     fn return_stmt<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
         Node::build::<types_nodes::parsenodes::ReturnStmt>(mcx).unwrap().seal()

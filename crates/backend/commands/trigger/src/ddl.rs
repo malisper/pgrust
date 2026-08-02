@@ -1,6 +1,5 @@
 // CreateTrigger / RemoveTriggerById / get_trigger_oid / renametrig
-// (trigger.c), incl. partitioned-table rename recursion. LOUD: non-superuser
-// owner checks.
+// (trigger.c), incl. partitioned-table rename recursion.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
@@ -156,16 +155,19 @@ fn name_datum_str<'a>(d: Datum) -> &'a str {
     core::str::from_utf8(&bytes[..len]).expect("non-UTF-8 tgname")
 }
 
-// renametrig (trigger.c). The RangeVarCallbackForRenameTrigger owner check is
-// the superuser fast path; relkind is re-checked on the opened rel.
-pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
-    if !superuser::superuser_arg(miscinit::GetUserId())? {
-        // unported: ALTER TRIGGER owner check for non-superusers
-        return Err(err(
-            "ALTER TRIGGER ... RENAME as a non-superuser is not supported yet".to_string(),
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
+// get_relkind_objtype (tablecmds.c), trigger-relevant subset: only relkinds
+// that pass the "cannot have triggers" check can reach the owner error.
+fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+    match relkind {
+        b'v' => types_nodes::parsenodes::ObjectType::OBJECT_VIEW,
+        RELKIND_FOREIGN_TABLE => types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_TABLE,
+        _ => types_nodes::parsenodes::ObjectType::OBJECT_TABLE,
     }
+}
+
+// renametrig (trigger.c). RangeVarCallbackForRenameTrigger's checks (relkind,
+// owner, system catalog) are applied to the opened rel.
+pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
     let rvn = stmt.relation.expect("RenameStmt.relation");
     let rv = rel_vocab::RangeVar {
         catalogname: rvn.catalogname,
@@ -190,6 +192,25 @@ pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
                 .with_detail(relkind_not_supported_detail(other as u8).to_string()),
             ));
         }
+    }
+    // RangeVarCallbackForRenameTrigger: you must own the table to rename one
+    // of its triggers.
+    if !aclchk::object_ownercheck(
+        types_core::RELATION_RELATION_ID,
+        targetrel.rd_id,
+        miscinit::GetUserId(),
+    )? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(targetrel.rd_rel.relkind),
+            rv.relname,
+        )?;
+    }
+    if !init_small::globals::allowSystemTableMods() && catalog::IsSystemRelation(&targetrel) {
+        return Err(err(
+            format!("permission denied: \"{}\" is a system catalog", rv.relname),
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+        ));
     }
     if targetrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
         pg_inherits::find_all_inheritors(mcx, targetrel.rd_id, AccessExclusiveLock)?;
@@ -527,4 +548,37 @@ pub fn EnableDisableTrigger<'mcx>(
         inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ddl_tests {
+    use super::*;
+    use types_nodes::parsenodes::ObjectType;
+
+    // RangeVarCallbackForRenameTrigger owner arm: relkind -> ObjectType per
+    // get_relkind_objtype (tablecmds.c) for the relkinds that can carry
+    // triggers, and the aclcheck_error(ACLCHECK_NOT_OWNER) shape C raises.
+    #[test]
+    fn rename_trigger_owner_error_matches_c() {
+        assert_eq!(get_relkind_objtype(RELKIND_RELATION), ObjectType::OBJECT_TABLE);
+        assert_eq!(get_relkind_objtype(b'v'), ObjectType::OBJECT_VIEW);
+        assert_eq!(get_relkind_objtype(RELKIND_FOREIGN_TABLE), ObjectType::OBJECT_FOREIGN_TABLE);
+        assert_eq!(get_relkind_objtype(RELKIND_PARTITIONED_TABLE), ObjectType::OBJECT_TABLE);
+
+        let e = aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(RELKIND_RELATION),
+            "t1",
+        )
+        .unwrap_err();
+        assert_eq!(e.message(), "must be owner of table t1");
+        assert_eq!(e.sqlstate(), ERRCODE_INSUFFICIENT_PRIVILEGE);
+        let e = aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(b'v'),
+            "v1",
+        )
+        .unwrap_err();
+        assert_eq!(e.message(), "must be owner of view v1");
+    }
 }

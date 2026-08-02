@@ -50,6 +50,8 @@ xact = { path = "../../access/transam/xact" }
 relpath = { path = "../../../common/relpath" }
 wchar = { path = "../../../common/wchar" }
 mbutils = { path = "../../utils/mb/mbutils" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+format_type = { path = "../../utils/adt/format_type" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
 adt_acl = { path = "../../utils/adt/acl" }
 superuser = { path = "../../utils/misc/superuser" }

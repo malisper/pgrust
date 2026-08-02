@@ -2,7 +2,7 @@ use datum::Datum;
 use mcx::Mcx;
 use pg_depend::ObjectAddress;
 use types_core::{AttrNumber, Oid, OidIsValid, NAMEDATALEN};
-use types_error::PgResult;
+use types_error::{PgResult, ERROR};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use crate::{SQLDropObject, CURRENT_STATE};
@@ -14,17 +14,6 @@ const TRIGGER_OID_INDEX_ID: Oid = 2702;
 const Anum_pg_trigger_oid: AttrNumber = 1;
 const Anum_pg_trigger_tgrelid: AttrNumber = 2;
 const POLICY_RELATION_ID: Oid = 3256;
-const DEFAULT_ACL_RELATION_ID: Oid = 826;
-const TYPE_RELATION_ID: Oid = types_core::TYPE_RELATION_ID;
-const CONSTRAINT_RELATION_ID: Oid = 2606;
-const PROCEDURE_RELATION_ID: Oid = 1255;
-const REWRITE_RELATION_ID: Oid = 2618;
-const STATISTIC_EXT_RELATION_ID: Oid = 3381;
-const USER_MAPPING_RELATION_ID: Oid = types_core::USER_MAPPING_RELATION_ID;
-const FOREIGN_SERVER_RELATION_ID: Oid = types_core::catalog::FOREIGN_SERVER_RELATION_ID;
-const FOREIGN_DATA_WRAPPER_RELATION_ID: Oid = types_core::catalog::FOREIGN_DATA_WRAPPER_RELATION_ID;
-const Anum_pg_foreign_server_srvname: i32 = 2;
-const Anum_pg_foreign_data_wrapper_fdwname: i32 = 2;
 
 pub fn EventTriggerSQLDropAddObject(
     mcx: Mcx<'_>,
@@ -113,84 +102,86 @@ pub fn EventTriggerSQLDropAddObject(
     Ok(())
 }
 
-struct ClassNaming {
-    nsp_attnum: Option<i32>,
-    name_attnum: i32,
-    namensp_unique: bool,
-    syscache_id: i32,
+// get_catalog_object_by_oid (objectaddress.c) with the caller's attribute
+// reads folded into `decode`; None = no catalog row for objid.
+fn catalog_object_row<T>(
+    mcx: Mcx<'_>,
+    class_id: Oid,
+    objid: Oid,
+    decode: impl FnOnce(&types_tuple::HeapTupleData<'_>, &types_tuple::TupleDescData<'_>) -> T,
+) -> PgResult<Option<T>> {
+    let prop = catalog_objectaddress::get_object_property_data(class_id);
+    let rel = table::table_open(mcx, class_id, types_rel::AccessShareLock)?;
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = prop.attnum_oid as AttrNumber;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = types_core::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(objid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        prop.oid_index_oid,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let result = genam::systable_getnext(mcx, &mut scan)?.map(|tup| decode(tup, rel.descr()));
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
 }
 
-fn class_naming(class_id: Oid) -> Option<ClassNaming> {
-    // (attnum_namespace, attnum_name, namensp_unique) per ObjectProperty
-    // (objectaddress.c), for the classes reachable from ported drops.
-    match class_id {
-        TYPE_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: Some(3),
-            name_attnum: 2,
-            namensp_unique: true,
-            syscache_id: cache_syscache::TYPEOID,
-        }),
-        CONSTRAINT_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: Some(3),
-            name_attnum: 2,
-            namensp_unique: false,
-            syscache_id: cache_syscache::CONSTROID,
-        }),
-        PROCEDURE_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: Some(3),
-            name_attnum: 2,
-            namensp_unique: false,
-            syscache_id: cache_syscache::PROCOID,
-        }),
-        STATISTIC_EXT_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: Some(4),
-            name_attnum: 3,
-            namensp_unique: true,
-            syscache_id: cache_syscache::STATEXTOID,
-        }),
-        // ObjectProperty: no namespace column (srvname/fdwname are globally
-        // unique, not per-schema).
-        FOREIGN_SERVER_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: None,
-            name_attnum: Anum_pg_foreign_server_srvname,
-            namensp_unique: true,
-            syscache_id: cache_syscache::FOREIGNSERVEROID,
-        }),
-        FOREIGN_DATA_WRAPPER_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: None,
-            name_attnum: Anum_pg_foreign_data_wrapper_fdwname,
-            namensp_unique: true,
-            syscache_id: cache_syscache::FOREIGNDATAWRAPPEROID,
-        }),
-        _ => None,
-    }
+// NameStr + pstrdup of a name-column datum.
+fn name_datum_str(d: Datum) -> String {
+    // SAFETY: name-column datum points at NAMEDATALEN bytes.
+    let bytes =
+        unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, NAMEDATALEN as usize) };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 // obtain_object_name_namespace (event_trigger.c): fill objname / schemaname /
-// istemp; false = foreign temp object, don't report.
+// istemp; false = foreign temp object, don't report. Generic over
+// ObjectProperty (objectaddress.c); classes outside the table are a no-op,
+// as in C.
 fn obtain_object_name_namespace(
     mcx: Mcx<'_>,
     object: &ObjectAddress,
     obj: &mut SQLDropObject,
 ) -> PgResult<bool> {
-    let (nsp, name): (Option<Oid>, Option<String>) = match object.classId {
-        types_core::RELATION_RELATION_ID => {
-            let nsp = lsyscache::relation::get_rel_namespace(object.objectId)?;
-            let name = lsyscache::relation::get_rel_name(mcx, object.objectId)?
-                .map(|s| s.as_str().to_string());
-            (Some(nsp), name)
-        }
-        // ObjectProperty rows with no name/namespace attnums (objectaddress.c):
-        // C's obtain_object_name_namespace is a no-op for these classes.
-        REWRITE_RELATION_ID | DEFAULT_ACL_RELATION_ID | USER_MAPPING_RELATION_ID => (None, None),
-        other => match class_naming(other) {
-            Some(naming) => syscache_naming(object.objectId, &naming)?,
-            None => panic!(
-                "obtain_object_name_namespace (event_trigger.c): unported object class {other}"
-            ),
-        },
+    if !catalog_objectaddress::is_objectclass_supported(object.classId) {
+        return Ok(true);
+    }
+    let prop = catalog_objectaddress::get_object_property_data(object.classId);
+    let row = catalog_object_row(mcx, object.classId, object.objectId, |tup, desc| {
+        let nsp = (prop.attnum_namespace != 0)
+            .then(|| {
+                let mut isnull = false;
+                // SAFETY: attnum from the ObjectProperty row for this catalog.
+                let d = unsafe {
+                    types_tuple::heap_getattr(tup, prop.attnum_namespace, desc, &mut isnull)
+                };
+                (!isnull).then(|| d.as_oid())
+            })
+            .flatten();
+        let name = (prop.is_nsp_name_unique && object.objectSubId == 0 && prop.attnum_name != 0)
+            .then(|| {
+                let mut isnull = false;
+                // SAFETY: attnum from the ObjectProperty row for this catalog.
+                let d = unsafe {
+                    types_tuple::heap_getattr(tup, prop.attnum_name, desc, &mut isnull)
+                };
+                (!isnull).then(|| name_datum_str(d))
+            })
+            .flatten();
+        (nsp, name)
+    })?;
+    let Some((nsp, name)) = row else {
+        // C: no catalog tuple -> nothing to fill, still reported.
+        return Ok(true);
     };
-
     if let Some(namespace_id) = nsp {
         if catalog_namespace::isTempNamespace(namespace_id) {
             obj.schemaname = Some("pg_temp".to_string());
@@ -203,56 +194,49 @@ fn obtain_object_name_namespace(
             obj.istemp = false;
         }
     }
-
-    let unique = match object.classId {
-        types_core::RELATION_RELATION_ID => true,
-        REWRITE_RELATION_ID => false,
-        other => class_naming(other).map(|n| n.namensp_unique).unwrap_or(false),
-    };
-    if unique && object.objectSubId == 0 {
+    if name.is_some() {
         obj.objname = name;
     }
     Ok(true)
 }
 
-// Namespace column value for a collected object (SRF schema column).
-pub(crate) fn object_namespace(addr: &ObjectAddress) -> PgResult<Option<Oid>> {
-    match class_naming(addr.classId) {
-        Some(naming) => Ok(syscache_naming(addr.objectId, &naming)?.0),
-        None => Ok(None),
+// Namespace column value for a collected object (SRF schema column),
+// pg_event_trigger_ddl_commands (event_trigger.c): classes without a
+// namespace column (or outside ObjectProperty) report NULL; a vanished row or
+// null namespace is an error, as in C.
+pub(crate) fn object_namespace(mcx: Mcx<'_>, addr: &ObjectAddress) -> PgResult<Option<Oid>> {
+    if !catalog_objectaddress::is_objectclass_supported(addr.classId) {
+        return Ok(None);
     }
-}
-
-fn syscache_naming(oid: Oid, naming: &ClassNaming) -> PgResult<(Option<Oid>, Option<String>)> {
-    let Some(tup) = cache_syscache::SearchSysCache1(
-        naming.syscache_id,
-        cache_syscache::SysCacheKey::Value(Datum::from_oid(oid)),
-    )?
-    else {
-        return Ok((None, None));
+    let prop = catalog_objectaddress::get_object_property_data(addr.classId);
+    if prop.attnum_namespace == 0 {
+        return Ok(None);
+    }
+    let row = catalog_object_row(mcx, addr.classId, addr.objectId, |tup, desc| {
+        let mut isnull = false;
+        // SAFETY: attnum from the ObjectProperty row for this catalog.
+        let d = unsafe { types_tuple::heap_getattr(tup, prop.attnum_namespace, desc, &mut isnull) };
+        (d.as_oid(), isnull)
+    })?;
+    let Some((nsp, isnull)) = row else {
+        return Err(elog::ereport(ERROR)
+            .errmsg(format!(
+                "cache lookup failed for object {}/{}",
+                addr.classId, addr.objectId
+            ))
+            .into_error()
+            .into());
     };
-    let nsp = match naming.nsp_attnum {
-        Some(attnum) => {
-            let (nsp_d, nsp_null) =
-                cache_syscache::SysCacheGetAttr(naming.syscache_id, &tup, attnum)?;
-            if nsp_null { None } else { Some(nsp_d.as_oid()) }
-        }
-        None => None,
-    };
-    let (name_d, name_null) =
-        cache_syscache::SysCacheGetAttr(naming.syscache_id, &tup, naming.name_attnum)?;
-    let name = if name_null {
-        None
-    } else {
-        // SAFETY: name-column datum points at NAMEDATALEN bytes.
-        let bytes = unsafe {
-            core::slice::from_raw_parts(name_d.as_usize() as *const u8, NAMEDATALEN as usize)
-        };
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
-    };
-    cache_syscache::ReleaseSysCache(tup);
-    Ok((nsp, name))
+    if isnull {
+        return Err(elog::ereport(ERROR)
+            .errmsg(format!(
+                "invalid null namespace in object {}/{}/{}",
+                addr.classId, addr.objectId, addr.objectSubId
+            ))
+            .into_error()
+            .into());
+    }
+    Ok(Some(nsp))
 }
 
 fn trigger_get_relid(mcx: Mcx<'_>, trigger_oid: Oid) -> PgResult<Oid> {
@@ -319,4 +303,54 @@ fn policy_get_relid(mcx: Mcx<'_>, policy_oid: Oid) -> PgResult<Oid> {
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
     Ok(relid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcx::MemoryContext;
+
+    fn drop_obj(object: ObjectAddress) -> SQLDropObject {
+        SQLDropObject {
+            address: object,
+            schemaname: None,
+            objname: None,
+            objidentity: None,
+            objecttype: None,
+            addrnames: None,
+            addrargs: None,
+            original: true,
+            normal: false,
+            istemp: false,
+        }
+    }
+
+    // Classes outside ObjectProperty are a no-op that still reports the drop
+    // (C event_trigger.c: "does nothing for object classes that are not in
+    // ObjectProperty"); previously fenced with a panic.
+    #[test]
+    fn obtain_object_name_namespace_ignores_unsupported_class() {
+        let ctx = MemoryContext::new("sqldrop-test");
+        // pg_enum (3501) has no ObjectProperty row.
+        let object = ObjectAddress::set(3501, 50020);
+        let mut obj = drop_obj(object);
+        assert!(obtain_object_name_namespace(ctx.mcx(), &object, &mut obj).unwrap());
+        assert!(obj.schemaname.is_none());
+        assert!(obj.objname.is_none());
+        assert!(!obj.istemp);
+    }
+
+    // ddl_commands schema column: classes without a namespace column (or
+    // outside ObjectProperty) are NULL without a catalog lookup.
+    #[test]
+    fn object_namespace_null_for_schema_less_classes() {
+        let ctx = MemoryContext::new("sqldrop-test");
+        // pg_enum (3501): not in ObjectProperty.
+        assert_eq!(object_namespace(ctx.mcx(), &ObjectAddress::set(3501, 1)).unwrap(), None);
+        // pg_rewrite (2618), pg_default_acl (826), pg_user_mapping (1418):
+        // ObjectProperty rows with attnum_namespace = InvalidAttrNumber.
+        assert_eq!(object_namespace(ctx.mcx(), &ObjectAddress::set(2618, 1)).unwrap(), None);
+        assert_eq!(object_namespace(ctx.mcx(), &ObjectAddress::set(826, 1)).unwrap(), None);
+        assert_eq!(object_namespace(ctx.mcx(), &ObjectAddress::set(1418, 1)).unwrap(), None);
+    }
 }

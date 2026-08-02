@@ -634,6 +634,20 @@ fn collect_subplans_expr<'mcx>(
     }
 }
 
+// ExplainNode's T_ForeignScan naming (explain.c): (pname, sname, operation);
+// direct-modify ForeignScans display the DML operation.
+pub(crate) fn foreign_scan_names(
+    op: types_nodes::CmdType,
+) -> (&'static str, &'static str, &'static str) {
+    match op {
+        types_nodes::CmdType::CMD_SELECT => ("Foreign Scan", "Foreign Scan", "Select"),
+        types_nodes::CmdType::CMD_INSERT => ("Foreign Insert", "Foreign Scan", "Insert"),
+        types_nodes::CmdType::CMD_UPDATE => ("Foreign Update", "Foreign Scan", "Update"),
+        types_nodes::CmdType::CMD_DELETE => ("Foreign Delete", "Foreign Scan", "Delete"),
+        _ => ("???", "Foreign Scan", "???"),
+    }
+}
+
 pub fn ExplainNode<'mcx>(
     node: Node<'mcx>,
     relationship: Option<&str>,
@@ -683,12 +697,9 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_TableFuncScan => ("Table Function Scan", "Table Function Scan"),
         NodeTag::T_ValuesScan => ("Values Scan", "Values Scan"),
         NodeTag::T_ForeignScan => {
-            assert!(
-                node.as_foreign_scan().unwrap().operation
-                    == types_nodes::CmdType::CMD_SELECT,
-                "ExplainNode (explain.c): ForeignScan direct modify unported"
-            );
-            ("Foreign Scan", "Foreign Scan")
+            let (p, s, o) = foreign_scan_names(node.as_foreign_scan().unwrap().operation);
+            operation = Some(o);
+            (p, s)
         }
         NodeTag::T_CteScan => ("CTE Scan", "CTE Scan"),
         NodeTag::T_NamedTuplestoreScan => ("Named Tuplestore Scan", "Named Tuplestore Scan"),

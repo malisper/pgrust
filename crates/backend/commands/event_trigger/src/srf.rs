@@ -264,14 +264,10 @@ fn stringify_grant_objtype(objtype: types_nodes::parsenodes::ObjectType) -> PgRe
 }
 
 fn object_schema_name(mcx: Mcx<'_>, addr: &pg_depend::ObjectAddress) -> PgResult<Option<String>> {
-    let nsp = match addr.classId {
-        types_core::RELATION_RELATION_ID => Some(lsyscache::relation::get_rel_namespace(addr.objectId)?),
-        _ => crate::sqldrop::object_namespace(addr)?,
-    };
-    match nsp {
-        Some(nsp) if OidIsValid(nsp) => Ok(lsyscache::misc::get_namespace_name_or_temp(mcx, nsp)?
+    match crate::sqldrop::object_namespace(mcx, addr)? {
+        Some(nsp) => Ok(lsyscache::misc::get_namespace_name_or_temp(mcx, nsp)?
             .map(|s| s.as_str().to_string())),
-        _ => Ok(None),
+        None => Ok(None),
     }
 }
 

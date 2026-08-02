@@ -204,13 +204,57 @@ pub fn NameListToString<'a>(mcx: Mcx<'a>, names: &NodeList<'_>) -> PgResult<PgSt
     Ok(out)
 }
 
-// TypeNameToString (parse_type.c) for grammar-produced TypeNames (names
-// always present); the format_type_be(typeOid) arm is unreachable here.
+// TypeNameToString (parse_type.c): possibly-qualified name as-is, or the
+// internally-specified type via format_type_be, plus the decoration
+// LookupTypeName considers.
 pub fn TypeNameToString<'a>(mcx: Mcx<'a>, tn: &TypeName<'_>) -> PgResult<PgString<'a>> {
-    assert!(!tn.names.is_nil(), "TypeNameToString: empty names (format_type_be arm unported)");
-    let mut out = NameListToString(mcx, &tn.names)?;
-    for _ in tn.arrayBounds.iter() {
+    let mut out = if tn.names.is_nil() {
+        let mut s = PgString::new_in(mcx);
+        s.try_push_str(&format_type::format_type_be(tn.typeOid)?)?;
+        s
+    } else {
+        NameListToString(mcx, &tn.names)?
+    };
+    if tn.pct_type {
+        out.try_push_str("%TYPE")?;
+    }
+    // C appendTypeNameToBuffer: "[]" appended ONCE when arrayBounds != NIL,
+    // regardless of dimension count.
+    if !tn.arrayBounds.is_nil() {
         out.try_push_str("[]")?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_nodes::Node;
+
+    // TypeNameToString decoration parity (appendTypeNameToBuffer,
+    // parse_type.c): %TYPE suffix and "[]" appended once regardless of the
+    // number of array bounds. The empty-names arm routes to format_type_be
+    // (previously a release-effective assert).
+    #[test]
+    fn type_name_to_string_decorations_match_c() {
+        let ctx = mcx::MemoryContext::new("commands_define-test");
+        let mcx = ctx.mcx();
+        let string_node =
+            |s: &'static str| Node::mk(mcx, types_nodes::String { sval: s }).unwrap();
+        let bound = |n: i32| Node::mk(mcx, types_nodes::Integer { ival: n }).unwrap();
+
+        let tn = TypeName {
+            names: NodeList::from_slice(mcx, &[string_node("s"), string_node("t")]).unwrap(),
+            arrayBounds: NodeList::from_slice(mcx, &[bound(-1), bound(-1)]).unwrap(),
+            ..TypeName::default()
+        };
+        assert_eq!(TypeNameToString(mcx, &tn).unwrap().as_str(), "s.t[]");
+
+        let tn = TypeName {
+            names: NodeList::from_slice(mcx, &[string_node("c")]).unwrap(),
+            pct_type: true,
+            ..TypeName::default()
+        };
+        assert_eq!(TypeNameToString(mcx, &tn).unwrap().as_str(), "c%TYPE");
+    }
 }

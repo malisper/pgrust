@@ -266,9 +266,12 @@ pub fn ExecVacuum<'mcx>(
         }
     }
 
-    if !vacstmt.is_vacuumcmd {
-        unported("ExecVacuum: ANALYZE statement (analyze.c lane)");
-    }
+    // tcop dispatches ANALYZE statements to commands_analyze's ExecVacuum,
+    // which owns C's ANALYZE arm (incl. in-transaction use_own_xacts=false).
+    assert!(
+        vacstmt.is_vacuumcmd,
+        "ExecVacuum (vacuum.c): ANALYZE lane (commands_analyze unit)"
+    );
 
     params.options = VACOPT_VACUUM
         | (if process_main { VACOPT_PROCESS_MAIN } else { 0 })
@@ -392,18 +395,19 @@ pub fn vacuum<'mcx>(
     is_top_level: bool,
 ) -> PgResult<()> {
     debug_assert!(params.options & (VACOPT_VACUUM | VACOPT_ANALYZE) != 0);
-    // ANALYZE-only callers here are the autovacuum worker (never in a
-    // transaction block); ANALYZE statements go through commands_analyze.
+    // ANALYZE-only callers of THIS unit are the autovacuum worker (never in
+    // a transaction block, so use_own_xacts is always true here); ANALYZE
+    // statements go through commands_analyze's vacuum, which owns C's
+    // use_own_xacts=false lane.
     if params.options & VACOPT_VACUUM != 0 {
         xact::PreventInTransactionBlock(is_top_level, "VACUUM")?;
     } else {
-        debug_assert!(
-            miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker,
-            "ANALYZE-only vacuum() caller must be the autovacuum worker"
+        assert!(
+            miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker
+                && !xact::IsInTransactionBlock(is_top_level),
+            "ANALYZE-only vacuum() caller must be the autovacuum worker \
+             outside a transaction block (statements: commands_analyze unit)"
         );
-        if xact::IsInTransactionBlock(is_top_level) {
-            unported("vacuum: ANALYZE inside a transaction block (use_own_xacts=false)");
-        }
     }
 
     if IN_VACUUM.get() {
@@ -1652,8 +1656,3 @@ fn loc(routine: &'static str) -> ::types_error::ErrorLocation {
     ::types_error::ErrorLocation::new(site.file(), site.line() as i32, routine)
 }
 
-#[cold]
-#[inline(never)]
-fn unported(unit: &str) -> ! {
-    panic!("unported callee reached from vacuum.c: {unit}");
-}
