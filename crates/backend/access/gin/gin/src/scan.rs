@@ -13,7 +13,7 @@ use ::types_tuple::itemptr::FirstOffsetNumber;
 
 use crate::insert::cached_gin_state;
 use crate::util::{ginCompareEntries, ginGetStats};
-use crate::{unported, vec_append};
+use crate::vec_append;
 
 /// ginbeginscan.
 pub fn ginbeginscan<'mcx>(
@@ -349,10 +349,19 @@ pub(crate) fn ginNewScanKey(
         )?;
     }
 
+    // If the index is version 0, it may be missing null and placeholder
+    // entries, which would render searches for nulls and full-index scans
+    // unreliable.  Throw an error if so.
     if has_null_query && !so.isVoidRes {
         let stats = ginGetStats(rel)?;
         if stats.ginVersion < 1 {
-            unported("pre-9.1 (version-0) GIN index null/full scans");
+            return Err(Box::new(
+                ::types_error::PgError::error(
+                    "old GIN indexes do not support whole-index scans nor searches for nulls",
+                )
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_hint(format!("To fix this, do REINDEX INDEX \"{}\".", rel.name())),
+            ));
         }
     }
 
