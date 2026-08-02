@@ -1002,7 +1002,7 @@ pub fn AlterSubscription<'mcx>(
                     && twophase::LookupGXactBySubid(subid)
                 {
                     return Err((*err(
-                        "cannot disable two_phase when prepared transactions exist",
+                        "cannot disable \"two_phase\" when prepared transactions exist",
                         ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
                     ))
                     .with_hint("Resolve these transactions and try again.")
