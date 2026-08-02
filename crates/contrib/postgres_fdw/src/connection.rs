@@ -946,6 +946,60 @@ struct ConnRow {
     invalidated: bool,
     xact_depth: i32,
     be_pid: i32,
+    closed: Option<bool>,
+}
+
+// pgfdw_conn_checkable (connection.c:2495): the POLLRDHUP probe exists only
+// where the platform defines it (Linux); elsewhere C compiles it out and the
+// closed column stays NULL.
+fn pgfdw_conn_checkable() -> bool {
+    cfg!(target_os = "linux")
+}
+
+// pgfdw_conn_check (connection.c:2458): 1 = closed, -1 = error, 0 = not
+// closed (or probe unavailable on this platform).
+fn pgfdw_conn_check(conn: &PgConn) -> i32 {
+    let sock = conn.socket();
+    if conn.connection_bad() || sock == types_core::PGINVALID_SOCKET {
+        return -1;
+    }
+    poll_rdhup(sock)
+}
+
+#[cfg(target_os = "linux")]
+fn poll_rdhup(sock: types_core::pgsocket) -> i32 {
+    let mut input_fd = libc::pollfd { fd: sock, events: libc::POLLRDHUP, revents: 0 };
+    loop {
+        // SAFETY: one live pollfd, zero timeout.
+        let result = unsafe { libc::poll(&mut input_fd, 1, 0) };
+        if result >= 0 {
+            break;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return -1;
+        }
+    }
+    if input_fd.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+    {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn poll_rdhup(_sock: types_core::pgsocket) -> i32 {
+    0
+}
+
+// closed-column value: Some(is_closed) when the probe runs, None = NULL
+// (C connection.c:2295 `check_conn && pgfdw_conn_checkable()` gate).
+fn closed_column(check_conn: bool, conn_check: impl FnOnce() -> i32) -> Option<bool> {
+    if check_conn && pgfdw_conn_checkable() {
+        Some(conn_check() != 0)
+    } else {
+        None
+    }
 }
 
 fn server_name_missing_ok(serverid: Oid) -> PgResult<Option<String>> {
@@ -1010,6 +1064,9 @@ fn get_connections_internal(
     if srf.tupdesc.natts != expected {
         return Err(Box::new(PgError::error("incorrect number of output arguments")));
     }
+    // check_conn (v1.2 first argument): the SQL function is STRICT, so the
+    // argument is never NULL when called from SQL (C PG_GETARG_BOOL(0)).
+    let check_conn = v1_2 && fcinfo.args[0].value.as_bool();
     let rows: Vec<ConnRow> = CONNECTIONS.with(|c| {
         c.borrow()
             .iter()
@@ -1020,6 +1077,9 @@ fn get_connections_internal(
                 invalidated: e.invalidated,
                 xact_depth: e.xact_depth,
                 be_pid: e.conn.as_ref().map(|c| c.backend_pid()).unwrap_or(0),
+                closed: closed_column(check_conn, || {
+                    pgfdw_conn_check(e.conn.as_ref().expect("filtered to open connections"))
+                }),
             })
             .collect()
     });
@@ -1041,9 +1101,12 @@ fn get_connections_internal(
             nulls[2] = false;
             values[3] = Datum::from_bool(row.xact_depth > 0);
             nulls[3] = false;
-            // closed: C answers only when check_conn && pgfdw_conn_checkable()
-            // (POLLRDHUP); the probe is unported — always NULL (divergence:
-            // check_conn=true would answer t/f on C/Linux).
+            // closed: answered only when check_conn && pgfdw_conn_checkable()
+            // (POLLRDHUP probe, Linux-only as in C); otherwise NULL.
+            if let Some(closed) = row.closed {
+                values[4] = Datum::from_bool(closed);
+                nulls[4] = false;
+            }
             values[5] = Datum::from_i32(row.be_pid);
             nulls[5] = false;
         } else {
@@ -1186,4 +1249,37 @@ fn pgfdw_get_cleanup_result(
         }
     }
     Ok(CleanupResult::Done(last))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // closed-column gate (connection.c:2295): NULL unless check_conn was
+    // passed AND the platform supports the POLLRDHUP probe. On Linux the
+    // probe result surfaces as t/f; elsewhere the column is always NULL,
+    // exactly as C compiled without POLLRDHUP.
+    #[test]
+    fn closed_column_gate_matches_c() {
+        assert_eq!(closed_column(false, || panic!("probe must not run")), None);
+        if cfg!(target_os = "linux") {
+            assert_eq!(closed_column(true, || 1), Some(true));
+            assert_eq!(closed_column(true, || -1), Some(true));
+            assert_eq!(closed_column(true, || 0), Some(false));
+        } else {
+            assert_eq!(closed_column(true, || panic!("probe must not run")), None);
+        }
+    }
+
+    // pgfdw_conn_check's poll body: a peer-closed socket reports closed (1),
+    // a live one reports open (0). POLLRDHUP is Linux-only, as in C.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn poll_rdhup_detects_peer_close() {
+        use std::os::fd::AsRawFd;
+        let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        assert_eq!(poll_rdhup(a.as_raw_fd()), 0);
+        drop(b);
+        assert_eq!(poll_rdhup(a.as_raw_fd()), 1);
+    }
 }
