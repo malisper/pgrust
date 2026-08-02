@@ -31,7 +31,6 @@ use crate::page::{
     page_of_mut, page_opaque, write_meta, write_opaque,
 };
 use crate::search::{bt_binsrch, bt_moveright};
-use crate::unported_phase2;
 use crate::utils::bt_mkscankey;
 use crate::vacuum::{bt_update_posting, BTVacState, VacPosting};
 
@@ -185,7 +184,8 @@ pub(crate) fn bt_set_cleanup_info(rel: &Relation<'_>, num_delpages: BlockNumber)
 
     let mut metad = page_meta(&metapin.page());
     if metad.btm_version < BTREE_NOVAC_VERSION {
-        unported_phase2("_bt_upgrademetapage (v2/v3 pg_upgrade metapages)");
+        // Upgrade meta-page if needed.
+        crate::page::bt_upgrademetapage(&metapin, &mut metad);
     }
     metad.btm_last_cleanup_num_delpages = num_delpages;
     metad.btm_last_cleanup_num_heap_tuples = -1.0;
@@ -730,7 +730,7 @@ fn bt_unlink_halfdead_page(
     if let Some(mb) = &metabuf {
         let mut metad = page_meta(&mb.page());
         if metad.btm_version < BTREE_NOVAC_VERSION {
-            unported_phase2("_bt_upgrademetapage (v2/v3 pg_upgrade metapages)");
+            crate::page::bt_upgrademetapage(mb, &mut metad);
         }
         metad.btm_fastroot = rightsib;
         metad.btm_fastlevel = targetlevel;

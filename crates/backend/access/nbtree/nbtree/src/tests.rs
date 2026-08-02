@@ -1559,3 +1559,54 @@ fn lp_dead_page_fill_runs_simple_deletion_instead_of_split() {
     assert!(seen.len() <= 60, "deleted tuples stay deleted: {}", seen.len());
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }
+
+// _bt_upgrademetapage: a v2 (pre-pg_upgrade) metapage upgrades in place to
+// BTREE_NOVAC_VERSION with the v3 fields filled and pd_lower re-covering the
+// full payload; the field-wise page_meta parse must tolerate the garbage
+// byte where v4's btm_allequalimage lives.
+#[test]
+fn upgrademetapage_lifts_v2_meta_to_novac_v3() {
+    install();
+    PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.clear();
+        let mut mp = meta_page_opts(P_NONE, 0, false);
+        // Rewrite as a v2 image: version 2, short pd_lower, arbitrary byte
+        // where the (v4-only) allequalimage bool would sit.
+        mp.0[SizeOfPageHeaderData + 4..SizeOfPageHeaderData + 8]
+            .copy_from_slice(&2u32.to_ne_bytes());
+        mp.0[SizeOfPageHeaderData + 40] = 0xAA;
+        let lower = (SizeOfPageHeaderData + 24) as u16;
+        mp.0[12..14].copy_from_slice(&lower.to_ne_bytes());
+        pages.push(leak_page(mp));
+    });
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    let pin = ::bufmgr_seams::BufferPin::adopt(
+        bufmgr_seams::read_buffer::call(&rel, ::types_nbtree::BTREE_METAPAGE).unwrap(),
+    )
+    .unwrap();
+
+    let mut metad = crate::page::page_meta(&pin.page());
+    assert_eq!(metad.btm_version, 2);
+
+    crate::page::bt_upgrademetapage(&pin, &mut metad);
+
+    assert_eq!(metad.btm_version, ::types_nbtree::BTREE_NOVAC_VERSION);
+    let on_page = crate::page::page_meta(&pin.page());
+    assert_eq!(on_page.btm_version, ::types_nbtree::BTREE_NOVAC_VERSION);
+    assert_eq!(on_page.btm_last_cleanup_num_delpages, 0);
+    assert_eq!(on_page.btm_last_cleanup_num_heap_tuples, -1.0);
+    assert!(!on_page.btm_allequalimage, "only a REINDEX can set allequalimage");
+    // pd_lower re-covers the whole (48B) metadata payload, as
+    // _bt_initmetapage lays it out.
+    let lower = PAGES.with(|p| {
+        let pages = p.borrow();
+        // SAFETY: leaked page, single-threaded test access.
+        let page = unsafe { &*pages[0].as_ptr() };
+        u16::from_ne_bytes([page.0[12], page.0[13]]) as usize
+    });
+    assert_eq!(lower, SizeOfPageHeaderData + core::mem::size_of::<BTMetaPageData>());
+    pin.release();
+    assert_eq!(PINS.with(Cell::get), 0);
+}
