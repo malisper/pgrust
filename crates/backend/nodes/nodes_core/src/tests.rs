@@ -738,4 +738,16 @@ fn expr_location_covers_c_arms_and_defaults_to_minus_one() {
     )
     .unwrap();
     assert_eq!(node_funcs::expr_location(de), -1);
+
+    // A_Indirection is also absent from C's 18.3 switch: -1, NOT the arg's
+    // location.
+    let ai = Node::mk(
+        mcx,
+        types_nodes::rawnodes::A_Indirection {
+            arg: Some(con),
+            indirection: types_nodes::NodeList::nil(),
+        },
+    )
+    .unwrap();
+    assert_eq!(node_funcs::expr_location(ai), -1);
 }

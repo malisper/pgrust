@@ -445,9 +445,6 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             node.as_subscripting_ref().unwrap().refexpr.map_or(-1, expr_location)
         }
         NodeTag::T_A_ArrayExpr => node.as_a_array_expr().unwrap().location,
-        NodeTag::T_A_Indirection => {
-            node.as_a_indirection().unwrap().arg.map_or(-1, expr_location)
-        }
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
         NodeTag::T_ColumnDef => {
