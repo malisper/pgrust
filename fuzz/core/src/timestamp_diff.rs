@@ -2525,6 +2525,31 @@ mod tests {
                         e.path().display(),
                         bytes.len()
                     );
+                    // Attribute the poisoned SIDE (CI cluster job ...59580 named
+                    // this unit; it passes fresh/sorted, fails at pod-order
+                    // ordinal 1034 — so some earlier exec poisons persistent
+                    // state). Same-thread retry vs fresh-thread retry split
+                    // the hypotheses: Rust session state is thread-local
+                    // (fresh thread = fresh Rust state) while the C oracle's
+                    // datetime caches are process-global statics (a fresh
+                    // thread still sees them).
+                    let same = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        timestamp_diff(&bytes)
+                    }));
+                    let b2 = bytes.clone();
+                    let fresh = std::thread::spawn(move || {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            timestamp_diff(&b2)
+                        }))
+                        .is_err()
+                    })
+                    .join()
+                    .unwrap_or(true);
+                    eprintln!(
+                        "REPLAY-FAIL-ATTRIB same_thread_retry_fails={} fresh_thread_fails={} (true/true=C process-global poison; true/false=Rust thread-local poison; false/*=transient)",
+                        same.is_err(),
+                        fresh
+                    );
                     failed.push(format!("{} (ordinal {n})", e.path().display()));
                 }
                 n += 1;
