@@ -193,3 +193,42 @@ fn tsvector_uniquepos_tie_weight_pg_qsort_parity() {
         "'w':1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,16383"
     );
 }
+
+/// Task #85 sibling (ceiling sweep): C tsvectorout pallocs its exact
+/// worst-case lenbuf up front, so a tsvector whose worst-case text form
+/// exceeds MaxAllocSize raises palloc's CATCHABLE "invalid memory alloc
+/// request size {lenbuf}" before emitting anything. The port used an
+/// unceilinged heuristic reserve and then grew infallibly (post-allocator-
+/// ceiling: an uncatchable abort; pre-ceiling: multi-GB RSS). Entries may
+/// share lexeme storage (WordEntry.pos is a 20-bit offset), so a ~2.4MB
+/// payload legally declares a >1GB worst case. Pre-fix this test FAILS
+/// (the out call returns Ok).
+#[test]
+fn tsvector_out_over_ceiling_lenbuf_raises_palloc_error() {
+    use crate::layout::WordEntry;
+    // storage: lexeme "ab" (len 2, shortalign 2) + npos=256 + 256 positions
+    let lex_len = 2usize;
+    let npos = 256usize;
+    let enc_max = ::mbutils::pg_database_encoding_max_length() as usize;
+    let per_entry = lex_len * 2 * enc_max + 1 + 7 * npos;
+    // number of entries needed for lenbuf > MAX_ALLOC_SIZE
+    let n = (::mcx::MAX_ALLOC_SIZE - 2) / (per_entry + 3) + 2;
+    let mut payload: Vec<u8> = Vec::with_capacity(4 + n * 4 + 2 + 2 + npos * 2);
+    payload.extend_from_slice(&(n as i32).to_ne_bytes());
+    let e = WordEntry::new(true, lex_len, 0);
+    for _ in 0..n {
+        payload.extend_from_slice(&e.0.to_ne_bytes());
+    }
+    payload.extend_from_slice(b"ab");
+    payload.extend_from_slice(&(npos as u16).to_ne_bytes());
+    for _ in 0..npos {
+        payload.extend_from_slice(&0u16.to_ne_bytes());
+    }
+    // the exact lenbuf C computes for this value
+    let lenbuf: usize = n * 2 + (n - 1) + 2 + n * per_entry;
+    assert!(lenbuf > ::mcx::MAX_ALLOC_SIZE);
+    let ctx = MemoryContext::new("t85");
+    let err = tsvector_out_core(ctx.mcx(), TsVec { payload: &payload })
+        .expect_err("worst-case text form above MaxAllocSize must raise palloc's error");
+    assert_eq!(err.message(), format!("invalid memory alloc request size {lenbuf}"));
+}

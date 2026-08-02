@@ -192,7 +192,33 @@ fn push_u16_dec(out: &mut PgVec<'_, u8>, v: u16) {
 
 pub fn tsvector_out_core<'mcx>(mcx: Mcx<'mcx>, v: TsVec<'_>) -> PgResult<PgVec<'mcx, u8>> {
     let size = v.size();
-    let mut out: PgVec<u8> = vec_with_capacity_in(mcx, v.payload.len() * 2 + 8)?;
+    // C tsvectorout (tsvector.c) pallocs its exact worst-case lenbuf up front:
+    //   lenbuf = size*2 /* '' */ + size-1 /* space */ + 2 /* \0 */
+    //          + per entry: len * 2 * pg_database_encoding_max_length()
+    //          + if haspos: 1 /* : */ + 7 /* int2 + , + weight */ * npos
+    // so an over-MaxAllocSize output raises palloc's CATCHABLE
+    // "invalid memory alloc request size {lenbuf}" before anything is
+    // emitted. vec_with_capacity_in's check_alloc_size is that exact check
+    // and message; reserving the same bound also means the emission below
+    // never regrows (C writes into the one palloc'd buffer).
+    //
+    // C computes lenbuf in int32 with -fwrapv; where that computation wraps
+    // (raw worst case >= 2^31, i.e. ~270MB+ of lexemes under a 4-byte
+    // encoding) C either errors on the sign-extended huge Size or overruns
+    // its own buffer (wrap to a small positive). We compute in usize: in the
+    // whole regime where C is well-defined and non-corrupting the request
+    // value and firing point match C exactly.
+    let enc_max = ::mbutils::pg_database_encoding_max_length() as usize;
+    let mut lenbuf: usize = size * 2 + size.saturating_sub(1) + 2;
+    for i in 0..size {
+        let e = v.entry(i);
+        lenbuf += v.lexeme(e).len() * 2 * enc_max;
+        let npos = v.positions(e).len();
+        if npos != 0 {
+            lenbuf += 1 + 7 * npos;
+        }
+    }
+    let mut out: PgVec<u8> = vec_with_capacity_in(mcx, lenbuf)?;
     for i in 0..size {
         let e = v.entry(i);
         if i != 0 {
