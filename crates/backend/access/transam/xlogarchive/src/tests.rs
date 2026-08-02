@@ -168,3 +168,25 @@ fn restore_archived_file_not_in_archive_recovery() {
     xlogrecovery_seams::archive_recovery_requested::set(|| false);
     assert_eq!(RestoreArchivedFile(SEG, "RECOVERYXLOG", 0, false).unwrap(), None);
 }
+
+// KeepFileRestoredFromArchive notifies the walsenders (WalSndWakeup(true,
+// false)) once the restored segment is in place — the formerly-elided wakeup
+// (the walsender unit now exists and installs the seam).
+#[test]
+fn keep_file_restored_notifies_walsenders() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static WAKEUPS: AtomicU32 = AtomicU32::new(0);
+    with_wal_cwd(|| {
+        walsender_seams::wal_snd_wakeup::set(|physical, logical| {
+            assert!(physical && !logical, "C passes WalSndWakeup(true, false)");
+            WAKEUPS.fetch_add(1, Ordering::Relaxed);
+        });
+
+        std::fs::write("pg_wal/RECOVERYXLOG", b"restored segment").unwrap();
+        KeepFileRestoredFromArchive("pg_wal/RECOVERYXLOG", SEG).unwrap();
+
+        assert!(Path::new(&format!("pg_wal/{SEG}")).exists());
+        assert!(Path::new(&done_path(SEG)).exists(), "forced .done (archive off)");
+        assert_eq!(WAKEUPS.load(Ordering::Relaxed), 1);
+    });
+}

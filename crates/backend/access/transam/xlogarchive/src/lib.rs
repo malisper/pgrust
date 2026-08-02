@@ -1,8 +1,8 @@
 //! xlogarchive.c. Recovery-side entry points (RestoreArchivedFile,
 //! ExecuteRecoveryCommand, KeepFileRestoredFromArchive) are callable but have
-//! no in-tree caller yet (recovery core owns them); Windows-only arms and
-//! walsender wakeups (walsender unported: no walsender thread can exist, so
-//! the wakeups are exact no-ops) are absent. BuildRestoreCommand is re-exported
+//! no in-tree caller yet (recovery core owns them); Windows-only arms are
+//! absent. Walsender wakeups route through the walsender_seams seam (a no-op
+//! until the walsender unit installs it). BuildRestoreCommand is re-exported
 //! from the `archive` crate (C home src/common/archive.c).
 
 #![allow(non_snake_case)]
@@ -223,7 +223,12 @@ pub fn KeepFileRestoredFromArchive(path: &str, xlogfname: &str) -> PgResult<()> 
         XLogArchiveNotify(xlogfname)?;
     }
 
-    // WalSndWakeup(true, false): walsender unported (see module doc).
+    // If the existing segment was replaced, it is safe to notify the
+    // walsenders: WalSndWakeup(true, false). The seam is installed iff the
+    // walsender unit is linked (the startup/xlogrecovery convention).
+    if walsender_seams::wal_snd_wakeup::is_installed() {
+        walsender_seams::wal_snd_wakeup::call(true, false);
+    }
     Ok(())
 }
 
