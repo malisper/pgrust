@@ -6,7 +6,6 @@ pub mod builtins;
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
-use types_core::fmgr::FnExprErased;
 use types_core::{InvalidOid, Oid, NAMEDATALEN};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -14,7 +13,6 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNSAFE_NEW_ENUM_VALUE_USAGE, ERROR,
 };
 use types_fmgr::FmgrInfo;
-use types_nodes::{Node, NodeTag};
 use pg_enum_seams::EnumSortedRow;
 use syscache_seams::PgEnumShape;
 
@@ -131,38 +129,12 @@ pub(crate) fn cmp_via(
     enum_cmp_internal(a.value.as_oid(), b.value.as_oid(), flinfo)
 }
 
-// get_fn_expr_argtype/get_call_expr_argtype (fmgr.c, unported unit) over the
-// call families flinfo.fn_expr carries; InvalidOid mirrors the C NULL cases.
+// get_fn_expr_argtype (fmgr.c): the canonical port lives in funcapi — all six
+// C call families and the full exprType vocabulary; unknown families return
+// InvalidOid exactly as C does (enum_first/enum_last then raise the clean
+// "could not determine actual enum type" error instead of panicking).
 fn get_fn_expr_argtype(flinfo: Option<&FmgrInfo>, argnum: usize) -> Oid {
-    let Some(expr) = flinfo.and_then(|f| f.fn_expr.as_ref()) else {
-        return InvalidOid;
-    };
-    let node = fn_expr_node(expr);
-    let args = match node.node_tag() {
-        NodeTag::T_FuncExpr => &node.as_func_expr().expect("FuncExpr").args,
-        NodeTag::T_OpExpr => &node.as_op_expr().expect("OpExpr").args,
-        tag => panic!("get_fn_expr_argtype: call family {tag:?} not ported"),
-    };
-    match args.iter().nth(argnum) {
-        Some(arg) => expr_type(arg),
-        None => InvalidOid,
-    }
-}
-
-fn fn_expr_node(expr: &FnExprErased) -> Node<'static> {
-    *expr.downcast_ref::<Node<'static>>().expect("fn_expr does not carry a Node")
-}
-
-fn expr_type(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Var => node.as_var().expect("Var").vartype,
-        NodeTag::T_Const => node.as_const().expect("Const").consttype,
-        NodeTag::T_Param => node.as_param().expect("Param").paramtype,
-        NodeTag::T_FuncExpr => node.as_func_expr().expect("FuncExpr").funcresulttype,
-        NodeTag::T_OpExpr => node.as_op_expr().expect("OpExpr").opresulttype,
-        NodeTag::T_RelabelType => node.as_relabel_type().expect("RelabelType").resulttype,
-        tag => panic!("adt_enum exprType: node family {tag:?} not ported"),
-    }
+    funcapi::get_fn_expr_argtype(flinfo, argnum)
 }
 
 fn enum_endpoint<'mcx>(mcx: Mcx<'mcx>, enumtypoid: Oid, backward: bool) -> PgResult<Oid> {
@@ -286,4 +258,101 @@ fn enum_contains_no_values(enumtypoid: Oid) -> PgResult<Box<PgError>> {
         PgError::new(ERROR, format!("enum {ty} contains no values"))
             .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use types_core::catalog::INT4OID;
+    use types_nodes::Node;
+
+    fn dummy(
+        _flinfo: Option<&mut FmgrInfo>,
+        _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        Ok(Datum::from_i32(0))
+    }
+
+    // fn_expr carrying `node`; the arena leaks so the 'static carrier holds.
+    fn flinfo_with_expr(node: Node<'static>) -> FmgrInfo {
+        let ctx = MemoryContext::new("adt_enum-test-fnexpr");
+        let stored = mcx::alloc_leak_in(ctx.mcx(), node).unwrap();
+        let mut flinfo = FmgrInfo::new(dummy, 3528, 0, true, false);
+        // SAFETY: stored is arena-backed; the arena is forgotten below.
+        flinfo.fn_expr = Some(unsafe { types_core::fmgr::FnExprErased::from_node_ref(stored) });
+        core::mem::forget(ctx);
+        flinfo
+    }
+
+    const MOOD_OID: Oid = 90001;
+
+    // Pre-fix an fn_expr call family beyond FuncExpr/OpExpr panicked
+    // ("call family ... not ported"); C's get_call_expr_argtype returns
+    // InvalidOid for a non-call node, so enum_first raises the clean
+    // "could not determine actual enum type" error (fmgr.c + enum.c).
+    #[test]
+    fn unhandled_call_family_is_invalid_oid_not_panic() {
+        let ctx = MemoryContext::new("adt_enum-test");
+        let mcx = ctx.mcx();
+        let konst = Node::mk_const(
+            mcx,
+            MOOD_OID,
+            -1,
+            0,
+            4,
+            Datum::from_oid(MOOD_OID),
+            false,
+            true,
+        )
+        .unwrap();
+        // SAFETY: test-local arena outlives the flinfo (forgotten inside).
+        let node: Node<'static> = unsafe { core::mem::transmute(konst) };
+        let flinfo = flinfo_with_expr(node);
+        let err = enum_range_typoid(Some(&flinfo)).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "could not determine actual enum type");
+    }
+
+    // The WindowFunc call family C handles: enum_first(x) over a window
+    // argument resolves the enum type oid through wintype-carrying args.
+    #[test]
+    fn window_func_call_family_resolves_argtype() {
+        let ctx = MemoryContext::new("adt_enum-test");
+        let mcx = ctx.mcx();
+        let arg = Node::mk_const(
+            mcx,
+            MOOD_OID,
+            -1,
+            0,
+            4,
+            Datum::from_oid(MOOD_OID),
+            false,
+            true,
+        )
+        .unwrap();
+        let wfunc = Node::mk(
+            mcx,
+            types_nodes::primnodes::WindowFunc {
+                winfnoid: 3528,
+                wintype: MOOD_OID,
+                wincollid: 0,
+                inputcollid: 0,
+                args: types_nodes::list::NodeList::make1(mcx, arg).unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // SAFETY: test-local arena outlives the flinfo (forgotten inside).
+        let node: Node<'static> = unsafe { core::mem::transmute(wfunc) };
+        let flinfo = flinfo_with_expr(node);
+        assert_eq!(enum_range_typoid(Some(&flinfo)).unwrap(), MOOD_OID);
+    }
+
+    // C: no FmgrInfo/fn_expr means InvalidOid (fmgr.c), hence the clean error.
+    #[test]
+    fn missing_fn_expr_is_clean_error() {
+        let err = enum_range_typoid(None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    }
 }

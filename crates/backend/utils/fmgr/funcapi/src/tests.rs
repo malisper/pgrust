@@ -602,3 +602,107 @@ fn call_expr_argtype_resolves_delegated_node_families() {
     assert_eq!(get_call_expr_rettype(minmax), TEXTOID);
     assert_eq!(get_call_expr_rettype(nullif), INT4OID);
 }
+
+// get_call_expr_argtype (fmgr.c) call families beyond FuncExpr/OpExpr:
+// DistinctExpr/NullIfExpr/ScalarArrayOpExpr/WindowFunc, plus C's special
+// ScalarArrayOpExpr hack — argument 1 reports the array's ELEMENT type.
+// Pre-fix these families returned InvalidOid where C resolves them.
+#[test]
+fn call_expr_argtype_covers_all_six_call_families() {
+    const INT4_ARRAY: Oid = 1007;
+    static BASE_SHAPE: Once = Once::new();
+    BASE_SHAPE.call_once(|| {
+        if !syscache_seams::pg_type_base_shape::is_installed() {
+            syscache_seams::pg_type_base_shape::set(|typid| {
+                Ok(match typid {
+                    INT4_ARRAY => Some(syscache_seams::PgTypeBaseShape {
+                        typtype: b'b' as i8,
+                        typbasetype: InvalidOid,
+                        typtypmod: -1,
+                        typelem: INT4OID,
+                        typsubscript: 6179, // F_ARRAY_SUBSCRIPT_HANDLER
+                    }),
+                    _ => None,
+                })
+            });
+        }
+    });
+
+    let ctx = MemoryContext::new_bump("funcapi-callfams");
+    let mcx = ctx.mcx();
+    let int_const = |v: i32| {
+        Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), false, true).unwrap()
+    };
+    let arr_const = || {
+        Node::mk_const(mcx, INT4_ARRAY, -1, 0, -1, Datum::from_i32(0), false, false).unwrap()
+    };
+
+    let distinct = Node::mk(
+        mcx,
+        ::nodes::primnodes::DistinctExpr {
+            opno: 96,
+            opfuncid: 65,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: ::nodes::list::NodeList::make2(mcx, int_const(1), int_const(2)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(get_call_expr_argtype(distinct, 0), INT4OID);
+    assert_eq!(get_call_expr_argtype(distinct, 2), InvalidOid);
+
+    let nullif = Node::mk(
+        mcx,
+        ::nodes::primnodes::NullIfExpr {
+            opno: 96,
+            opfuncid: 65,
+            opresulttype: INT4OID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: ::nodes::list::NodeList::make2(mcx, int_const(1), int_const(2)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(get_call_expr_argtype(nullif, 1), INT4OID);
+
+    let wfunc = Node::mk(
+        mcx,
+        ::nodes::primnodes::WindowFunc {
+            winfnoid: 2147,
+            wintype: 20,
+            wincollid: 0,
+            inputcollid: 0,
+            args: ::nodes::list::NodeList::make1(mcx, int_const(7)).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(get_call_expr_argtype(wfunc, 0), INT4OID);
+
+    // `1 = ANY(array)`: argument 0 is the scalar, argument 1 reports the
+    // array's element type (C's "special hack").
+    let saop = Node::mk(
+        mcx,
+        ::nodes::primnodes::ScalarArrayOpExpr {
+            opno: 96,
+            opfuncid: 65,
+            hashfuncid: InvalidOid,
+            negfuncid: InvalidOid,
+            useOr: true,
+            inputcollid: 0,
+            args: ::nodes::list::NodeList::make2(mcx, int_const(1), arr_const()).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(get_call_expr_argtype(saop, 0), INT4OID);
+    assert_eq!(get_call_expr_argtype(saop, 1), INT4OID);
+
+    // Non-call families keep C's InvalidOid.
+    assert_eq!(get_call_expr_argtype(int_const(1), 0), InvalidOid);
+}
