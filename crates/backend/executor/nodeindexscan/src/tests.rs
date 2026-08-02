@@ -845,3 +845,137 @@ fn index_lockmode_is_rte_rellockmode() {
         assert_eq!(index_lockmode(&estate, 1), ::types_rel::RowExclusiveLock);
     });
 }
+
+// nodeIndexscan.c:1384-1400: a non-Const RowCompare member becomes a runtime
+// key targeting the SK_ROW_MEMBER subkey; evaluation writes the subkey (not
+// any top-level key), like C's runtime_keys[n].scan_key = this_sub_key.
+#[test]
+fn row_compare_runtime_member_builds_and_evaluates_subkey() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let heap_oid = fresh_oid();
+        let index_oid = fresh_oid();
+        register_indexed_table(heap_oid, index_oid, &[1]);
+        let index_rel = index_relation(mcx, index_oid, heap_oid);
+        let mk_lvar = || Node::mk_var(mcx, INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let c7 = Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+        // Non-Const member: COALESCE(42) — compiles without fmgr and is not
+        // a Const at build time.
+        let c42 = Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(42), false, true).unwrap();
+        let runtime_member = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::CoalesceExpr {
+                coalescetype: INT4OID,
+                coalescecollid: 0,
+                args: NodeList::make1(mcx, c42).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut opnos = ::types_nodes::list::OidList::nil();
+        opnos.lappend(mcx, OP_INT4GT).unwrap();
+        opnos.lappend(mcx, OP_INT4GT).unwrap();
+        let mut opfamilies = ::types_nodes::list::OidList::nil();
+        opfamilies.lappend(mcx, INT4_BTREE_OPFAMILY).unwrap();
+        opfamilies.lappend(mcx, INT4_BTREE_OPFAMILY).unwrap();
+        let mut inputcollids = ::types_nodes::list::OidList::nil();
+        inputcollids.lappend(mcx, 0).unwrap();
+        inputcollids.lappend(mcx, 0).unwrap();
+        let rc = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::RowCompareExpr {
+                cmptype: 5, // BTGreaterStrategyNumber, matches OP_INT4GT
+                opnos,
+                opfamilies,
+                inputcollids,
+                largs: NodeList::make2(mcx, mk_lvar(), mk_lvar()).unwrap(),
+                rargs: NodeList::make2(mcx, c7, runtime_member).unwrap(),
+            },
+        )
+        .unwrap();
+        let quals = NodeList::make1(mcx, rc).unwrap();
+        let mut runtime = ::mcx::PgVec::new_in(mcx);
+        let mut keys = exec_index_build_scan_keys(
+            mcx, &index_rel, &quals, ParamBind::NONE, false, &mut runtime, None,
+        )
+        .unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_ne!(keys[0].sk_flags & SK_ROW_HEADER, 0);
+        assert_eq!(runtime.len(), 1);
+        let subp = runtime[0].row_member.expect("row member runtime key");
+        assert!(runtime[0].key_toastable == false);
+        let first_sub = keys[0].sk_argument.as_usize() as *const ScanKeyData;
+        // SAFETY: the header points at the two-member flat subkey buffer.
+        unsafe {
+            assert_eq!(subp.as_ptr() as *const ScanKeyData, first_sub.add(1));
+            assert_eq!((*first_sub).sk_argument.as_i32(), 7);
+            assert_eq!((*first_sub).sk_flags, SK_ROW_MEMBER);
+            assert_ne!((*subp.as_ptr()).sk_flags & SK_ROW_END, 0);
+            assert_eq!((*subp.as_ptr()).sk_argument, Datum::from_usize(0));
+        }
+        // ExecIndexEvalRuntimeKeys writes the evaluated value into the subkey.
+        let mut estate = EStateData::new_in(mcx);
+        let ecxt = estate.create_expr_context();
+        exec_index_eval_runtime_keys(&mut estate, ecxt, &mut runtime, &mut keys, &mut [])
+            .unwrap();
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!((*subp.as_ptr()).sk_argument.as_i32(), 42);
+            assert_eq!((*subp.as_ptr()).sk_flags & SK_ISNULL, 0);
+        }
+        estate.exec_reset_tuple_table(false);
+        quiesced();
+    });
+}
+
+// nodeIndexscan.c:1345-1346: the saop left operand is unconditionally
+// RelabelType-stripped (binary-compatible index keys, e.g. varchar via the
+// text opclass); this used to raise 0A000.
+#[test]
+fn saop_relabeled_left_operand_is_stripped() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let heap_oid = fresh_oid();
+        let index_oid = fresh_oid();
+        register_indexed_table(heap_oid, index_oid, &[1]);
+        let index_rel = index_relation(mcx, index_oid, heap_oid);
+        let lvar = Node::mk_var(mcx, INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let relabeled = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::RelabelType {
+                arg: lvar,
+                resulttype: INT4OID,
+                resulttypmod: -1,
+                resultcollid: 0,
+                relabelformat: ::types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let rvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+        let saop = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::ScalarArrayOpExpr {
+                opno: OP_INT4EQ,
+                opfuncid: F_INT4EQ,
+                hashfuncid: 0,
+                negfuncid: 0,
+                useOr: true,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, relabeled, rvar).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let quals = NodeList::make1(mcx, saop).unwrap();
+        let mut runtime = ::mcx::PgVec::new_in(mcx);
+        let keys = exec_index_build_scan_keys(
+            mcx, &index_rel, &quals, ParamBind::NONE, false, &mut runtime, None,
+        )
+        .unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].sk_attno, 1);
+        assert_eq!(keys[0].sk_flags, SK_SEARCHARRAY);
+        assert_eq!(runtime.len(), 1);
+    });
+}

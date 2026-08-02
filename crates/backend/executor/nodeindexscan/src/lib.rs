@@ -1,12 +1,14 @@
 // nodeIndexscan.c: Var-op-Const quals become ScanKeys at init (rule 5);
-// runtime keys (indexkey op expression, incl. SK_SEARCHARRAY arrays)
-// re-evaluate into the same ScanKeys at rescan; RowCompare quals build a
-// SK_ROW_HEADER key over a state-owned subkey array (Const members only —
-// runtime row members loud-panic). Non-amsearcharray array keys loud-panic
-// pending their lanes. EPQ arms loud-panic pending EPQState.
+// runtime keys (indexkey op expression, incl. SK_SEARCHARRAY arrays and
+// RowCompare members) re-evaluate into the same ScanKeys at rescan;
+// RowCompare quals build a SK_ROW_HEADER key over a state-owned subkey
+// array. Non-amsearcharray array keys raise a clean feature error pending
+// their lane. EPQ arms loud-panic pending EPQState.
 #![allow(non_snake_case)]
 
 extern crate alloc;
+
+use core::ptr::NonNull;
 
 use ::datum::Datum;
 use ::execexpr::{
@@ -46,6 +48,10 @@ pub struct IndexRuntimeKeyInfo<'mcx> {
     // Which key array scan_key indexes: quals or ORDER BY keys (C stores a
     // pointer into the respective array).
     pub orderby: bool,
+    // RowCompare runtime member: the key lives in the flat SK_ROW_MEMBER
+    // buffer, not either indexed array (C stores the subkey pointer the same
+    // way); Some overrides scan_key/orderby.
+    pub row_member: Option<NonNull<ScanKeyData>>,
     pub key_expr: PgBox<'mcx, ExprState<'mcx>>,
     pub key_toastable: bool,
 }
@@ -711,14 +717,15 @@ fn scankey_case_unported(what: &str) -> Box<PgError> {
 }
 
 /// `ExecIndexBuildScanKeys`, cases 1 (indexkey op Const), 2 (runtime key),
-/// 3 (RowCompare over Const members), 4 (amsearcharray ScalarArrayOp, Const
-/// or runtime array), and 5 (NullTest). Runtime (non-Const) row members and
-/// non-amsearcharray ScalarArrayOp loud-panic (the planner only builds saop
-/// index quals on amsearcharray AMs — plancat sets it for btree only).
-/// `isorderby` is the ORDER BY (amcanorderbyop) leg: ordering-op strategy
-/// lookup + SK_ORDER_BY, cases 1 and 2 only. `runtime_keys` is shared across
-/// the indexqual and indexorderby calls (C's resized array). SK_ROW_HEADER
-/// keys point into a flat SK_ROW_MEMBER buffer leaked into `mcx`, freed with
+/// 3 (RowCompare, Const or runtime members), 4 (amsearcharray
+/// ScalarArrayOp, Const or runtime array), and 5 (NullTest).
+/// Non-amsearcharray ScalarArrayOp raises a clean feature error pending the
+/// IndexArrayKeyInfo lane (the planner CAN emit those via
+/// skip_nonnative_saop). `isorderby` is the ORDER BY (amcanorderbyop) leg:
+/// ordering-op strategy lookup + SK_ORDER_BY, cases 1 and 2 only.
+/// `runtime_keys` is shared across the indexqual and indexorderby calls
+/// (C's resized array). SK_ROW_HEADER keys and RowCompare runtime keys
+/// point into a flat SK_ROW_MEMBER buffer leaked into `mcx`, freed with
 /// the query context exactly like C's palloc'd subkey array.
 pub fn exec_index_build_scan_keys<'mcx>(
     mcx: Mcx<'mcx>,
@@ -797,13 +804,30 @@ pub fn exec_index_build_scan_keys<'mcx>(
                             SK_ROW_MEMBER | if con.constisnull { SK_ISNULL } else { 0 },
                             con.constvalue,
                         ),
-                        // C treats a non-Const member as a runtime key
-                        // targeting the subkey; the runtime-key table here
-                        // addresses top-level keys only.
+                        // A non-Const member becomes a runtime key targeting
+                        // the subkey about to be pushed (C stores the subkey
+                        // pointer); the flat buffer's base is stable — it was
+                        // reserved exactly above and never regrows.
                         None => {
-                            return Err(scankey_case_unported(
-                                "a row comparison with a non-constant member",
-                            ))
+                            let this_sub_key = unsafe {
+                                NonNull::new_unchecked(
+                                    row_subkeys.as_mut_ptr().add(row_subkeys.len()),
+                                )
+                            };
+                            runtime_keys.push(IndexRuntimeKeyInfo {
+                                scan_key: 0,
+                                orderby: false,
+                                row_member: Some(this_sub_key),
+                                key_expr: ::execexpr::exec_init_expr_subplans(
+                                    mcx,
+                                    Some(rightop),
+                                    params,
+                                    sub,
+                                )?
+                                .expect("runtime key expr compiles"),
+                                key_toastable: lsyscache::get_typlen(op_righttype)? == -1,
+                            });
+                            (SK_ROW_MEMBER, ::datum::Datum::from_usize(0))
                         }
                     };
 
@@ -839,11 +863,9 @@ pub fn exec_index_build_scan_keys<'mcx>(
                         "a scalar-array qual on a non-amsearcharray access method",
                     ));
                 }
-                let leftop = saop.args.nth(0);
+                let mut leftop = saop.args.nth(0);
                 if leftop.node_tag() == NodeTag::T_RelabelType {
-                    return Err(scankey_case_unported(
-                        "a binary-compatible (RelabelType) scalar-array index key",
-                    ));
+                    leftop = leftop.as_relabel_type().unwrap().arg;
                 }
                 let var = leftop
                     .as_var()
@@ -870,6 +892,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
                         runtime_keys.push(IndexRuntimeKeyInfo {
                             scan_key: scan_keys.len(),
                             orderby: false,
+                            row_member: None,
                             key_expr: ::execexpr::exec_init_expr_subplans(mcx, Some(rightop), params, sub)?
                                 .expect("runtime key expr compiles"),
                             // The expr yields an array of op_righttype, not
@@ -953,6 +976,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
                 runtime_keys.push(IndexRuntimeKeyInfo {
                     scan_key: scan_keys.len(),
                     orderby: isorderby,
+                    row_member: None,
                     key_expr: ::execexpr::exec_init_expr_subplans(mcx, Some(rightop), params, sub)?
                         .expect("runtime key expr compiles"),
                     key_toastable: lsyscache::get_typlen(op_righttype)? == -1,
@@ -1147,7 +1171,11 @@ pub fn exec_index_eval_runtime_keys<'mcx>(
             };
             exec_eval_expr(&mut rk.key_expr, &mut slots)?
         };
-        let key = if rk.orderby {
+        let key = if let Some(sub) = rk.row_member {
+            // SAFETY: points into the mcx-leaked flat SK_ROW_MEMBER buffer,
+            // which lives with the query context like the key arrays.
+            unsafe { &mut *sub.as_ptr() }
+        } else if rk.orderby {
             &mut orderby_keys[rk.scan_key]
         } else {
             &mut scan_keys[rk.scan_key]
