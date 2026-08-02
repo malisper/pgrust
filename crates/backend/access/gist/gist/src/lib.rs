@@ -13,6 +13,8 @@ pub mod split;
 pub mod state;
 #[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod interrupt_tests;
 pub mod util;
 pub mod vacuum;
 pub mod wal;
@@ -37,10 +39,13 @@ pub(crate) fn non_gist_opaque() -> ! {
     panic!("gist entry point reached with a non-gist scan opaque")
 }
 
-pub(crate) fn check_for_interrupts() {
+pub fn check_for_interrupts() -> PgResult<()> {
+    // CHECK_FOR_INTERRUPTS() — route a pending interrupt through the ported
+    // ProcessInterrupts seam (the spgist/gin/hash/heapam pattern).
     if init_small::globals::InterruptPending() {
-        panic!("unported: ProcessInterrupts (tcop/postgres.c) reached from gist");
+        return ::postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 #[inline]

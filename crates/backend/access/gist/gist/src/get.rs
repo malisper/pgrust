@@ -514,7 +514,7 @@ fn get_next_nearest(scan: &mut IndexScanDescData<'_>) -> PgResult<bool> {
             return Ok(true);
         }
 
-        crate::check_for_interrupts();
+        crate::check_for_interrupts()?;
         gist_scan_page(scan, item.blkno, item.parentlsn, &item.distances, None)?;
     }
 }
@@ -633,7 +633,7 @@ pub fn gistgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgR
                 return Ok(false);
             };
 
-            crate::check_for_interrupts();
+            crate::check_for_interrupts()?;
 
             {
                 let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
@@ -688,7 +688,7 @@ pub fn gistgetbitmap(
         let Some(item) = next else {
             break;
         };
-        crate::check_for_interrupts();
+        crate::check_for_interrupts()?;
         ntids += gist_scan_page(scan, item.blkno, item.parentlsn, &[], Some(tbm))?;
     }
 
