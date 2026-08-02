@@ -692,6 +692,57 @@ mod armor_header_tests {
         }
     }
 
+    // D10's ORDERING half, previously unwitnessed. C validates each key/value
+    // PAIR interleaved (pgp-pgsql.c:790-834: key null/ASCII/": "/newline, then
+    // value null/ASCII/newline, then i+1) rather than all keys before any
+    // value. With a NULL value at index 0 and a NULL key at index 1, C reaches
+    // the VALUE check at i=0 first and reports the value error. Validating all
+    // keys first would report the key error instead.
+    #[test]
+    fn pairs_are_validated_interleaved_not_keys_first() {
+        expect_err(
+            &[Some(b"k"), None],
+            &[None, Some(b"v")],
+            "null value not allowed for header value",
+            ERRCODE_NULL_VALUE_NOT_ALLOWED,
+        );
+        // Same shape one level down: a bad key at index 1 must not preempt a
+        // bad VALUE at index 0.
+        expect_err(
+            &[Some(b"k"), Some(b"k\nx")],
+            &[Some(b"v\nx"), Some(b"v")],
+            "header value must not contain newlines",
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        );
+        // And within one pair the KEY is checked before the value.
+        expect_err(
+            &[Some(b"k\nx")],
+            &[Some(b"v\nx")],
+            "header key must not contain newlines",
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        );
+    }
+
+    // D9's asymmetric half: C's dimension test is `nkdims > 1 || nkdims !=
+    // nvdims` (pgp-pgsql.c:772), which an EMPTY array (ndim 0) paired with a
+    // 1-element array fails — "wrong number of array subscripts", NOT the
+    // count-mismatch message. The all-empty case below returns 0 headers.
+    #[test]
+    fn empty_array_against_nonempty_is_a_subscript_error() {
+        let ctx = mcx::MemoryContext::new("armor test");
+        let empty = text_array(ctx.mcx(), &[], 0, &[]);
+        let one = text_array(ctx.mcx(), &[Some(b"a")], 1, &[1]);
+        for (ki, vi) in [(&empty, &one), (&one, &empty)] {
+            match parse_key_value_arrays(ctx.mcx(), ki, vi) {
+                Err(e) => {
+                    assert_eq!(e.message, "wrong number of array subscripts");
+                    assert_eq!(e.sqlstate, ERRCODE_ARRAY_SUBSCRIPT_ERROR);
+                }
+                Ok(_) => panic!("expected a subscript error"),
+            }
+        }
+    }
+
     #[test]
     fn empty_arrays_yield_no_headers() {
         let ctx = mcx::MemoryContext::new("armor test");

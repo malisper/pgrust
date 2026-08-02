@@ -123,6 +123,36 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// crypt-sha.c:207-231's two clamp NOTICEs, returning (text, clamped value)
+/// or None when `srounds` is already in range.
+///
+/// The value C prints is `%d` of the POST-strtoint, PRE-clamp `int` — the
+/// TRUNCATED SIGNED value. That is why `rounds=2147483648` notices
+/// `rounds=-2147483648`, `rounds=4294967296` notices `rounds=0`, and
+/// `rounds=99999999999999999999` notices `rounds=-1`: all three then fail
+/// `< MIN` and run 1000 rounds. Formatting the clamped value instead, or a
+/// wider type, would silently turn a 13-byte setting string into a
+/// 999,999,999-round burn (lane p1-pgcrypto, D12).
+fn clamp_rounds(srounds: i32) -> Option<(String, i32)> {
+    if srounds > ROUNDS_MAX {
+        Some((
+            format!(
+                "rounds={srounds} exceeds maximum supported value ({ROUNDS_MAX}), using {ROUNDS_MAX} instead"
+            ),
+            ROUNDS_MAX,
+        ))
+    } else if srounds < ROUNDS_MIN {
+        Some((
+            format!(
+                "rounds={srounds} is below supported value ({ROUNDS_MIN}), using {ROUNDS_MIN} instead"
+            ),
+            ROUNDS_MIN,
+        ))
+    } else {
+        None
+    }
+}
+
 /// pwhash-lineage hash64 encoder, audited byte-exact against C's
 /// b64_from_24bit emission order via the transpose tables below.
 fn hash64_encode(bs: &[u8]) -> String {
@@ -371,16 +401,9 @@ pub fn crypt_sha(pw: &str, setting: &str) -> Result<String, CryptError> {
             ));
         }
         rest = &num[end + 1..];
-        if srounds > ROUNDS_MAX {
-            notice(&format!(
-                "rounds={srounds} exceeds maximum supported value ({ROUNDS_MAX}), using {ROUNDS_MAX} instead"
-            ));
-            srounds = ROUNDS_MAX;
-        } else if srounds < ROUNDS_MIN {
-            notice(&format!(
-                "rounds={srounds} is below supported value ({ROUNDS_MIN}), using {ROUNDS_MIN} instead"
-            ));
-            srounds = ROUNDS_MIN;
+        if let Some((msg, clamped)) = clamp_rounds(srounds) {
+            notice(&msg);
+            srounds = clamped;
         }
         rounds = srounds as u32;
         rounds_custom = true;
@@ -438,4 +461,75 @@ pub fn crypt_sha(pw: &str, setting: &str) -> Result<String, CryptError> {
     } else {
         format!("{magic}{salt_str}${encoded}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D12's load-bearing detail, previously witnessed NOWHERE: the clamp
+    /// NOTICE prints the TRUNCATED SIGNED int32, not the clamped value and
+    /// not a wider type. Texts captured from live 18.3 (p1-pgcrypto /
+    /// p1-shaport, 2026-08-01); the truncations are C `strtoint`
+    /// (src/common/string.c:50 — strtol, cast to int, errno ignored).
+    #[test]
+    fn clamp_notice_prints_the_truncated_signed_value() {
+        // (rounds spelling, strtoint result, notice text)
+        for (spelling, want_srounds) in [
+            ("2147483648", -2147483648i32),
+            ("4294967296", 0),
+            ("99999999999999999999", -1),
+            ("-1", -1),
+            ("-5", -5),
+            ("0", 0),
+            ("", 0),
+            ("999", 999),
+        ] {
+            let (lval, _) = strtol10(spelling.as_bytes());
+            let srounds = lval as i32;
+            assert_eq!(srounds, want_srounds, "strtoint({spelling:?})");
+            let (msg, clamped) = clamp_rounds(srounds).expect("below MIN => a NOTICE");
+            assert_eq!(
+                msg,
+                format!("rounds={want_srounds} is below supported value (1000), using 1000 instead")
+            );
+            assert_eq!(clamped, ROUNDS_MIN);
+        }
+        // Above MAX is only reachable in (MAX, i32::MAX].
+        let (msg, clamped) = clamp_rounds(1_000_000_000).expect("above MAX => a NOTICE");
+        assert_eq!(
+            msg,
+            "rounds=1000000000 exceeds maximum supported value (999999999), using 999999999 instead"
+        );
+        assert_eq!(clamped, ROUNDS_MAX);
+        // In range: no NOTICE at all.
+        for r in [ROUNDS_MIN, 5000, ROUNDS_MAX] {
+            assert!(clamp_rounds(r).is_none(), "rounds={r} is in range");
+        }
+    }
+
+    /// strtol leniency is part of the contract (D17): leading whitespace is
+    /// skipped, a '+'/'-' sign is accepted, an empty digit run converts
+    /// nothing and reports the PRE-whitespace start as the end pointer (C
+    /// sets `*endptr = str`), and overflow saturates at LONG_MAX/LONG_MIN
+    /// before the cast to int.
+    #[test]
+    fn strtol10_matches_c() {
+        assert_eq!(strtol10(b"5000$x"), (5000, 4));
+        assert_eq!(strtol10(b" 5000$x"), (5000, 5));
+        assert_eq!(strtol10(b"+5000$x"), (5000, 5));
+        assert_eq!(strtol10(b"-5000$x"), (-5000, 5));
+        assert_eq!(strtol10(b"0005000$x"), (5000, 7));
+        assert_eq!(strtol10(b"\t\n\x0b\x0c\r7$"), (7, 6));
+        // No conversion: value 0, end index 0 (NOT past the whitespace).
+        assert_eq!(strtol10(b"$abc"), (0, 0));
+        assert_eq!(strtol10(b"   $abc"), (0, 0));
+        assert_eq!(strtol10(b"abc"), (0, 0));
+        assert_eq!(strtol10(b"+$"), (0, 0));
+        // Saturation, then the int32 truncation C applies on top.
+        assert_eq!(strtol10(b"99999999999999999999$").0, i64::MAX);
+        assert_eq!(strtol10(b"-99999999999999999999$").0, i64::MIN);
+        assert_eq!(strtol10(b"9223372036854775807$").0, i64::MAX);
+        assert_eq!(strtol10(b"-9223372036854775808$").0, i64::MIN);
+    }
 }
