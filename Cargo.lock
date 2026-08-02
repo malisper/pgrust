@@ -13058,6 +13058,7 @@ dependencies = [
 name = "plpgsql"
 version = "0.0.0"
 dependencies = [
+ "adt_domains",
  "adt_regproc",
  "analyze_seams",
  "arrayfuncs",
@@ -13102,6 +13103,7 @@ dependencies = [
  "tupdesc",
  "tuplestore",
  "typcache",
+ "typcache_seams",
  "types_array",
  "types_core",
  "types_error",
