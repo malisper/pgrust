@@ -123,8 +123,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SetSerializableTransactionSnapshot (predicate.c): the parallel-worker
-    // no-op arm and READ ONLY DEFERRABLE rejection are ported; the
-    // snapshot-import arm (SET TRANSACTION SNAPSHOT) stays loud.
-    pub fn set_serializable_transaction_snapshot() -> PgResult<()>
+    // SetSerializableTransactionSnapshot (predicate.c:1722): use an imported
+    // snapshot (identified by its xmin) for the current serializable
+    // transaction. `source` is C's (sourcevxid, sourcepid); None renders the
+    // NULL sourcevxid of the parallel-restore lane, which only parallel
+    // workers reach (a no-op there).
+    pub fn set_serializable_transaction_snapshot(
+        snapshot_xmin: TransactionId,
+        source: Option<(types_core::VirtualTransactionId, i32)>,
+    ) -> PgResult<()>
 );

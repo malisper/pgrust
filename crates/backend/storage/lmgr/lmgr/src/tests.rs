@@ -556,3 +556,137 @@ fn speculative_insertion_lock_cycle() {
         ]
     );
 }
+
+// ---- WaitForLockersMultiple progress reporting (lmgr.c:936-969) ----
+
+fn progress_beentry() -> &'static backend_status::PgBackendStatus {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        init_small::globals::SetMaxBackends(8);
+        ipc_seams::on_shmem_exit::set(|_, _| {});
+        backend_status::init_seams();
+        backend_progress::init_seams();
+        backend_status::BackendStatusShmemInit().unwrap();
+    });
+    // One fixed slot: this is the only lmgr test binding a beentry.
+    init_small::globals::SetMyProcNumber(3);
+    backend_status::pgstat_beinit().unwrap();
+    backend_status::set_pgstat_track_activities_backing(true);
+    backend_status::MyBEEntry().expect("pgstat_beinit bound a beentry")
+}
+
+fn vxid(procno: types_core::ProcNumber, lxid: u32) -> types_core::VirtualTransactionId {
+    types_core::VirtualTransactionId { procNumber: procno, localTransactionId: lxid }
+}
+
+#[test]
+fn wait_for_lockers_progress_protocol() {
+    use backend_progress::progress::{
+        PROGRESS_WAITFOR_CURRENT_PID, PROGRESS_WAITFOR_DONE, PROGRESS_WAITFOR_TOTAL,
+    };
+
+    install();
+    let be = progress_beentry();
+    let param = |i: usize| be.st_progress_param[i].get();
+
+    let mc = mcx::MemoryContext::new("waitfor-test");
+    let mcx = mc.mcx();
+
+    let tag_a = LOCKTAG::relation(DB, PLAIN_REL);
+    let tag_b = LOCKTAG::relation(DB, PLAIN_REL + 1);
+
+    // tag_a holds two lockers, tag_b one whose PGPROC is already gone.
+    let conflicts_for = move |tag: &LOCKTAG| -> PgResult<mcx::PgVec<'_, types_core::VirtualTransactionId>> {
+        let mut v = mcx::PgVec::new_in(mcx);
+        if tag.locktag_field2 == PLAIN_REL {
+            v.push(vxid(1, 10));
+            v.push(vxid(2, 11));
+        } else {
+            v.push(vxid(5, 12));
+        }
+        Ok(v)
+    };
+    let holder_pid = |procno: types_core::ProcNumber| match procno {
+        1 => Some(111),
+        2 => Some(222),
+        _ => None, // holder exited: C skips the CURRENT_PID update
+    };
+
+    let waited: RefCell<Vec<types_core::VirtualTransactionId>> = RefCell::new(Vec::new());
+    let wait = |v: types_core::VirtualTransactionId| -> PgResult<()> {
+        // The progress view is current at each wait point (C updates
+        // CURRENT_PID before VirtualXactLock and DONE after).
+        match waited.borrow().len() {
+            0 => {
+                assert_eq!(param(PROGRESS_WAITFOR_TOTAL), 3);
+                assert_eq!(param(PROGRESS_WAITFOR_CURRENT_PID), 111);
+                assert_eq!(param(PROGRESS_WAITFOR_DONE), 0);
+            }
+            1 => {
+                assert_eq!(param(PROGRESS_WAITFOR_CURRENT_PID), 222);
+                assert_eq!(param(PROGRESS_WAITFOR_DONE), 1);
+            }
+            2 => {
+                // vanished holder: CURRENT_PID keeps the previous value
+                assert_eq!(param(PROGRESS_WAITFOR_CURRENT_PID), 222);
+                assert_eq!(param(PROGRESS_WAITFOR_DONE), 2);
+            }
+            _ => unreachable!("only three lockers were reported"),
+        }
+        waited.borrow_mut().push(v);
+        Ok(())
+    };
+
+    wait_for_lockers_guts(&[tag_a, tag_b], true, conflicts_for, holder_pid, wait).unwrap();
+
+    assert_eq!(
+        waited.borrow().as_slice(),
+        &[vxid(1, 10), vxid(2, 11), vxid(5, 12)],
+        "every reported locker is awaited, in order"
+    );
+    // C zeroes all three waitfor params after the last wait.
+    assert_eq!(param(PROGRESS_WAITFOR_TOTAL), 0);
+    assert_eq!(param(PROGRESS_WAITFOR_DONE), 0);
+    assert_eq!(param(PROGRESS_WAITFOR_CURRENT_PID), 0);
+}
+
+#[test]
+fn wait_for_lockers_no_progress_and_empty_tags() {
+    use backend_progress::progress::PROGRESS_WAITFOR_TOTAL;
+
+    install();
+    let be = progress_beentry();
+
+    // Empty locktag list: C returns before any progress update.
+    backend_progress::pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, 7);
+    wait_for_lockers_guts(
+        &[],
+        true,
+        |_| -> PgResult<mcx::PgVec<'static, types_core::VirtualTransactionId>> {
+            unreachable!("no locktags, no conflict scan")
+        },
+        |_| None,
+        |_| unreachable!("nothing to wait for"),
+    )
+    .unwrap();
+    assert_eq!(be.st_progress_param[PROGRESS_WAITFOR_TOTAL].get(), 7);
+
+    // progress=false leaves the params untouched.
+    let mc = mcx::MemoryContext::new("waitfor-test2");
+    let mcx = mc.mcx();
+    let tag = LOCKTAG::relation(DB, PLAIN_REL);
+    wait_for_lockers_guts(
+        &[tag],
+        false,
+        move |_| {
+            let mut v = mcx::PgVec::new_in(mcx);
+            v.push(vxid(1, 10));
+            Ok(v)
+        },
+        |_| Some(999),
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(be.st_progress_param[PROGRESS_WAITFOR_TOTAL].get(), 7, "no progress writes");
+    backend_progress::pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, 0);
+}

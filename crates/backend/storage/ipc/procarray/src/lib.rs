@@ -236,6 +236,75 @@ pub fn ProcArrayOwnXmin() -> TransactionId {
     }
 }
 
+/// ProcArrayInstallImportedXmin (procarray.c:2532): install an imported xmin
+/// into MyProc->xmin, atomically (under ProcArrayLock) with the check that
+/// the source virtual transaction is still running, so OldestXmin can't go
+/// backwards. False = source xact no longer running.
+pub fn ProcArrayInstallImportedXmin(
+    xmin: TransactionId,
+    sourcevxid: types_core::VirtualTransactionId,
+) -> PgResult<bool> {
+    let mut result = false;
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+
+    debug_assert!(TransactionIdIsNormal(xmin));
+    let my_procno = MyProc().expect("ProcArrayInstallImportedXmin without MyProc");
+    let me = GetPGProcByNumber(my_procno);
+
+    // Get lock so source xact can't end while we're doing this
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+
+    // Find the PGPROC entry of the source transaction. (This could use
+    // GetPGProcByNumber(), unless it's a prepared xact.  But this isn't
+    // performance critical.)
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        let status_flags = hdr.statusFlags[index].load(Relaxed);
+
+        // Ignore procs running LAZY VACUUM
+        if status_flags & PROC_IN_VACUUM != 0 {
+            continue;
+        }
+
+        // We are only interested in the specific virtual transaction.
+        if proc.vxid.procNumber.load(Relaxed) != sourcevxid.procNumber {
+            continue;
+        }
+        if proc.vxid.lxid.load(Relaxed) != sourcevxid.localTransactionId {
+            continue;
+        }
+
+        // We check the transaction's database ID for paranoia's sake: if it's
+        // in another DB then its xmin does not cover us.  Caller should have
+        // detected this already, so we just treat any funny cases as
+        // "transaction not found".
+        if proc.databaseId.load(Relaxed) != init_small::globals::MyDatabaseId() {
+            continue;
+        }
+
+        // Likewise, let's just make real sure its xmin does cover us.
+        let xid = proc.xmin.read();
+        if !TransactionIdIsNormal(xid) || !TransactionIdPrecedesOrEquals(xid, xmin) {
+            continue;
+        }
+
+        // We're good.  Install the new xmin.  As in GetSnapshotData, set
+        // TransactionXmin too.  (Note that because snapmgr.c called
+        // GetSnapshotData first, we'll be overwriting a valid xmin here, so
+        // we don't check that.)
+        me.xmin.value.store(xmin, Relaxed);
+        TRANSACTION_XMIN.set(xmin);
+
+        result = true;
+        break;
+    }
+
+    LWLockRelease(ProcArrayLock())?;
+    Ok(result)
+}
+
 /// ProcArrayInstallRestoredXmin (procarray.c): parallel workers pin their xmin
 /// under the leader's; PROC_XMIN_FLAGS propagate so vacuum's horizon reads the
 /// value the same way. False = source xact no longer running.
@@ -1792,12 +1861,23 @@ pub fn CountUserBackends(roleid: types_core::Oid) -> PgResult<i32> {
     Ok(count)
 }
 
-// C sends SIGTERM to conflicting autovacuum workers each try; no autovacuum
-// exists here, so the walk-and-retry loop is kept without the kill step.
+// CountOtherDBBackends (procarray.c:3751): 50 tries with 100ms sleep between
+// tries makes 5 sec total wait; conflicting autovacuum workers are SIGTERMed
+// (at most MAXAUTOVACPIDS per iteration) after the lock is released, before
+// sleeping.
 pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32, i32)>> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let my_procno = MyProc().expect("no MyProc");
+
+    // max autovacs to SIGTERM per iteration
+    const MAXAUTOVACPIDS: usize = 10;
+    // wasm32: the wasi libc crate exposes no SIG* names; 15 is SIGTERM in
+    // the thread-signal emulation's Linux-numbered space (procsignal wasm arm).
+    #[cfg(not(target_family = "wasm"))]
+    const SIGTERM: i32 = libc::SIGTERM;
+    #[cfg(target_family = "wasm")]
+    const SIGTERM: i32 = 15;
 
     let mut nbackends = 0;
     let mut nprepared = 0;
@@ -1806,12 +1886,15 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
 
         nbackends = 0;
         nprepared = 0;
+        let mut autovac_pids = [0i32; MAXAUTOVACPIDS];
+        let mut nautovacs = 0usize;
         let mut found = false;
 
         LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
         for index in 0..arrayP.numProcs.get() as usize {
             let pgprocno = arrayP.pgprocnos[index].get();
             let proc = &hdr.allProcs[pgprocno as usize];
+            let status_flags = hdr.statusFlags[index].load(Relaxed);
             if proc.databaseId.load(Relaxed) != databaseid {
                 continue;
             }
@@ -1819,22 +1902,29 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
                 continue;
             }
             found = true;
-            if proc.pid.load(Relaxed) == 0 {
+            let pid = proc.pid.load(Relaxed);
+            if pid == 0 {
                 nprepared += 1;
             } else {
-                // C SIGTERMs conflicting autovacuum workers here; none exist
-                // yet — trip if one ever does rather than wait out the 5s.
-                debug_assert!(
-                    hdr.statusFlags[index].load(Relaxed) & PROC_IS_AUTOVACUUM == 0,
-                    "CountOtherDBBackends: autovacuum SIGTERM step unported"
-                );
                 nbackends += 1;
+                if status_flags & PROC_IS_AUTOVACUUM != 0 && nautovacs < MAXAUTOVACPIDS {
+                    autovac_pids[nautovacs] = pid;
+                    nautovacs += 1;
+                }
             }
         }
         LWLockRelease(ProcArrayLock())?;
 
         if !found {
-            return Ok(None);
+            return Ok(None); // no conflicting backends, so done
+        }
+
+        // Send SIGTERM to any conflicting autovacuums before sleeping. We
+        // postpone this step until after the loop because we don't want to
+        // hold ProcArrayLock while issuing kill(). We have no idea what might
+        // block kill() inside the kernel...
+        for &pid in autovac_pids.iter().take(nautovacs) {
+            let _ = procsignal::SendThreadSignal(pid, SIGTERM); // ignore any error
         }
 
         std::thread::sleep(std::time::Duration::from_millis(100));

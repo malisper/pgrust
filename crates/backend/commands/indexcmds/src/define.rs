@@ -1185,7 +1185,7 @@ pub fn DefineIndex<'mcx>(
         procarray::SetIndexsafeProcflags()?;
     }
 
-    lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock)?;
+    lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock, true)?;
 
     let snap = snapmgr::GetTransactionSnapshot()?;
     snapmgr::PushActiveSnapshot(&snap)?;
@@ -1198,7 +1198,7 @@ pub fn DefineIndex<'mcx>(
         procarray::SetIndexsafeProcflags()?;
     }
 
-    lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock)?;
+    lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock, true)?;
 
     let snap = snapmgr::GetTransactionSnapshot()?;
     let snapshot = snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot");

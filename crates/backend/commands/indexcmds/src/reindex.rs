@@ -834,7 +834,7 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 2: build the new indexes, one transaction each.
-    lmgr::WaitForLockersMultiple(mcx, &lock_tags, ShareLock)?;
+    lmgr::WaitForLockersMultiple(mcx, &lock_tags, ShareLock, true)?;
     xact::CommitTransactionCommand()?;
 
     for newidx in new_index_ids.iter() {
@@ -854,7 +854,7 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 3: let the new indexes catch up, then validate, one per xact.
-    lmgr::WaitForLockersMultiple(mcx, &lock_tags, ShareLock)?;
+    lmgr::WaitForLockersMultiple(mcx, &lock_tags, ShareLock, true)?;
     xact::CommitTransactionCommand()?;
 
     for newidx in new_index_ids.iter() {
@@ -917,7 +917,7 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 5: mark the old indexes dead.
-    lmgr::WaitForLockersMultiple(mcx, &lock_tags, AccessExclusiveLock)?;
+    lmgr::WaitForLockersMultiple(mcx, &lock_tags, AccessExclusiveLock, true)?;
 
     for oldidx in index_ids.iter() {
         postgres_seams::check_for_interrupts::call()?;
@@ -931,7 +931,7 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 6: drop the old indexes.
-    lmgr::WaitForLockersMultiple(mcx, &lock_tags, AccessExclusiveLock)?;
+    lmgr::WaitForLockersMultiple(mcx, &lock_tags, AccessExclusiveLock, true)?;
 
     let snap = snapmgr::GetTransactionSnapshot()?;
     snapmgr::PushActiveSnapshot(&snap)?;

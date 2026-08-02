@@ -77,7 +77,7 @@ pub fn index_drop<'mcx>(
         xact::CommitTransactionCommand()?;
         xact::StartTransactionCommand()?;
 
-        lmgr::WaitForLockersMultiple(mcx, &heaplocktag, AccessExclusiveLock)?;
+        lmgr::WaitForLockersMultiple(mcx, &heaplocktag, AccessExclusiveLock, true)?;
 
         let snapshot = snapmgr::GetTransactionSnapshot()?;
         snapmgr::PushActiveSnapshot(&snapshot)?;
@@ -87,7 +87,7 @@ pub fn index_drop<'mcx>(
         xact::CommitTransactionCommand()?;
         xact::StartTransactionCommand()?;
 
-        lmgr::WaitForLockersMultiple(mcx, &heaplocktag, AccessExclusiveLock)?;
+        lmgr::WaitForLockersMultiple(mcx, &heaplocktag, AccessExclusiveLock, true)?;
 
         userHeapRelation = table::table_open(mcx, heapId, ShareUpdateExclusiveLock)?;
         userIndexRelation = indexam::index_open(mcx, indexId, AccessExclusiveLock)?;

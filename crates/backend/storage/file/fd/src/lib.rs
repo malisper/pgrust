@@ -130,8 +130,10 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests;
 
-// AIO engine unported => no in-flight AIO can reference any fd; skipping the
-// uninstalled seam is C's empty-drain arm.
+// pgaio_closing_fd (aio.c): submit this backend's staged IOs before an fd
+// they may reference goes away. Product boots install the seam from aio_core
+// (seams_init); the is_installed guard covers minimal test binaries that
+// never wire the AIO engine, where no IO can be in flight — C's empty-drain.
 pub(crate) fn pgaio_closing_fd_if_engine_present(fd: i32) {
     if aio_seams::pgaio_closing_fd::is_installed() {
         aio_seams::pgaio_closing_fd::call(fd);

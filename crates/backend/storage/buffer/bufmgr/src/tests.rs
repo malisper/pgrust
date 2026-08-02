@@ -1402,3 +1402,45 @@ fn unpin_with_mismatched_owner_warns_instead_of_panicking() {
     let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
     assert_eq!(state & BUF_REFCOUNT_MASK, 0);
 }
+
+// ---- ReadBuffer_common P_NEW back-compat path (bufmgr.c:1208) ----
+
+#[test]
+fn p_new_redirects_to_extend_buffered_rel() {
+    let _g = setup();
+    setup_extend_seams();
+    let rel = 9505;
+
+    // P_NEW == InvalidBlockNumber: extend by one block instead of reading.
+    let (b, found) = ReadBuffer_common(
+        temp_smgr(rel),
+        types_core::RELPERSISTENCE_TEMP,
+        ForkNumber::MAIN_FORKNUM,
+        types_core::InvalidBlockNumber,
+        ReadBufferMode::Normal,
+        None,
+    )
+    .unwrap();
+    assert!(!found);
+    assert!(b < 0, "temp relations get negative buffer ids");
+    assert_eq!(BufferGetBlockNumber(b), 0, "first P_NEW extends to block 0");
+    assert!(buffer_page_is_new(b), "extended pages are zero-filled");
+    assert_eq!(*NBLOCKS.lock().unwrap().get(&rel).unwrap(), 1);
+    ReleaseBuffer(b).unwrap();
+
+    // Each P_NEW call appends another block.
+    let (b2, _) = ReadBuffer_common(
+        temp_smgr(rel),
+        types_core::RELPERSISTENCE_TEMP,
+        ForkNumber::MAIN_FORKNUM,
+        types_core::InvalidBlockNumber,
+        ReadBufferMode::Normal,
+        None,
+    )
+    .unwrap();
+    assert_eq!(BufferGetBlockNumber(b2), 1);
+    assert_eq!(*NBLOCKS.lock().unwrap().get(&rel).unwrap(), 2);
+    ReleaseBuffer(b2).unwrap();
+
+    DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+}

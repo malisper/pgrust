@@ -92,4 +92,8 @@ pub fn pgstat_progress_end_command() {
 
 pub fn init_seams() {
     backend_progress_seams::pgstat_progress_end_command::set(pgstat_progress_end_command);
+    backend_progress_seams::pgstat_progress_update_param::set(pgstat_progress_update_param);
+    backend_progress_seams::pgstat_progress_update_multi_param::set(
+        pgstat_progress_update_multi_param,
+    );
 }
