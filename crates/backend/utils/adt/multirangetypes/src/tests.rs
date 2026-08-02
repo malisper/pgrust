@@ -313,3 +313,18 @@ mod out_ceiling {
         );
     }
 }
+
+// pseudotypes.c: anymultirange_out/anycompatiblemultirange_out are `return
+// multirange_out(fcinfo)`; the aliases must resolve to the same fc body.
+#[test]
+fn pseudotype_aliases_delegate_to_multirange_out() {
+    let by_oid = |oid: types_core::Oid| {
+        crate::builtins::MULTIRANGETYPES_BUILTINS
+            .iter()
+            .find(|b| b.foid == oid)
+            .unwrap_or_else(|| panic!("oid {oid} not registered"))
+    };
+    assert_eq!(by_oid(4230).func as usize, crate::builtins::fc_multirange_out as usize);
+    assert_eq!(by_oid(4227).func as usize, crate::builtins::fc_multirange_out as usize);
+    assert_eq!(by_oid(4227).name, "anycompatiblemultirange_out");
+}

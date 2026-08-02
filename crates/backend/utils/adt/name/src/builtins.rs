@@ -154,6 +154,19 @@ pub fn fc_session_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     byref_result(fcinfo.result_mcx(), &n.data)
 }
 
+// C system_user (miscinit.c home; the identity core lives in miscinit):
+// auth_method:authn_id as text, or SQL NULL when no authenticated identity
+// was established for this session.
+pub fn fc_system_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match miscinit::GetSystemUser() {
+        Some(s) => {
+            let t = varlena::cstring_to_text(fcinfo.result_mcx(), s.as_bytes())?;
+            Ok(types_fmgr::varlena_result(t))
+        }
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
 pub fn fc_current_schema(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     match crate::current_schema(fcinfo.result_mcx())? {
         Some(n) => byref_result(fcinfo.result_mcx(), &n.data),
@@ -261,4 +274,5 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(1403, "current_schemas", 1, fc_current_schemas),
     b(2422, "namerecv", 1, fc_namerecv),
     b(2423, "namesend", 1, fc_namesend),
+    b(6311, "system_user", 0, fc_system_user),
 ];

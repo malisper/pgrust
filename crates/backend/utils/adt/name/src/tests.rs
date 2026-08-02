@@ -215,3 +215,40 @@ fn btnamecmp_returns_raw_strncmp_magnitude() {
     assert_eq!(btnamecmp(&c, &a, C_COLLATION_OID).unwrap(), 2);
     assert_eq!(btnamecmp(&a, &a, C_COLLATION_OID).unwrap(), 0);
 }
+
+// C system_user (miscinit.c): NULL before InitializeSystemUser ran for the
+// session; auth_method:authn_id as text after. Pre-fix the wrapper was
+// unregistered (only the fmgr not-ported fence answered oid 6311).
+#[test]
+fn system_user_wrapper_null_then_identity() {
+    let ctx = MemoryContext::new("t");
+
+    // No authenticated identity on this (test) session: SQL NULL.
+    let mut fci = LocalFcinfo::<0>::new(0);
+    // SAFETY: ctx outlives the call.
+    unsafe { fci.set_result_mcx(ctx.mcx()) };
+    let _ = fc_system_user(None, &mut fci).unwrap();
+    assert!(fci.isnull, "C GetSystemUser() == NULL -> PG_RETURN_NULL()");
+
+    miscinit::InitializeSystemUser("alice", "scram-sha-256");
+    let mut fci = LocalFcinfo::<0>::new(0);
+    // SAFETY: ctx outlives the call.
+    unsafe { fci.set_result_mcx(ctx.mcx()) };
+    let d = fc_system_user(None, &mut fci).unwrap();
+    assert!(!fci.isnull);
+    // SAFETY: fc_system_user returns a live 4B-header text varlena in ctx.
+    let v = unsafe { datum::VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+    assert_eq!(v.data(), b"scram-sha-256:alice");
+}
+
+// The registration row: oid 6311 (pg_proc.dat) resolves to fc_system_user.
+#[test]
+fn system_user_registered_at_6311() {
+    let row = NAME_BUILTINS
+        .iter()
+        .find(|b| b.foid == 6311)
+        .expect("system_user registered");
+    assert_eq!(row.name, "system_user");
+    assert_eq!(row.func as usize, fc_system_user as usize);
+    assert_eq!(row.nargs, 0);
+}

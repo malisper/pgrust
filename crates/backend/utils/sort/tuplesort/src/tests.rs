@@ -1765,6 +1765,124 @@ fn radix_direct_small_covers_unsafe_paths() {
     ts.end();
 }
 
+
+// cstring (typlen -2) datum-sort rig: the shim comparator is the
+// BTORDER_PROC-per-comparison lane C uses when no sortsupport routine
+// exists for the sorted type.
+fn fc_cstrcmp(
+    _flinfo: Option<&mut ::types_fmgr::FmgrInfo>,
+    fcinfo: &mut ::types_fmgr::FunctionCallInfoBaseData,
+) -> ::types_error::PgResult<Datum> {
+    let [a, b] = fcinfo.args_n::<2>();
+    // SAFETY: both args are live NUL-terminated cstring datums.
+    let (x, y) = unsafe {
+        (
+            core::ffi::CStr::from_ptr(a.value.as_usize() as *const core::ffi::c_char),
+            core::ffi::CStr::from_ptr(b.value.as_usize() as *const core::ffi::c_char),
+        )
+    };
+    Ok(Datum::from_i32(match x.to_bytes().cmp(y.to_bytes()) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    }))
+}
+
+// shim_cmp resolves its comparator through the fmgr_info seam (the
+// TLS-flinfo carrier); route the test oid at fc_cstrcmp.
+fn install_cstrcmp_seam() {
+    static SHIM_SEAM: std::sync::Once = std::sync::Once::new();
+    SHIM_SEAM.call_once(|| {
+        if !::fmgr_seams::fmgr_info::is_installed() {
+            ::fmgr_seams::fmgr_info::set(|oid| {
+                Ok(::types_fmgr::FmgrInfo::new(fc_cstrcmp, oid, 2, true, false))
+            });
+        }
+    });
+}
+
+fn cstring_sort(work_mem: i32, sortopt: i32) -> Tuplesort {
+    install_cstrcmp_seam();
+    let key = SortSupport {
+        ssup_collation: 0,
+        ssup_reverse: false,
+        ssup_nulls_first: false,
+        ssup_attno: 1,
+        comparator: SortComparator::Shim(crate::ssup::ShimCmp { fn_addr: fc_cstrcmp, fn_oid: 0 }),
+    };
+    Tuplesort::begin_common(
+        work_mem,
+        sortopt,
+        &[key],
+        true,
+        None,
+        SortVariant::Datum { byref_typlen: -2 },
+    )
+}
+
+// tuplesort_begin_datum cstring lane (typlen -2): putdatum datumCopys
+// strlen+1 bytes (C datumCopy via datumGetSize) so the sort owns stable
+// NUL-terminated images. Pre-fix this begin panicked.
+#[test]
+fn cstring_datum_sort_in_memory() {
+    let inputs = ["mango", "", "apple", "apple\u{1}z", "banana", "b"];
+    let mut ts = cstring_sort(1024, TUPLESORT_NONE);
+    for s in inputs {
+        let c = std::ffi::CString::new(s).unwrap();
+        // datumCopy inside putdatum: the source buffer may die right after.
+        ts.putdatum(Datum::from_usize(c.as_ptr() as usize), false).unwrap();
+        drop(c);
+    }
+    ts.putdatum(Datum::null(), true).unwrap();
+    ts.performsort().unwrap();
+    let mut got: Vec<Option<String>> = Vec::new();
+    while let Some(nd) = ts.getdatum(true).unwrap() {
+        got.push(if nd.isnull {
+            None
+        } else {
+            // SAFETY: in-memory sort images live until reset/end.
+            let c = unsafe {
+                core::ffi::CStr::from_ptr(nd.value.as_usize() as *const core::ffi::c_char)
+            };
+            Some(c.to_str().unwrap().to_string())
+        });
+    }
+    let mut oracle: Vec<String> = inputs.iter().map(|s| s.to_string()).collect();
+    oracle.sort_unstable();
+    let mut expect: Vec<Option<String>> = oracle.into_iter().map(Some).collect();
+    expect.push(None); // nulls last with nulls_first=false
+    assert_eq!(got, expect);
+    ts.end();
+}
+
+// Bounded cstring sort: heap eviction frees under stup_alloc_size's
+// strlen+1 arm (C free_sort_tuple over datumGetSize(-2) layouts).
+#[test]
+fn cstring_datum_sort_bounded_eviction() {
+    let mut ts = cstring_sort(1024, TUPLESORT_ALLOWBOUNDED);
+    ts.set_bound(3);
+    let mut seed = 5u64;
+    let mut oracle: Vec<String> = Vec::new();
+    for _ in 0..500 {
+        let s = format!("v{:08}", lcg(&mut seed) % 100_000);
+        oracle.push(s.clone());
+        let c = std::ffi::CString::new(s).unwrap();
+        ts.putdatum(Datum::from_usize(c.as_ptr() as usize), false).unwrap();
+    }
+    oracle.sort_unstable();
+    ts.performsort().unwrap();
+    for want in oracle.iter().take(3) {
+        let nd = ts.getdatum(true).unwrap().unwrap();
+        assert!(!nd.isnull);
+        // SAFETY: live tuplecontext cstring image.
+        let c = unsafe {
+            core::ffi::CStr::from_ptr(nd.value.as_usize() as *const core::ffi::c_char)
+        };
+        assert_eq!(c.to_str().unwrap(), want);
+    }
+    ts.end();
+}
+
 mod spill {
     use std::sync::atomic::{AtomicI32, Ordering};
     use std::sync::Once;
@@ -2041,6 +2159,37 @@ mod spill {
         })
         .collect();
         assert_eq!(vals, vec![1, 3, 5]);
+        ts.end();
+    }
+
+    // cstring (typlen -2) datum spill: writetup_datum sizes the image as
+    // strlen+1 (C datumGetSize) and the NUL rides the tape; readtup hands
+    // back live cstring copies.
+    #[test]
+    fn cstring_datum_spill_final_merge() {
+        setup();
+        let (_cwd, _dir) = enter_datadir("cstrspill");
+        let mut ts = super::cstring_sort(64, TUPLESORT_NONE);
+        let mut seed = 99u64;
+        let mut oracle: Vec<String> = Vec::with_capacity(30_000);
+        for _ in 0..30_000 {
+            let s = format!("k{:012}", lcg(&mut seed) % 1_000_000);
+            let c = std::ffi::CString::new(s.clone()).unwrap();
+            ts.putdatum(Datum::from_usize(c.as_ptr() as usize), false).unwrap();
+            oracle.push(s);
+        }
+        oracle.sort_unstable();
+        ts.performsort().unwrap();
+        let mut got: Vec<String> = Vec::with_capacity(oracle.len());
+        while let Some(nd) = ts.getdatum(true).unwrap() {
+            assert!(!nd.isnull);
+            // SAFETY: live slab-slot cstring image until the next fetch.
+            let c = unsafe {
+                core::ffi::CStr::from_ptr(nd.value.as_usize() as *const core::ffi::c_char)
+            };
+            got.push(c.to_str().unwrap().to_string());
+        }
+        assert_eq!(got, oracle);
         ts.end();
     }
 }

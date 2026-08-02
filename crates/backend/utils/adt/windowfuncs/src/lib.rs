@@ -26,11 +26,6 @@ fn window_support(fcinfo: &mut Fcinfo, optimize_frame: bool) -> PgResult<Datum> 
     // SAFETY: prosupport contract — arg points at a live tag-first node.
     let tag = unsafe { *p };
     match tag {
-        NodeTag::T_SupportRequestSimplify
-        | NodeTag::T_SupportRequestCost
-        | NodeTag::T_SupportRequestRows
-        | NodeTag::T_SupportRequestSelectivity
-        | NodeTag::T_SupportRequestIndexCondition => Ok(Datum::from_usize(0)),
         NodeTag::T_SupportRequestWFuncMonotonic => {
             let req = a.value.as_usize() as *mut SupportRequestWFuncMonotonic;
             // SAFETY: tag checked; caller owns the request node.
@@ -81,7 +76,9 @@ fn window_support(fcinfo: &mut Fcinfo, optimize_frame: bool) -> PgResult<Datum> 
             }
             Ok(a.value)
         }
-        other => panic!("window prosupport: request {other:?} unported"),
+        // C acts only on the two requests above and returns NULL (ignore)
+        // for every other SupportRequest kind, present or future.
+        _ => Ok(Datum::from_usize(0)),
     }
 }
 
@@ -148,3 +145,39 @@ pub const WINDOWFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(6307, "window_cume_dist_support", 1, true, fc_window_cume_dist_support),
     b(6308, "window_ntile_support", 1, true, fc_window_ntile_support),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_fmgr::LocalFcinfo;
+    use types_nodes::supportnodes::SupportRequestSimplify;
+
+    // C window_*_support/int8inc_support act on WFuncMonotonic and
+    // OptimizeWindowClause only; EVERY other SupportRequest kind returns
+    // NULL (ignored). Pre-fix an unlisted kind panicked.
+    #[test]
+    fn unhandled_support_request_returns_null() {
+        // A tag-first request node the window prosupports don't handle.
+        let req = SupportRequestSimplify::new(None, None);
+        let mut fci = LocalFcinfo::<1>::new(0);
+        fci.set_arg(0, Datum::from_usize(&req as *const _ as usize));
+        assert_eq!(
+            fc_window_row_number_support(None, &mut fci).unwrap().as_usize(),
+            0
+        );
+        assert_eq!(fc_int8inc_support(None, &mut fci).unwrap().as_usize(), 0);
+        assert_eq!(fc_window_ntile_support(None, &mut fci).unwrap().as_usize(), 0);
+    }
+
+    // int8inc_support ignores OptimizeWindowClause (C returns NULL there too).
+    #[test]
+    fn int8inc_ignores_optimize_window_clause() {
+        let req = SupportRequestOptimizeWindowClause {
+            tag: NodeTag::T_SupportRequestOptimizeWindowClause,
+            frame_options: 0,
+        };
+        let mut fci = LocalFcinfo::<1>::new(0);
+        fci.set_arg(0, Datum::from_usize(&req as *const _ as usize));
+        assert_eq!(fc_int8inc_support(None, &mut fci).unwrap().as_usize(), 0);
+    }
+}

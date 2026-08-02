@@ -130,27 +130,49 @@ fn vector_values(d: Datum, elmlen: usize) -> (usize, *const u8) {
     }
 }
 
-// text varlena -> &str, inline images only (partexprs is written inline).
-fn text_to_str(d: Datum) -> &'static str {
+// text varlena -> &str; short and plain images read in place, toasted or
+// compressed ones detoast into the partcache mcx (C RelationBuildPartitionKey
+// reads partexprs via TextDatumGetCString = pg_detoast_datum; very long
+// expression lists compress inline).
+fn text_to_str(d: Datum) -> PgResult<&'static str> {
     let p = d.as_usize() as *const u8;
-    // SAFETY: syscache text attribute; toasted/compressed images are loud.
+    // SAFETY: syscache text attribute, readable through its varsize_any.
     unsafe {
         let b0 = *p;
         let (len, off) = if b0 & 0x01 != 0 {
             if b0 == 0x01 {
-                panic!("partcache: toasted partexprs unported");
+                // 1B_E external/indirect toast pointer.
+                return detoast_text(p);
             }
             ((((b0 as usize) >> 1) & 0x7F) - 1, 1)
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
             if w & 0x02 != 0 {
-                panic!("partcache: compressed partexprs unported");
+                // 4B_C inline-compressed image.
+                return detoast_text(p);
             }
             ((w as usize >> 2) - 4, 4)
         };
-        core::str::from_utf8(core::slice::from_raw_parts(p.add(off), len))
-            .expect("non-UTF-8 partexprs")
+        Ok(core::str::from_utf8(core::slice::from_raw_parts(p.add(off), len))
+            .expect("non-UTF-8 partexprs"))
     }
+}
+
+// The cold detoast leg of text_to_str; the flat copy lives in (and dies
+// with) the partcache mcx, like C's partkeycxt allocations.
+//
+// # Safety
+// `p` heads a live toasted/compressed varlena readable through varsize_any.
+#[cold]
+#[inline(never)]
+unsafe fn detoast_text(p: *const u8) -> PgResult<&'static str> {
+    // SAFETY: forwarded caller contract.
+    let raw =
+        unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+    let mcx = with_state(|st| st.mcx);
+    let flat = detoast_seams::detoast_attr::call(mcx, raw)?.leak();
+    // detoast_attr returns a plain 4B-header image.
+    Ok(core::str::from_utf8(&flat[4..]).expect("non-UTF-8 partexprs"))
 }
 
 pub fn RelationGetPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData>> {
@@ -250,7 +272,7 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
             // Parsed and folded directly in the cache mcx (C parses in a temp
             // context and copyObjects into partkeycxt; fold garbage persists
             // here the way C's partkeycxt allocations do).
-            let parsed = readfuncs::stringToNode(mcx, text_to_str(exprs_d))?;
+            let parsed = readfuncs::stringToNode(mcx, text_to_str(exprs_d)?)?;
             let list = parsed.as_list().expect("partexprs is a List");
             for e in list.iter() {
                 let folded = clauses::eval_const_expressions(mcx, e)?;
@@ -386,4 +408,61 @@ pub fn get_default_partition_oid(parent_relid: Oid) -> PgResult<Oid> {
     .as_oid();
     cache_syscache::ReleaseSysCache(tuple);
     Ok(defid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // partexprs images: short and plain read in place; compressed/external
+    // detoast (C TextDatumGetCString). Pre-fix the toast arms panicked.
+    #[test]
+    fn text_to_str_short_inline() {
+        let payload = b"({RESTRICTINFO})";
+        // 1B short header: total size (payload + header byte) << 1 | 1.
+        let mut img = vec![(((payload.len() + 1) as u8) << 1) | 0x01];
+        img.extend_from_slice(payload);
+        assert_eq!(
+            text_to_str(Datum::from_usize(img.as_ptr() as usize)).unwrap(),
+            core::str::from_utf8(payload).unwrap()
+        );
+    }
+
+    #[test]
+    fn text_to_str_plain_inline() {
+        let payload = b"({OPEXPR :opno 96})";
+        let mut img = ((payload.len() as u32 + 4) << 2).to_ne_bytes().to_vec();
+        img.extend_from_slice(payload);
+        assert_eq!(
+            text_to_str(Datum::from_usize(img.as_ptr() as usize)).unwrap(),
+            core::str::from_utf8(payload).unwrap()
+        );
+    }
+
+    #[test]
+    fn text_to_str_detoasts_compressed() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if !detoast_seams::detoast_attr::is_installed() {
+                // The rig's compressed images are [4B_C header][plain 4B_U
+                // image]; the mock hands back the embedded plain image,
+                // standing in for the decompression engine.
+                detoast_seams::detoast_attr::set(|mcx, image| {
+                    assert_eq!(image[0] & 0x03, 0x02, "4B_C compressed header");
+                    let mut v = mcx::vec_with_capacity_in(mcx, image.len() - 4)?;
+                    mcx::vec_append_bytes(&mut v, &image[4..])?;
+                    Ok(v)
+                });
+            }
+        });
+        let payload = b"({VAR :varno 1 :varattno 2})";
+        let mut plain = ((payload.len() as u32 + 4) << 2).to_ne_bytes().to_vec();
+        plain.extend_from_slice(payload);
+        let mut img = (((plain.len() as u32 + 4) << 2) | 0x02).to_ne_bytes().to_vec();
+        img.extend_from_slice(&plain);
+        assert_eq!(
+            text_to_str(Datum::from_usize(img.as_ptr() as usize)).unwrap(),
+            core::str::from_utf8(payload).unwrap()
+        );
+    }
 }

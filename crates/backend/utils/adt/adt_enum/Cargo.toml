@@ -18,6 +18,7 @@ types_nodes = { path = "../../../../_support/types/nodes" }
 hashfn = { path = "../../../../common/hashfn" }
 pqformat = { path = "../../../libpq/pqformat" }
 arrayfuncs = { path = "../arrayfuncs" }
+funcapi = { path = "../../fmgr/funcapi" }
 format_type = { path = "../format_type" }
 pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }
 syscache_seams = { path = "../../cache/syscache_seams" }

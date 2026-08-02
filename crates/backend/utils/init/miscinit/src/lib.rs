@@ -1,8 +1,11 @@
 //! miscinit.c: processing-mode/backend-type globals, the user-id /
 //! security-restriction state machine, the LocalLatchData home,
 //! ClientConnectionInfo serialization, and the lock-file interlock.
-//! Deferred (owners unported): has_rolreplication, the system_user() SQL
-//! wrapper.
+//! The system_user() SQL wrapper lives with the other identity fmgr
+//! wrappers in the name crate (over GetSystemUser here). Deferred:
+//! has_rolreplication — miscinit cannot reach the pg_authid syscache
+//! (crate cycle), so its body installs the miscinit_seams slot from
+//! replication/logical.
 
 #![allow(non_snake_case)]
 

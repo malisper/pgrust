@@ -234,7 +234,7 @@ pub fn fc_binary_upgrade_set_missing_value(
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_missing_value")?;
     let _ = fcinfo;
-    // unported: SetAttrMissing (commands/tablecmds.c).
+    // unported: SetAttrMissing (catalog/heap.c).
     Err(upgrade_unported("binary_upgrade_set_missing_value"))
 }
 
@@ -256,8 +256,8 @@ pub fn fc_binary_upgrade_replorigin_advance(
     if fcinfo.argisnull(0) {
         null_arg("binary_upgrade_replorigin_advance")?;
     }
-    // unported: ReplicationOriginNameForLogicalRep / replorigin_by_name
-    // (replication/origin.c).
+    // unported: ReplicationOriginNameForLogicalRep (commands/
+    // subscriptioncmds.c) / replorigin_by_name (replication/logical/origin.c).
     Err(upgrade_unported("binary_upgrade_replorigin_advance"))
 }
 

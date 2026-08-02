@@ -987,14 +987,20 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(744, "array_eq", 2, fc_array_eq),
     b(750, "array_in", 3, fc_array_in),
     b(751, "array_out", 1, fc_array_out),
-    // anyarray_out (pseudotypes.c) is `return array_out(fcinfo)`.
+    // anyarray_out / anycompatiblearray_out (pseudotypes.c) are
+    // `return array_out(fcinfo)`.
     b(2297, "anyarray_out", 1, fc_array_out),
+    b(5089, "anycompatiblearray_out", 1, fc_array_out),
     b(395, "array_to_text", 2, fc_array_to_text),
     nb(384, "array_to_text_null", 3, fc_array_to_text_null),
     b(2176, "array_length", 2, fc_array_length),
     b(383, "array_cat", 2, fc_array_cat),
     b(2400, "array_recv", 3, fc_array_recv),
     b(2401, "array_send", 1, fc_array_send),
+    // anyarray_send / anycompatiblearray_send (pseudotypes.c) are
+    // `return array_send(fcinfo)`.
+    b(2503, "anyarray_send", 1, fc_array_send),
+    b(5091, "anycompatiblearray_send", 1, fc_array_send),
     b(2410, "int2vectorrecv", 1, fc_int2vectorrecv),
     b(2411, "int2vectorsend", 1, fc_int2vectorsend),
     b(2420, "oidvectorrecv", 1, fc_oidvectorrecv),

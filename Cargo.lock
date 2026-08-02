@@ -269,6 +269,7 @@ dependencies = [
  "arrayfuncs",
  "datum",
  "format_type",
+ "funcapi",
  "hashfn",
  "mcx",
  "pg_enum_seams",
@@ -712,6 +713,7 @@ dependencies = [
  "adt_float",
  "arrayfuncs",
  "datum",
+ "detoast_seams",
  "funcapi_srf",
  "hashfn",
  "hyperloglog",
@@ -6849,6 +6851,7 @@ dependencies = [
 name = "guc"
 version = "0.0.0"
 dependencies = [
+ "acl_seams",
  "aclchk_seams",
  "conffiles_seams",
  "elog",
@@ -11260,6 +11263,7 @@ dependencies = [
  "cache_syscache",
  "clauses",
  "datum",
+ "detoast_seams",
  "fmgr_seams",
  "format_type",
  "inval",
@@ -11272,6 +11276,7 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_rel",
+ "types_tuple",
 ]
 
 [[package]]

@@ -165,18 +165,32 @@ pub fn get_fn_expr_argtype(flinfo: Option<&FmgrInfo>, argnum: usize) -> Oid {
     get_call_expr_argtype(node, argnum)
 }
 
-/// C: get_call_expr_argtype (fmgr.c) over the ported call-expression
-/// families; unknown families return InvalidOid exactly as C does.
+/// C: get_call_expr_argtype (fmgr.c) over all six C call-expression families
+/// (FuncExpr/OpExpr/DistinctExpr/ScalarArrayOpExpr/NullIfExpr/WindowFunc);
+/// unknown families return InvalidOid exactly as C does.
 pub fn get_call_expr_argtype(node: Node<'_>, argnum: usize) -> Oid {
     let args = match node.node_tag() {
         NodeTag::T_FuncExpr => &node.as_func_expr().unwrap().args,
         NodeTag::T_OpExpr => &node.as_op_expr().unwrap().args,
+        NodeTag::T_DistinctExpr => &node.as_distinct_expr().unwrap().args,
+        NodeTag::T_ScalarArrayOpExpr => &node.as_scalar_array_op_expr().unwrap().args,
+        NodeTag::T_NullIfExpr => &node.as_null_if_expr().unwrap().args,
+        NodeTag::T_WindowFunc => &node.as_window_func().unwrap().args,
         _ => return InvalidOid,
     };
     if argnum >= args.len() {
         return InvalidOid;
     }
-    expr_type(Some(args.nth(argnum)))
+    let argtype = expr_type(Some(args.nth(argnum)));
+    // C's special hack for ScalarArrayOpExpr: what the underlying function
+    // actually gets passed is the element type of the array.
+    if node.node_tag() == NodeTag::T_ScalarArrayOpExpr && argnum == 1 {
+        // Infallible by signature (the promoted_array_type precedent); the
+        // lookup errors only on a broken catalog, where C ereports.
+        return lsyscache::get_base_element_type(argtype)
+            .unwrap_or_else(|e| panic!("get_base_element_type({argtype}): {e}"));
+    }
+    argtype
 }
 
 /// C: get_call_expr_argtype over an erased fn_expr — a real call-expression

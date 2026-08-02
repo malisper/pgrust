@@ -239,10 +239,23 @@ pub fn GetConfigOption(
             }
             return Err(Box::new(unrecognized(name)));
         };
-        if restrict_privileged && record.gen().flags & types_guc::GUC_SUPERUSER_ONLY != 0 {
-            // has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_SETTINGS) is
-            // acl.c's, unported; loud panic, never a silent allow.
-            panic!("GetConfigOption({name:?}): GUC_SUPERUSER_ONLY privilege check not yet ported");
+        // C: ConfigOptionIsVisible (guc_funcs.c) — GUC_SUPERUSER_ONLY reads
+        // need has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_SETTINGS).
+        if restrict_privileged
+            && record.gen().flags & types_guc::GUC_SUPERUSER_ONLY != 0
+            && !acl_seams::has_privs_of_role::call(
+                miscinit::GetUserId(),
+                ROLE_PG_READ_ALL_SETTINGS,
+            )?
+        {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                .errmsg(format!("permission denied to examine \"{name}\""))
+                .errdetail(
+                    "Only roles with privileges of the \"pg_read_all_settings\" role may examine this parameter.",
+                )
+                .into_error()
+                .into());
         }
         Ok(Some(show_guc_option(record, false)))
     })
@@ -274,6 +287,9 @@ fn unrecognized(name: &str) -> PgError {
 }
 
 const GUC_QUALIFIER_SEPARATOR: char = '.';
+
+// ROLE_PG_READ_ALL_SETTINGS (pg_authid.dat).
+const ROLE_PG_READ_ALL_SETTINGS: Oid = 3374;
 
 // valid_custom_variable_name (guc.c:1076).
 pub use array::{
