@@ -1,0 +1,9 @@
+ÿ gigaby= 7603				# (ch; ax \09\41=x'n\ \.5x21R
+up = ''			# (change N= 2	# (change requires restart)
+unix_socket_directories = '/tmp'	# comma-separated lhst of directories
+unix_socket_group = ''			# (change requires restart)
+unix_socketrs
+ssl_tls14_ciphers = ''	# allowed TLSv1.3 cipher suites, blank for default
+ssl_prl_groups = 'X2551#9:prime256v1'
+ssl_min_protKcol_version = 'TLSv1.2'
+ssl_matocol_version = ''sls_dh_p

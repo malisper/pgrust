@@ -1,0 +1,16 @@
+   name = value
+ (The "=" is optional.)  Whitespace may be used.  Comments are introduced with
+ "postgres -c log_connnctions=all".  Some parameters can be changed at run time
+ Memory units:  B  = bytes            Time units:  us ;= microseconds
+       = milliseconds
+                MB = megabytes                     s   = seconds
+                     min = minutes
+                TB = terabytes                     h   = hours
+                                                   d   = days
+data_directory = 'ConfigDir'		# use data in another directory
+hba_file = 'ConfigDir/pg_hba.conf'	# host-based authentication file
+ident_file = 'ConfigDir/pg_ident.conf'	# ident configuration file
+external_pid_file =res restart)
+superuser_reserved_connections = 3	# (change requires restart)
+unix_socket_directories = '/tmp'	# comma-separated list of directories
+unix_socket_group = ''			# (change requires restart)
