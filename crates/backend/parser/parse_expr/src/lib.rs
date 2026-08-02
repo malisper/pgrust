@@ -161,10 +161,11 @@ pub fn transformExprRecurse<'mcx>(
             pstate,
             expr.as_set_to_default().unwrap().location,
         )),
+        // Every raw tag C's switch handles has an arm above; C's default is
+        // "should not reach here" elog(unrecognized node type), kept loud.
         other => panic!(
-            "transformExprRecurse (parse_expr.c): arm for {other:?} unported — \
-             unit backend-parser-expr (TypeCast/SubLink and friends land with their \
-             parser units)"
+            "transformExprRecurse (parse_expr.c): unrecognized node type {other:?} — \
+             C elogs here too"
         ),
     }
 }
