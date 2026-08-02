@@ -549,6 +549,32 @@ pub fn spellfam_diff(data: &[u8]) {
             return;
         }
 
+        // DOMAIN CARVE (resource bound — SHARED regex-NFA compile cost, no
+        // differential signal). spell.c NIAddAffix hands any condition mask
+        // that fails RS_isRegis to pg_regcomp (spell.c:565), and Spencer NFA
+        // optimization is superlinear in alternation/grouping count — BOTH
+        // sides pay it identically (profiled: C createarc/optimize/sortins ==
+        // Rust regex_core::regex_nfa on the same input). CI floor run
+        // 1785632839 @ 9,644,033 execs was ended not by any divergence but by
+        // this cost cliff: fuzzer-minted masks with ~800-1000 `|` bytes drove
+        // ~30s/exec + multi-GB ASan-inflated RSS, tripping libFuzzer's
+        // rss_limit (oom-36ce2308, replays CLEAN in 1.7s without ASan) and
+        // slow-unit threshold (slow-unit-1e3e91f3, 5.3s/317MB un-sanitized).
+        // Real ispell affix conditions are character classes and literals —
+        // alternation/grouping/bounded-repeat metachars essentially never
+        // appear — so cap the total count of the multiplier metacharacters
+        // {'|', '(', '{'} in the affix file at 64. Coverage cost ~none: the
+        // pg_regcomp arm of NIAddAffix stays in domain via small masks.
+        const MAX_REGEX_MULTIPLIERS: usize = 64;
+        if aff
+            .iter()
+            .filter(|&&b| b == b'|' || b == b'(' || b == b'{')
+            .count()
+            > MAX_REGEX_MULTIPLIERS
+        {
+            return;
+        }
+
         // DOMAIN CARVE (C-UB, task #80 — the whole AF-alias surface, by a
         // PRESENCE test, applied before either side runs). C fills AffixData
         // slots lazily in FILE ORDER, so an affix line referencing an alias whose
@@ -1205,6 +1231,16 @@ mod fleet_repro {
     #[test]
     fn stackov_c47645d6() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-stackov-c47645d6")).unwrap();
+        super::spellfam_diff(&data);
+    }
+    #[test]
+    fn oomrss_36ce2308() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-oomrss-36ce2308")).unwrap();
+        super::spellfam_diff(&data);
+    }
+    #[test]
+    fn slowunit_1e3e91f3() {
+        let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/spellfam_diff/probe-slowunit-1e3e91f3")).unwrap();
         super::spellfam_diff(&data);
     }
     #[test]
