@@ -584,3 +584,28 @@ fn errposition_gb18030_trailing_lead_byte_does_not_panic() {
         3
     );
 }
+
+#[test]
+fn udeescape_non_utf8_server_runs_the_conversion_lane() {
+    use crate::udeescape::{str_udeescape, UdeescapeFailure};
+
+    // The escapes above U+007F now ride mbutils::pg_unicode_to_server on a
+    // non-UTF8 server; with no UTF8-to-server conversion proc loaded, C
+    // reports 0A000 "conversion ... is not supported" (mbutils.c), where
+    // this lane used to panic. ASCII escapes convert inline regardless.
+    let ctx = MemoryContext::new("t");
+    let saved = mbutils::GetDatabaseEncoding();
+    mbutils::SetDatabaseEncoding(PG_LATIN1).unwrap();
+
+    let ascii = str_udeescape(ctx.mcx(), br"\0041", b'\\', 0, PG_LATIN1).unwrap();
+    assert_eq!(&*ascii, b"A");
+
+    match str_udeescape(ctx.mcx(), br"\00e9", b'\\', 0, PG_LATIN1) {
+        Err(UdeescapeFailure::Hard(e)) => {
+            assert_eq!(e.message(), "conversion between UTF8 and LATIN1 is not supported");
+        }
+        other => panic!("expected the conversion-proc lane to report: {other:?}"),
+    }
+
+    mbutils::SetDatabaseEncoding(saved).unwrap();
+}

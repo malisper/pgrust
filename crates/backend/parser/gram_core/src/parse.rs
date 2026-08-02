@@ -149,7 +149,14 @@ impl<'mcx> Parser<'mcx> {
                     *llocp,
                     self.settings.encoding,
                 )
-                .map_err(|e| self.udeescape_error(e))?;
+                .map_err(|e| match e {
+                    parser_small1::udeescape::UdeescapeFailure::Escape(e) => {
+                        self.udeescape_error(e)
+                    }
+                    // pg_unicode_to_server errors pass through uncursored,
+                    // as in C.
+                    parser_small1::udeescape::UdeescapeFailure::Hard(e) => e,
+                })?;
                 let out_tok = if t == tokens::UIDENT {
                     parser_small1::truncate_identifier(
                         &mut decoded,

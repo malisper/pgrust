@@ -7,7 +7,9 @@ use parser_seams::RawParseMode;
 use types_error::PgResult;
 use types_nodes::rawnodes::RawStmt;
 
-pub use parser_small1::udeescape::{check_uescapechar, str_udeescape, UdeescapeError};
+pub use parser_small1::udeescape::{
+    check_uescapechar, str_udeescape, UdeescapeError, UdeescapeFailure,
+};
 
 pub fn raw_parser<'mcx>(
     mcx: Mcx<'mcx>,

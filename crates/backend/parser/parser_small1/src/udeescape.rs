@@ -1,5 +1,7 @@
+use alloc::boxed::Box;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use crate::scanner_isspace;
+use types_error::PgError;
 use wchar::{
     is_utf16_surrogate_first, is_utf16_surrogate_second, is_valid_unicode_codepoint, pg_enc,
     pg_wchar, surrogate_pair_to_codepoint, unicode_to_utf8, unicode_utf8len, PG_UTF8,
@@ -14,6 +16,21 @@ pub struct UdeescapeError {
     pub message: &'static str,
     pub location: i32,
     pub hint: Option<&'static str>,
+}
+
+/// Either one of str_udeescape's own escape errors (the caller renders the
+/// cursor) or a hard error out of pg_unicode_to_server, which C raises
+/// as-is, with no cursor.
+#[derive(Debug)]
+pub enum UdeescapeFailure {
+    Escape(UdeescapeError),
+    Hard(Box<PgError>),
+}
+
+impl From<UdeescapeError> for UdeescapeFailure {
+    fn from(e: UdeescapeError) -> Self {
+        UdeescapeFailure::Escape(e)
+    }
 }
 
 // Call sites guard with is_ascii_hexdigit (C's unreached elog).
@@ -42,17 +59,34 @@ pub fn check_uescapechar(escape: u8) -> bool {
         || scanner_isspace(escape))
 }
 
-fn pg_unicode_to_server(c: pg_wchar, out: &mut PgVec<'_, u8>, server_encoding: pg_enc) {
-    if server_encoding != PG_UTF8 {
-        panic!(
-            "pg_unicode_to_server: non-UTF8 server encoding needs the mbutils.c \
-             conversion layer (backend-utils-mb unported)"
+// pg_unicode_to_server (mbutils.c) with the ASCII / UTF-8-server fast paths
+// inlined; other server encodings run the mbutils conversion-proc lane,
+// whose errors C raises as-is (untranslatable character / missing default
+// conversion), with no cursor.
+fn pg_unicode_to_server<'mcx>(
+    mcx: Mcx<'mcx>,
+    c: pg_wchar,
+    out: &mut PgVec<'mcx, u8>,
+    server_encoding: pg_enc,
+) -> Result<(), UdeescapeFailure> {
+    if c > 0x7F && server_encoding != PG_UTF8 {
+        // The encoding parameter is a port-ism (C reads GetDatabaseEncoding
+        // itself); the conversion below targets the database encoding, so a
+        // drifted caller must fail loudly rather than emit wrong bytes.
+        assert_eq!(
+            server_encoding,
+            mbutils::GetDatabaseEncoding(),
+            "str_udeescape encoding drifted from the database encoding"
         );
+        let bytes = mbutils::pg_unicode_to_server(mcx, c).map_err(UdeescapeFailure::Hard)?;
+        mcx::vec_append_bytes(out, &bytes).unwrap_or_else(|e| panic!("{}", e.message()));
+        return Ok(());
     }
     let mut buf = [0u8; 4];
     unicode_to_utf8(c, &mut buf);
     let n = unicode_utf8len(c) as usize;
     mcx::vec_append_bytes(out, &buf[..n]).unwrap_or_else(|e| panic!("{}", e.message()));
+    Ok(())
 }
 
 /// `str_udeescape` (parser.c): decode the Unicode escapes of a `U&'...'` /
@@ -64,7 +98,7 @@ pub fn str_udeescape<'mcx>(
     escape: u8,
     position: i32,
     server_encoding: pg_enc,
-) -> Result<PgVec<'mcx, u8>, UdeescapeError> {
+) -> Result<PgVec<'mcx, u8>, UdeescapeFailure> {
     let mut out: PgVec<'mcx, u8> =
         vec_with_capacity_in(mcx, s.len()).unwrap_or_else(|e| panic!("{}", e.message()));
     let mut pair_first: pg_wchar = 0;
@@ -83,7 +117,7 @@ pub fn str_udeescape<'mcx>(
             let escpos = escpos_at(i);
             if byte(i + 1) == escape {
                 if pair_first != 0 {
-                    return Err(invalid_pair(escpos));
+                    return Err(invalid_pair(escpos).into());
                 }
                 out.push(escape);
                 i += 2;
@@ -92,7 +126,7 @@ pub fn str_udeescape<'mcx>(
                     + (hexval(byte(i + 2)) << 8)
                     + (hexval(byte(i + 3)) << 4)
                     + hexval(byte(i + 4));
-                emit(&mut out, &mut pair_first, unicode, escpos, server_encoding)?;
+                emit(mcx, &mut out, &mut pair_first, unicode, escpos, server_encoding)?;
                 i += 5;
             } else if byte(i + 1) == b'+' && (2..=7).all(|k| byte(i + k).is_ascii_hexdigit()) {
                 let unicode = (hexval(byte(i + 2)) << 20)
@@ -101,55 +135,56 @@ pub fn str_udeescape<'mcx>(
                     + (hexval(byte(i + 5)) << 8)
                     + (hexval(byte(i + 6)) << 4)
                     + hexval(byte(i + 7));
-                emit(&mut out, &mut pair_first, unicode, escpos, server_encoding)?;
+                emit(mcx, &mut out, &mut pair_first, unicode, escpos, server_encoding)?;
                 i += 8;
             } else {
                 return Err(UdeescapeError {
                     message: "invalid Unicode escape",
                     location: escpos,
                     hint: Some("Unicode escapes must be \\XXXX or \\+XXXXXX."),
-                });
+                }
+                .into());
             }
         } else {
             if pair_first != 0 {
-                return Err(invalid_pair(escpos_at(i)));
+                return Err(invalid_pair(escpos_at(i)).into());
             }
             out.push(s[i]);
             i += 1;
         }
     }
     if pair_first != 0 {
-        return Err(invalid_pair(escpos_at(i)));
+        return Err(invalid_pair(escpos_at(i)).into());
     }
     Ok(out)
 }
 
 // The shared value-check + surrogate-pair + emit tail of both escape arms.
-fn emit(
-    out: &mut PgVec<'_, u8>,
+fn emit<'mcx>(
+    mcx: Mcx<'mcx>,
+    out: &mut PgVec<'mcx, u8>,
     pair_first: &mut pg_wchar,
     unicode: pg_wchar,
     escpos: i32,
     server_encoding: pg_enc,
-) -> Result<(), UdeescapeError> {
+) -> Result<(), UdeescapeFailure> {
     check_unicode_value(unicode, escpos)?;
     let invalid_pair =
         UdeescapeError { message: "invalid Unicode surrogate pair", location: escpos, hint: None };
     let cp = if *pair_first != 0 {
         if !is_utf16_surrogate_second(unicode) {
-            return Err(invalid_pair);
+            return Err(invalid_pair.into());
         }
         let cp = surrogate_pair_to_codepoint(*pair_first, unicode);
         *pair_first = 0;
         cp
     } else if is_utf16_surrogate_second(unicode) {
-        return Err(invalid_pair);
+        return Err(invalid_pair.into());
     } else if is_utf16_surrogate_first(unicode) {
         *pair_first = unicode;
         return Ok(());
     } else {
         unicode
     };
-    pg_unicode_to_server(cp, out, server_encoding);
-    Ok(())
+    pg_unicode_to_server(mcx, cp, out, server_encoding)
 }

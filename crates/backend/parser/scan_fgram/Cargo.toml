@@ -11,6 +11,7 @@ path = "src/lib.rs"
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 keywords = { path = "../../../common/keywords" }
+mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 numutils = { path = "../../utils/adt/numutils" }
 parser_small1 = { path = "../parser_small1" }
