@@ -790,6 +790,7 @@ pub struct Constraint<'mcx> {
     pub where_clause: Option<Node<'mcx>>,
     pub indexname: Option<&'mcx str>,
     pub indexspace: Option<&'mcx str>,
+    pub reset_default_tblspc: bool,
     pub pktable: Option<&'mcx crate::RangeVar<'mcx>>,
     pub fk_attrs: NodeList<'mcx>,
     pub pk_attrs: NodeList<'mcx>,

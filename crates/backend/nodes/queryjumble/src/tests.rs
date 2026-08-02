@@ -91,6 +91,42 @@ fn queryid_stable_normalized_and_locations_recorded() {
 }
 
 #[test]
+fn constraint_reset_default_tblspc_distinguishes_queryid() {
+    EnableQueryId();
+    let ctx = MemoryContext::new_bump("qjumble-test");
+    let mcx = ctx.mcx();
+
+    // C's generated jumble walks every un-ignored Constraint field, including
+    // the transform-set reset_default_tblspc flag (parsenodes.h:2852).
+    let constraint_query = |reset: bool| -> Query<'_> {
+        let c = Node::mk(
+            mcx,
+            types_nodes::rawnodes::Constraint {
+                contype: types_nodes::rawnodes::ConstrType::CONSTR_UNIQUE,
+                reset_default_tblspc: reset,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Query {
+            commandType: types_nodes::nodes_enums::CmdType::CMD_UTILITY,
+            utilityStmt: Some(c),
+            ..Default::default()
+        }
+    };
+
+    let mut q_set = constraint_query(true);
+    let mut q_unset = constraint_query(false);
+    JumbleQuery(mcx, &mut q_set).unwrap();
+    JumbleQuery(mcx, &mut q_unset).unwrap();
+    assert_ne!(q_set.queryId, 0);
+    assert_ne!(
+        q_set.queryId, q_unset.queryId,
+        "reset_default_tblspc must feed the jumble as C does"
+    );
+}
+
+#[test]
 fn jumble_buffer_overflow_folds() {
     EnableQueryId();
     let ctx = MemoryContext::new_bump("qjumble-test");
