@@ -145,6 +145,8 @@ const fn b(foid: types_core::Oid, name: &'static str, nargs: i16, strict: bool, 
 pub static ENUM_BUILTINS: &[FmgrBuiltin] = &[
     b(3506, "enum_in", 2, true, fc_enum_in),
     b(3507, "enum_out", 1, true, fc_enum_out),
+    // anyenum_out (pseudotypes.c) is `return enum_out(fcinfo)`.
+    b(3505, "anyenum_out", 1, true, fc_enum_out),
     b(3508, "enum_eq", 2, true, fc_enum_eq),
     b(3509, "enum_ne", 2, true, fc_enum_ne),
     b(3510, "enum_lt", 2, true, fc_enum_lt),

@@ -356,3 +356,20 @@ mod tests {
         assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     }
 }
+
+#[cfg(test)]
+mod pseudotype_alias_tests {
+    // pseudotypes.c: anyenum_out is `return enum_out(fcinfo)`; the alias
+    // must resolve to the same fc body as enum_out.
+    #[test]
+    fn anyenum_out_delegates_to_enum_out() {
+        let by_oid = |oid: types_core::Oid| {
+            crate::builtins::ENUM_BUILTINS
+                .iter()
+                .find(|b| b.foid == oid)
+                .unwrap_or_else(|| panic!("oid {oid} not registered"))
+        };
+        assert_eq!(by_oid(3505).func as usize, crate::builtins::fc_enum_out as usize);
+        assert_eq!(by_oid(3505).name, "anyenum_out");
+    }
+}

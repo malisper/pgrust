@@ -2128,3 +2128,23 @@ fn array_out_over_ceiling_output_raises_stringinfo_error() {
         )
     );
 }
+
+// pseudotypes.c: anyarray_out/anycompatiblearray_out are `return
+// array_out(fcinfo)`, anyarray_send/anycompatiblearray_send are `return
+// array_send(fcinfo)`; the aliases must resolve to the same fc body.
+#[test]
+fn pseudotype_aliases_delegate_to_array_io() {
+    let by_oid = |oid: types_core::Oid| {
+        crate::builtins::ARRAYFUNCS_BUILTINS
+            .iter()
+            .find(|b| b.foid == oid)
+            .unwrap_or_else(|| panic!("oid {oid} not registered"))
+    };
+    assert_eq!(by_oid(2297).func as usize, crate::builtins::fc_array_out as usize);
+    assert_eq!(by_oid(5089).func as usize, crate::builtins::fc_array_out as usize);
+    assert_eq!(by_oid(2503).func as usize, crate::builtins::fc_array_send as usize);
+    assert_eq!(by_oid(5091).func as usize, crate::builtins::fc_array_send as usize);
+    assert_eq!(by_oid(2503).name, "anyarray_send");
+    assert_eq!(by_oid(5089).name, "anycompatiblearray_out");
+    assert_eq!(by_oid(5091).name, "anycompatiblearray_send");
+}

@@ -1100,3 +1100,18 @@ fn range_deparse_nested_amplification_hits_ceiling_catchably() {
     }
     panic!("nested range deparse never hit the MaxAllocSize ceiling");
 }
+
+// pseudotypes.c: anyrange_out/anycompatiblerange_out are `return
+// range_out(fcinfo)`; the aliases must resolve to the same fc body.
+#[test]
+fn pseudotype_aliases_delegate_to_range_out() {
+    let by_oid = |oid: types_core::Oid| {
+        crate::builtins::RANGETYPES_BUILTINS
+            .iter()
+            .find(|b| b.foid == oid)
+            .unwrap_or_else(|| panic!("oid {oid} not registered"))
+    };
+    assert_eq!(by_oid(3833).func as usize, crate::builtins::fc_range_out as usize);
+    assert_eq!(by_oid(5095).func as usize, crate::builtins::fc_range_out as usize);
+    assert_eq!(by_oid(5095).name, "anycompatiblerange_out");
+}

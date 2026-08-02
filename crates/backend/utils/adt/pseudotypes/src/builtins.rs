@@ -4,10 +4,9 @@
 //! varlena unknownin precedent), cstring_recv/cstring_send (binary wire:
 //! COPY BINARY and binary-format parameters/results), pg_node_tree_out
 //! (varlena fc_textout delegate), pg_node_tree_send (varlena textsend
-//! delegate). Not registrable: the *_out/*_send
-//! delegates whose target unit is unported
-//! (anyarray/anycompatiblearray/anyenum/anyrange/anycompatiblerange/
-//! anymultirange/anycompatiblemultirange).
+//! delegate). Registered elsewhere: the any*_out/any*_send delegates are
+//! OID aliases in their target crates' tables (arrayfuncs, adt_enum,
+//! rangetypes, multirangetypes), exactly as C's `return X_out(fcinfo)`.
 
 use datum::Datum;
 use types_core::Oid;

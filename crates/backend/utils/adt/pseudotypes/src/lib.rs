@@ -1,7 +1,9 @@
 //! pseudotypes.c: ereport-only I/O stubs, real cstring/void I/O, and the
-//! pg_node_tree delegates onto the ported varlena text lanes. Outputs whose
-//! delegate unit is unported (array/enum/range/multirange *_out and *_send)
-//! are named loud panics.
+//! pg_node_tree delegates onto the ported varlena text lanes. The
+//! anyarray/anyenum/anyrange/anymultirange *_out and *_send delegates are
+//! `return X_out(fcinfo)` in C; each is registered as an OID alias of its
+//! target's fc wrapper in the delegate crate's builtins table
+//! (arrayfuncs/adt_enum/rangetypes/multirangetypes).
 
 pub mod builtins;
 #[cfg(test)]
@@ -99,28 +101,6 @@ pub fn shell_out() -> PgResult<Datum> {
     Err(PgError::error("cannot display a value of a shell type")
         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
         .into())
-}
-
-macro_rules! unported_delegate {
-    ($($fname:ident -> $target:literal in $unit:literal;)*) => {$(
-        pub fn $fname() -> ! {
-            panic!(concat!(
-                stringify!($fname), ": delegates to ", $target, " (", $unit, " not ported)"
-            ))
-        }
-    )*};
-}
-
-unported_delegate! {
-    anyarray_out -> "array_out" in "arrayfuncs";
-    anyarray_send -> "array_send" in "arrayfuncs";
-    anycompatiblearray_out -> "array_out" in "arrayfuncs";
-    anycompatiblearray_send -> "array_send" in "arrayfuncs";
-    anyenum_out -> "enum_out" in "adt_enum";
-    anyrange_out -> "range_out" in "rangetypes";
-    anycompatiblerange_out -> "range_out" in "rangetypes";
-    anymultirange_out -> "multirange_out" in "multirangetypes";
-    anycompatiblemultirange_out -> "multirange_out" in "multirangetypes";
 }
 
 // C: pstrdup — bytes to the first NUL, re-terminated.

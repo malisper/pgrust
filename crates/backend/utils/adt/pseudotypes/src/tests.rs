@@ -55,12 +55,6 @@ fn pg_node_tree_out_passes_text_through() {
 }
 
 #[test]
-#[should_panic(expected = "anyarray_out: delegates to array_out (arrayfuncs not ported)")]
-fn unported_delegates_are_loud() {
-    anyarray_out();
-}
-
-#[test]
 fn void_send_fmgr_wrapper_sends_empty_payload() {
     use types_fmgr::LocalFcinfo;
 
