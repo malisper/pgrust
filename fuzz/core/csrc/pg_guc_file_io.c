@@ -53,6 +53,7 @@
  *   and comment-only seeds which take the real path.
  */
 
+#define _GNU_SOURCE 1  /* vasprintf (glibc); a no-op on macOS libc */
 #define GUCF_DRIVER_TU 1
 #include "postgres.h"
 #include "utils/conffiles.h"
@@ -186,12 +187,15 @@ static _Thread_local int gucf_driver_jmp_armed;
 
 static _Thread_local int gucf_pending_elevel;
 static _Thread_local int gucf_pending_code;
-static _Thread_local char gucf_pending_msg[4096];
+/* Dynamic, never truncating: PG formats errmsg into an expanding StringInfo,
+ * so a fixed capture buffer would clip long tokens and manufacture a false
+ * message divergence (the CI cluster found exactly that at 3.2M execs). */
+static _Thread_local char *gucf_pending_msg;
 
 static _Thread_local int gucf_thrown;		/* 1 after an elevel >= ERROR report */
 static _Thread_local int gucf_thrown_elevel;
 static _Thread_local int gucf_thrown_code;
-static _Thread_local char gucf_thrown_msg[4096];
+static _Thread_local char *gucf_thrown_msg;
 
 /* count + last of the sub-ERROR reports (PG's log-only channel) */
 static _Thread_local int gucf_logged_count;
@@ -203,7 +207,11 @@ gucf_ereport_begin(int elevel)
 {
 	gucf_pending_elevel = elevel;
 	gucf_pending_code = ERRCODE_INTERNAL_ERROR; /* elog default; errcode() overrides */
-	gucf_pending_msg[0] = '\0';
+	if (gucf_pending_msg)
+	{
+		free(gucf_pending_msg);
+		gucf_pending_msg = NULL;
+	}
 }
 
 int
@@ -219,7 +227,8 @@ gucf_errmsg(const char *fmt, ...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	vsnprintf(gucf_pending_msg, sizeof(gucf_pending_msg), fmt, ap);
+	if (vasprintf(&gucf_pending_msg, fmt, ap) < 0)
+		abort();
 	va_end(ap);
 	return 0;
 }
@@ -238,7 +247,10 @@ gucf_ereport_finish(void)
 		gucf_thrown = 1;
 		gucf_thrown_elevel = gucf_pending_elevel;
 		gucf_thrown_code = gucf_pending_code;
-		memcpy(gucf_thrown_msg, gucf_pending_msg, sizeof(gucf_thrown_msg));
+		free(gucf_thrown_msg);
+		gucf_thrown_msg = gucf_pending_msg ? strdup(gucf_pending_msg) : strdup("");
+		if (!gucf_thrown_msg)
+			abort();
 		if (!gucf_driver_jmp_armed)
 			abort();
 		siglongjmp(gucf_driver_jmp, 1);
@@ -335,7 +347,8 @@ pg_gucf_run(const unsigned char *buf, size_t len, int elevel)
 	gucf_thrown = 0;
 	gucf_thrown_elevel = 0;
 	gucf_thrown_code = 0;
-	gucf_thrown_msg[0] = '\0';
+	free(gucf_thrown_msg);
+	gucf_thrown_msg = NULL;
 	gucf_logged_count = 0;
 	gucf_logged_last_elevel = 0;
 	gucf_logged_last_code = 0;
@@ -450,7 +463,7 @@ pg_gucf_thrown_get_elevel(void)
 const char *
 pg_gucf_thrown_get_msg(void)
 {
-	return gucf_thrown_msg;
+	return gucf_thrown_msg ? gucf_thrown_msg : "";
 }
 
 int

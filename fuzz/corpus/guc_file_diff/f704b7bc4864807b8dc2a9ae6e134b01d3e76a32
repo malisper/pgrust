@@ -1,0 +1,361 @@
+# --------------------
+#hba_file = 'ConfigDir/pg_hba.conf'	# host-based authentication file
+					# (change requires restart)
+#ident_file = 'ConfigDir/pg_ident.conf'	# ident configuration file
+					# (change requires restart)
+
+# If external_pid_file is not explicitly set, no extra PID file is written.
+#external_pid_file = ''			# write an extra PID file
+					# (change requires restart)
+
+
+#---------------------------------			# comma-separated list of addresses;
+					# defaults to 'localhost'; use '*' for all
+					# (change requires restart)
+#port = 5432				# (change requires restart)
+#max_connections = 100			# (change requires restart)
+#reserved_connections = 0		# (change requires restart)
+#superuser_reserved_connections = 3	# (change requires restart)
+#unix_socket_directories = '/tmp'	# comma-separated list of directories
+					# (change requires restart)
+#unix_socket_group = ''			# (change requires restart)
+#unix_socket_permissions =^ 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     GB =xxxx2utes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#---------------------------------------------------------------             GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------
+
+# The default values of these variables are drivenfrom the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 1554		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#----------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+# -; Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresses;
+					# defaults to 'localhost'; use '*' forn all
+					# (change requires restart)
+#port = 5432				# (change r-----------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#-----------------------------------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#----------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#----------------------------------------------------ectory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes   restart)
+#max_connections = 100			# (change requires restart)
+#reserved_connections = 0		# (change requires restart)
+#superuser_reserved_connections = 3	# (change requires restart)
+#unix_socket_directories = '/tmp'	# comma-separated list of directories
+					# (change requires restart)
+#unix_socket_group = ''			# (change requires restart)
+#unix_socket_permissions = 0777		# begin with 0 to use octal notation
+					# (change requires restart)
+#bonjour = off				# advertise server via Bonjour
+					# (change requires restart)
+#bonjour_name = ''			# defaults to the computer name
+					# (change requires restart)
+
+# - TCP settings -
+# see "man tcp" for details
+
+     d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#-------------------------------------------- = 'ConfigDir'		# use data in another directory
+					issions = 1554		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#----------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+# -; Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresses;
+					# defaults to 'localhost'; use '*' forn all
+					# (change requires restart)
+#port = 5432				# (change r-----------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+# ----------------------------------------------------
+# FILE ONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+# - Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresses;
+					# defaults to 'localhost'; use '*' forn all
+					# (change requires restart)
+#port = 5432				# (change r-----------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir#		# use data in another d)
+#unix_socket_directories = '/tmp'	# comma-separated list of directories
+					# (change requires restart)
+#unix_socket_group = ''			# (change requires restart)
+#unix_socket_permissions = 0777		# begin with 0 to use oct        min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented her sae ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#----------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+# - Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresses;
+					# defaults to 'localhost'; use '*' forn all
+					# (change requires restart)
+#port = 5432				# (change r-----------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#----------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+# - Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresse--------------------------------------------------------------
+# FILE LOCATIONS
+#------------------------------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = sec-----------------s;
+					# defaults to 'localhost'; use '*' for all
+					# (change requires restart)
+#port = 2716				# (change requires restart)
+#max_connections = 100			# (change requires restart)
+#reserved_connections = 0		# (change requires restart)
+#superuser_reserved_connections = 3	# (change requires restart)
+#unix_socket_directories = '/tmp'	# comma-separated list of directories
+					# (change requires restart)
+#unix_socket_group = ''			# (change requires restart)
+#unix_socket_permissions = 0778		# begin with 0 to use oct        min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environm----------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+# - Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresse--------------------------------------------------------------
+# FILE LOCATIONS
+#------------------------------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = sec-----------------s;
+					# defaults to 'localhost'; use '*' for all
+					# (change requires restart)
+#port = 2716				# (change requires restart)
+#max_connections = 100			# (change requires restart)
+#reserved_connections = 0		# (change requires restart)
+#superuser_reserved_connections = 3	# (change requires restart)
+#unix_socket_directories = '/tmp'	# comma-separated list of directories
+					# (change requires restart)
+#unix_socket_group = ''			# (change requires restart)
+#unix_socket_permissions = 0778		# begin with 0 to use oct        min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented her sae ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal n---------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented her sae ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes   ent variable, represented her sae ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#-----------------------------------------------as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#----------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#----------7-------------------------------------------------------------------
+
+# - Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresse--------------------------------------------------------------
+# FILE LOCATIONS
+#------------------------------------------------------------------------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+					issions = 0777		# begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#----------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+# - Connection Settings -
+
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresses;
+					# defaults to 'localhost'; use '*' forn all
+					# (change requires restart)
+#port = 5432				# (change r-----------------
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir#		# use data in another directory
+					issions = 0777		#  = seconds
+#                GB = gigabytes  8		# begin with 0 to use octal notation
+					# (change requir begin with 0 to use octal notation
+					# (ch                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes restart)
+#bonjour = ofes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------f				# €------------------------------------------------------
+# FILE LOCATIONS
+#--------á=0--W--õ-------
