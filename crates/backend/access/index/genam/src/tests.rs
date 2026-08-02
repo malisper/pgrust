@@ -332,3 +332,147 @@ fn ignore_system_indexes_forces_the_heap_arm() {
         .unwrap();
     assert!(msg.contains("predicate_lock_relation"), "{msg}");
 }
+
+// ---------------------------------------------------------------------------
+// index_compute_xid_horizon_for_tuples: the table_index_delete_tuples shim
+// (hash/gist LP_DEAD reuse). One fake index page whose LP_DEAD items point at
+// committed-dead heap tuples; the horizon must reach their committed xmax.
+// ---------------------------------------------------------------------------
+
+const BLCKSZ: usize = ::types_core::BLCKSZ;
+const SIZE_OF_PAGE_HEADER: usize = ::types_storage::bufpage::SizeOfPageHeaderData;
+const INDEX_BUF: ::types_core::Buffer = 500;
+const HEAP_BUF: ::types_core::Buffer = 100;
+
+#[repr(C, align(8))]
+struct FakePage([u8; BLCKSZ]);
+
+thread_local! {
+    static INDEX_PAGE: core::ptr::NonNull<FakePage> =
+        core::ptr::NonNull::from(Box::leak(Box::new(FakePage([0u8; BLCKSZ]))));
+    static HEAP_PAGE: core::ptr::NonNull<FakePage> =
+        core::ptr::NonNull::from(Box::leak(Box::new(FakePage([0u8; BLCKSZ]))));
+    static HORIZON_PINS: Cell<i32> = const { Cell::new(0) };
+}
+
+fn install_horizon_seams() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        bufmgr_seams::read_buffer::set(|rel, blkno| {
+            if rel.rd_id != TBL {
+                // Keeps seam_scan_reaches_the_buffer_layer's witness: an
+                // index-arm descent still dies at read_buffer.
+                panic!("read_buffer reached from the index arm (horizon mock serves the heap only)");
+            }
+            HORIZON_PINS.with(|c| c.set(c.get() + 1));
+            Ok(HEAP_BUF + blkno as ::types_core::Buffer)
+        });
+        bufmgr_seams::release_buffer::set(|_buf| {
+            HORIZON_PINS.with(|c| c.set(c.get() - 1));
+            Ok(())
+        });
+        bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+        bufmgr_seams::incr_buffer_ref_count::set(|_buf| {
+            HORIZON_PINS.with(|c| c.set(c.get() + 1))
+        });
+        bufmgr_seams::buffer_get_block_number::set(|buf| match buf {
+            INDEX_BUF => 7,
+            b => (b - HEAP_BUF) as ::types_core::BlockNumber,
+        });
+        bufmgr_seams::buffer_get_page::set(|buf| match buf {
+            INDEX_BUF => INDEX_PAGE.with(|p| p.cast::<u8>()),
+            _ => HEAP_PAGE.with(|p| p.cast::<u8>()),
+        });
+        procarray_seams::global_vis_test_for::set(|_rel| {
+            ::types_core::GlobalVisStateHandle::new(1)
+        });
+    });
+}
+
+// Committed-dead heap tuple image: xmin 10 / xmax 20, both hinted committed.
+fn dead_heap_tuple_image(val: i32) -> [u8; 28] {
+    let mut img = [0u8; 28];
+    img[0..4].copy_from_slice(&10u32.to_ne_bytes()); // xmin
+    img[4..8].copy_from_slice(&20u32.to_ne_bytes()); // xmax
+    img[18..20].copy_from_slice(&1u16.to_ne_bytes()); // natts
+    let infomask =
+        ::types_tuple::HEAP_XMIN_COMMITTED | ::types_tuple::HEAP_XMAX_COMMITTED;
+    img[20..22].copy_from_slice(&infomask.to_ne_bytes());
+    img[22] = 24; // t_hoff
+    img[24..28].copy_from_slice(&val.to_ne_bytes());
+    img
+}
+
+fn write_page_header(page: &mut FakePage, lower: usize, upper: usize) {
+    page.0[12..14].copy_from_slice(&(lower as u16).to_ne_bytes());
+    page.0[14..16].copy_from_slice(&(upper as u16).to_ne_bytes());
+    page.0[16..18].copy_from_slice(&(BLCKSZ as u16).to_ne_bytes());
+    page.0[18..20].copy_from_slice(&((BLCKSZ as u16) | 4).to_ne_bytes());
+}
+
+fn put_item(page: &mut FakePage, i: usize, upper: &mut usize, img: &[u8], dead: bool) {
+    *upper = (*upper - img.len()) & !7;
+    page.0[*upper..*upper + img.len()].copy_from_slice(img);
+    let mut id = ::types_storage::bufpage::ItemIdData::new(0, 0, 0);
+    id.set_normal(*upper as u16, img.len() as u16);
+    if dead {
+        id.mark_dead();
+    }
+    let off = SIZE_OF_PAGE_HEADER + i * 4;
+    // SAFETY: repr(transparent) over u32.
+    let raw: u32 = unsafe { core::mem::transmute(id) };
+    page.0[off..off + 4].copy_from_slice(&raw.to_ne_bytes());
+}
+
+fn build_horizon_pages(n: usize) {
+    HEAP_PAGE.with(|p| {
+        // SAFETY: leaked page; single-threaded test access.
+        let page = unsafe { &mut *p.as_ptr() };
+        let mut upper = BLCKSZ;
+        for i in 0..n {
+            let img = dead_heap_tuple_image(i as i32);
+            put_item(page, i, &mut upper, &img, false);
+        }
+        write_page_header(page, SIZE_OF_PAGE_HEADER + n * 4, upper);
+    });
+    INDEX_PAGE.with(|p| {
+        // SAFETY: as above.
+        let page = unsafe { &mut *p.as_ptr() };
+        let mut upper = BLCKSZ;
+        for i in 0..n {
+            // Minimal IndexTuple image: t_tid (block 0, posid i+1) + t_info.
+            let mut img = [0u8; 8];
+            img[2..4].copy_from_slice(&0u16.to_ne_bytes()); // bi_lo
+            img[4..6].copy_from_slice(&((i + 1) as u16).to_ne_bytes()); // posid
+            img[6..8].copy_from_slice(&8u16.to_ne_bytes()); // t_info: size 8
+            put_item(page, i, &mut upper, &img, true);
+        }
+        write_page_header(page, SIZE_OF_PAGE_HEADER + n * 4, upper);
+    });
+}
+
+#[test]
+fn xid_horizon_for_lp_dead_tuples_reaches_committed_xmax() {
+    install();
+    install_horizon_seams();
+    build_horizon_pages(3);
+
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let irel = make(mcx, IDX, "pg_class_oid_index", RELKIND_INDEX, BTREE_AM_OID);
+    let hrel = make(mcx, TBL, "pg_class", RELKIND_RELATION, HEAP_AM);
+
+    // Through the seam mirror (registered by init_seams), as hash/gist call.
+    let horizon = genam_seams::index_compute_xid_horizon_for_tuples::call(
+        mcx,
+        &irel,
+        &hrel,
+        INDEX_BUF,
+        &[1, 2, 3],
+    )
+    .unwrap();
+
+    // Every LP_DEAD item points at a committed-dead tuple with xmax 20.
+    assert_eq!(horizon, 20);
+    assert_eq!(HORIZON_PINS.with(Cell::get), 0, "no heap pins leaked");
+}
