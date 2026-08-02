@@ -1069,7 +1069,7 @@ fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult
     }
 
     // First validate that we have permission to use the language.
-    let aclresult = aclchk::object_aclcheck(
+    let aclresult = aclchk_seams::object_aclcheck::call(
         LANGUAGE_RELATION_ID,
         proc_shape.prolang,
         miscinit::GetUserId(),
@@ -1089,7 +1089,7 @@ fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult
     }
 
     // Check whether we are allowed to execute the function itself.
-    let aclresult = aclchk::object_aclcheck(
+    let aclresult = aclchk_seams::object_aclcheck::call(
         PROCEDURE_RELATION_ID,
         funcoid,
         miscinit::GetUserId(),
@@ -1207,6 +1207,10 @@ mod tests {
     const TEST_FUNC: Oid = 77001;
     const TEST_LANG: Oid = 77002;
     const TEST_VALIDATOR: Oid = 77003;
+    // Non-superuser roles the fake object_aclcheck denies: no USAGE on the
+    // language, and no EXECUTE on the function, respectively.
+    const TEST_NOLANG_USER: Oid = 77004;
+    const TEST_NOEXEC_USER: Oid = 77005;
 
     fn install_validator_seams() {
         use std::sync::Once;
@@ -1230,24 +1234,66 @@ mod tests {
                     lanvalidator: TEST_VALIDATOR,
                 }))
             });
+            // Name lookups feed only aclcheck_error's message text.
+            syscache_seams::lookup_pg_language_name::set(|langoid| {
+                Ok((langoid == TEST_LANG).then(|| {
+                    let mut n = NameData::default();
+                    n.namestrcpy("testlang");
+                    n
+                }))
+            });
+            syscache_seams::pg_proc_proname::set(|funcid| {
+                Ok((funcid == TEST_FUNC).then(|| {
+                    let mut n = NameData::default();
+                    n.namestrcpy("testfunc");
+                    n
+                }))
+            });
+            // Per-role ACL verdicts for the two validator-access gates; every
+            // other caller falls through to the real aclchk path.
+            aclchk_seams::object_aclcheck::set(|classid, objectid, roleid, mode| {
+                if roleid == TEST_NOLANG_USER
+                    && (classid, objectid, mode) == (LANGUAGE_RELATION_ID, TEST_LANG, adt_acl::ACL_USAGE)
+                {
+                    return Ok(aclchk::ACLCHECK_NO_PRIV);
+                }
+                if roleid == TEST_NOEXEC_USER {
+                    return Ok(
+                        if (classid, objectid, mode)
+                            == (PROCEDURE_RELATION_ID, TEST_FUNC, adt_acl::ACL_EXECUTE)
+                        {
+                            aclchk::ACLCHECK_NO_PRIV
+                        } else {
+                            aclchk::ACLCHECK_OK
+                        },
+                    );
+                }
+                if roleid == TEST_NOLANG_USER {
+                    return Ok(aclchk::ACLCHECK_OK);
+                }
+                aclchk::object_aclcheck(classid, objectid, roleid, mode)
+            });
         });
     }
 
-    fn as_bootstrap_superuser<T>(f: impl FnOnce() -> T) -> T {
-        use types_core::catalog::BOOTSTRAP_SUPERUSERID;
+    fn as_role<T>(roleid: Oid, is_super: bool, f: impl FnOnce() -> T) -> T {
         let old = miscinit::ReplaceSessionIdentityState(miscinit::SessionIdentityState {
-            authenticated_user_id: BOOTSTRAP_SUPERUSERID,
-            session_user_id: BOOTSTRAP_SUPERUSERID,
-            outer_user_id: BOOTSTRAP_SUPERUSERID,
-            current_user_id: BOOTSTRAP_SUPERUSERID,
+            authenticated_user_id: roleid,
+            session_user_id: roleid,
+            outer_user_id: roleid,
+            current_user_id: roleid,
             system_user: None,
-            session_user_is_superuser: true,
+            session_user_is_superuser: is_super,
             security_restriction_context: 0,
             set_role_is_active: false,
         });
         let r = f();
         miscinit::ReplaceSessionIdentityState(old);
         r
+    }
+
+    fn as_bootstrap_superuser<T>(f: impl FnOnce() -> T) -> T {
+        as_role(types_core::catalog::BOOTSTRAP_SUPERUSERID, true, f)
     }
 
     // The previously-fenced object_aclcheck gates: a superuser caller passes
@@ -1276,6 +1322,31 @@ mod tests {
         as_bootstrap_superuser(|| {
             let e = check_function_validator_access(TEST_VALIDATOR, 999_999).unwrap_err();
             assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+        });
+    }
+
+    // The deny lanes of the two gates (C: object_aclcheck != ACLCHECK_OK ->
+    // aclcheck_error). Denied USAGE on the language stops before the
+    // function-EXECUTE gate, with C's OBJECT_LANGUAGE error text.
+    #[test]
+    fn validator_language_usage_denied_for_unprivileged_role() {
+        install_validator_seams();
+        as_role(TEST_NOLANG_USER, false, || {
+            let e = check_function_validator_access(TEST_VALIDATOR, TEST_FUNC).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_INSUFFICIENT_PRIVILEGE);
+            assert_eq!(e.message, "permission denied for language testlang");
+        });
+    }
+
+    // Language USAGE granted, function EXECUTE denied: the second gate fires
+    // with C's OBJECT_FUNCTION error text.
+    #[test]
+    fn validator_function_execute_denied_for_unprivileged_role() {
+        install_validator_seams();
+        as_role(TEST_NOEXEC_USER, false, || {
+            let e = check_function_validator_access(TEST_VALIDATOR, TEST_FUNC).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_INSUFFICIENT_PRIVILEGE);
+            assert_eq!(e.message, "permission denied for function testfunc");
         });
     }
 
