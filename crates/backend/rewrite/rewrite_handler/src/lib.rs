@@ -524,14 +524,21 @@ fn rewriteTargetListIU<'mcx>(
     for tle_node in target_list {
         let tle = tle_node.as_target_entry().expect("targetlist cell");
         if tle.resjunk {
-            // The parser already numbered junk entries past the column count
-            // in tlist order; a mismatch would need flatCopyTargetEntry.
-            assert_eq!(
-                tle.resno as usize, next_junk_attrno,
-                "rewriteTargetListIU (rewriteHandler.c): junk resno renumber \
-                 (flatCopyTargetEntry) not ported"
-            );
-            junk_tlist.lappend(mcx, tle_node)?;
+            // Junk entries get resnos above the last real resno. Get the
+            // resno right, but don't copy unnecessarily (C's
+            // flatCopyTargetEntry: shallow copy, expr shared).
+            let junk_node = if tle.resno as usize != next_junk_attrno {
+                types_nodes::Node::mk(
+                    mcx,
+                    types_nodes::primnodes::TargetEntry {
+                        resno: next_junk_attrno as types_core::AttrNumber,
+                        ..*tle
+                    },
+                )?
+            } else {
+                tle_node
+            };
+            junk_tlist.lappend(mcx, junk_node)?;
             next_junk_attrno += 1;
             continue;
         }
