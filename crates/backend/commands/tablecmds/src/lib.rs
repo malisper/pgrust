@@ -818,6 +818,15 @@ pub fn DefineRelation<'mcx>(
         }
     }
 
+    // DefineRelation's rawDefaults/cookedDefaults split (tablecmds.c:988-1025).
+    // Merged columns re-number local attributes; raw defaults ride them.
+    // Partition column options carry name-resolved attnos, not positions.
+    let (raw_defaults, cooked_defaults) = match &merged {
+        Some(m) => constraints::collect_column_defaults(mcx, &m.columns)?,
+        None if parent_oid.is_some() => (partition_raw_defaults, mcx::PgVec::new_in(mcx)),
+        None => constraints::collect_column_defaults(mcx, table_elts)?,
+    };
+
     let relation_id = catalog_heap::heap_create_with_catalog(
         mcx,
         &catalog_heap::HeapCreateParams {
@@ -837,7 +846,8 @@ pub fn DefineRelation<'mcx>(
     )?;
 
     // C StoreConstraints runs inside heap_create_with_catalog: inherited
-    // cooked CHECKs and generation expressions land before pg_inherits rows.
+    // cooked CHECKs, generation expressions and cooked column defaults land
+    // before pg_inherits rows.
     if let Some(m) = &merged {
         inheritance::store_inherited_checks(mcx, relation_id, &m.checks)?;
         if !m.gendefs.is_empty() {
@@ -848,6 +858,14 @@ pub fn DefineRelation<'mcx>(
             }
             table::table_close(rel, types_rel::NoLock)?;
         }
+    }
+    if !cooked_defaults.is_empty() {
+        xact::CommandCounterIncrement()?;
+        let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
+        for &(attnum, expr) in cooked_defaults.iter() {
+            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
+        }
+        table::table_close(rel, types_rel::NoLock)?;
     }
     if !partition_checks.is_empty() {
         inheritance::store_inherited_checks(mcx, relation_id, &partition_checks)?;
@@ -1011,13 +1029,6 @@ pub fn DefineRelation<'mcx>(
         parent.close(types_rel::NoLock)?;
     }
 
-    // Merged columns re-number local attributes; raw defaults ride them.
-    let raw_defaults = match &merged {
-        Some(m) => constraints::collect_raw_defaults(mcx, &m.columns)?,
-        // Partition column options carry name-resolved attnos, not positions.
-        None if parent_oid.is_some() => partition_raw_defaults,
-        None => constraints::collect_raw_defaults(mcx, table_elts)?,
-    };
     let old_notnulls: &[inheritance::InheritedNotNull<'mcx>] = match &merged {
         Some(m) => &m.notnulls[..],
         None => &partition_notnulls[..],
