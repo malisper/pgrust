@@ -51,6 +51,7 @@ const AVG_INT4_OID: u32 = 2101;
 const INT4_AVG_ACCUM_OID: u32 = 1963;
 const INT8_AVG_OID: u32 = 1964;
 const C_COLLATION: u32 = 950;
+const VARCHAROID: u32 = 1043;
 
 static SEAMS: Once = Once::new();
 
@@ -60,6 +61,26 @@ fn install_seams() {
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         fmgr_core::init_seams();
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
+        // IsBinaryCoercible backing: varchar -> text is a binary implicit cast.
+        syscache_seams::pg_type_base_shape::set(|typid| {
+            Ok(matches!(typid, INT4OID | TEXTOID | VARCHAROID).then_some(
+                syscache_seams::PgTypeBaseShape {
+                    typtype: b'b' as i8,
+                    typbasetype: 0,
+                    typtypmod: -1,
+                    typelem: 0,
+                    typsubscript: 0,
+                },
+            ))
+        });
+        syscache_seams::lookup_pg_cast_shape::set(|src, tgt| {
+            Ok((src == VARCHAROID && tgt == TEXTOID).then_some(syscache_seams::PgCastShape {
+                oid: 10001,
+                castfunc: 0,
+                castcontext: b'i' as i8,
+                castmethod: b'b' as i8,
+            }))
+        });
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 INT4OID => Some(PgTypeShape {
@@ -2956,5 +2977,76 @@ mod find_cols_walks_unlisted_node_families {
             .unwrap()),
             vec![false, false, true],
         );
+    }
+}
+
+// ExecInitAgg's strict-transfn + NULL-initval gate (nodeAgg.c:4035): the
+// first aggregated input (past any ordered-set direct args) must be
+// IsBinaryCoercible to the transtype; failure is C's catchable 42P13
+// error, not a panic, and binary-coercible (not just equal) pairs pass.
+mod strict_trans_compat {
+    use super::*;
+    use ::types_nodes::list::OidList;
+    use ::types_nodes::primnodes::Aggref;
+
+    fn mk_aggref<'m>(
+        mcx: ::mcx::Mcx<'m>,
+        arg_types: &[u32],
+        n_direct: usize,
+    ) -> Aggref<'m> {
+        let mut aggargtypes = OidList::nil();
+        for &t in arg_types {
+            aggargtypes.lappend(mcx, t).unwrap();
+        }
+        let mut aggdirectargs = ::types_nodes::list::NodeList::nil();
+        for &t in arg_types.iter().take(n_direct) {
+            let c = Node::mk_const(mcx, t, -1, 0, -1, ::datum::Datum::null(), true, false)
+                .unwrap();
+            aggdirectargs.lappend(mcx, c).unwrap();
+        }
+        Aggref {
+            aggfnoid: 90300,
+            aggtype: TEXTOID,
+            aggargtypes,
+            aggdirectargs,
+            ..Aggref::default()
+        }
+    }
+
+    #[test]
+    fn accepts_equal_and_binary_coercible_input() {
+        install_seams();
+        let ctx = ::mcx::MemoryContext::new("strict-compat");
+        let mcx = ctx.mcx();
+        crate::check_strict_trans_compat(&mk_aggref(mcx, &[TEXTOID], 0), TEXTOID).unwrap();
+        crate::check_strict_trans_compat(&mk_aggref(mcx, &[VARCHAROID], 0), TEXTOID).unwrap();
+    }
+
+    #[test]
+    fn skips_ordered_set_direct_args() {
+        install_seams();
+        let ctx = ::mcx::MemoryContext::new("strict-compat");
+        let mcx = ctx.mcx();
+        // One direct arg of int4; the first AGGREGATED input is varchar.
+        crate::check_strict_trans_compat(&mk_aggref(mcx, &[INT4OID, VARCHAROID], 1), TEXTOID)
+            .unwrap();
+    }
+
+    #[test]
+    fn rejects_incompatible_input_with_c_error() {
+        install_seams();
+        let ctx = ::mcx::MemoryContext::new("strict-compat");
+        let mcx = ctx.mcx();
+        let e = crate::check_strict_trans_compat(&mk_aggref(mcx, &[INT4OID], 0), TEXTOID)
+            .unwrap_err();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION);
+        assert_eq!(
+            e.message(),
+            "aggregate 90300 needs to have compatible input type and transition type"
+        );
+        // No aggregated input at all (numAggTransFnArgs <= numDirectArgs).
+        let e = crate::check_strict_trans_compat(&mk_aggref(mcx, &[INT4OID], 1), TEXTOID)
+            .unwrap_err();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION);
     }
 }

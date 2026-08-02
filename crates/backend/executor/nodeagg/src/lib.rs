@@ -822,6 +822,30 @@ fn agg_lookup_failed(aggfnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for aggregate {aggfnoid}")))
 }
 
+// ExecInitAgg (nodeAgg.c:4035): strict transfn + NULL initval needs the
+// first aggregated input (past any ordered-set direct args) binary-coercible
+// to the transtype, so the first-value path can seed the transValue with it.
+fn check_strict_trans_compat(aggref: &Aggref<'_>, transtype: Oid) -> PgResult<()> {
+    let n_direct = aggref.aggdirectargs.len();
+    let input_type = aggref.aggargtypes.iter().nth(n_direct);
+    if input_type.is_none() || !coerce::IsBinaryCoercible(input_type.unwrap(), transtype)? {
+        return Err(agg_incompatible_trans_type(aggref.aggfnoid));
+    }
+    Ok(())
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn agg_incompatible_trans_type(aggfnoid: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "aggregate {aggfnoid} needs to have compatible input type and transition type"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION),
+    )
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -1367,17 +1391,7 @@ pub fn exec_init_agg<'mcx>(
                 } else if trans_init[transno].isnull
                     && fmgr_core::fmgr_info(transfn_oid)?.fn_strict
                 {
-                    // C checks the FIRST aggregated input (nodeAgg.c
-                    // IsBinaryCoercible gate) — the strict first-value path
-                    // copies args[1]; exact-match covers every live agg.
-                    let input_type = aggref.aggargtypes.first();
-                    if input_type != Some(transtype) {
-                        panic!(
-                            "ExecInitAgg (nodeAgg.c): strict transfn with NULL initval and \
-                             input type {input_type:?} != transtype {transtype} \
-                             (IsBinaryCoercible not ported)"
-                        );
-                    }
+                    check_strict_trans_compat(aggref, transtype)?;
                 }
             }
         }
