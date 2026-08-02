@@ -245,6 +245,8 @@ fn apply_spooled_messages(
     xid: TransactionId,
     lsn: XLogRecPtr,
 ) -> PgResult<()> {
+    crate::maybe_start_skipping_changes(lsn);
+
     begin_replication_step(mcx)?;
 
     let name = changes_filename(subid(), xid);
@@ -312,6 +314,65 @@ pub(crate) fn apply_handle_stream_commit(
     stream_cleanup_files(subid(), xid)?;
 
     crate::tablesync::process_syncing_tables(mcx, conn, commit_data.end_lsn)?;
+    Ok(())
+}
+
+// apply_handle_stream_prepare (worker.c:1280), serialized-transaction
+// (TRANS_LEADER_APPLY) arm: replay the spool, then prepare like a live
+// PREPARE.
+pub(crate) fn apply_handle_stream_prepare(
+    mcx: Mcx<'static>,
+    conn: &mut PgConn,
+    r: &mut logicalproto::Reader<'_>,
+) -> PgResult<()> {
+    if in_streamed_transaction() {
+        protocol_violation(
+            "STREAM PREPARE message without STREAM STOP",
+            "apply_handle_stream_prepare",
+        )?;
+    }
+
+    // Tablesync should never receive prepare.
+    if crate::tablesync::AM_TABLESYNC_WORKER.with(std::cell::Cell::get) {
+        protocol_violation(
+            "tablesync worker received a STREAM PREPARE message",
+            "apply_handle_stream_prepare",
+        )?;
+    }
+
+    let prepare_data = logicalproto::logicalrep_read_stream_prepare(r)?;
+
+    // The transaction has been serialized to file, so replay all the spooled
+    // operations; apply_spooled_messages leaves the last change's transaction
+    // open for the prepare.
+    apply_spooled_messages(mcx, conn, prepare_data.xid, prepare_data.prepare_lsn)?;
+
+    // Mark the transaction as prepared.
+    crate::apply::apply_handle_prepare_internal(&prepare_data)?;
+
+    xact::CommitTransactionCommand()?;
+
+    // It is okay not to set the local_end LSN for the prepare because the
+    // prepare record is always flushed (see apply_handle_prepare).
+    crate::store_flush_position(prepare_data.end_lsn, types_core::InvalidXLogRecPtr);
+
+    IN_REMOTE_TRANSACTION.set(false);
+
+    // Unlink the files with serialized changes and subxact info.
+    stream_cleanup_files(subid(), prepare_data.xid)?;
+
+    let _ = elog::elog(
+        types_error::DEBUG1,
+        "finished processing the STREAM PREPARE command".to_string(),
+    );
+
+    // Process any tables that are being synchronized in parallel.
+    crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)?;
+
+    // As in apply_handle_prepare: a crash before clearing the subskiplsn
+    // leaves it set, cleared when finishing the next transaction.
+    crate::stop_skipping_changes();
+    crate::clear_subscription_skip_lsn(mcx, prepare_data.prepare_lsn)?;
     Ok(())
 }
 

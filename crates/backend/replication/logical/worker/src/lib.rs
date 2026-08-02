@@ -6,14 +6,10 @@
 //
 // Renderings vs C (documented per lane convention):
 // - Per-worker file-statics are thread-locals (thread-model).
-// - SwitchToUntrustedUser (run_as_owner=false) is NOT ported: apply runs as
-//   the worker's user (the subscription owner). Recorded divergence — the
-//   privilege boundary matters for untrusted table owners, not for
-//   correctness of apply itself.
-// - ALTER SUBSCRIPTION ... SKIP (valid subskiplsn) refuses loudly.
 // - Conflict reporting (ReportApplyConflict/conflict stats) is rendered as
-//   LOG lines for the update/delete-missing cases; origin-differs detection
-//   is not ported (no CommitTsData lookup).
+//   single LOG lines (msg + C's DETAIL sentence) for the update/delete
+//   missing and origin-differs cases; the tuple-content display half of C's
+//   DETAIL is not rendered.
 // - The DirtySnapshot in the replica-identity lookups is rendered as
 //   GetLatestSnapshot + the C lock-retry protocol (see apply.rs).
 #![allow(non_snake_case)]
@@ -25,7 +21,7 @@ use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidXLogRecPtr, Oid, TimestampTz, XLogRecPtr};
 use types_error::{
     ErrorLocation, PgResult, DEBUG2, ERRCODE_CONNECTION_FAILURE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG, WARNING,
 };
 
 use walreceiver::client::{CopyData, PgConn};
@@ -76,6 +72,8 @@ pub(crate) struct MySub {
     pub owner: Oid,
     pub ownersuperuser: bool,
     pub passwordrequired: bool,
+    pub runasowner: bool,
+    pub failover: bool,
     #[allow(dead_code)]
     pub dbid: Oid,
 }
@@ -94,6 +92,101 @@ thread_local! {
     static LSN_MAPPING: RefCell<Vec<(XLogRecPtr, XLogRecPtr)>> = const { RefCell::new(Vec::new()) };
     // Set when apply must exit for a subscription change (worker restarts).
     pub(crate) static APPLY_WORKER_EXIT: Cell<bool> = const { Cell::new(false) };
+    // skip_xact_finish_lsn (worker.c:329): valid while the whole remote
+    // transaction whose finish LSN it holds is being skipped
+    // (ALTER SUBSCRIPTION ... SKIP).
+    static SKIP_XACT_FINISH_LSN: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+}
+
+// is_skipping_changes (worker.c:330).
+pub(crate) fn is_skipping_changes() -> bool {
+    SKIP_XACT_FINISH_LSN.get() != InvalidXLogRecPtr
+}
+
+// maybe_start_skipping_changes (worker.c:4904): start skipping if the
+// transaction's finish LSN matches the subscription's skiplsn.
+pub(crate) fn maybe_start_skipping_changes(finish_lsn: XLogRecPtr) {
+    debug_assert!(!is_skipping_changes());
+    debug_assert!(!IN_REMOTE_TRANSACTION.get());
+    debug_assert!(!stream_apply::in_streamed_transaction());
+
+    // Called for every remote transaction; skipping is rare.
+    let skiplsn = my_sub(|s| s.skiplsn);
+    if skiplsn == InvalidXLogRecPtr || skiplsn != finish_lsn {
+        return;
+    }
+
+    SKIP_XACT_FINISH_LSN.set(finish_lsn);
+    let _ = elog::elog(
+        LOG,
+        format!(
+            "logical replication starts skipping transaction at LSN {:X}/{:X}",
+            (finish_lsn >> 32) as u32,
+            finish_lsn as u32
+        ),
+    );
+}
+
+// stop_skipping_changes (worker.c:4931).
+pub(crate) fn stop_skipping_changes() {
+    if !is_skipping_changes() {
+        return;
+    }
+    let lsn = SKIP_XACT_FINISH_LSN.get();
+    let _ = elog::elog(
+        LOG,
+        format!(
+            "logical replication completed skipping transaction at LSN {:X}/{:X}",
+            (lsn >> 32) as u32,
+            lsn as u32
+        ),
+    );
+    SKIP_XACT_FINISH_LSN.set(InvalidXLogRecPtr);
+}
+
+// clear_subscription_skip_lsn (worker.c:4955): the catalog half lives in
+// pg_subscription::ClearSubscriptionSkipLsn; transaction/snapshot management
+// and the mismatch WARNING live here. finish_lsn is the transaction's finish
+// LSN: when it doesn't match the cleared skiplsn, warn (e.g. the user
+// specified a wrong subskiplsn).
+pub(crate) fn clear_subscription_skip_lsn(mcx: Mcx<'_>, finish_lsn: XLogRecPtr) -> PgResult<()> {
+    let myskiplsn = my_sub(|s| s.skiplsn);
+    if myskiplsn == InvalidXLogRecPtr {
+        return Ok(());
+    }
+
+    let started_tx = if !xact::IsTransactionState() {
+        xact::StartTransactionCommand()?;
+        true
+    } else {
+        false
+    };
+
+    // Updating pg_subscription might involve TOAST table access, so ensure a
+    // valid snapshot.
+    snapmgr::PushActiveSnapshot(&snapmgr::GetTransactionSnapshot()?)?;
+
+    let (suboid, subname) = my_sub(|s| (s.oid, s.name.clone()));
+    let cleared = pg_subscription::ClearSubscriptionSkipLsn(mcx, suboid, &subname, myskiplsn)?;
+    if cleared && myskiplsn != finish_lsn {
+        let _ = ereport(WARNING)
+            .errmsg(format!("skip-LSN of subscription \"{subname}\" cleared"))
+            .errdetail(format!(
+                "Remote transaction's finish WAL location (LSN) {:X}/{:X} did not match skip-LSN {:X}/{:X}.",
+                (finish_lsn >> 32) as u32,
+                finish_lsn as u32,
+                (myskiplsn >> 32) as u32,
+                myskiplsn as u32,
+            ))
+            .finish(loc("clear_subscription_skip_lsn"));
+    }
+
+    snapmgr::PopActiveSnapshot()?;
+
+    if started_tx {
+        xact::CommitTransactionCommand()?;
+    }
+    Ok(())
 }
 
 pub(crate) fn my_sub<R>(f: impl FnOnce(&MySub) -> R) -> R {
@@ -123,6 +216,8 @@ fn load_subscription(mcx: Mcx<'_>, subid: Oid) -> PgResult<Option<MySub>> {
         owner: sub.owner,
         ownersuperuser: sub.ownersuperuser,
         passwordrequired: sub.passwordrequired,
+        runasowner: sub.runasowner,
+        failover: sub.failover,
         dbid: sub.dbid,
     }))
 }
@@ -676,10 +771,6 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
             .errmsg("subscription has no replication slot set")
             .finish(loc("run_apply_worker"))?;
         unreachable!();
-    }
-
-    if my_sub(|s| s.skiplsn) != InvalidXLogRecPtr {
-        panic!("unported: ALTER SUBSCRIPTION ... SKIP (subskiplsn set)");
     }
 
     // Set up replication-origin tracking; the session origin rides each
