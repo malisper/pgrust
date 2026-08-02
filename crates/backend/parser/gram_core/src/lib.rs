@@ -34,5 +34,7 @@ pub fn raw_parser<'mcx>(
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod tests_dump;
+// `dump` (fuzz-only): the nodeToStringWithLocations renderer doubles as the
+// differential tree plane for fuzz/core's gram_core_diff target.
+#[cfg(any(test, feature = "dump"))]
+pub mod tests_dump;

@@ -143,12 +143,38 @@ const IM_MINUTE: i32 = 1 << 11;
 const IM_SECOND: i32 = 1 << 12;
 const INTERVAL_FULL_RANGE: i32 = 0x7FFF;
 
+#[cfg(not(feature = "unported-soft"))]
 #[cold]
 #[inline(never)]
 fn unimplemented_rule(rule: usize) -> ! {
     panic!(
         "gram_core: unimplemented grammar action: rule {rule} ({}), gram.y:{}",
         YYTNAME[YYR1[rule] as usize], YYRLINE[rule]
+    )
+}
+
+// Fuzz-only carve fence (100%-coverage campaign, lane p1-new2): the sentinel
+// SQLSTATE lets the gram_core_diff differential driver classify inputs that
+// reach a not-yet-ported grammar action WITHOUT unwinding (cargo-fuzz builds
+// abort on panic), while every non-fuzz build keeps the loud panic above —
+// the panic list IS the later-phase porting TODO list and release behavior
+// is unchanged. The driver treats this state as the UNPORTED carve verdict
+// (no tree compare; the C side must still parse or raise a real error).
+#[cfg(feature = "unported-soft")]
+pub const UNPORTED_RULE_SQLSTATE: types_error::SqlState =
+    types_error::make_sqlstate(*b"GRUNP");
+
+#[cfg(feature = "unported-soft")]
+#[cold]
+#[inline(never)]
+fn unimplemented_rule_soft(rule: usize) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!(
+            "gram_core: unimplemented grammar action: rule {rule} ({}), gram.y:{}",
+            YYTNAME[YYR1[rule] as usize],
+            YYRLINE[rule]
+        ))
+        .with_sqlstate(UNPORTED_RULE_SQLSTATE),
     )
 }
 
@@ -230,9 +256,14 @@ impl<'mcx> Parser<'mcx> {
             2465 => {
                 let mut n = Node::build::<types_nodes::PLAssignStmt>(mcx)?;
                 n.name = view.v(1).str_val();
-                // check_indirection is a no-op: A_Indices construction is an
-                // unported loud.
-                n.indirection = view.v(2).list();
+                // check_indirection rejects a non-terminal '*': A_Indices
+                // (subscript) construction is an unported loud, but A_Star
+                // (`.*`) IS reachable here, so the check is NOT a no-op —
+                // `a.*.c` in a PL/pgSQL assign target must raise "improper
+                // use of \"*\"" (found by gram_core_diff CI cluster 2026-08-01).
+                let ind = view.v(2).list();
+                self.check_indirection(&ind)?;
+                n.indirection = ind;
                 n.val = view.v(4).node();
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
@@ -2689,11 +2720,15 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::List(targets);
             }
-            // set_target: ColId opt_indirection (check_indirection is a no-op:
-            // A_Indices construction is an unported loud).
+            // set_target: ColId opt_indirection. check_indirection is NOT a
+            // no-op: A_Indices is an unported loud but A_Star (`.*`) is
+            // reachable, so a non-terminal '*' must raise here exactly as C
+            // does (sibling of the rule-2465 fix; found by gram_core_diff
+            // CI cluster run 3, `UPDATE t SET (a, x.*.c, ...)`).
             1669 => {
                 let name = view.v(1).str_val();
                 let indirection = view.v(2).list();
+                self.check_indirection(&indirection)?;
                 *yyval = YYSTYPE::Node(Some(Node::mk_res_target(
                     mcx,
                     Some(name),
@@ -2887,11 +2922,13 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("insert_column_item"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            // insert_column_item: ColId opt_indirection (check_indirection is
-            // a no-op here: A_Indices construction is an unported loud).
+            // insert_column_item: ColId opt_indirection. check_indirection is
+            // NOT a no-op (see rule 1669): A_Star is reachable even though
+            // A_Indices is an unported loud.
             1629 => {
                 let name = view.v(1).str_val();
                 let indirection = view.v(2).list();
+                self.check_indirection(&indirection)?;
                 *yyval = YYSTYPE::Node(Some(Node::mk_res_target(
                     mcx,
                     Some(name),
@@ -6364,7 +6401,12 @@ impl<'mcx> Parser<'mcx> {
                 let (rv, sub, nm) = if rule == 1312 { (3, 6, 8) } else { (5, 8, 10) };
                 let mut n = Node::build::<RenameStmt>(mcx)?;
                 n.renameType = ObjectType::OBJECT_TABCONSTRAINT;
-                n.relationType = ObjectType::OBJECT_TABLE;
+                // C rules 1312/1313 set renameType/relation/subname/newname/
+                // missing_ok ONLY — relationType stays at makeNode's zero
+                // (OBJECT_ACCESS_METHOD). Assigning OBJECT_TABLE here made
+                // every `ALTER TABLE ... RENAME CONSTRAINT` tree differ from
+                // C (found by gram_core_diff over the regress-SQL seeds,
+                // 2026-08-01).
                 n.relation = view.v(rv).node().expect("relation_expr").as_variant::<RangeVar>();
                 n.subname = Some(view.v(sub).str_val());
                 n.newname = Some(view.v(nm).str_val());
@@ -9045,8 +9087,12 @@ impl<'mcx> Parser<'mcx> {
             // def_arg / operator_def_arg: func_type | reserved_keyword |
             // qual_all_Op | NumericOnly | Sconst | NONE (872/873 = the
             // NumericOnly/Sconst def_arg arms already in the hot match).
-            869 | 1374 | 1377 | 1378 => *yyval = YYSTYPE::Node(view.v(1).node()),
-            870 | 874 | 1375 => {
+            869 | 1374 | 1377 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            // 1378 (operator_def_arg: Sconst) is C's makeString($1), NOT a
+            // node pass-through — grouping it with 1377 type-confused the
+            // value stack (found by gram_core_diff CI cluster campaign
+            // 2026-08-01: ALTER TYPE t SET (delim = ')')).
+            870 | 874 | 1375 | 1378 => {
                 *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?));
             }
             871 | 1376 => *yyval = YYSTYPE::Node(Some(Node::mk_list(mcx, view.v(1).list())?)),
@@ -10622,7 +10668,10 @@ impl<'mcx> Parser<'mcx> {
                 )?));
             }
             // alter_table_cmd ENABLE/DISABLE RULE
+            #[cfg(not(feature = "unported-soft"))]
             _ => unimplemented_rule(rule),
+            #[cfg(feature = "unported-soft")]
+            _ => return Err(unimplemented_rule_soft(rule)),
         }
         Ok(())
     }

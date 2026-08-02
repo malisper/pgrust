@@ -267,7 +267,7 @@ impl<'mcx> Parser<'mcx> {
                             return Ok(());
                         }
                         yystate = act;
-                        stk.ensure(mcx, sp + 1)?;
+                        self.ensure_stack(&mut stk, sp + 1)?;
                         // SAFETY: see above.
                         unsafe {
                             stk.write_val(sp, mem::take(&mut yylval), yylloc);
@@ -289,6 +289,25 @@ impl<'mcx> Parser<'mcx> {
             }
             yystate = self.reduce_and_goto(&mut stk, rule, &mut sp)?;
         }
+    }
+
+    // gram.c yyoverflow: at YYMAXDEPTH it does `yyerror(&yylloc, "memory
+    // exhausted")` = scanner_yyerror, which renders the cursor position + the
+    // "at or near <token>" tail and raises ERRCODE_SYNTAX_ERROR. The bare,
+    // position-less/sqlstate-less PgError from Stacks::grow diverged on all
+    // three (found by gram_core_diff CI cluster campaign 2026-08-01); route the
+    // exhaustion through the same parser_yyerror path C uses.
+    #[inline(always)]
+    fn ensure_stack(&self, stk: &mut Stacks<'mcx>, new_sp: usize) -> PgResult<()> {
+        // C exhausts when the just-pushed state index reaches YYMAXDEPTH-1
+        // (`yyss + yystacksize - 1 <= yyssp` with yystacksize == YYMAXDEPTH),
+        // reporting the token driving THAT push. new_sp is our push target
+        // index, so the boundary is YYMAXDEPTH-1 (not YYMAXDEPTH) — the
+        // one-token-deeper cursorpos was caught by gram_core_diff 2026-08-01.
+        if new_sp >= YYMAXDEPTH - 1 {
+            return Err(self.parser_yyerror("memory exhausted"));
+        }
+        stk.ensure(self.mcx, new_sp)
     }
 
     #[inline(always)]
@@ -319,28 +338,28 @@ impl<'mcx> Parser<'mcx> {
                 0 => {
                     let mut yyval = YYSTYPE::None;
                     self.reduce(stk.action_view(base), rule, &mut yyval, yyloc)?;
-                    stk.ensure(self.mcx, base + 1)?;
+                    self.ensure_stack(stk, base + 1)?;
                     stk.write_val(base, yyval, yyloc);
                 }
                 255 => {
-                    stk.ensure(self.mcx, base + 1)?;
+                    self.ensure_stack(stk, base + 1)?;
                     stk.write_val(base, YYSTYPE::None, yyloc);
                 }
                 // Constant arms can come from empty productions (base == sp).
                 254 => {
-                    stk.ensure(self.mcx, base + 1)?;
+                    self.ensure_stack(stk, base + 1)?;
                     stk.write_val(base, YYSTYPE::List(NodeList::nil()), yyloc);
                 }
                 253 => {
-                    stk.ensure(self.mcx, base + 1)?;
+                    self.ensure_stack(stk, base + 1)?;
                     stk.write_val(base, YYSTYPE::Node(None), yyloc);
                 }
                 252 => {
-                    stk.ensure(self.mcx, base + 1)?;
+                    self.ensure_stack(stk, base + 1)?;
                     stk.write_val(base, YYSTYPE::Alias(None), yyloc);
                 }
                 251 => {
-                    stk.ensure(self.mcx, base + 1)?;
+                    self.ensure_stack(stk, base + 1)?;
                     stk.write_val(base, YYSTYPE::Limit(None), yyloc);
                 }
                 n => {
@@ -413,39 +432,15 @@ impl<'mcx> Parser<'mcx> {
         if ref_tok == YYEOF {
             return loc;
         }
-        let mut v2 = CoreYYSTYPE::None;
-        let mut l2 = 0;
-        let ub = match s.core_yylex(&mut v2, &mut l2) {
-            Ok(t2) if t2 != YYEOF => l2 as usize,
-            _ => sub.len(),
-        };
-        let (mut lo, mut hi) = (1usize, ub);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if self.first_token_eq(&sub[..mid], ref_tok, &ref_val, ref_loc) {
-                hi = mid;
-            } else {
-                lo = mid + 1;
-            }
-        }
-        loc + lo
+        // C's hold-char NUL sits at the END OF THE MATCH; the scanner's
+        // tok_end() is exactly that byte. (The former smallest-prefix
+        // binary search diverged whenever a proper prefix re-lexed to the
+        // same token+value — e.g. the leading-zero integer `000000`
+        // reported `at or near "0"`; found by the gram_core_diff fuzz
+        // target, 2026-08-01.)
+        loc + s.tok_end()
     }
 
-    fn first_token_eq(
-        &self,
-        prefix: &'mcx [u8],
-        ref_tok: i32,
-        ref_val: &CoreYYSTYPE<'mcx>,
-        ref_loc: i32,
-    ) -> bool {
-        let mut s = Scanner::new(prefix, self.mcx, self.settings);
-        let mut v = CoreYYSTYPE::None;
-        let mut l = 0;
-        match s.core_yylex(&mut v, &mut l) {
-            Ok(t) => t == ref_tok && l == ref_loc && v == *ref_val,
-            Err(_) => false,
-        }
-    }
 }
 
 // Bit-identical repack (tag values aligned across the two 16B carriers).

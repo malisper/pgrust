@@ -2,18 +2,31 @@
 // nodeToStringWithLocations format and compare against vectors emitted by the
 // REAL compiled gram.c+outfuncs.c (vendored cgram_expected.txt; the harness
 // recipe is in docs/optimizations/gram_core-parity.md).
+#[cfg(test)]
 use crate::raw_parser;
+#[cfg(test)]
 use mcx::MemoryContext;
+#[cfg(test)]
 use parser_seams::RawParseMode;
 use types_nodes::rawnodes::{A_Expr_Kind, ValUnion};
 use types_nodes::{Node, NodeList};
 
+#[cfg(test)]
 fn test_ctx() -> &'static MemoryContext {
     thread_local! {
         static CTX: &'static MemoryContext =
             Box::leak(Box::new(MemoryContext::new("gram-dump-test")));
     }
     CTX.with(|c| *c)
+}
+
+/// Render a raw parsetree in C's nodeToStringWithLocations format — the tree
+/// plane of the gram_core_diff differential fuzz target (byte-compared
+/// against the vendored outfuncs.c oracle).
+pub fn render_parsetree(tree: &NodeList<'_>) -> String {
+    let mut out = String::new();
+    list(&mut out, tree);
+    out
 }
 
 fn out_token(out: &mut String, s: Option<&str>) {
@@ -155,6 +168,24 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if let Some(s) = n.as_select_stmt() {
         select_stmt(out, s);
+    } else if let Some(p) = n.as_pl_assign_stmt() {
+        // _outPLAssignStmt (PLPGSQL_ASSIGN parse modes)
+        out.push_str("{PLASSIGNSTMT");
+        string_field(out, "name", Some(p.name));
+        list_field(out, "indirection", &p.indirection);
+        int_field(out, "nnames", p.nnames);
+        node_field(out, "val", p.val);
+        int_field(out, "location", p.location);
+        out.push('}');
+    } else if let Some(f) = n.as_sql_value_function() {
+        // _outSQLValueFunction (CURRENT_DATE family; type/typmod are filled
+        // by parse analysis, so raw trees carry 0/-1)
+        out.push_str("{SQLVALUEFUNCTION");
+        int_field(out, "op", f.op as i32);
+        out.push_str(&format!(" :type {}", f.r#type));
+        int_field(out, "typmod", f.typmod);
+        int_field(out, "location", f.location);
+        out.push('}');
     } else if let Some(rt) = n.as_res_target() {
         out.push_str("{RESTARGET");
         string_field(out, "name", rt.name);
@@ -1292,6 +1323,139 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "qual", a.qual);
         node_field(out, "with_check", a.with_check);
         out.push('}');
+    } else if let Some(a) = n.as_alter_seq_stmt() {
+        out.push_str("{ALTERSEQSTMT");
+        out.push_str(" :sequence ");
+        match a.sequence {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "options", &a.options);
+        bool_field(out, "for_identity", a.for_identity);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_alter_system_stmt() {
+        out.push_str("{ALTERSYSTEMSTMT");
+        out.push_str(" :setstmt ");
+        variable_set_stmt(out, a.setstmt);
+        out.push('}');
+    } else if let Some(l) = n.as_listen_stmt() {
+        out.push_str("{LISTENSTMT");
+        string_field(out, "conditionname", l.conditionname);
+        out.push('}');
+    } else if let Some(u) = n.as_unlisten_stmt() {
+        out.push_str("{UNLISTENSTMT");
+        string_field(out, "conditionname", u.conditionname);
+        out.push('}');
+    } else if let Some(nt) = n.as_notify_stmt() {
+        out.push_str("{NOTIFYSTMT");
+        string_field(out, "conditionname", nt.conditionname);
+        string_field(out, "payload", nt.payload);
+        out.push('}');
+    } else if let Some(l) = n.as_load_stmt() {
+        out.push_str("{LOADSTMT");
+        string_field(out, "filename", Some(l.filename));
+        out.push('}');
+    } else if let Some(l) = n.as_lock_stmt() {
+        out.push_str("{LOCKSTMT");
+        list_field(out, "relations", &l.relations);
+        int_field(out, "mode", l.mode);
+        bool_field(out, "nowait", l.nowait);
+        out.push('}');
+    } else if let Some(d) = n.as_discard_stmt() {
+        out.push_str("{DISCARDSTMT");
+        int_field(out, "target", d.target as i32);
+        out.push('}');
+    } else if n
+        .as_variant::<types_nodes::parsenodes::CheckPointStmt>()
+        .is_some()
+    {
+        out.push_str("{CHECKPOINTSTMT}");
+    } else if let Some(r) = n.as_variant::<types_nodes::rawnodes::RuleStmt>() {
+        out.push_str("{RULESTMT");
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "rulename", Some(r.rulename));
+        node_field(out, "whereClause", r.whereClause);
+        int_field(out, "event", r.event as i32);
+        bool_field(out, "instead", r.instead);
+        list_field(out, "actions", &r.actions);
+        bool_field(out, "replace", r.replace);
+        out.push('}');
+    } else if let Some(i) = n.as_infer_clause() {
+        out.push_str("{INFERCLAUSE");
+        list_field(out, "indexElems", &i.indexElems);
+        node_field(out, "whereClause", i.whereClause);
+        string_field(out, "conname", i.conname);
+        int_field(out, "location", i.location);
+        out.push('}');
+    } else if let Some(o) = n.as_on_conflict_clause() {
+        out.push_str("{ONCONFLICTCLAUSE");
+        int_field(out, "action", o.action as i32);
+        node_field(out, "infer", o.infer);
+        list_field(out, "targetList", &o.targetList);
+        node_field(out, "whereClause", o.whereClause);
+        int_field(out, "location", o.location);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::ClusterStmt>() {
+        out.push_str("{CLUSTERSTMT");
+        node_field(out, "relation", c.relation);
+        string_field(out, "indexname", c.indexname);
+        list_field(out, "params", &c.params);
+        out.push('}');
+    } else if let Some(c) = n.as_copy_stmt() {
+        out.push_str("{COPYSTMT");
+        node_field(out, "relation", c.relation);
+        node_field(out, "query", c.query);
+        list_field(out, "attlist", &c.attlist);
+        bool_field(out, "is_from", c.is_from);
+        bool_field(out, "is_program", c.is_program);
+        string_field(out, "filename", c.filename);
+        list_field(out, "options", &c.options);
+        node_field(out, "whereClause", c.whereClause);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::ReindexStmt>() {
+        out.push_str("{REINDEXSTMT");
+        int_field(out, "kind", r.kind as i32);
+        node_field(out, "relation", r.relation);
+        string_field(out, "name", r.name);
+        list_field(out, "params", &r.params);
+        out.push('}');
+    } else if let Some(s) = n.as_sec_label_stmt() {
+        out.push_str("{SECLABELSTMT");
+        int_field(out, "objtype", s.objtype as i32);
+        node_field(out, "object", s.object);
+        string_field(out, "provider", s.provider);
+        string_field(out, "label", s.label);
+        out.push('}');
+    } else if let Some(t) = n.as_truncate_stmt() {
+        out.push_str("{TRUNCATESTMT");
+        list_field(out, "relations", &t.relations);
+        bool_field(out, "restart_seqs", t.restart_seqs);
+        int_field(out, "behavior", t.behavior as i32);
+        out.push('}');
+    } else if let Some(a) =
+        n.as_variant::<types_nodes::rawnodes::AlterExtensionContentsStmt>()
+    {
+        out.push_str("{ALTEREXTENSIONCONTENTSSTMT");
+        string_field(out, "extname", a.extname);
+        int_field(out, "action", a.action);
+        int_field(out, "objtype", a.objtype as i32);
+        node_field(out, "object", a.object);
+        out.push('}');
+    } else if let Some(t) = n.as_variant::<types_nodes::rawnodes::TableLikeClause>() {
+        out.push_str("{TABLELIKECLAUSE");
+        out.push_str(" :relation ");
+        match t.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        out.push_str(&format!(" :options {}", t.options));
+        out.push_str(&format!(" :relationOid {}", t.relationOid));
+        out.push('}');
     } else if let Some(pt) = n.as_variant::<types_nodes::parsenodes::PublicationTable>() {
         publication_table(out, pt);
     } else if let Some(p) = n.as_variant::<types_nodes::parsenodes::PublicationObjSpec>() {
@@ -1724,6 +1888,123 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "value", o.value);
         int_field(out, "location", o.location);
         out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::CreatedbStmt>() {
+        out.push_str("{CREATEDBSTMT");
+        string_field(out, "dbname", s.dbname);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::DropdbStmt>() {
+        out.push_str("{DROPDBSTMT");
+        string_field(out, "dbname", s.dbname);
+        bool_field(out, "missing_ok", s.missing_ok);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::AlterDatabaseStmt>() {
+        out.push_str("{ALTERDATABASESTMT");
+        string_field(out, "dbname", s.dbname);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) =
+        n.as_variant::<types_nodes::parsenodes::AlterDatabaseRefreshCollStmt>()
+    {
+        out.push_str("{ALTERDATABASEREFRESHCOLLSTMT");
+        string_field(out, "dbname", s.dbname);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::AlterDatabaseSetStmt>() {
+        out.push_str("{ALTERDATABASESETSTMT");
+        string_field(out, "dbname", s.dbname);
+        node_field(out, "setstmt", s.setstmt);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::CreateFdwStmt>() {
+        out.push_str("{CREATEFDWSTMT");
+        string_field(out, "fdwname", s.fdwname);
+        list_field(out, "func_options", &s.func_options);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::AlterFdwStmt>() {
+        out.push_str("{ALTERFDWSTMT");
+        string_field(out, "fdwname", s.fdwname);
+        list_field(out, "func_options", &s.func_options);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::CreateForeignServerStmt>() {
+        out.push_str("{CREATEFOREIGNSERVERSTMT");
+        string_field(out, "servername", s.servername);
+        string_field(out, "servertype", s.servertype);
+        string_field(out, "version", s.version);
+        string_field(out, "fdwname", s.fdwname);
+        bool_field(out, "if_not_exists", s.if_not_exists);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::AlterForeignServerStmt>() {
+        out.push_str("{ALTERFOREIGNSERVERSTMT");
+        string_field(out, "servername", s.servername);
+        string_field(out, "version", s.version);
+        list_field(out, "options", &s.options);
+        bool_field(out, "has_version", s.has_version);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::CreateForeignTableStmt>() {
+        // gen_node_support stringifies the embedded-struct paths, so the C
+        // labels are literally "base.relation" etc.
+        out.push_str("{CREATEFOREIGNTABLESTMT :base.relation ");
+        match s.base.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "base.tableElts", &s.base.tableElts);
+        list_field(out, "base.inhRelations", &s.base.inhRelations);
+        node_field(out, "base.partbound", s.base.partbound);
+        node_field(out, "base.partspec", s.base.partspec);
+        node_field(out, "base.ofTypename", s.base.ofTypename);
+        list_field(out, "base.constraints", &s.base.constraints);
+        list_field(out, "base.nnconstraints", &s.base.nnconstraints);
+        list_field(out, "base.options", &s.base.options);
+        int_field(out, "base.oncommit", s.base.oncommit as i32);
+        string_field(out, "base.tablespacename", s.base.tablespacename);
+        string_field(out, "base.accessMethod", s.base.accessMethod);
+        bool_field(out, "base.if_not_exists", s.base.if_not_exists);
+        string_field(out, "servername", s.servername);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::CreateUserMappingStmt>() {
+        out.push_str("{CREATEUSERMAPPINGSTMT :user ");
+        match s.user {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "servername", s.servername);
+        bool_field(out, "if_not_exists", s.if_not_exists);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::AlterUserMappingStmt>() {
+        out.push_str("{ALTERUSERMAPPINGSTMT :user ");
+        match s.user {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "servername", s.servername);
+        list_field(out, "options", &s.options);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::DropUserMappingStmt>() {
+        out.push_str("{DROPUSERMAPPINGSTMT :user ");
+        match s.user {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "servername", s.servername);
+        bool_field(out, "missing_ok", s.missing_ok);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::ImportForeignSchemaStmt>() {
+        out.push_str("{IMPORTFOREIGNSCHEMASTMT");
+        string_field(out, "server_name", s.server_name);
+        string_field(out, "remote_schema", s.remote_schema);
+        string_field(out, "local_schema", s.local_schema);
+        // ImportForeignSchemaType discriminants match C order (ALL=0,
+        // LIMIT_TO=1, EXCEPT=2; parsenodes.h).
+        int_field(out, "list_type", s.list_type as i32);
+        list_field(out, "table_list", &s.table_list);
+        list_field(out, "options", &s.options);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
@@ -1903,6 +2184,7 @@ fn func_call(out: &mut String, f: &types_nodes::rawnodes::FuncCall<'_>) {
     out.push('}');
 }
 
+#[cfg(test)]
 fn run_one(stmt: &str) -> String {
     match raw_parser(test_ctx().mcx(), stmt, RawParseMode::RAW_PARSE_DEFAULT) {
         Ok(tree) => {

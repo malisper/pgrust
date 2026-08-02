@@ -2596,3 +2596,122 @@ fn alter_extension_contents_forms() {
     assert_eq!(n.objtype, ObjectType::OBJECT_TYPE);
     assert!(n.object.expect("object").as_variant::<TypeName>().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// gram_core_diff CI-campaign regressions (lane p1-new2, 2026-08-01).
+// Each test pins a REAL divergence vs the vendored 18.3 gram.c/scan.c oracle
+// found by the differential fuzz campaign; every one was negative-controlled
+// at land time (fails on the pre-fix tree). Reproducers are also banked in
+// fuzz/corpus/gram_core_diff.
+// ---------------------------------------------------------------------------
+
+// Defect 1: operator_def_arg: Sconst (rule 1378) is C's makeString($1), not a
+// node pass-through — grouping it with rule 1377 type-confused the value
+// stack (Sconst arrives as a str, not a Node).
+#[test]
+fn regress_operator_def_arg_sconst_is_make_string() {
+    let list = parse("ALTER TYPE t SET (delim = ')');");
+    let at = only_stmt(&list)
+        .stmt
+        .expect("stmt")
+        .as_alter_type_stmt()
+        .expect("AlterTypeStmt");
+    assert_eq!(at.options.len(), 1);
+    let d = at.options.nth(0).as_def_elem().expect("DefElem");
+    assert_eq!(d.defname, Some("delim"));
+    assert_eq!(d.arg.expect("arg").as_string().expect("String").sval, ")");
+}
+
+// Defect 2: stack exhaustion must render C's yyoverflow shape — routed
+// through parser_yyerror (ERRCODE_SYNTAX_ERROR + cursor position + the
+// "at or near" tail), exhausting at pushed index YYMAXDEPTH-1 like C, not a
+// bare position-less PgError one token deeper.
+#[test]
+fn regress_stack_exhaustion_error_shape() {
+    let depth = crate::tables::YYMAXDEPTH + 64;
+    let mut sql = String::from("SELECT ");
+    sql.extend(std::iter::repeat('(').take(depth));
+    sql.push('1');
+    let e = parse_err(&sql);
+    assert_eq!(e.message(), "memory exhausted at or near \"(\"");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    let pos = e.cursor_position().expect("cursorpos rendered like C");
+    // C exhausts when the pushed state index reaches YYMAXDEPTH-1; the
+    // exact value is pinned by the CI-validated differential (an
+    // off-by-one in the boundary moves this by one token).
+    assert!(pos > 0 && (pos as usize) < sql.len());
+}
+
+// Defect 3 + 4: check_indirection is NOT a no-op — A_Star (`.*`) is reachable
+// even though A_Indices is an unported loud, so a non-terminal `*` must raise
+// exactly as C does on all three surfaces: PL/pgSQL assign target (rule
+// 2465), UPDATE set_target (1669), and insert_column_item (1629).
+#[test]
+fn regress_check_indirection_nonterminal_star() {
+    // PL/pgSQL assignment target: a.*.c := ...
+    let e = match raw_parser(
+        test_ctx().mcx(),
+        "a.*.c := 1",
+        RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1,
+    ) {
+        Ok(_) => panic!("expected improper-star error"),
+        Err(e) => e,
+    };
+    assert!(
+        e.message().starts_with("improper use of \"*\""),
+        "got: {}",
+        e.message()
+    );
+
+    // UPDATE set_target (single and multiassign forms).
+    let e = parse_err("UPDATE t SET x.*.c = 1;");
+    assert!(e.message().starts_with("improper use of \"*\""), "got: {}", e.message());
+    let e = parse_err("UPDATE t SET (a, x.*.c) = (1, 2);");
+    assert!(e.message().starts_with("improper use of \"*\""), "got: {}", e.message());
+
+    // insert_column_item.
+    let e = parse_err("INSERT INTO t (x.*.c) VALUES (1);");
+    assert!(e.message().starts_with("improper use of \"*\""), "got: {}", e.message());
+
+    // Control: a TERMINAL `.*` stays legal on the same productions.
+    let _ = parse("UPDATE t SET x.* = 1;");
+    let _ = parse("INSERT INTO t (x.*) VALUES (1);");
+}
+
+// Defect (local smoke): error-path token recovery must report C's hold-char
+// extent — the full matched token text — not the minimal value-equal prefix.
+// The witness needs every proper prefix to re-lex to the same token+value:
+// a leading-zero integer (each prefix of "000000" is ICONST 0).
+#[test]
+fn regress_error_token_holdchar_extent() {
+    let e = parse_err("SELECT 1 000000;");
+    assert_eq!(e.message(), "syntax error at or near \"000000\"");
+}
+
+// Defect 5: C rules 1312/1313 (ALTER TABLE ... RENAME CONSTRAINT) never
+// assign relationType — it stays at makeNode's zero (OBJECT_ACCESS_METHOD),
+// and outfuncs prints `:relationType 0`.
+#[test]
+fn regress_rename_constraint_relation_type_stays_zero() {
+    use types_nodes::parsenodes::{ObjectType, RenameStmt};
+    let list = parse("ALTER TABLE t RENAME CONSTRAINT a TO b;");
+    let rs = only_stmt(&list)
+        .stmt
+        .expect("stmt")
+        .as_variant::<RenameStmt>()
+        .expect("RenameStmt");
+    assert_eq!(rs.renameType, ObjectType::OBJECT_TABCONSTRAINT);
+    assert_eq!(rs.relationType, ObjectType::OBJECT_ACCESS_METHOD);
+    assert_eq!(rs.subname, Some("a"));
+    assert_eq!(rs.newname, Some("b"));
+    assert!(!rs.missing_ok);
+
+    let list = parse("ALTER TABLE IF EXISTS t RENAME CONSTRAINT a TO b;");
+    let rs = only_stmt(&list)
+        .stmt
+        .expect("stmt")
+        .as_variant::<RenameStmt>()
+        .expect("RenameStmt");
+    assert_eq!(rs.relationType, ObjectType::OBJECT_ACCESS_METHOD);
+    assert!(rs.missing_ok);
+}
