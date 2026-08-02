@@ -100,37 +100,46 @@ pub fn RelationGetPartitionDesc(
     RelationBuildPartitionDesc(rel, omit_detached)
 }
 
-// text varlena -> &str; long bound lists arrive pglz-compressed inline.
+// text varlena -> &str; long bound lists arrive pglz-compressed inline or as
+// external TOAST pointers into pg_class's TOAST table (C TextDatumGetCString
+// detoasts either form via pg_detoast_datum_packed).
 fn text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, d: Datum) -> &'mcx str {
     let p = d.as_usize() as *const u8;
-    // SAFETY: syscache text attribute; toasted/compressed images are loud.
+    // SAFETY: syscache text attribute; header forms dispatched as C VARATT_IS_*.
     unsafe {
         let b0 = *p;
         let (len, off) = if b0 & 0x01 != 0 {
             if b0 == 0x01 {
-                panic!("partdesc: toasted relpartbound unported");
+                // External TOAST pointer (C VARATT_IS_EXTERNAL).
+                return detoast_text_to_str(mcx, p);
             }
             ((((b0 as usize) >> 1) & 0x7F) - 1, 1)
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
             if w & 0x02 != 0 {
-                let total = ::types_tuple::varatt::varsize_any(p);
-                let raw = core::slice::from_raw_parts(p, total);
-                let flat = ::detoast_seams::detoast_attr::call(mcx, raw)
-                    .expect("detoast relpartbound");
-                let (ptr, len) = (flat.as_ptr(), flat.len());
-                core::mem::forget(flat);
-                // detoast_attr returns the full 4-byte-header image; the
-                // payload follows. Arena-backed until mcx reset; forget only
-                // skips the vec's own dealloc.
-                let s = core::slice::from_raw_parts(ptr.add(4), len - 4);
-                return core::str::from_utf8(s).expect("non-UTF-8 relpartbound");
+                return detoast_text_to_str(mcx, p);
             }
             ((w as usize >> 2) - 4, 4)
         };
         core::str::from_utf8(core::slice::from_raw_parts(p.add(off), len))
             .expect("non-UTF-8 relpartbound")
     }
+}
+
+// External or compressed relpartbound image -> flat &str via detoast_attr.
+//
+// # Safety
+// `p` points to a live varlena image (toast pointer or compressed 4B form).
+unsafe fn detoast_text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, p: *const u8) -> &'mcx str {
+    let total = ::types_tuple::varatt::varsize_any(p);
+    let raw = core::slice::from_raw_parts(p, total);
+    let flat = ::detoast_seams::detoast_attr::call(mcx, raw).expect("detoast relpartbound");
+    let (ptr, len) = (flat.as_ptr(), flat.len());
+    core::mem::forget(flat);
+    // detoast_attr returns the full 4-byte-header image; the payload follows.
+    // Arena-backed until mcx reset; forget only skips the vec's own dealloc.
+    let s = core::slice::from_raw_parts(ptr.add(4), len - 4);
+    core::str::from_utf8(s).expect("non-UTF-8 relpartbound")
 }
 
 #[inline(never)]
@@ -303,4 +312,44 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
     let out = result.clone_in(cmcx)?;
     with_state(|st| st.quals.insert(relid, result));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mock owner of the detoast seam for this test binary (see the partbounds
+    // twin): expects the 18-byte ondisk toast pointer built below and hands
+    // back the flat 4B-header text image.
+    fn mock_detoast<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        image: &[u8],
+    ) -> PgResult<::mcx::PgVec<'mcx, u8>> {
+        assert_eq!(image[0], 0x01, "external toast pointer tag byte");
+        assert_eq!(image[1], ::types_tuple::varatt::VARTAG_ONDISK);
+        assert_eq!(image.len(), 18, "VARHDRSZ_EXTERNAL + vartag_size(ONDISK)");
+        let payload = b"{LIST (a, b, c)}";
+        let total = ::types_tuple::varatt::VARHDRSZ + payload.len();
+        let mut v = ::mcx::vec_with_capacity_in(mcx, total)?;
+        v.extend_from_slice(
+            &::types_tuple::varatt::set_varsize_4b_word(total as u32).to_ne_bytes(),
+        );
+        v.extend_from_slice(payload);
+        Ok(v)
+    }
+
+    // Witness for the retired "toasted relpartbound unported" fence: an
+    // externally-toasted relpartbound must be fetched, as C's
+    // RelationBuildPartitionDesc does via TextDatumGetCString (partdesc.c).
+    #[test]
+    fn external_relpartbound_is_detoasted() {
+        ::detoast_seams::detoast_attr::set(mock_detoast);
+        let cx = MemoryContext::new("partdesc detoast test");
+        // varattrib_1b_e ondisk image: [0x01, VARTAG_ONDISK, 16 payload bytes].
+        let mut image = [0u8; 18];
+        image[0] = 0x01;
+        image[1] = ::types_tuple::varatt::VARTAG_ONDISK;
+        let s = text_to_str(cx.mcx(), Datum::from_usize(image.as_ptr() as usize));
+        assert_eq!(s, "{LIST (a, b, c)}");
+    }
 }

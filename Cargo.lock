@@ -11217,6 +11217,7 @@ dependencies = [
 name = "partbounds"
 version = "0.1.0"
 dependencies = [
+ "adt_scalar",
  "arrayfuncs",
  "cache_syscache",
  "clauses_seams",
@@ -11224,6 +11225,7 @@ dependencies = [
  "copyfuncs",
  "datum",
  "detoast_seams",
+ "elog_seams",
  "execexpr",
  "format_type",
  "funcapi",
@@ -13479,6 +13481,7 @@ dependencies = [
  "guc",
  "init_small",
  "inval",
+ "libc",
  "lsyscache",
  "mbutils",
  "mcx",
