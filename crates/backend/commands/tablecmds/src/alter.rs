@@ -6114,6 +6114,14 @@ fn ATPostAlterTypeParse<'mcx>(
                                     .expect("Constraint");
                             }
                         }
+                        // SAFETY: as above (tablecmds.c:15757).
+                        unsafe {
+                            connode
+                                .with_mut::<Constraint, _>(|c| {
+                                    c.reset_default_tblspc = true;
+                                })
+                                .expect("Constraint");
+                        }
                         // SAFETY: as above.
                         unsafe {
                             cnode

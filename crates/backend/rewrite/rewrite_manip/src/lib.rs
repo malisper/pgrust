@@ -120,8 +120,54 @@ fn mva_mutate<'mcx>(
         }
     }
     if node.node_tag() == NodeTag::T_SubLink {
-        // nodes_core's SubLink arm skips the subselect C recurses into.
-        panic!("unported: map_variable_attnos over SubLink (Query walk)");
+        // nodes_core's SubLink mutator arm skips the subselect C mutates
+        // (rv_mutate precedent): recurse there in place, then testexpr.
+        let sl = node.as_sub_link().expect("SubLink");
+        if mva_mutate(mcx, sl.subselect, target_varno, sublevels_up, attnums, to_rowtype, found_whole_row)?
+            .is_some()
+        {
+            panic!("Query subselect mutates in place");
+        }
+        return match sl.testexpr {
+            None => Ok(None),
+            Some(te) => match mva_mutate(
+                mcx,
+                te,
+                target_varno,
+                sublevels_up,
+                attnums,
+                to_rowtype,
+                found_whole_row,
+            )? {
+                None => Ok(None),
+                Some(new_te) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: sl.subLinkType,
+                        subLinkId: sl.subLinkId,
+                        testexpr: Some(new_te),
+                        operName: sl.operName.clone_in(mcx)?,
+                        subselect: sl.subselect,
+                        location: sl.location,
+                    },
+                )?)),
+            },
+        };
+    }
+    if node.node_tag() == NodeTag::T_Query {
+        // map_variable_attnos_mutator's Query arm (rewriteManip.c): recurse
+        // into an RTE subquery or not-yet-planned sublink subquery with
+        // sublevels_up bumped (C query_tree_mutator at flags 0), in place.
+        let bumped = sublevels_up + 1;
+        let mut needs_descent = move |sub: &'mcx Query<'mcx>| -> PgResult<bool> {
+            let mut w = RtiUsed { rt_index: target_varno, sublevels_up: bumped + 1 };
+            nodes_core::query_tree_walker(sub, &mut w, 0)
+        };
+        let mut m = |n: Node<'mcx>| {
+            mva_mutate(mcx, n, target_varno, bumped, attnums, to_rowtype, found_whole_row)
+        };
+        mutate_query_fields_inplace(mcx, node, &mut m, &mut needs_descent)?;
+        return Ok(None);
     }
     let mut m = |n: Node<'mcx>| {
         mva_mutate(mcx, n, target_varno, sublevels_up, attnums, to_rowtype, found_whole_row)
@@ -1277,14 +1323,26 @@ fn rv_mutate_onconflict<'mcx>(
     oc_node: Node<'mcx>,
     ctx: &mut ReplaceVarsCtx<'_, 'mcx>,
 ) -> PgResult<()> {
+    let mcx = ctx.mcx;
+    let mut m = |n: Node<'mcx>| rv_mutate(n, ctx);
+    mutate_onconflict_inplace(mcx, oc_node, &mut m)
+}
+
+// OnConflictExpr's expression positions, in place (expression_tree_mutator's
+// T_OnConflictExpr field set).
+fn mutate_onconflict_inplace<'mcx>(
+    mcx: Mcx<'mcx>,
+    oc_node: Node<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+) -> PgResult<()> {
     let oc = oc_node
         .as_on_conflict_expr()
         .expect("OnConflictExpr");
-    let arbiter_elems = rv_mutate_list(&oc.arbiterElems, ctx)?;
-    let arbiter_where = rv_mutate_opt(oc.arbiterWhere, ctx)?;
-    let set = rv_mutate_list(&oc.onConflictSet, ctx)?;
-    let oc_where = rv_mutate_opt(oc.onConflictWhere, ctx)?;
-    let excl_tlist = rv_mutate_list(&oc.exclRelTlist, ctx)?;
+    let arbiter_elems = nodes_core::mutate_list_dyn(mcx, &oc.arbiterElems, m)?;
+    let arbiter_where = nodes_core::mutate_opt_dyn(oc.arbiterWhere, m)?;
+    let set = nodes_core::mutate_list_dyn(mcx, &oc.onConflictSet, m)?;
+    let oc_where = nodes_core::mutate_opt_dyn(oc.onConflictWhere, m)?;
+    let excl_tlist = nodes_core::mutate_list_dyn(mcx, &oc.exclRelTlist, m)?;
     // SAFETY: exclusive tree (module contract).
     unsafe {
         oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
@@ -1335,28 +1393,53 @@ fn rv_mutate_list<'mcx>(
     Ok(if changed { Some(out) } else { None })
 }
 
-// query_tree_mutator's field set, applied in place on the Query node.
+// query_tree_mutator's field set, applied in place on the Query node
+// (ReplaceVarsFromTargetList's specialization of the engine below).
 fn rv_query_inplace<'mcx>(
     qnode: Node<'mcx>,
     ctx: &mut ReplaceVarsCtx<'_, 'mcx>,
 ) -> PgResult<()> {
     let mcx = ctx.mcx;
+    // ctx.sublevels_up is restored between mutator calls (the Query arm
+    // bumps and restores), so copies taken here match the live values at
+    // every point the predicate runs.
+    let (rt_index, walk_level) = (ctx.target_varno, ctx.sublevels_up);
+    let mut needs_descent = move |sub: &'mcx Query<'mcx>| -> PgResult<bool> {
+        let mut w = RtiUsed { rt_index, sublevels_up: walk_level + 1 };
+        nodes_core::query_tree_walker(sub, &mut w, 0)
+    };
+    let mut m = |n: Node<'mcx>| rv_mutate(n, ctx);
+    mutate_query_fields_inplace(mcx, qnode, &mut m, &mut needs_descent)
+}
+
+// C query_tree_mutator's field set at flags == 0, applied in place on the
+// Query node. The callback owns the T_Query arm (bump sublevels, recurse
+// back here, return None), exactly as C requires mutators to handle Query;
+// `subquery_needs_descent` decides whether an RTE subquery is copied and
+// descended (&Query has no recoverable node handle, so descent costs a
+// serialize/deserialize copy).
+fn mutate_query_fields_inplace<'mcx>(
+    mcx: Mcx<'mcx>,
+    qnode: Node<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+    subquery_needs_descent: &mut dyn FnMut(&'mcx Query<'mcx>) -> PgResult<bool>,
+) -> PgResult<()> {
     let q = qnode.as_query().expect("Query");
 
-    let new_target = rv_mutate_list(&q.targetList, ctx)?;
-    let new_returning = rv_mutate_list(&q.returningList, ctx)?;
-    let new_having = rv_mutate_opt(q.havingQual, ctx)?;
-    let new_limit_off = rv_mutate_opt(q.limitOffset, ctx)?;
-    let new_limit_cnt = rv_mutate_opt(q.limitCount, ctx)?;
-    let new_setops = rv_mutate_opt(q.setOperations, ctx)?;
+    let new_target = nodes_core::mutate_list_dyn(mcx, &q.targetList, m)?;
+    let new_returning = nodes_core::mutate_list_dyn(mcx, &q.returningList, m)?;
+    let new_having = nodes_core::mutate_opt_dyn(q.havingQual, m)?;
+    let new_limit_off = nodes_core::mutate_opt_dyn(q.limitOffset, m)?;
+    let new_limit_cnt = nodes_core::mutate_opt_dyn(q.limitCount, m)?;
+    let new_setops = nodes_core::mutate_opt_dyn(q.setOperations, m)?;
     if let Some(oc_node) = q.onConflict {
-        rv_mutate_onconflict(oc_node, ctx)?;
+        mutate_onconflict_inplace(mcx, oc_node, m)?;
     }
     for wco_node in &q.withCheckOptions {
         let wco = wco_node
             .as_with_check_option()
             .expect("withCheckOptions cell");
-        if let Some(new_qual) = rv_mutate_opt(wco.qual, ctx)? {
+        if let Some(new_qual) = nodes_core::mutate_opt_dyn(wco.qual, m)? {
             // SAFETY: exclusive tree (module contract).
             unsafe {
                 wco_node.with_mut::<types_nodes::parsenodes::WithCheckOption, _>(|w| {
@@ -1370,8 +1453,8 @@ fn rv_query_inplace<'mcx>(
         let action = action_node
             .as_merge_action()
             .expect("mergeActionList cell is a MergeAction");
-        let new_qual = rv_mutate_opt(action.qual, ctx)?;
-        let new_tlist = rv_mutate_list(&action.targetList, ctx)?;
+        let new_qual = nodes_core::mutate_opt_dyn(action.qual, m)?;
+        let new_tlist = nodes_core::mutate_list_dyn(mcx, &action.targetList, m)?;
         if new_qual.is_some() || new_tlist.is_some() {
             // SAFETY: exclusive tree (module contract).
             unsafe {
@@ -1387,23 +1470,34 @@ fn rv_query_inplace<'mcx>(
             .expect("MergeAction");
         }
     }
-    let new_merge_join_cond = rv_mutate_opt(q.mergeJoinCondition, ctx)?;
+    let new_merge_join_cond = nodes_core::mutate_opt_dyn(q.mergeJoinCondition, m)?;
+    // C mutates the expressions under WindowClause nodes even when not
+    // interested in SortGroupClause nodes (query_tree_mutator's non-
+    // QTW_EXAMINE_SORTGROUP lane).
     for wc_node in &q.windowClause {
         let wc = wc_node.as_window_clause().expect("windowClause cell");
-        if rv_mutate_opt(wc.startOffset, ctx)?.is_some()
-            || rv_mutate_opt(wc.endOffset, ctx)?.is_some()
-        {
-            panic!(
-                "ReplaceVarsFromTargetList (rewriteManip.c): NEW/OLD reference \
-                 inside a window frame offset (WindowClause rebuild unported)"
-            );
+        let new_start = nodes_core::mutate_opt_dyn(wc.startOffset, m)?;
+        let new_end = nodes_core::mutate_opt_dyn(wc.endOffset, m)?;
+        if new_start.is_some() || new_end.is_some() {
+            // SAFETY: exclusive tree (module contract).
+            unsafe {
+                wc_node.with_mut::<types_nodes::parsenodes::WindowClause, _>(|w| {
+                    if new_start.is_some() {
+                        w.startOffset = new_start;
+                    }
+                    if new_end.is_some() {
+                        w.endOffset = new_end;
+                    }
+                })
+            }
+            .expect("WindowClause");
         }
     }
     let new_jointree = match q.jointree {
         None => None,
         Some(jt) => {
-            let fl = rv_mutate_list(&jt.fromlist, ctx)?;
-            let quals = rv_mutate_opt(jt.quals, ctx)?;
+            let fl = nodes_core::mutate_list_dyn(mcx, &jt.fromlist, m)?;
+            let quals = nodes_core::mutate_opt_dyn(jt.quals, m)?;
             if fl.is_some() || quals.is_some() {
                 Some(mcx::alloc_leak_in(
                     mcx,
@@ -1423,22 +1517,18 @@ fn rv_query_inplace<'mcx>(
             .expect("cteList cell")
             .ctequery
             .expect("analyzed CTE");
-        rv_mutate(ctequery, ctx)?;
+        m(ctequery)?;
     }
     for rte_node in q.rtable.iter() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         match rte.rtekind {
             RTEKind::RTE_SUBQUERY => {
-                // &Query has no recoverable node handle; only re-read it when
-                // it actually holds outer references to the target varno.
+                // &Query has no recoverable node handle; only re-read it
+                // when the caller's predicate says it must be visited.
                 let sub = rte.subquery.expect("subquery RTE has a subquery");
-                let mut w = RtiUsed {
-                    rt_index: ctx.target_varno,
-                    sublevels_up: ctx.sublevels_up + 1,
-                };
-                if nodes_core::query_tree_walker(sub, &mut w, 0)? {
-                    let sub_node = copy_query_node(ctx.mcx, sub)?;
-                    if rv_mutate(sub_node, ctx)?.is_some() {
+                if subquery_needs_descent(sub)? {
+                    let sub_node = copy_query_node(mcx, sub)?;
+                    if m(sub_node)?.is_some() {
                         panic!("Query subselect mutates in place");
                     }
                     let sub_ref = sub_node.as_query().expect("Query round trip");
@@ -1450,7 +1540,7 @@ fn rv_query_inplace<'mcx>(
                 }
             }
             RTEKind::RTE_VALUES => {
-                if let Some(new_lists) = rv_mutate_list(&rte.values_lists, ctx)? {
+                if let Some(new_lists) = nodes_core::mutate_list_dyn(mcx, &rte.values_lists, m)? {
                     // SAFETY: exclusive tree (module contract).
                     unsafe {
                         rte_node
@@ -1460,7 +1550,7 @@ fn rv_query_inplace<'mcx>(
                 }
             }
             RTEKind::RTE_JOIN => {
-                if let Some(new_javs) = rv_mutate_list(&rte.joinaliasvars, ctx)? {
+                if let Some(new_javs) = nodes_core::mutate_list_dyn(mcx, &rte.joinaliasvars, m)? {
                     // SAFETY: as above.
                     unsafe {
                         rte_node
@@ -1469,13 +1559,36 @@ fn rv_query_inplace<'mcx>(
                     .expect("RangeTblEntry");
                 }
             }
-            RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_GROUP => panic!(
-                "ReplaceVarsFromTargetList (rewriteManip.c): {:?} RTE mutation arm unported",
-                rte.rtekind
-            ),
+            RTEKind::RTE_FUNCTION => {
+                if let Some(new_fns) = nodes_core::mutate_list_dyn(mcx, &rte.functions, m)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<RangeTblEntry, _>(|r| r.functions = new_fns)
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                if let Some(new_tf) = nodes_core::mutate_opt_dyn(rte.tablefunc, m)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(new_tf))
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_GROUP => {
+                if let Some(new_ge) = nodes_core::mutate_list_dyn(mcx, &rte.groupexprs, m)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<RangeTblEntry, _>(|r| r.groupexprs = new_ge)
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
             _ => {}
         }
-        if let Some(new_sq) = rv_mutate_list(&rte.securityQuals, ctx)? {
+        if let Some(new_sq) = nodes_core::mutate_list_dyn(mcx, &rte.securityQuals, m)? {
             // SAFETY: exclusive tree (module contract).
             unsafe {
                 rte_node.with_mut::<RangeTblEntry, _>(|r| r.securityQuals = new_sq)

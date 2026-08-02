@@ -1512,7 +1512,7 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             list(js, &e.options)?;
             js.f_str(e.indexname);
             js.f_str(e.indexspace);
-            js.f_bool(false); // reset_default_tblspc: unported field
+            js.f_bool(e.reset_default_tblspc);
             js.f_str(e.access_method);
             node(js, e.where_clause)?;
             range_var(js, e.pktable)?;

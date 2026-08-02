@@ -1012,9 +1012,10 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 rte.colcollations = self.read_oid_list("colcollations")?;
                 rte.relid = self.read_u32("relid");
             }
-            other => panic!(
-                "_readRangeTblEntry (readfuncs.c): {other:?} arm unported (view SELECT-rule set)"
-            ),
+            RTEKind::RTE_RESULT => {
+                // No extra fields. (C's unrecognized-kind default elog cannot
+                // arise: RTEKind is a closed enum here.)
+            }
         }
         rte.lateral = self.read_bool("lateral");
         rte.inFromCl = self.read_bool("inFromCl");

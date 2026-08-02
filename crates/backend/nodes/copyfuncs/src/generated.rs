@@ -2071,6 +2071,7 @@ pub(crate) fn copy_Constraint<'d>(mcx: Mcx<'d>, s: &Constraint<'_>) -> PgResult<
         where_clause: copy_node_opt(mcx, s.where_clause)?,
         indexname: opt_str_in(mcx, s.indexname)?,
         indexspace: opt_str_in(mcx, s.indexspace)?,
+        reset_default_tblspc: s.reset_default_tblspc,
         pktable: match s.pktable { Some(v) => Some(mk_ref(mcx, copy_RangeVar(mcx, v)?)?), None => None },
         fk_attrs: copy_node_list(mcx, &s.fk_attrs)?,
         pk_attrs: copy_node_list(mcx, &s.pk_attrs)?,

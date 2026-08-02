@@ -762,3 +762,43 @@ fn seam_installed_and_callable() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].queryId, 42);
 }
+
+// rewriteTargetListIU renumbers junk entries whose resnos are not already
+// contiguous past the real columns (C's flatCopyTargetEntry lane).
+#[test]
+fn junk_entries_renumbered_past_real_columns() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = make(mcx, TBL, "t", RELKIND_RELATION, false);
+
+    let junk = |resno: i16, v: i32| {
+        let c = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(v), false, true).unwrap();
+        Node::mk_target_entry(mcx, c, resno, Some("junk"), true).unwrap()
+    };
+    // Mis-numbered junk entries (resnos 5 and 9 on a 0-column relation).
+    let mut tlist = NodeList::make1(mcx, junk(5, 1)).unwrap();
+    tlist.lappend(mcx, junk(9, 2)).unwrap();
+
+    let out = crate::rewriteTargetListIU(
+        mcx,
+        &tlist,
+        CmdType::CMD_INSERT,
+        types_nodes::primnodes::OverridingKind::OVERRIDING_NOT_SET,
+        &rel,
+        None,
+        None,
+    )
+    .unwrap();
+    let resnos: Vec<i16> = out
+        .iter()
+        .map(|n| n.as_target_entry().unwrap().resno)
+        .collect();
+    assert_eq!(resnos, vec![1, 2], "junk resnos renumbered past numattrs");
+    // Values ride along unchanged (flat copy shares the expr).
+    let vals: Vec<i32> = out
+        .iter()
+        .map(|n| n.as_target_entry().unwrap().expr.as_const().unwrap().constvalue.as_i32())
+        .collect();
+    assert_eq!(vals, vec![1, 2]);
+}

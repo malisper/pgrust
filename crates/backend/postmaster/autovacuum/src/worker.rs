@@ -659,15 +659,46 @@ pub fn do_autovacuum() -> PgResult<()> {
         slots[my].wi_dobalance.store(true, Relaxed);
     }
 
-    // Work items requested by backends. The only C type is BRIN autosummarize,
-    // whose producer (AutoVacuumRequestWork caller) is the brin summarize lane.
-    {
-        let l = shmem::av_lock();
-        for i in 0..NUM_WORKITEMS {
-            let wi = &l.work_items[i];
+    // Perform additional work items, as requested by backends
+    // (do_autovacuum, autovacuum.c:2519). The only C type is BRIN
+    // autosummarize.
+    for i in 0..NUM_WORKITEMS {
+        // Claim this one, and release the lock while performing it.
+        let claimed = {
+            let mut l = shmem::av_lock();
+            let wi = &mut l.work_items[i];
             if wi.avw_used && !wi.avw_active && wi.avw_database == g::MyDatabaseId() {
-                unported("perform_work_item: AVW_BRINSummarizeRange (brin autosummarize lane)");
+                wi.avw_active = true;
+                Some(*wi)
+            } else {
+                None
             }
+        };
+        let Some(workitem) = claimed else {
+            continue;
+        };
+
+        let snapshot = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snapshot)?;
+        perform_work_item(&workitem)?;
+        if snapmgr::ActiveSnapshotSet() {
+            // The transaction could have aborted inside perform_work_item.
+            snapmgr::PopActiveSnapshot()?;
+        }
+
+        // Check for config changes before acquiring lock for further jobs.
+        postgres_seams::check_for_interrupts::call()?;
+        if interrupt::ConfigReloadPending() {
+            interrupt::SetConfigReloadPending(false);
+            guc_file_seams::process_config_file::call(types_guc::GucContext::PGC_SIGHUP)?;
+            VacuumUpdateCosts()?;
+        }
+
+        // And mark it done.
+        {
+            let mut l = shmem::av_lock();
+            l.work_items[i].avw_active = false;
+            l.work_items[i].avw_used = false;
         }
     }
 
@@ -712,8 +743,9 @@ fn autovacuum_do_vac_analyze(
     commands_vacuum::vacuum(mcx, &rel_list, &tab.at_params, bstrategy, true)
 }
 
+const MAX_AUTOVAC_ACTIV_LEN: usize = 64 * 2 + 56;
+
 fn autovac_report_activity(tab: &AutovacTable, nspname: &str, relname: &str) {
-    const MAX_AUTOVAC_ACTIV_LEN: usize = 64 * 2 + 56;
     let mut activity = if tab.at_params.options & VACOPT_VACUUM != 0 {
         if tab.at_params.options & VACOPT_ANALYZE != 0 {
             String::from("autovacuum: VACUUM ANALYZE")
@@ -739,6 +771,122 @@ fn autovac_report_activity(tab: &AutovacTable, nspname: &str, relname: &str) {
         backend_status_seams::BackendState::STATE_RUNNING,
         Some(&activity),
     );
+}
+
+// perform_work_item (autovacuum.c:2603): execute a previously registered
+// work item. Note we do not store table info in MyWorkerInfo, since this is
+// not vacuuming proper. Errors abort the work item and let the worker
+// continue (the work item list can be lossy); only FATAL propagates.
+fn perform_work_item(workitem: &shmem::WorkItem) -> PgResult<()> {
+    let work_cx = MemoryContext::new("autovacuum work item");
+    let wmcx = work_cx.mcx();
+
+    // Save the relation name for a possible error message, to avoid a
+    // catalog lookup in case of an error. If any of these come back empty,
+    // the relation has been dropped since last we checked; skip it.
+    let Some(row) = fetch_av_class_row(wmcx, workitem.avw_relation)? else {
+        return Ok(());
+    };
+    let cur_relname = row.relname;
+    let Some(cur_nspname) = syscache_seams::pg_namespace_nspname::call(row.relnamespace)?
+        .map(|n| String::from_utf8_lossy(n.name_str()).into_owned())
+    else {
+        return Ok(());
+    };
+    let Some(cur_datname) = dbcommands_seams::get_database_name::call(g::MyDatabaseId())? else {
+        return Ok(());
+    };
+
+    autovac_report_workitem(workitem, &cur_nspname, &cur_relname);
+
+    let avw_type = workitem.avw_type;
+    let avw_relation = workitem.avw_relation;
+    let avw_block_number = workitem.avw_block_number;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match avw_type {
+            AVW_BRIN_SUMMARIZE_RANGE => {
+                // C: DirectFunctionCall2(brin_summarize_range, ...).
+                fmgr::direct_function_call2_coll_in(
+                    brin_funcs::fc_brin_summarize_range,
+                    InvalidOid,
+                    wmcx,
+                    datum::Datum::from_oid(avw_relation),
+                    datum::Datum::from_i64(avw_block_number as i64),
+                )?;
+            }
+            other => {
+                elog::elog(WARNING, format!("unrecognized work item found: type {other}"))?;
+            }
+        }
+        // Clear a possible query-cancel signal, to avoid a late reaction to
+        // an automatically-sent signal because of vacuuming the current
+        // table (we're done with it, so it would make no sense to cancel at
+        // this point).
+        g::SetQueryCancelPending(false);
+        Ok(())
+    }))
+    .unwrap_or_else(|payload| {
+        Err(Box::new(pg_error_from_panic(payload, "autovacuum worker panicked")))
+    });
+    if let Err(mut err) = result {
+        // C's PG_CATCH: adorn, report, abort, restart, continue. FATAL never
+        // reaches C's PG_CATCH (errfinish proc_exits).
+        if err.level() >= FATAL {
+            return Err(err);
+        }
+        g::HoldInterrupts();
+        err.add_context_line(format!(
+            "processing work entry for relation \"{cur_datname}.{cur_nspname}.{cur_relname}\""
+        ));
+        elog::emit_error_report_for(&err);
+        xact::AbortOutOfAnyTransaction()?;
+        elog::FlushErrorState();
+        xact::StartTransactionCommand()?;
+        g::ResumeInterrupts();
+    }
+    // We intentionally do not set did_vacuum here.
+    Ok(())
+}
+
+// autovac_report_workitem (autovacuum.c): report to pgstat that this worker
+// is processing a work item.
+fn autovac_report_workitem(workitem: &shmem::WorkItem, nspname: &str, relname: &str) {
+    let activity = workitem_activity_string(workitem, nspname, relname);
+
+    // Set statement_timestamp() to current time for pg_stat_activity.
+    xact::SetCurrentStatementStartTimestamp();
+
+    backend_status_seams::pgstat_report_activity::call(
+        backend_status_seams::BackendState::STATE_RUNNING,
+        Some(&activity),
+    );
+}
+
+// The qualified name of the relation, and the block number if any, after C's
+// "autovacuum: BRIN summarize" prefix (autovac_report_workitem's snprintf
+// pair; the suffix write is capped at MAX_AUTOVAC_ACTIV_LEN - len).
+fn workitem_activity_string(
+    workitem: &shmem::WorkItem,
+    nspname: &str,
+    relname: &str,
+) -> String {
+    // AVW_BRINSummarizeRange is the only work-item type C defines (the sole
+    // switch arm).
+    debug_assert_eq!(workitem.avw_type, AVW_BRIN_SUMMARIZE_RANGE);
+    let mut activity = String::from("autovacuum: BRIN summarize");
+    let blk = if workitem.avw_block_number != types_core::InvalidBlockNumber {
+        format!(" {}", workitem.avw_block_number)
+    } else {
+        String::new()
+    };
+    let suffix = format!(" {nspname}.{relname}{blk}");
+    let room = (MAX_AUTOVAC_ACTIV_LEN - 1).saturating_sub(activity.len());
+    let mut end = suffix.len().min(room);
+    while end > 0 && !suffix.is_char_boundary(end) {
+        end -= 1;
+    }
+    activity.push_str(&suffix[..end]);
+    activity
 }
 
 fn table_recheck_autovac(
@@ -1089,5 +1237,36 @@ mod tests {
         let mut r = row(1000.0, 10, 0);
         r.oid = StatisticRelationId;
         assert_eq!(decide(&r, Some(&entry(9999, 0, 9999)), None), (true, false, false));
+    }
+
+    #[test]
+    fn workitem_activity_matches_c_format() {
+        let wi = shmem::WorkItem {
+            avw_type: AVW_BRIN_SUMMARIZE_RANGE,
+            avw_used: true,
+            avw_active: false,
+            avw_database: 5,
+            avw_relation: 50010,
+            avw_block_number: 128,
+        };
+        assert_eq!(
+            workitem_activity_string(&wi, "public", "brin_tab"),
+            "autovacuum: BRIN summarize public.brin_tab 128"
+        );
+        // InvalidBlockNumber prints no block suffix (C's blk[0] = '\0').
+        let wi_noblk = shmem::WorkItem {
+            avw_block_number: types_core::InvalidBlockNumber,
+            ..wi
+        };
+        assert_eq!(
+            workitem_activity_string(&wi_noblk, "public", "brin_tab"),
+            "autovacuum: BRIN summarize public.brin_tab"
+        );
+        // C caps the suffix snprintf at MAX_AUTOVAC_ACTIV_LEN - len bytes
+        // (including the NUL): total activity <= MAX_AUTOVAC_ACTIV_LEN - 1.
+        let long = "x".repeat(300);
+        let s = workitem_activity_string(&wi, &long, "t");
+        assert_eq!(s.len(), MAX_AUTOVAC_ACTIV_LEN - 1);
+        assert!(s.starts_with("autovacuum: BRIN summarize x"));
     }
 }

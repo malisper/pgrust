@@ -226,3 +226,26 @@ fn log_string_formats() {
     let s = build_param_log_string(mcx, &params, Some(&known), -1).unwrap().unwrap();
     assert_eq!(s.as_str(), "$1 = 'known''v'");
 }
+
+// ParamsErrorCallback (params.c): errcontext text for named/unnamed portals;
+// no-ops when no paramValuesStr was stored or the handle is NULL.
+#[test]
+fn params_error_context_matches_c() {
+    let params = [int_param(42)];
+    let h = unsafe { types_portal::params::register(&params) };
+
+    // No paramValuesStr stored: C's callback returns without errcontext.
+    let e = params_error_context(Box::new(types_error::PgError::error("boom")), "p1", h);
+    assert_eq!(e.context(), None);
+    // NULL handle = C's data->params == NULL early return.
+    let e = params_error_context(e, "p1", types_portal::ParamListHandle::NULL);
+    assert_eq!(e.context(), None);
+
+    types_portal::params::set_param_values_str(h, std::rc::Rc::from("$1 = '42'"));
+    let e = params_error_context(e, "p1", h);
+    assert_eq!(e.context(), Some("portal \"p1\" with parameters: $1 = '42'"));
+    let e = params_error_context(Box::new(types_error::PgError::error("boom")), "", h);
+    assert_eq!(e.context(), Some("unnamed portal with parameters: $1 = '42'"));
+
+    types_portal::params::free(h);
+}

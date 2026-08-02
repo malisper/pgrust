@@ -1,14 +1,16 @@
-// nodeFuncs.c expression accessors. exprType/exprTypmod/exprCollation are
-// closed-set slices over the tags this parser lane can produce (their C
-// default is a hard elog, kept as a loud panic); exprLocation carries every
-// C 18.3 arm plus C's default of -1 for anything else.
+// nodeFuncs.c exprType/exprTypmod/exprCollation/exprLocation. Full C 18.3
+// arm coverage: exprType/exprCollation keep C's unrecognized-node elog as a
+// loud panic (infallible signatures); exprTypmod's default is C's -1;
+// exprLocation carries every C 18.3 arm plus C's default of -1.
 use types_core::{Oid, ParseLoc};
 use types_nodes::{Node, NodeList, NodeTag};
 
+// C's `elog(ERROR, "unrecognized node type: %d", ...)` default arms; loud
+// panic here since these accessors are infallible by signature.
 #[cold]
 #[inline(never)]
 fn deferred(what: &str, tag: NodeTag) -> ! {
-    panic!("{what} (nodeFuncs.c): arm for {tag:?} unported — backend-nodes-core lane")
+    panic!("{what} (nodeFuncs.c): unrecognized node type: {tag:?}")
 }
 
 pub fn expr_type(node: Node<'_>) -> Oid {
@@ -101,6 +103,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         }
         NodeTag::T_AlternativeSubPlan => expr_type(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
+        NodeTag::T_InferenceElem => expr_type(
+            node.as_inference_elem().unwrap().expr.expect("InferenceElem has an expr"),
         ),
         other => deferred("exprType", other),
     }
@@ -256,7 +261,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_AlternativeSubPlan => expr_typmod(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
         ),
-        other => deferred("exprTypmod", other),
+        // C exprTypmod's default is -1, not an unrecognized-node elog.
+        _ => -1,
     }
 }
 
@@ -360,6 +366,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         },
         NodeTag::T_AlternativeSubPlan => expr_collation(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
+        NodeTag::T_InferenceElem => expr_collation(
+            node.as_inference_elem().unwrap().expr.expect("InferenceElem has an expr"),
         ),
         other => deferred("exprCollation", other),
     }

@@ -1142,7 +1142,7 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "options", &c.options);
         string_field(out, "indexname", c.indexname);
         string_field(out, "indexspace", c.indexspace);
-        bool_field(out, "reset_default_tblspc", false);
+        bool_field(out, "reset_default_tblspc", c.reset_default_tblspc);
         string_field(out, "access_method", c.access_method);
         node_field(out, "where_clause", c.where_clause);
         out.push_str(" :pktable ");

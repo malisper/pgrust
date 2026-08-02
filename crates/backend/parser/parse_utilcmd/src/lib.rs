@@ -2199,6 +2199,7 @@ fn transform_index_constraints<'mcx>(
             unsafe { cnode.with_mut::<Constraint, _>(|c| core::mem::take(&mut c.options)) }
                 .expect("Constraint");
         index.tableSpace = constraint.indexspace;
+        index.reset_default_tblspc = constraint.reset_default_tblspc;
         // Included columns (parse_utilcmd.c:2841-2929): no NOT NULL forcing,
         // no duplicate complaints.
         let mut including_params = NodeList::nil();
@@ -2491,6 +2492,7 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         unsafe { cnode.with_mut::<Constraint, _>(|c| core::mem::take(&mut c.options)) }
             .expect("Constraint");
     index.tableSpace = constraint.indexspace;
+    index.reset_default_tblspc = constraint.reset_default_tblspc;
 
     if is_exclusion {
         let mut index_params = NodeList::nil();
@@ -2607,6 +2609,7 @@ fn transform_existing_index_constraint<'mcx>(
     index.idxname = constraint.conname;
     index.accessMethod = Some("btree");
     index.tableSpace = constraint.indexspace;
+    index.reset_default_tblspc = constraint.reset_default_tblspc;
 
     let index_oid = lsyscache::get_relname_relid(index_name, rel.rd_rel.relnamespace)?;
     if index_oid == InvalidOid {

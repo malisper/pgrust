@@ -42,7 +42,7 @@ impl ParamBind<'_> {
         ParamBind { extern_params: None, exec_vals: None, n_exec: 0 };
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Entry {
     ptr: *const ParamExternData,
     len: usize,
@@ -53,6 +53,10 @@ struct Entry {
     // that mirror C's paramFetch bail-outs (params.c BuildParamLogString ->
     // auto_explain's Query Parameters line) need the provenance bit.
     hooked: bool,
+    // C ParamListInfo.paramValuesStr: textual values for error reporting
+    // (exec_bind_message stores BuildParamLogString's result; params.c
+    // ParamsErrorCallback reads it). NULL in C = None.
+    param_values_str: Option<std::rc::Rc<str>>,
 }
 
 thread_local! {
@@ -92,7 +96,13 @@ unsafe fn register_with_hooked(params: &[ParamExternData], hooked: bool) -> Para
         g.set(v);
         v
     });
-    let entry = Entry { ptr: params.as_ptr(), len: params.len(), generation, hooked };
+    let entry = Entry {
+        ptr: params.as_ptr(),
+        len: params.len(),
+        generation,
+        hooked,
+        param_values_str: None,
+    };
     let idx = match FREE.with(|f| f.borrow_mut().pop()) {
         Some(i) => {
             ENTRIES.with(|e| e.borrow_mut()[i as usize] = Some(entry));
@@ -110,11 +120,32 @@ unsafe fn register_with_hooked(params: &[ParamExternData], hooked: bool) -> Para
 fn lookup(h: ParamListHandle) -> Entry {
     assert!(!h.is_null(), "params: NULL handle dereferenced");
     let (idx, generation) = decode(h);
-    let entry = ENTRIES.with(|e| e.borrow().get(idx as usize).copied().flatten());
+    let entry = ENTRIES.with(|e| e.borrow().get(idx as usize).cloned().flatten());
     match entry {
         Some(e) if e.generation == generation => e,
         _ => panic!("params: stale ParamListHandle {h:?} (freed)"),
     }
+}
+
+/// C `params->paramValuesStr = ...` (exec_bind_message).
+pub fn set_param_values_str(h: ParamListHandle, s: std::rc::Rc<str>) {
+    let (idx, generation) = decode(h);
+    ENTRIES.with(|e| {
+        let mut e = e.borrow_mut();
+        match e.get_mut(idx as usize).and_then(|s| s.as_mut()) {
+            Some(en) if en.generation == generation => en.param_values_str = Some(s),
+            _ => panic!("params: stale ParamListHandle {h:?} (freed)"),
+        }
+    });
+}
+
+/// C `params->paramValuesStr` read (params.c ParamsErrorCallback); a NULL
+/// handle reads as C's params == NULL.
+pub fn param_values_str(h: ParamListHandle) -> Option<std::rc::Rc<str>> {
+    if h.is_null() {
+        return None;
+    }
+    lookup(h).param_values_str
 }
 
 /// # Safety
@@ -155,7 +186,7 @@ pub fn free(h: ParamListHandle) {
     ENTRIES.with(|e| {
         let mut e = e.borrow_mut();
         if let Some(slot) = e.get_mut(idx as usize) {
-            if slot.map(|en| en.generation) == Some(generation) {
+            if slot.as_ref().map(|en| en.generation) == Some(generation) {
                 *slot = None;
                 FREE.with(|f| f.borrow_mut().push(idx));
             }
@@ -169,7 +200,9 @@ pub fn is_live(h: ParamListHandle) -> bool {
     }
     let (idx, generation) = decode(h);
     ENTRIES.with(|e| {
-        e.borrow().get(idx as usize).copied().flatten().map(|en| en.generation)
+        e.borrow()
+            .get(idx as usize)
+            .and_then(|s| s.as_ref().map(|en| en.generation))
             == Some(generation)
     })
 }

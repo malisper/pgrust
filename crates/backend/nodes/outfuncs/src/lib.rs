@@ -1490,13 +1490,14 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             out_oid_list(out, &r.colcollations);
             w!(out, " :relid {}", r.relid);
         }
+        RTEKind::RTE_RESULT => {
+            // No extra fields. (C's unrecognized-kind default elog cannot
+            // arise: RTEKind is a closed enum here.)
+        }
         RTEKind::RTE_GROUP => {
             w!(out, " :groupexprs ");
             out_list(out, &r.groupexprs)?;
         }
-        other => panic!(
-            "_outRangeTblEntry (outfuncs.c): {other:?} arm unported (view SELECT-rule set)"
-        ),
     }
     w!(out, " :lateral ");
     out_bool(out, r.lateral);

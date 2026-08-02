@@ -227,6 +227,86 @@ fn lextype_table() {
     assert_eq!(l[11].descr, "Space symbols");
 }
 
+// A non-default parser drives through ts_cache + fmgr (wparser.c
+// tt_setup_firstcall / prs_setup_firstcall) and must produce the same rows
+// as the native default-parser path when its methods are the default
+// parser's.
+#[test]
+fn nondefault_parser_via_ts_cache_fmgr_drive() {
+    setup();
+    const CUSTOM_PRS: types_core::Oid = 90001;
+    // TupleDescInitEntry resolves attribute types through syscache.
+    syscache_seams::lookup_pg_type_shape::set(|typid| {
+        use types_tuple::{PgTypeShape, TYPALIGN_INT, TYPSTORAGE_EXTENDED, TYPSTORAGE_PLAIN};
+        Ok(match typid {
+            types_core::catalog::INT4OID => Some(PgTypeShape {
+                typlen: 4,
+                typbyval: true,
+                typalign: TYPALIGN_INT,
+                typstorage: TYPSTORAGE_PLAIN,
+                typcollation: 0,
+            }),
+            types_core::catalog::TEXTOID => Some(PgTypeShape {
+                typlen: -1,
+                typbyval: false,
+                typalign: TYPALIGN_INT,
+                typstorage: TYPSTORAGE_EXTENDED,
+                typcollation: 100,
+            }),
+            _ => None,
+        })
+    });
+    // Fake pg_ts_parser row pointing at the default parser's method OIDs.
+    syscache_seams::lookup_pg_ts_parser_shape::set(|prsid| {
+        Ok((prsid == CUSTOM_PRS).then_some(syscache_seams::PgTsParserShape {
+            prsstart: 3717,
+            prstoken: 3718,
+            prsend: 3719,
+            prsheadline: 0,
+            prslextype: 3721,
+        }))
+    });
+    fmgr_seams::fmgr_info::set(|oid| {
+        let (func, nargs): (types_fmgr::PGFunction, i16) = match oid {
+            3717 => (crate::builtins::fc_prsd_start, 2),
+            3718 => (crate::builtins::fc_prsd_nexttoken, 3),
+            3719 => (crate::builtins::fc_prsd_end, 1),
+            3721 => (crate::builtins::fc_prsd_lextype, 1),
+            other => panic!("unexpected fmgr_info oid {other}"),
+        };
+        Ok(types_fmgr::FmgrInfo::new(func, oid, nargs, true, false))
+    });
+    typcache_seams::assign_record_type_typmod::set(|desc| {
+        desc.tdtypmod = 1;
+        Ok(())
+    });
+
+    let ctx = mcx::MemoryContext::new("wparser-nondefault-test");
+    let mcx = ctx.mcx();
+    let mut fcinfo = types_fmgr::LocalFcinfo::<2>::new(0);
+    // SAFETY: `mcx` outlives every use of this fcinfo in this test.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    let input = types_fmgr::varlena_result(
+        varlena::cstring_to_text(mcx, b"The Fat Rats").unwrap(),
+    );
+    fcinfo.set_arg(0, datum::Datum::from_oid(CUSTOM_PRS));
+    fcinfo.set_arg(1, input);
+
+    let crate::builtins::SrfRows::Tuples(custom) =
+        crate::builtins::parse_rows(&fcinfo, CUSTOM_PRS).unwrap();
+    let crate::builtins::SrfRows::Tuples(default) =
+        crate::builtins::parse_rows(&fcinfo, crate::builtins::DEFAULT_PARSER_OID).unwrap();
+    assert_eq!(custom.len(), 5, "The/ /Fat/ /Rats");
+    assert_eq!(custom, default);
+
+    let crate::builtins::SrfRows::Tuples(custom_tt) =
+        crate::builtins::token_type_rows(&fcinfo, CUSTOM_PRS).unwrap();
+    let crate::builtins::SrfRows::Tuples(default_tt) =
+        crate::builtins::token_type_rows(&fcinfo, crate::builtins::DEFAULT_PARSER_OID).unwrap();
+    assert_eq!(custom_tt.len(), 23);
+    assert_eq!(custom_tt, default_tt);
+}
+
 #[test]
 fn stoplist_roundtrip() {
     setup();

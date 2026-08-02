@@ -538,9 +538,11 @@ pub fn query_or_expression_tree_walker_dyn<'mcx>(
     }
 }
 
-/// C query_or_expression_tree_mutator; the Query arm needs the generic
-/// query_tree_mutator engine (unported — rewrite_manip carries the only
-/// specialized form), so it panics loudly.
+/// C query_or_expression_tree_mutator; the Query arm needs a generic
+/// query_tree_mutator engine (unported here — rewrite_manip's
+/// mutate_query_fields_inplace is the parameterized in-place form, but it
+/// cannot live in this crate without a Query-copy hook: RTE subquery descent
+/// needs the outfuncs/readfuncs round trip), so it panics loudly.
 pub fn query_or_expression_tree_mutator<'mcx, F>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,

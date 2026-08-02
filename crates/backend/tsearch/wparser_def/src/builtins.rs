@@ -104,7 +104,7 @@ pub fn fc_prsd_headline(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     Ok(Datum::from_usize(prs_ptr as usize))
 }
 
-enum SrfRows {
+pub(crate) enum SrfRows {
     Tuples(Vec<Vec<u8>>),
 }
 
@@ -137,23 +137,42 @@ fn srf_drive(
     }
 }
 
-fn require_default_parser(oid: ::types_core::Oid, name: &str) {
-    if oid != DEFAULT_PARSER_OID {
-        panic!("wparser_def: {name} for non-default parser {oid} unported (needs ts_cache parser lookup)");
-    }
-}
-
 pub fn fc_ts_token_type_byid(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     srf_drive(flinfo, fcinfo, "ts_token_type_byid", |fcinfo| {
-        require_default_parser(fcinfo.arg(0).as_oid(), "ts_token_type");
-        token_type_rows(fcinfo)
+        token_type_rows(fcinfo, fcinfo.arg(0).as_oid())
     })
 }
 
-fn token_type_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
+// tt_setup_firstcall (wparser.c): the parser's lextype method provides the
+// descriptor list. The default parser short-circuits to the native
+// implementation (the same function fmgr would resolve for OID 3721).
+fn parser_lex_descrs(mcx: ::mcx::Mcx<'_>, prsid: ::types_core::Oid) -> PgResult<Vec<LexDescr>> {
+    if prsid == DEFAULT_PARSER_OID {
+        return Ok(lextype());
+    }
+    let prs = ::ts_cache::lookup_ts_parser_cache(prsid)?;
+    if prs.lextype_oid == ::types_core::InvalidOid {
+        return Err(Box::new(::types_error::PgError::error(format!(
+            "method lextype isn't defined for text search parser {prsid}"
+        ))));
+    }
+    // C: OidFunctionCall1(prs->lextypeOid, (Datum) 0).
+    let mut flinfo = ::fmgr_seams::fmgr_info::call(prs.lextype_oid)?;
+    let d = ::types_fmgr::function_call1_coll_in(
+        &mut flinfo,
+        ::types_core::InvalidOid,
+        mcx,
+        Datum::from_usize(0),
+    )?;
+    // SAFETY: internal-arg contract (fc_prsd_lextype above): lextype methods
+    // return *mut Vec<LexDescr> and the caller takes ownership.
+    Ok(*unsafe { Box::from_raw(d.as_usize() as *mut Vec<LexDescr>) })
+}
+
+pub(crate) fn token_type_rows(fcinfo: &Fcinfo, prsid: ::types_core::Oid) -> PgResult<SrfRows> {
     let mcx = fcinfo.result_mcx();
     let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, 3)?;
     ::tupdesc::TupleDescInitEntry(&mut desc, 1, Some("tokid"), INT4OID, -1, 0)?;
@@ -164,8 +183,9 @@ fn token_type_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
     // BlessTupleDesc (via TupleDescGetAttInMetadata, wparser.c tt_setup):
     // FieldSelect over these tuples needs the registered typmod.
     ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
-    let mut rows = Vec::with_capacity(parser::LASTNUM as usize);
-    for d in lextype() {
+    let descrs = parser_lex_descrs(mcx, prsid)?;
+    let mut rows = Vec::with_capacity(descrs.len());
+    for d in descrs {
         let alias = varlena_result(::varlena::cstring_to_text(mcx, d.alias.as_bytes())?);
         let descr = varlena_result(::varlena::cstring_to_text(mcx, d.descr.as_bytes())?);
         let tuple = ::heaptuple::heap_form_tuple(
@@ -184,8 +204,8 @@ pub fn fc_ts_token_type_byname(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     srf_drive(flinfo, fcinfo, "ts_token_type_byname", |fcinfo| {
-        require_default_parser(parser_oid_from_text_arg(fcinfo, 0)?, "ts_token_type");
-        token_type_rows(fcinfo)
+        let prsid = parser_oid_from_text_arg(fcinfo, 0)?;
+        token_type_rows(fcinfo, prsid)
     })
 }
 
@@ -202,17 +222,15 @@ fn parser_oid_from_text_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<::types_core:
 
 pub fn fc_ts_parse_byid(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     srf_drive(flinfo, fcinfo, "ts_parse_byid", |fcinfo| {
-        require_default_parser(fcinfo.arg(0).as_oid(), "ts_parse");
-        parse_rows(fcinfo)
+        parse_rows(fcinfo, fcinfo.arg(0).as_oid())
     })
 }
 
-fn parse_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
+pub(crate) fn parse_rows(fcinfo: &Fcinfo, prsid: ::types_core::Oid) -> PgResult<SrfRows> {
     // SAFETY: strict fn; arg 1 is a text varlena.
     let txt = unsafe { fcinfo.arg_varlena_packed(1)? };
     let mcx = fcinfo.result_mcx();
     let data = txt.data();
-    let mut prs = parser::tparser_init(mcx, data.as_ptr(), data.len())?;
     let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
     ::tupdesc::TupleDescInitEntry(&mut desc, 1, Some("tokid"), INT4OID, -1, 0)?;
     ::tupdesc::TupleDescInitEntry(&mut desc, 2, Some("token"), TEXTOID, -1, 0)?;
@@ -221,15 +239,62 @@ fn parse_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
     // BlessTupleDesc (wparser.c prs_setup), as tt_setup above.
     ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
     let mut rows = Vec::new();
-    while parser::tparser_get(&mut prs)? {
-        let token = varlena_result(::varlena::cstring_to_text(mcx, prs.token_bytes())?);
+    let mut push_row = |type_: i32, token_bytes: &[u8]| -> PgResult<()> {
+        let token = varlena_result(::varlena::cstring_to_text(mcx, token_bytes)?);
         let tuple = ::heaptuple::heap_form_tuple(
             mcx,
             &desc,
-            &[Datum::from_i32(prs.type_), token],
+            &[Datum::from_i32(type_), token],
             &[false, false],
         )?;
         rows.push(tuple.image().to_vec());
+        Ok(())
+    };
+    if prsid == DEFAULT_PARSER_OID {
+        // Native short-circuit: the same functions fmgr would resolve.
+        let mut prs = parser::tparser_init(mcx, data.as_ptr(), data.len())?;
+        while parser::tparser_get(&mut prs)? {
+            push_row(prs.type_, prs.token_bytes())?;
+        }
+    } else {
+        // prs_setup_firstcall/prs_process_call (wparser.c): drive the
+        // parser's methods through their cached FmgrInfos, C's
+        // FunctionCall2/FunctionCall3/FunctionCall1 sequence.
+        let entry = ::ts_cache::lookup_ts_parser_cache(prsid)?;
+        let prsobj = ::types_fmgr::function_call2_coll_in(
+            &mut entry.prsstart.borrow_mut(),
+            ::types_core::InvalidOid,
+            mcx,
+            Datum::from_usize(data.as_ptr() as usize),
+            Datum::from_i32(data.len() as i32),
+        )?;
+        loop {
+            let mut lex: *const u8 = core::ptr::null();
+            let mut llen: i32 = 0;
+            let t = ::types_fmgr::function_call3_coll_in(
+                &mut entry.prstoken.borrow_mut(),
+                ::types_core::InvalidOid,
+                mcx,
+                prsobj,
+                Datum::from_usize(&mut lex as *mut *const u8 as usize),
+                Datum::from_usize(&mut llen as *mut i32 as usize),
+            )?
+            .as_i32();
+            if t == 0 {
+                break;
+            }
+            // SAFETY: internal-arg contract (fc_prsd_nexttoken above): *lex
+            // spans llen bytes of the input buffer.
+            let token_bytes =
+                unsafe { core::slice::from_raw_parts(lex, llen.max(0) as usize) };
+            push_row(t, token_bytes)?;
+        }
+        ::types_fmgr::function_call1_coll_in(
+            &mut entry.prsend.borrow_mut(),
+            ::types_core::InvalidOid,
+            mcx,
+            prsobj,
+        )?;
     }
     Ok(SrfRows::Tuples(rows))
 }
@@ -239,8 +304,8 @@ pub fn fc_ts_parse_byname(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     srf_drive(flinfo, fcinfo, "ts_parse_byname", |fcinfo| {
-        require_default_parser(parser_oid_from_text_arg(fcinfo, 0)?, "ts_parse");
-        parse_rows(fcinfo)
+        let prsid = parser_oid_from_text_arg(fcinfo, 0)?;
+        parse_rows(fcinfo, prsid)
     })
 }
 
