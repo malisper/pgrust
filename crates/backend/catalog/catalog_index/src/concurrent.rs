@@ -357,7 +357,9 @@ pub fn validate_index<'mcx>(
         index: &indexRelation,
         heaprel: &heapRelation,
         analyze_only: false,
+        report_progress: true,
         estimated_count: true,
+        message_level: ::types_error::DEBUG2,
         num_heap_tuples: heapRelation.rd_rel.reltuples as f64,
         strategy: None,
     };

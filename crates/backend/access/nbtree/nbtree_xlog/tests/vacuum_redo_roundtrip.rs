@@ -751,7 +751,9 @@ fn btree_vacuum_redo_rebuilds_pages_byte_exact() {
         index: &rel,
         heaprel: &rel,
         analyze_only: false,
+        report_progress: false,
         estimated_count: true,
+        message_level: types_error::DEBUG2,
         num_heap_tuples: max_key as f64 / 2.0,
         strategy: None,
     };

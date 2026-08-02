@@ -2086,7 +2086,9 @@ fn sim_sweep_writer_child() {
                         index: idx_ref,
                         heaprel: &rel,
                         analyze_only: false,
+                        report_progress: false,
                         estimated_count: false,
+                        message_level: types_error::DEBUG2,
                         num_heap_tuples: -1.0,
                         strategy: None,
                     };
@@ -2204,7 +2206,9 @@ fn sim_sweep_writer_child() {
                         index: idx_ref,
                         heaprel: &rel,
                         analyze_only: false,
+                        report_progress: false,
                         estimated_count: false,
+                        message_level: types_error::DEBUG2,
                         num_heap_tuples: -1.0,
                         strategy: None,
                     };

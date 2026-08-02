@@ -32,13 +32,16 @@ use crate::page::{
 use crate::pagedel::{bt_pagedel, bt_pendingfsm_finalize, bt_pendingfsm_init};
 use crate::utils::{bt_end_vacuum, bt_end_vacuum_key, bt_start_vacuum};
 
-// IndexVacuumInfo (access/genam.h); message_level/report_progress dropped
-// (logging + progress lanes unported).
+// IndexVacuumInfo (access/genam.h).
 pub struct IndexVacuumInfo<'a, 'mcx> {
     pub index: &'a Relation<'mcx>,
     pub heaprel: &'a ::types_rel::RelationData<'mcx>,
     pub analyze_only: bool,
+    /// emit progress.h status reports
+    pub report_progress: bool,
     pub estimated_count: bool,
+    /// ereport level for progress messages (C's int rendered as ErrorLevel)
+    pub message_level: ::types_error::ErrorLevel,
     pub num_heap_tuples: f64,
     pub strategy: BufferAccessStrategy,
 }
@@ -240,6 +243,12 @@ fn btvacuumscan_blocks(
                 rel,
                 ForkNumber::MAIN_FORKNUM,
             )?;
+            if vstate.info.report_progress {
+                ::backend_progress::pgstat_progress_update_param(
+                    ::backend_progress::progress::PROGRESS_SCAN_BLOCKS_TOTAL,
+                    *num_pages as i64,
+                );
+            }
             if *current >= *num_pages {
                 return Ok(true);
             }
@@ -258,6 +267,12 @@ fn btvacuumscan_blocks(
             )?)
             .expect("ReadBufferExtended returned InvalidBuffer");
             btvacuumpage(vstate, scratch, pin)?;
+            if vstate.info.report_progress {
+                ::backend_progress::pgstat_progress_update_param(
+                    ::backend_progress::progress::PROGRESS_SCAN_BLOCKS_DONE,
+                    *current as i64,
+                );
+            }
             *current += 1;
             scanned += 1;
         }

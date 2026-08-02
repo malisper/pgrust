@@ -880,7 +880,15 @@ fn do_analyze_rel<'mcx>(
                 index: ind,
                 heaprel: &**onerel,
                 analyze_only: true,
+                // C leaves report_progress uninitialized on this path (only
+                // nbtree's block scan reads it; analyze-only cleanup skips it).
+                report_progress: false,
                 estimated_count: true,
+                message_level: if params.options & VACOPT_VERBOSE != 0 {
+                    types_error::INFO
+                } else {
+                    types_error::DEBUG2
+                },
                 num_heap_tuples: onerel.rd_rel.reltuples as f64,
                 strategy: bufmgr_seams::get_access_strategy::call(
                     types_storage::buf::BufferAccessStrategyType::BasVacuum,

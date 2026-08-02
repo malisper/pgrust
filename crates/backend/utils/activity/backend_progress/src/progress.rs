@@ -20,6 +20,10 @@ pub const PROGRESS_VACUUM_PHASE_INDEX_CLEANUP: i64 = 4;
 pub const PROGRESS_VACUUM_PHASE_TRUNCATE: i64 = 5;
 pub const PROGRESS_VACUUM_PHASE_FINAL_CLEANUP: i64 = 6;
 
+// Block numbers in a generic relation scan (CREATE INDEX/REINDEX validate).
+pub const PROGRESS_SCAN_BLOCKS_TOTAL: usize = 15;
+pub const PROGRESS_SCAN_BLOCKS_DONE: usize = 16;
+
 pub const PROGRESS_ANALYZE_PHASE: usize = 0;
 pub const PROGRESS_ANALYZE_BLOCKS_TOTAL: usize = 1;
 pub const PROGRESS_ANALYZE_BLOCKS_DONE: usize = 2;

@@ -1532,7 +1532,9 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
                     index: &vacrel.indrels[idx],
                     heaprel: vacrel.rel,
                     analyze_only: false,
+                    report_progress: false,
                     estimated_count: true,
+                    message_level: ::types_error::DEBUG2,
                     num_heap_tuples: old_live_tuples,
                     strategy: vacrel.bstrategy.clone(),
                 };
@@ -1612,7 +1614,9 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
                     index: &vacrel.indrels[idx],
                     heaprel: vacrel.rel,
                     analyze_only: false,
+                    report_progress: false,
                     estimated_count,
+                    message_level: ::types_error::DEBUG2,
                     num_heap_tuples: reltuples,
                     strategy: vacrel.bstrategy.clone(),
                 };
