@@ -86,18 +86,56 @@ pub fn gen_salt(salt_type: &str, rounds: i32) -> Result<String, CryptError> {
     })
 }
 
+// px-crypt.c:37-78 run_crypt_des / run_crypt_md5 / run_crypt_bf /
+// run_crypt_sha — the four handlers px_crypt_list points at.
+fn run_crypt_des(psw: &str, salt: &str) -> Result<String, CryptError> {
+    desc::run_crypt_des(psw.as_bytes(), salt.as_bytes())
+}
+fn run_crypt_md5(psw: &str, salt: &str) -> Result<String, CryptError> {
+    crypt_md5(psw.as_bytes(), salt.as_bytes()).map_err(CryptError::Message)
+}
+fn run_crypt_bf(psw: &str, salt: &str) -> Result<String, CryptError> {
+    bcrypt::crypt_bf(psw.as_bytes(), salt.as_bytes())
+}
+fn run_crypt_sha(psw: &str, salt: &str) -> Result<String, CryptError> {
+    shacrypt::crypt_sha(psw, salt)
+}
+
+type CryptFn = fn(&str, &str) -> Result<String, CryptError>;
+
+/// `px_crypt_list` (px-crypt.c:88-99), in C's exact order. Two rows carry
+/// behavior that is easy to lose by hand-writing the dispatch as an if-chain:
+///
+///   - `{"$2$", 3, NULL}` matches BEFORE the DES catch-all and has a NULL
+///     handler, so `px_crypt` returns NULL and pgcrypto.c:234 raises
+///     "crypt(3) returned NULL" (SQLSTATE 39000).
+///   - there is deliberately no `"$2b$"` row: `$2b$…` fails `strncmp` against
+///     `$2a$`/`$2x$` (byte 2) and against `$2$` (byte 2, 'b' vs '$'), so it
+///     reaches `{"", 0, run_crypt_des}` and is traditional-DES-hashed with the
+///     2-char salt `$2`.
+static PX_CRYPT_LIST: &[(&[u8], Option<CryptFn>)] = &[
+    (b"$2a$", Some(run_crypt_bf)),
+    (b"$2x$", Some(run_crypt_bf)),
+    (b"$2$", None),
+    (b"$1$", Some(run_crypt_md5)),
+    (b"$5$", Some(run_crypt_sha)),
+    (b"$6$", Some(run_crypt_sha)),
+    (b"_", Some(run_crypt_des)),
+    (b"", Some(run_crypt_des)),
+];
+
+/// `px_crypt` (px-crypt.c:101). C walks the table until either the zero-length
+/// catch-all id or a `strncmp` hit, then returns NULL when the matched row has
+/// no handler.
 pub fn crypt(password: &str, salt: &str) -> Result<String, CryptError> {
     let s = salt.as_bytes();
-    if s.starts_with(b"$1$") {
-        crypt_md5(password.as_bytes(), s).map_err(CryptError::Message)
-    } else if s.starts_with(b"$5$") || s.starts_with(b"$6$") {
-        shacrypt::crypt_sha(password, salt)
-    } else if s.starts_with(b"$2a$") || s.starts_with(b"$2x$") || s.starts_with(b"$2b$") {
-        bcrypt::crypt_bf(password.as_bytes(), s)
-    } else if s.first() == Some(&b'_') {
-        desc::crypt_xdes(password.as_bytes(), s)
-    } else {
-        desc::crypt_des(password.as_bytes(), s)
+    let (_, handler) = PX_CRYPT_LIST
+        .iter()
+        .find(|(id, _)| id.is_empty() || s.starts_with(id))
+        .expect("px_crypt_list ends with the zero-length catch-all row");
+    match handler {
+        None => Err(CryptError::Message("crypt(3) returned NULL".to_string())),
+        Some(f) => f(password, salt),
     }
 }
 

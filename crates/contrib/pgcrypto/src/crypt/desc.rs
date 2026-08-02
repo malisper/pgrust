@@ -19,6 +19,18 @@ pub fn crypt_des(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
+/// `run_crypt_des` (px-crypt.c:37) — the handler BOTH the `"_"` and the
+/// zero-length catch-all rows of `px_crypt_list` point at. `px_crypt_des`
+/// picks the xdes or the traditional branch off `setting[0] == '_'`
+/// (crypt-des.c:681), and each branch carries its own length check.
+pub fn run_crypt_des(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
+    if setting.first() == Some(&b'_') {
+        crypt_xdes(pw, setting)
+    } else {
+        crypt_des(pw, setting)
+    }
+}
+
 /// BSDI extended DES (`_`, xdes). `setting` is `_<4 rounds><4 salt>...`.
 pub fn crypt_xdes(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
     // C requires at least the `_` + 4 round chars + 4 salt chars.

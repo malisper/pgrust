@@ -68,11 +68,10 @@ fn arm() {
 //       => ERROR:  crypt(3) returned NULL
 //     SELECT crypt('foox','$2$')
 //       => ERROR:  crypt(3) returned NULL    (39000, re-captured x2 2026-08-01)
-// pgrust: crypt.rs matches only $2a$/$2x$/$2b$, so "$2$" falls through to
-// desc::crypt_des and SUCCEEDS with a 13-char traditional DES hash.
+// RETIRED (lane p1-pgcryptofam-fixes): crypt() now walks a port of the
+// px_crypt_list TABLE, so the NULL-handler row is reachable.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "KNOWN DIVERGENCE D1 (pgrust bug): C errors 'crypt(3) returned NULL' on a $2$ setting; pgrust DES-hashes it"]
 fn div_d1_dollar2_must_error() {
     for setting in ["$2$06$......................", "$2$"] {
         let got = crypt_ok("foox", setting);
@@ -93,11 +92,10 @@ fn div_d1_dollar2_must_error() {
 // Captured 18.3:
 //     SELECT crypt('foox','$2b$06$......................')
 //       => $2A2eTeOR8FRk
-// pgrust: crypt.rs routes $2b$ to bcrypt::crypt_bf → a $2b$-prefixed bcrypt
-// hash. Same input, entirely different algorithm and output.
+// RETIRED (lane p1-pgcryptofam-fixes): the ported table has no $2b$ row and
+// crypt-blowfish.c's setting[2] check accepts only 'a'/'x'.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "KNOWN DIVERGENCE D2 (pgrust bug): C traditional-DES-hashes a $2b$ setting (no $2b$ row in px_crypt_list); pgrust bcrypts it"]
 fn div_d2_dollar2b_is_des_in_c() {
     let got = crypt_ok("foox", "$2b$06$......................");
     assert_eq!(

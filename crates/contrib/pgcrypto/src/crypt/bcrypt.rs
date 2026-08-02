@@ -1,4 +1,4 @@
-//! bcrypt (`$2a$`/`$2x$`/`$2b$`) — Blowfish-based password hashing
+//! bcrypt (`$2a$`/`$2x$`) — Blowfish-based password hashing
 //! (`crypt-blowfish.c`). The expensive EksBlowfish key schedule is driven
 //! through the `blowfish` crate's `bcrypt` primitives (`bc_init_state`,
 //! `salted_expand_key`, `bc_expand_key`, `bc_encrypt`), which implement the
@@ -89,7 +89,7 @@ pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
     if setting.len() < 7 + 22
         || setting[0] != b'$'
         || setting[1] != b'2'
-        || (setting[2] != b'a' && setting[2] != b'x' && setting[2] != b'b')
+        || (setting[2] != b'a' && setting[2] != b'x')
         || setting[3] != b'$'
         || !setting[4].is_ascii_digit()
         || setting[4] > b'3'
