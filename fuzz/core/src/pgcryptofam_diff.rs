@@ -1,41 +1,53 @@
 //! pgcryptofam_diff: differential fuzz driver for contrib/pgcrypto's
-//! crypt() / gen_salt() / armor family vs verbatim vendored PostgreSQL 18.3
-//! C (csrc/pgcryptofam/, upstream sha 62d6c7d3df; lane p1-pgcryptofam).
-//! The C-side FFI surface is `crate::pgcryptofam`; this file is the
-//! comparison logic.
+//! crypt() / gen_salt() / armor / digest / hmac family vs verbatim vendored
+//! PostgreSQL 18.3 C (csrc/pgcryptofam/, upstream sha 62d6c7d3df; lane
+//! p1-pgcryptofam). The C-side FFI surface is `crate::pgcryptofam`; this file
+//! is the comparison logic.
 //!
-//! Input encoding: `data[0] % 5` = arm, `data[1]` = shape/mode byte,
+//! THE PGRUST SIDE IS ALWAYS THE SHIPPED `fc_*` WRAPPER, reached through
+//! `dfmgr::load_external_function("pgcrypto", ...)`. The driver never calls a
+//! core directly and the pgcrypto crate's module visibility is UNCHANGED —
+//! widening a product's API surface for a harness is a change to the product
+//! for the test's sake (coordinator ruling, 2026-08-02). Going through the
+//! wrappers also buys a plane a core-level driver would miss: the wrappers'
+//! own error translations (`crypt_err`'s 39000 NULL path, `px_err`'s 22023,
+//! `Cannot use "%s": %s`) are compared against the C wrapper bodies the
+//! oracle entries transcribe verbatim.
+//!
+//! Input encoding: `data[0] % 6` = arm, `data[1]` = shape/mode byte,
 //! `data[2..]` = payload (two-field splits carry an explicit length byte).
 //!
-//! Selector = data[0] % 5:
+//! Selector = data[0] % 6:
 //!
-//!   0 crypt        — pgcrypto::crypt::crypt(password, setting) vs
+//!   0 crypt        — fc `pg_crypt`(password, setting) vs
 //!                    pg_diff_pgcryptofam_crypt (px_crypt over the verbatim
 //!                    des/xdes/md5/bcrypt/sha-crypt engines + pg_crypt's own
-//!                    39000 "crypt(3) returned NULL" translation). The
-//!                    SQLSTATE plane rides the shipped `pg_crypt` fc wrapper
-//!                    (lib.rs crypt_err) whenever the GUC store is available.
-//!   1 gen_salt     — pgcrypto::crypt::gen_salt(algo, rounds) vs
-//!                    pg_diff_pgcryptofam_gen_salt. ENTROPY-CARVED, see
+//!                    39000 "crypt(3) returned NULL" translation).
+//!                    COST-BOUNDED, see below.
+//!   1 gen_salt     — fc `pg_gen_salt` / `pg_gen_salt_rounds`(algo, rounds)
+//!                    vs pg_diff_pgcryptofam_gen_salt. ENTROPY-CARVED, see
 //!                    DOMAIN CARVES; the rounds-validation behavior (xdes
 //!                    [1,0xFFFFFF] + even-count refusal + PX_XDES_ROUNDS=725,
-//!                    bf [4,31], sha [1000,999999999], unknown algo) is fully
-//!                    compared.
-//!   2 armor        — pgcrypto::pgp::armor::armor_encode(data, keys, values)
-//!                    vs pg_diff_pgcryptofam_armor, PLUS the SQL-array header
-//!                    validation plane: the shipped `pg_armor` fc wrapper
-//!                    (lib.rs parse_key_value_arrays) against a transcription
-//!                    of pgp-pgsql.c:772-834's check order.
-//!   3 dearmor      — pgcrypto::pgp::armor::armor_decode(text) vs
-//!                    pg_diff_pgcryptofam_dearmor (+ pg_dearmor's
-//!                    px_THROW_ERROR translation), with the shipped
-//!                    `pg_dearmor` fc wrapper carrying the SQLSTATE plane.
-//!   4 armor_headers— pgcrypto::pgp::armor::extract_armor_headers(text) vs
-//!                    pg_diff_pgcryptofam_armor_headers.
+//!                    bf [4,31], sha [1000,999999999], unknown algo,
+//!                    pg_strcasecmp matching) is fully compared.
+//!   2 armor        — fc `pg_armor`(data, keys[], values[]) vs
+//!                    pg_diff_pgcryptofam_armor, PLUS the SQL-array header
+//!                    validation plane: the wrapper's `parse_key_value_arrays`
+//!                    against a transcription of pgp-pgsql.c:772-834's check
+//!                    order (the only driver-side model in the target — see
+//!                    `c_model_validate`).
+//!   3 dearmor      — fc `pg_dearmor`(text) vs pg_diff_pgcryptofam_dearmor
+//!                    (+ pg_dearmor's px_THROW_ERROR translation).
+//!   4 digest       — fc `pg_digest`(data, name) vs
+//!                    pg_diff_pgcryptofam_digest (find_digest_provider ->
+//!                    downcase_truncate_identifier -> px_find_digest ->
+//!                    px_md_*).
+//!   5 hmac         — fc `pg_hmac`(data, key, name) vs
+//!                    pg_diff_pgcryptofam_hmac (verbatim px-hmac.c).
 //!
 //! COMPARISON PLANES (the harness contract):
 //!   P1 VALUE      — exact output image (hash string / salt string / armored
-//!                   bytes / decoded bytes / decoded (key,value) pairs).
+//!                   bytes / decoded bytes / digest / mac).
 //!   P2 VERDICT    — ok vs error, both directions.
 //!   P3 SQLSTATE   — the raised errcode. Error-plane parity IS "same
 //!                   behavior"; C's MAKE_SQLSTATE int and Rust's
@@ -46,21 +58,32 @@
 //!                   twin) where N is the TRUNCATED SIGNED int32. Compared:
 //!                   notice PRESENCE and the NUMERIC VALUES in the text. This
 //!                   plane is what witnesses the D12 clamp. Rust notices are
-//!                   captured through elog's emit_log_hook (see `notices`).
+//!                   captured through elog's emit_log_hook (`record_notice`);
+//!                   `notice_plane_is_live` fences it against going vacuous.
 //! Message TEXT is out of scope for comparison; it is captured and printed in
 //! the panic message for triage only.
 //!
-//! COST BOUNDING (mandatory — this is what keeps the harness alive).
+//! COST BOUNDING (mandatory — this is what keeps the harness alive AND what
+//! keeps the CI cluster floor inside its deadline; crypto targets are slow and a
+//! loose bound is how a floor under-runs).
 //! Before EITHER side runs, arm 0 calls `pg_diff_pgcryptofam_cost_probe` and
 //! SKIPS the exec — symmetrically, both sides, and counted in
-//! [`cost_skips`] — when the parsed work exceeds: bcrypt cost <= 6
-//! (2^6 = 64 key schedules), shacrypt rounds <= 5000, xdes count <= 4095.
-//! DES and md5 are constant work and are unbounded. The decision is made
-//! from the PROBE ALONE, before either implementation is touched, so the
-//! skip can never be asymmetric (an asymmetric skip fakes agreement). The
-//! bound holds even if the D12 product fix were reverted: the probe parses
-//! the setting the way the vendored preambles do and never runs crypt work,
-//! so the oracle does not depend on the fix to terminate.
+//! [`cost_skips`] — unless the parsed work is at or under:
+//!   * bcrypt  cost PINNED TO 04   (2^4 = 16 key schedules; every higher
+//!                                  cost, up to 2^31, is refused)
+//!   * shacrypt rounds PINNED TO 1000 (crypt-sha's own parser clamps every
+//!                                  below-range value UP to MIN = 1000, so
+//!                                  `cost <= 1000` accepts exactly the
+//!                                  clamped-to-minimum band — where the
+//!                                  D6/D12 NOTICE evidence lives — and
+//!                                  refuses the 5000 default and above)
+//!   * xdes    count <= 255        (of a 0xFFFFFF domain)
+//! DES and md5 are constant work (25 and 1000 iterations) and are unbounded.
+//! The decision is made from the PROBE ALONE, before either implementation is
+//! touched, so the skip can never be asymmetric — an asymmetric skip fakes
+//! agreement. The bound holds even if the D12 product fix were reverted: the
+//! probe parses the setting the way the vendored preambles do and never runs
+//! crypt work, so the oracle does not depend on the fix to terminate.
 //!
 //! D12 IS DELIBERATELY OUT OF THIS TARGET. `rounds >= 2^31` wedges any
 //! in-process harness BY DESIGN: C clamps to 1000, and the pre-fix Rust ran
@@ -68,23 +91,23 @@
 //! fuzzer instead of failing it. Witnessing D12 needs a child-process +
 //! SIGKILL timeout rig, not a fuzz arm; the in-tree witness is
 //! `pgcrypto::crypt::tests::shacrypt_rounds_out_of_range_clamps_like_c`
-//! (bounded by a finite CHECK_FOR_INTERRUPTS budget). The cost bound above
-//! makes every rounds >= 5001 setting a counted skip here.
+//! (bounded by a finite CHECK_FOR_INTERRUPTS budget). Every rounds > 1000
+//! setting is a counted skip here.
 //!
 //! EXHAUSTIVE-DIFF SWEEPS, NOT FUZZ ARMS. `to64`, `bf_encode`, `bf_decode`,
 //! `ascii_to_bin` and the xdes count encode have domains at or under ~2^32,
-//! so per the campaign's decision cascade they are ENUMERATED against the C
-//! entry points in `pgcryptofam_sweeps.rs` (total over the domain, stronger
-//! than any fuzz floor) instead of being sampled here.
+//! so per the campaign's decision cascade they are ENUMERATED in
+//! `pgcryptofam_sweeps.rs` (total over the domain, stronger than any fuzz
+//! floor) instead of being sampled here. That file documents which of them
+//! the shipped-wrapper-only route can and cannot address.
 //!
 //! DOMAIN CARVES (harness/caller contract, never pgrust behavior):
-//!   - arm 0/1 text domain: `crypt`/`gen_salt` take `&str` on the Rust side
-//!     and the SQL wrappers reach them through `String::from_utf8_lossy`.
-//!     The driver therefore materializes ONE byte string per field
-//!     (NUL-sanitized 0x00 -> 0x01, then lossy-decoded to UTF-8) and hands
-//!     the IDENTICAL bytes to both sides. Non-ASCII stays in the domain (D11
-//!     needs password bytes >= 0x80); only NUL and invalid-UTF-8 tails are
-//!     normalized, and PG `text` can carry neither.
+//!   - arm 0/1 text domain: the SQL wrappers reach the cores through
+//!     `String::from_utf8_lossy`, so the driver materializes ONE byte string
+//!     per field (NUL-sanitized 0x00 -> 0x01, then lossy-decoded to UTF-8)
+//!     and hands the IDENTICAL bytes to both sides. Non-ASCII stays in the
+//!     domain (D11 needs password bytes >= 0x80); only NUL and invalid-UTF-8
+//!     tails are normalized, and PG `text` can carry neither.
 //!   - ARM 1 ENTROPY CARVE. gen_salt output is entropy-dependent AND the two
 //!     sides consume DIFFERENT NUMBERS of random bytes for the same
 //!     algorithm (C's md5 generator packs 6 bytes into 8 chars; pgrust draws
@@ -98,25 +121,30 @@
 //!     can never fire and fake a one-sided error.
 //!   - arm 2 header keys/values are NUL-sanitized: C's pgp_armor_encode
 //!     takes `char **` cstrings, so an embedded NUL truncates C-side only.
-//!     PG `text` cannot carry NUL.
-//!   - arm 4 input text is NUL-sanitized: pgp_extract_armor_headers copies
-//!     the header block into a NUL-terminated buffer and splits it with
-//!     strchr/strstr, while the shipped Rust is slice-based. Arm 3
-//!     (pgp_armor_decode) is length-based on BOTH sides (memchr / slice
-//!     iteration) and therefore keeps raw bytes.
-//!   - arm 2/3 fc planes run unconditionally (neither wrapper reads a GUC).
-//!     Arm 0/1's fc plane runs only when the thread's GUC store came up:
-//!     `fc_pg_crypt`/`fc_pg_gen_salt*` open with `check_builtin_crypto()`,
-//!     which PANICS ("GUC store not initialized") without one. When the
-//!     store is unavailable the SQLSTATE plane for those two arms is
-//!     skipped and counted in [`fc_skips`]; P1/P2/P4 still run at full
-//!     strength off the cores. Under the dedicated `pgcryptofam_diff` fuzz
-//!     binary — the binary the CI cluster runs and the coverage capture replays —
-//!     the store comes up and the plane is live.
-//!   - the `pgp_armor_headers` SRF wrapper (fc_pgp_armor_headers) is NOT
-//!     driven: InitMaterializedSRF needs the executor's tuplestore/typcache
-//!     machinery, which every sibling lane carves as SRF-engine surface.
-//!     The compared body — `extract_armor_headers` — is driven directly.
+//!     PG `text` cannot carry NUL. Arm 3 (pgp_armor_decode) is length-based
+//!     on BOTH sides (memchr / slice iteration) and keeps raw bytes.
+//!   - arms 0/1 need the thread's GUC store: `fc_pg_crypt` /
+//!     `fc_pg_gen_salt*` open with `check_builtin_crypto()`, which PANICS
+//!     ("GUC store not initialized") without one. `guc_store_ready()` brings
+//!     it up once per thread (THREAD-LOCAL — it installs no process-global
+//!     seam, so it cannot poison a sibling lane's `Once`); if it cannot, the
+//!     two arms return without executing and are counted in [`fc_skips`].
+//!     `fc_plane_is_live` fences that against silent degradation.
+//!   - CHECK_FOR_INTERRUPTS is installed as a never-interrupting no-op. That
+//!     is the SYMMETRIC environment: the C oracle's shim CFI is a no-op too.
+//!     Cancellability (D19) is witnessed by pgcrypto's own `arm_cfi` tests.
+//!
+//! SURFACE NOT COVERED BY THIS TARGET (stated, not hidden):
+//!   `pgp_armor_headers` / `extract_armor_headers`. Its only shipped entry
+//!   point is `fc_pgp_armor_headers`, a MATERIALIZE-SRF wrapper:
+//!   `InitMaterializedSRF(.., flags = 0)` resolves its tupdesc through
+//!   `get_call_result_type` -> pg_proc, which needs the executor's
+//!   syscache/tuplestore fixtures — the SRF-engine surface every sibling
+//!   lane carves. With product visibility unchanged there is no non-SRF way
+//!   in, so this target does not cover it and does not pretend to. The C
+//!   oracle entry `pg_diff_pgcryptofam_armor_headers` exists and is
+//!   smoke-anchored in `pgcryptofam.rs`; routing a pgrust side to it needs
+//!   either a pinned pg_proc fixture or a proof, and is owed elsewhere.
 
 #![allow(dead_code)]
 
@@ -128,7 +156,7 @@ use types_error::{PgError, SqlState};
 use types_fmgr::{LocalFcinfo, PGFunction};
 
 use crate::pgcryptofam::{
-    c_armor, c_armor_headers, c_crypt_status, c_dearmor, c_gen_salt_status, cost_probe,
+    c_armor, c_crypt_status, c_dearmor, c_digest, c_gen_salt_status, c_hmac, cost_probe,
     PgcryptofamKind, PgcryptofamStatus,
 };
 
@@ -140,9 +168,15 @@ const ITOA64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn
 // COST BOUND (see the banner)
 // ---------------------------------------------------------------------------
 
-const BF_MAX_COST_ITERS: i64 = 1 << 6; // bcrypt cost <= 6
-const SHA_MAX_ROUNDS: i64 = 5_000;
-const XDES_MAX_COUNT: i64 = 4_095;
+/// bcrypt pinned to cost 04: `cost_probe` reports `1 << N`, and the vendored
+/// preamble only ever yields N >= 4, so this accepts exactly `$2a$04$` /
+/// `$2x$04$` and refuses 05..31.
+const BF_MAX_COST_ITERS: i64 = 1 << 4;
+/// shacrypt pinned to 1000 (see the banner).
+const SHA_MAX_ROUNDS: i64 = 1_000;
+/// xdes capped at 255 of a 0xFFFFFF domain (the encoder's full domain is
+/// swept exhaustively elsewhere; here only the DECODE path needs exercising).
+const XDES_MAX_COUNT: i64 = 255;
 
 thread_local! {
     static COST_SKIPS: RefCell<u64> = const { RefCell::new(0) };
@@ -156,8 +190,7 @@ pub fn cost_skips() -> u64 {
     COST_SKIPS.with(|c| *c.borrow())
 }
 
-/// Number of execs whose fc SQLSTATE plane was skipped for want of a GUC
-/// store (arms 0/1 only).
+/// Number of execs whose arm was skipped for want of a GUC store (arms 0/1).
 pub fn fc_skips() -> u64 {
     FC_SKIPS.with(|c| *c.borrow())
 }
@@ -192,9 +225,9 @@ fn record_notice(e: &PgError, output_to_server: &mut bool) {
 }
 
 /// Arm the NOTICE plane for this thread. `log_min_messages` must be at or
-/// below NOTICE or elog's policy never reaches the emit hook at all (the
-/// boot default is WARNING) — a silently unarmed hook would make P4 vacuous,
-/// which `notice_plane_is_live` fences.
+/// below NOTICE or elog's policy never reaches the emit hook at all (the boot
+/// default is WARNING) — a silently unarmed hook would make P4 vacuous, which
+/// `notice_plane_is_live` fences.
 fn arm_notice_capture() {
     thread_local! { static ARMED: RefCell<bool> = const { RefCell::new(false) }; }
     ARMED.with(|a| {
@@ -236,10 +269,10 @@ fn numbers_in(s: &str) -> Vec<i64> {
 }
 
 // ---------------------------------------------------------------------------
-// fc-wrapper plane plumbing (P3)
+// fc-wrapper plumbing — the ONLY route to the pgrust side
 // ---------------------------------------------------------------------------
 
-fn seams_setup() {
+pub(crate) fn seams_setup() {
     static SEAMS: Once = Once::new();
     SEAMS.call_once(|| {
         use std::panic::catch_unwind;
@@ -247,12 +280,11 @@ fn seams_setup() {
         // on a second install; every impl below is the standard environment
         // the sibling lanes install too).
         let _ = catch_unwind(pgcrypto::init_seams);
-        // ENVIRONMENT SEAM, not computation: the bcrypt / sha-crypt cost
-        // loops call CHECK_FOR_INTERRUPTS once per round (D19). The C oracle
-        // shim's CHECK_FOR_INTERRUPTS is likewise a no-op — there is no
-        // signal machinery on either side of this harness — so a
-        // never-interrupting impl is the SYMMETRIC environment. Cancellation
-        // behavior is witnessed by pgcrypto's own arm_cfi tests, not here.
+        // ENVIRONMENT SEAM, not computation: the bcrypt / sha-crypt / DES
+        // cost loops call CHECK_FOR_INTERRUPTS once per round (D19). The C
+        // oracle shim's CHECK_FOR_INTERRUPTS is likewise a no-op — there is
+        // no signal machinery on either side of this harness — so a
+        // never-interrupting impl is the SYMMETRIC environment.
         crate::install_check_for_interrupts_seam_once();
         // elog's errfinish reads it; the harness is never in parallel mode.
         let _ = catch_unwind(|| xact_seams::is_in_parallel_mode::set(|| false));
@@ -266,10 +298,10 @@ fn seams_setup() {
 /// Bring up the thread's GUC store if we can. `fc_pg_crypt`/`fc_pg_gen_salt*`
 /// open with `check_builtin_crypto()` -> `guc::GetConfigOption`, which
 /// `.expect("GUC store not initialized")`s without one. The store is
-/// THREAD-LOCAL, so this is retried per thread and never poisons a sibling
-/// lane's process-global seam (unlike installing guc/elog/guc_tables seams,
-/// which this deliberately does NOT do).
-fn guc_store_ready() -> bool {
+/// THREAD-LOCAL, so this is retried per thread and installs no process-global
+/// seam (unlike guc/elog/guc_tables::init_seams, which this deliberately does
+/// NOT call — those poison a sibling lane's `Once` in the shared test binary).
+pub(crate) fn guc_store_ready() -> bool {
     thread_local! { static TRIED: RefCell<Option<bool>> = const { RefCell::new(None) }; }
     TRIED.with(|t| {
         let mut t = t.borrow_mut();
@@ -288,13 +320,13 @@ fn guc_store_ready() -> bool {
     })
 }
 
-fn lookup(name: &str) -> PGFunction {
+pub(crate) fn lookup(name: &str) -> PGFunction {
     dfmgr::load_external_function("pgcrypto", name, true)
         .expect("pgcrypto library registered")
         .expect("function resolves")
 }
 
-fn fc_call<const N: usize>(
+pub(crate) fn fc_call<const N: usize>(
     f: PGFunction,
     m: mcx::Mcx<'_>,
     args: [Datum; N],
@@ -309,7 +341,7 @@ fn fc_call<const N: usize>(
 }
 
 /// 4B-U text/bytea varlena image: [4-byte LE header][payload].
-fn text_image(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn text_image(bytes: &[u8]) -> Vec<u8> {
     let total = bytes.len() + 4;
     let mut img = Vec::with_capacity(total);
     img.extend_from_slice(&((total as u32) << 2).to_le_bytes());
@@ -321,7 +353,7 @@ fn text_image(bytes: &[u8]) -> Vec<u8> {
 ///
 /// SAFETY: `d` came from a wrapper returning a live 4B-header varlena in the
 /// arming context.
-unsafe fn result_payload<'a>(d: Datum) -> &'a [u8] {
+pub(crate) unsafe fn result_payload<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
     let word = u32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)]);
     let total = (word >> 2) as usize;
@@ -364,16 +396,15 @@ impl<'a> Rdr<'a> {
 }
 
 /// The single byte string BOTH sides receive for a `text`-typed field: NUL
-/// sanitized then lossy-decoded to UTF-8, because the Rust cores take `&str`
-/// and the SQL wrappers reach them through `String::from_utf8_lossy`. See
-/// DOMAIN CARVES.
+/// sanitized then lossy-decoded to UTF-8, because the SQL wrappers reach the
+/// cores through `String::from_utf8_lossy`. See DOMAIN CARVES.
 fn text_field(bytes: &[u8]) -> String {
     let sanitized: Vec<u8> = bytes.iter().map(|&b| if b == 0 { 1 } else { b }).collect();
     String::from_utf8_lossy(&sanitized).into_owned()
 }
 
-/// NUL-sanitized bytes (no UTF-8 normalization) — the armor header / header
-/// text domain, where C uses cstrings but neither side decodes.
+/// NUL-sanitized bytes (no UTF-8 normalization) — the armor header domain,
+/// where C uses cstrings but neither side decodes.
 fn nul_free(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|&b| if b == 0 { 1 } else { b }).collect()
 }
@@ -390,12 +421,69 @@ fn oracle_note(st: &PgcryptofamStatus) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// KNOWN DIVERGENCE 1 — px_THROW_ERROR SQLSTATE (found by this target at plane
+// creation, 2026-08-02). CLASS: pgrust bug, NOT a harness defect.
+//
+// C: contrib/pgcrypto/pgp-pgsql.c `pg_dearmor` ends in `px_THROW_ERROR(res)`,
+// and px.c:94-108 raises everything except PXE_NO_RANDOM with
+// ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION = 39000. pgrust:
+// `fc_pg_dearmor` maps the failure through lib.rs `px_msg` -> `px_err`, which
+// hardcodes ERRCODE_INVALID_PARAMETER_VALUE = 22023 for every pgcrypto error.
+// Same message text ("Corrupt ascii-armor"), wrong SQLSTATE. The C side is
+// the running verbatim 18.3 oracle, not a reading of the source.
+//
+// The lane's product fixes are frozen, so the P3 plane carves EXACTLY this
+// pair and nothing else: C must be 39000 AND Rust must be 22023 AND the two
+// message texts must still agree. Any other (C, Rust) SQLSTATE pair still
+// fails, so a second, different mapping defect cannot hide behind this carve.
+// Deleting these two constants is the fix gate.
+// ---------------------------------------------------------------------------
+const C_SQLSTATE_39000: i32 = 3 + (9 << 6); // MAKE_SQLSTATE("39000")
+const RUST_SQLSTATE_22023: i32 = 2 + (2 << 6) + (2 << 18) + (3 << 24);
+
+fn is_known_px_throw_sqlstate_divergence(c: i32, r: i32) -> bool {
+    c == C_SQLSTATE_39000 && r == RUST_SQLSTATE_22023
+}
+
+// ---------------------------------------------------------------------------
+// KNOWN DIVERGENCE 2 — CRYPT VALUE IS `text` MADE FROM A `String` (found by
+// this target during the first smoke, 2026-08-02). CLASS: pgrust bug
+// (representational), NOT a harness defect.
+//
+// C's crypt() result BEGINS WITH A VERBATIM COPY OF THE SETTING BYTES:
+// crypt-des.c copies setting[0..2] (traditional) / setting[0..9] (xdes) and
+// crypt-md5.c re-emits the raw salt run, then appends an all-itoa64 hash.
+// pgrust's `crypt` returns `String`, and desc.rs / crypt.rs launder those
+// copied bytes through `String::from_utf8_lossy`. A setting whose copied
+// prefix is a TRUNCATED multibyte sequence is therefore U+FFFD-substituted
+// pgrust-side while C returns the raw bytes:
+//   crypt('foox', <U+FFFD>.)  C -> EF BF + "jiOTA4TpMRw"  (13 bytes)
+//                        pgrust -> EF BF BD + same 11     (14 bytes)
+// The setting is valid UTF-8; only the 2-byte PREFIX C copies out of it is
+// not, so this is reachable from SQL (PG does not encoding-validate a
+// function's text result). Fixing it is a signature change across the crypt
+// cone (`String` -> `Vec<u8>`), which this lane's frozen product cannot take.
+//
+// The carve is as narrow as the defect: when C's bytes are valid UTF-8 the
+// comparison is EXACT. Only when they are not does the driver compare
+// pgrust's output against C's LOSSY IMAGE — and the hash tail is all itoa64,
+// so a hash-value defect in that region is still caught byte for byte.
+// Deleting `crypt_value_matches` is the fix gate.
+// ---------------------------------------------------------------------------
+fn crypt_value_matches(rust: &[u8], c: &[u8]) -> bool {
+    match std::str::from_utf8(c) {
+        Ok(_) => rust == c,
+        Err(_) => rust == String::from_utf8_lossy(c).as_bytes(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // arm 0: crypt(password, setting)
 // ---------------------------------------------------------------------------
 
 /// px_crypt_list prefixes plus the two that are NOT rows (`$2b$`, `$2y$`) and
-/// a bare/garbage arm — the fuzzer reaches every engine through byte 1 of the
-/// mode byte instead of having to synthesize `$2a$` from scratch.
+/// a bare/garbage arm — the fuzzer reaches every engine through the mode byte
+/// instead of having to synthesize `$2a$` from scratch.
 const SETTING_PREFIXES: [&str; 12] = [
     "", "$1$", "$5$", "$6$", "$2a$", "$2x$", "$2$", "$2b$", "$2y$", "_", "$5$rounds=", "$7$",
 ];
@@ -407,10 +495,14 @@ fn run_crypt(r: &mut Rdr, mode: u8) {
     let mut setting = String::from(prefix);
     setting.push_str(&text_field(r.rest()));
 
-    // ---- COST BOUND: probe first, decide before either side runs ----
+    // ---- COST BOUND: probe first, decide before EITHER side runs ----
     let (kind, cost) = cost_probe(setting.as_bytes());
     if !cost_within_bound(kind, cost) {
         COST_SKIPS.with(|c| *c.borrow_mut() += 1);
+        return;
+    }
+    if !guc_store_ready() {
+        FC_SKIPS.with(|c| *c.borrow_mut() += 1);
         return;
     }
 
@@ -420,15 +512,24 @@ fn run_crypt(r: &mut Rdr, mode: u8) {
     // NOTICE rides a call that returns normally, and the plain `Result`
     // wrapper drops the status on Ok. ONE exec per side, always.
     let (cn, cst) = c_crypt_status(pw.as_bytes(), setting.as_bytes(), &mut out);
-    let cval: Option<Vec<u8>> = cn.map(|n| out[..n].to_vec());
+    let cval: Option<&[u8]> = cn.map(|n| &out[..n]);
     let cnotices: Vec<String> = if cst.notice_count > 0 {
         vec![cst.notice_str().to_string()]
     } else {
         Vec::new()
     };
-    let cerr = if cval.is_none() { Some(&cst) } else { None };
 
-    let rres = pgcrypto::crypt::crypt(&pw, &setting);
+    let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
+    let pwi = text_image(pw.as_bytes());
+    let sti = text_image(setting.as_bytes());
+    let fc = fc_call(
+        lookup("pg_crypt"),
+        ctx.mcx(),
+        [
+            Datum::from_usize(pwi.as_ptr() as usize),
+            Datum::from_usize(sti.as_ptr() as usize),
+        ],
+    );
     let rnotices: Vec<String> = take_notices().into_iter().map(|(_, m)| m).collect();
 
     // ---- P4: NOTICE plane ----
@@ -445,112 +546,31 @@ fn run_crypt(r: &mut Rdr, mode: u8) {
         );
     }
 
-    // ---- P1/P2: value + verdict ----
-    match (&cval, &rres) {
-        (Some(cv), Ok(rv)) => assert!(
-            crypt_value_matches(rv, cv),
-            "crypt({pw:?},{setting:?}) value: Rust {:?} vs C {:?}",
-            rv.as_bytes(),
-            cv
-        ),
-        (None, Err(_)) => {}
-        (Some(cv), Err(e)) => panic!(
-            "crypt({pw:?},{setting:?}): C ok {:?}, Rust errored {}",
-            String::from_utf8_lossy(cv),
-            crypt_err_note(e)
-        ),
-        (None, Ok(rv)) => panic!(
-            "crypt({pw:?},{setting:?}): Rust ok {rv:?}, {}",
-            oracle_note(&cst)
-        ),
-    }
-
-    // ---- P3: SQLSTATE, through the shipped fc wrapper ----
-    if !guc_store_ready() {
-        FC_SKIPS.with(|c| *c.borrow_mut() += 1);
-        return;
-    }
-    let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
-    let pwi = text_image(pw.as_bytes());
-    let sti = text_image(setting.as_bytes());
-    let fc = fc_call(
-        lookup("pg_crypt"),
-        ctx.mcx(),
-        [
-            Datum::from_usize(pwi.as_ptr() as usize),
-            Datum::from_usize(sti.as_ptr() as usize),
-        ],
-    );
-    drop(take_notices());
-    match (&cval, fc) {
+    // ---- P1/P2/P3 ----
+    match (cval, fc) {
         (Some(cv), Ok(d)) => {
             // SAFETY: fc_pg_crypt returns a live text varlena in ctx.
             let rv = unsafe { result_payload(d) };
             assert!(
-                crypt_value_matches(&String::from_utf8_lossy(rv), cv),
-                "fc pg_crypt({pw:?},{setting:?}) value: Rust {rv:?} vs C {cv:?}"
+                crypt_value_matches(rv, cv),
+                "crypt({pw:?},{setting:?}) value: Rust {rv:?} vs C {cv:?}"
             );
         }
-        (None, Err(e)) => {
-            let st = cerr.expect("error status");
-            assert_eq!(
-                e.sqlstate.0,
-                st.sqlstate,
-                "fc pg_crypt({pw:?},{setting:?}) SQLSTATE: Rust {:?} vs {}",
-                e.message,
-                oracle_note(st)
-            );
-        }
-        (Some(_), Err(e)) => panic!(
-            "fc pg_crypt({pw:?},{setting:?}): C ok, fc errored {:?}",
-            e.message
-        ),
-        (None, Ok(_)) => panic!(
-            "fc pg_crypt({pw:?},{setting:?}): fc ok, {}",
+        (None, Err(e)) => assert_eq!(
+            e.sqlstate.0,
+            cst.sqlstate,
+            "crypt({pw:?},{setting:?}) SQLSTATE: Rust {:?}/{} vs {}",
+            e.message,
+            e.sqlstate.0,
             oracle_note(&cst)
         ),
-    }
-}
-
-
-// ---------------------------------------------------------------------------
-// KNOWN DIVERGENCE — CRYPT VALUE IS `String`, C's IS BYTES (found by this
-// target during the smoke, 2026-08-02). CLASS: pgrust bug (representational),
-// NOT a harness defect.
-//
-// C's crypt() result BEGINS WITH A VERBATIM COPY OF THE SETTING BYTES:
-// crypt-des.c copies setting[0..2] (traditional) / setting[0..9] (xdes) and
-// crypt-md5.c re-emits the raw salt run, then appends an all-itoa64 hash.
-// pgrust's `crypt` returns `String`, and desc.rs / crypt.rs launder those
-// copied bytes through `String::from_utf8_lossy`. A setting whose copied
-// prefix is a TRUNCATED multibyte sequence is therefore U+FFFD-substituted
-// pgrust-side while C returns the raw bytes:
-//   crypt('foox', E'\uFFFD.')  C -> EF BF + "jiOTA4TpMRw"   (13 bytes)
-//                               pgrust -> EF BF BD + same 11 (14 bytes)
-// The setting is valid UTF-8; only the 2-byte PREFIX C copies out of it is
-// not, so this is reachable from SQL (PG does not encoding-validate a
-// function's text result). Fixing it is a signature change across the crypt
-// cone (`String` -> `Vec<u8>`), which this lane's frozen product cannot take.
-//
-// The carve is as narrow as the defect: when C's bytes are valid UTF-8 the
-// comparison is EXACT. Only when they are not does the driver compare
-// pgrust's output against C's LOSSY IMAGE — and the hash tail is all itoa64,
-// so a hash-value defect in that region is still caught byte for byte.
-// Deleting `crypt_value_matches` is the fix gate.
-fn crypt_value_matches(rust: &str, c: &[u8]) -> bool {
-    match std::str::from_utf8(c) {
-        Ok(exact) => rust == exact,
-        Err(_) => rust == String::from_utf8_lossy(c),
-    }
-}
-
-fn crypt_err_note(e: &pgcrypto::crypt::CryptError) -> String {
-    match e {
-        pgcrypto::crypt::CryptError::Message(m) => format!("Message({m:?})"),
-        pgcrypto::crypt::CryptError::Unsupported(m) => format!("Unsupported({m:?})"),
-        pgcrypto::crypt::CryptError::Pg(e) => {
-            format!("Pg(sqlstate={} msg={:?})", e.sqlstate.0, e.message)
-        }
+        (Some(cv), Err(e)) => panic!(
+            "crypt({pw:?},{setting:?}): C ok {:?}, Rust errored {:?}/{}",
+            String::from_utf8_lossy(cv),
+            e.message,
+            e.sqlstate.0
+        ),
+        (None, Ok(_)) => panic!("crypt({pw:?},{setting:?}): Rust ok, {}", oracle_note(&cst)),
     }
 }
 
@@ -593,13 +613,23 @@ const ROUNDS_CORNERS: [i32; 16] = [
 ];
 
 fn run_gen_salt(r: &mut Rdr, mode: u8) {
+    if !guc_store_ready() {
+        FC_SKIPS.with(|c| *c.borrow_mut() += 1);
+        return;
+    }
     let algo = if mode & 1 == 0 {
         SALT_ALGOS[(mode >> 4) as usize % SALT_ALGOS.len()].to_string()
     } else {
         let n = r.u8() as usize % 24;
         text_field(r.bytes(n))
     };
-    let rounds = if mode & 2 == 0 {
+    // mode bit 2 picks the ONE-argument wrapper, which pins rounds to 0 on the
+    // pgrust side; the oracle is then handed rounds = 0 too, so the two sides
+    // stay on the same input.
+    let one_arg = mode & 4 == 0;
+    let rounds = if one_arg {
+        0
+    } else if mode & 2 == 0 {
         ROUNDS_CORNERS[(mode >> 2) as usize % ROUNDS_CORNERS.len()]
     } else {
         r.i32()
@@ -616,33 +646,54 @@ fn run_gen_salt(r: &mut Rdr, mode: u8) {
 
     let mut out = vec![0u8; 256];
     let (cn, st) = c_gen_salt_status(algo.as_bytes(), rounds, &entropy, &mut out);
-    let cval: Option<Vec<u8>> = cn.map(|n| out[..n].to_vec());
+    let cval: Option<&[u8]> = cn.map(|n| &out[..n]);
 
+    let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
+    let ai = text_image(algo.as_bytes());
+    let fc = if one_arg {
+        fc_call(
+            lookup("pg_gen_salt"),
+            ctx.mcx(),
+            [Datum::from_usize(ai.as_ptr() as usize)],
+        )
+    } else {
+        fc_call(
+            lookup("pg_gen_salt_rounds"),
+            ctx.mcx(),
+            [
+                Datum::from_usize(ai.as_ptr() as usize),
+                Datum::from_i32(rounds),
+            ],
+        )
+    };
     drop(take_notices());
-    let rres = pgcrypto::crypt::gen_salt(&algo, rounds);
 
-    // ---- P2: verdict ----
-    match (&cval, &rres) {
-        (Some(cv), Ok(rv)) => {
+    match (cval, fc) {
+        (Some(cv), Ok(d)) => {
+            // SAFETY: fc_pg_gen_salt* returns a live text varlena in ctx.
+            let rv = unsafe { result_payload(d) };
             // ---- P1 (carved): length + deterministic prefix + alphabet ----
             assert_eq!(
                 rv.len(),
                 cv.len(),
-                "gen_salt({algo:?},{rounds}) length: C {:?} vs Rust {rv:?}",
-                String::from_utf8_lossy(cv)
+                "gen_salt({algo:?},{rounds}) length: C {:?} vs Rust {:?}",
+                String::from_utf8_lossy(cv),
+                String::from_utf8_lossy(rv)
             );
             let plen = deterministic_prefix_len(cv);
             assert_eq!(
-                &rv.as_bytes()[..plen],
+                &rv[..plen],
                 &cv[..plen],
-                "gen_salt({algo:?},{rounds}) deterministic prefix: C {:?} vs Rust {rv:?}",
-                String::from_utf8_lossy(cv)
+                "gen_salt({algo:?},{rounds}) deterministic prefix: C {:?} vs Rust {:?}",
+                String::from_utf8_lossy(cv),
+                String::from_utf8_lossy(rv)
             );
-            for (i, &b) in rv.as_bytes()[plen..].iter().enumerate() {
+            for (i, &b) in rv[plen..].iter().enumerate() {
                 assert!(
                     ITOA64.contains(&b),
                     "gen_salt({algo:?},{rounds}) random tail byte {i} = {b:#04x} \
-                     is off the itoa64 alphabet (Rust {rv:?})"
+                     is off the itoa64 alphabet (Rust {:?})",
+                    String::from_utf8_lossy(rv)
                 );
             }
             // ...and C's own tail must be in the alphabet too (the plane is
@@ -654,61 +705,20 @@ fn run_gen_salt(r: &mut Rdr, mode: u8) {
                 );
             }
         }
-        (None, Err(_)) => {}
-        (Some(cv), Err(e)) => panic!(
-            "gen_salt({algo:?},{rounds}): C ok {:?}, Rust errored {}",
-            String::from_utf8_lossy(cv),
-            crypt_err_note(e)
-        ),
-        (None, Ok(rv)) => panic!(
-            "gen_salt({algo:?},{rounds}): Rust ok {rv:?}, {}",
-            oracle_note(&st)
-        ),
-    }
-
-    // ---- P3: SQLSTATE through the shipped fc wrapper ----
-    if !guc_store_ready() {
-        FC_SKIPS.with(|c| *c.borrow_mut() += 1);
-        return;
-    }
-    let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
-    let ai = text_image(algo.as_bytes());
-    let fname = if mode & 4 == 0 && rounds == 0 {
-        "pg_gen_salt"
-    } else {
-        "pg_gen_salt_rounds"
-    };
-    let fc = if fname == "pg_gen_salt" {
-        fc_call(
-            lookup(fname),
-            ctx.mcx(),
-            [Datum::from_usize(ai.as_ptr() as usize)],
-        )
-    } else {
-        fc_call(
-            lookup(fname),
-            ctx.mcx(),
-            [
-                Datum::from_usize(ai.as_ptr() as usize),
-                Datum::from_i32(rounds),
-            ],
-        )
-    };
-    drop(take_notices());
-    match (&cval, fc) {
-        (Some(_), Ok(_)) => {}
         (None, Err(e)) => assert_eq!(
             e.sqlstate.0,
             st.sqlstate,
-            "fc {fname}({algo:?},{rounds}) SQLSTATE: Rust {:?} vs {}",
+            "gen_salt({algo:?},{rounds}) SQLSTATE: Rust {:?}/{} vs {}",
             e.message,
+            e.sqlstate.0,
             oracle_note(&st)
         ),
-        (Some(_), Err(e)) => panic!(
-            "fc {fname}({algo:?},{rounds}): C ok, fc errored {:?}",
+        (Some(cv), Err(e)) => panic!(
+            "gen_salt({algo:?},{rounds}): C ok {:?}, Rust errored {:?}",
+            String::from_utf8_lossy(cv),
             e.message
         ),
-        (None, Ok(_)) => panic!("fc {fname}({algo:?},{rounds}): fc ok, {}", oracle_note(&st)),
+        (None, Ok(_)) => panic!("gen_salt({algo:?},{rounds}): Rust ok, {}", oracle_note(&st)),
     }
 }
 
@@ -744,10 +754,11 @@ fn deterministic_prefix_len(c: &[u8]) -> usize {
 /// `fc_pg_armor` against C SOURCE rather than against a running C body. Every
 /// row is a live-18.3 captured verdict (lane p1-pgcrypto D8/D9/D10). The
 /// armor VALUE plane below is C-oracle-witnessed as usual.
+///
+/// NB: C's two NULL-element checks (ERRCODE_NULL_VALUE_NOT_ALLOWED) are out
+/// of the fuzz domain — the driver never builds a text[] with NULLs.
+/// pgcrypto's own `armor_header_tests` cover both.
 fn c_model_validate(keys: &[Vec<u8>], values: &[Vec<u8>]) -> Option<(&'static str, SqlState)> {
-    // NB: C's two NULL-element checks (ERRCODE_NULL_VALUE_NOT_ALLOWED) are
-    // out of the fuzz domain — the driver never builds a text[] with NULLs.
-    // pgcrypto's own armor_header_tests cover both.
     use types_error::{ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INVALID_PARAMETER_VALUE};
     if keys.len() != values.len() {
         return Some(("mismatched array dimensions", ERRCODE_ARRAY_SUBSCRIPT_ERROR));
@@ -865,7 +876,7 @@ fn run_armor(r: &mut Rdr, mode: u8) {
         return;
     }
 
-    // ---- P1/P2: armored value, C oracle vs shipped core AND fc wrapper ----
+    // ---- P1/P2: armored value, C oracle vs the shipped wrapper ----
     let pairs: Vec<(&[u8], &[u8])> = keys
         .iter()
         .zip(values.iter())
@@ -875,53 +886,24 @@ fn run_armor(r: &mut Rdr, mode: u8) {
     let n = c_armor(&data, &pairs, &mut out).expect("pgp_armor_encode never raises");
     let cval = &out[..n];
 
-    let rval = pgcrypto::pgp::armor::armor_encode(&data, &keys, &values);
-    assert_eq!(
-        rval,
-        cval,
-        "armor_encode(datalen={},{} headers) value",
-        data.len(),
-        nheaders
-    );
-
     let fcd = fc.expect("checked Ok above");
     // SAFETY: fc_pg_armor returns a live bytea varlena in ctx.
     let fcv = unsafe { result_payload(fcd) };
-    assert_eq!(fcv, cval, "fc pg_armor(datalen={}) value", data.len());
+    assert_eq!(
+        fcv,
+        cval,
+        "fc pg_armor(datalen={}, {nheaders} headers) value",
+        data.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
-// arms 3/4: dearmor / pgp_armor_headers
+// arm 3: dearmor(text)
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// KNOWN DIVERGENCE — DEARMOR/HEADERS SQLSTATE (found by this target at plane
-// creation, 2026-08-02). CLASS: pgrust bug, NOT a harness defect.
-//
-// C: contrib/pgcrypto/pgp-pgsql.c `pg_dearmor` (and `pgp_armor_headers`) end
-// in `px_THROW_ERROR(res)`, and px.c:94-108 raises everything except
-// PXE_NO_RANDOM with ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION = 39000.
-// pgrust: `fc_pg_dearmor` maps the failure through lib.rs `px_msg` ->
-// `px_err`, which hardcodes ERRCODE_INVALID_PARAMETER_VALUE = 22023 for every
-// pgcrypto error. Same message text ("Corrupt ascii-armor"), wrong SQLSTATE.
-// The C side is the running verbatim 18.3 oracle, not a reading of the source.
-//
-// The lane's product fixes are frozen, so the P3 plane carves EXACTLY this
-// pair and nothing else: C must be 39000 AND Rust must be 22023 AND the two
-// message texts must agree. Any other (C, Rust) SQLSTATE pair still fails,
-// so a second, different mapping defect cannot hide behind this carve.
-// Deleting these two constants is the fix gate.
-const C_SQLSTATE_39000: i32 = 3 + (9 << 6); // MAKE_SQLSTATE("39000")
-const RUST_SQLSTATE_22023: i32 = 2 + (2 << 6) + (2 << 18) + (3 << 24);
-
-fn is_known_px_throw_sqlstate_divergence(c: i32, r: i32) -> bool {
-    c == C_SQLSTATE_39000 && r == RUST_SQLSTATE_22023
-}
-
 
 /// Build an armored envelope with the C encoder, then apply one fuzz-chosen
-/// mutation. Without this the decode arms almost never reach past the header
-/// scan; with it they reach the base64/CRC/header-split interiors.
+/// mutation. Without this the decode arm almost never reaches past the header
+/// scan; with it, it reaches the base64/CRC/header-split interiors.
 fn armored_input(r: &mut Rdr, mode: u8) -> Vec<u8> {
     if mode & 1 == 0 {
         return r.rest().to_vec();
@@ -933,12 +915,9 @@ fn armored_input(r: &mut Rdr, mode: u8) -> Vec<u8> {
         let kl = r.u8() as usize % 12;
         let vl = r.u8() as usize % 16;
         let mut k = nul_free(r.bytes(kl));
-        if k.is_empty() {
-            k = format!("K{i}").into_bytes();
-        }
-        // C's encoder emits "key: value\n"; a key already containing ": " or a
-        // newline would produce a stream the SQL surface can never make (the
-        // validation arm 2 covers those rejections).
+        // C's encoder emits "key: value\n"; a key already containing ": " or
+        // a newline would produce a stream the SQL surface can never make
+        // (arm 2 covers those rejections).
         k.retain(|&b| b != b'\n' && b != b':');
         if k.is_empty() {
             k = format!("K{i}").into_bytes();
@@ -960,11 +939,10 @@ fn armored_input(r: &mut Rdr, mode: u8) -> Vec<u8> {
     let mut env = out[..n].to_vec();
 
     // one mutation, driven by the remaining payload
-    let kind = r.u8() % 6;
-    match kind {
+    match r.u8() % 6 {
         0 => {}
         1 => {
-            // flip one byte
+            // flip one bit
             if !env.is_empty() {
                 let pos = (r.u8() as usize | ((r.u8() as usize) << 8)) % env.len();
                 env[pos] ^= 1 << (r.u8() % 8);
@@ -1011,30 +989,7 @@ fn run_dearmor(r: &mut Rdr, mode: u8) {
 
     let mut out = vec![0u8; text.len() + 4096];
     let cres = c_dearmor(&text, &mut out);
-    let rres = pgcrypto::pgp::armor::armor_decode(&text);
 
-    match (&cres, &rres) {
-        (Ok(n), Ok(rv)) => assert_eq!(
-            &rv[..],
-            &out[..*n],
-            "dearmor({:?}) value",
-            String::from_utf8_lossy(&text)
-        ),
-        (Err(_), Err(())) => {}
-        (Ok(n), Err(())) => panic!(
-            "dearmor({:?}): C ok ({} bytes), Rust errored",
-            String::from_utf8_lossy(&text),
-            n
-        ),
-        (Err(st), Ok(rv)) => panic!(
-            "dearmor({:?}): Rust ok ({} bytes), {}",
-            String::from_utf8_lossy(&text),
-            rv.len(),
-            oracle_note(st)
-        ),
-    }
-
-    // ---- P3: SQLSTATE through the shipped fc wrapper (no GUC needed) ----
     let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
     let ti = text_image(&text);
     let fc = fc_call(
@@ -1046,14 +1001,19 @@ fn run_dearmor(r: &mut Rdr, mode: u8) {
         (Ok(n), Ok(d)) => {
             // SAFETY: fc_pg_dearmor returns a live bytea varlena in ctx.
             let rv = unsafe { result_payload(d) };
-            assert_eq!(rv, &out[..*n], "fc pg_dearmor value");
+            assert_eq!(
+                rv,
+                &out[..*n],
+                "dearmor({:?}) value",
+                String::from_utf8_lossy(&text)
+            );
         }
         (Err(st), Err(e)) => {
             if !is_known_px_throw_sqlstate_divergence(st.sqlstate, e.sqlstate.0) {
                 assert_eq!(
                     e.sqlstate.0,
                     st.sqlstate,
-                    "fc pg_dearmor({:?}) SQLSTATE: Rust {:?} vs {}",
+                    "dearmor({:?}) SQLSTATE: Rust {:?} vs {}",
                     String::from_utf8_lossy(&text),
                     e.message,
                     oracle_note(st)
@@ -1064,48 +1024,129 @@ fn run_dearmor(r: &mut Rdr, mode: u8) {
             assert_eq!(
                 e.message,
                 st.msg_str(),
-                "fc pg_dearmor({:?}) message under the known-SQLSTATE carve",
+                "dearmor({:?}) message under the known-SQLSTATE carve",
                 String::from_utf8_lossy(&text)
             );
         }
-        (Ok(_), Err(e)) => panic!("fc pg_dearmor: C ok, fc errored {:?}", e.message),
-        (Err(st), Ok(_)) => panic!("fc pg_dearmor: fc ok, {}", oracle_note(st)),
-    }
-}
-
-fn run_armor_headers(r: &mut Rdr, mode: u8) {
-    // DOMAIN CARVE: NUL-sanitized (C splits a NUL-terminated copy).
-    let text = nul_free(&armored_input(r, mode));
-
-    let cres = c_armor_headers(&text);
-    let rres = pgcrypto::pgp::armor::extract_armor_headers(&text);
-
-    match (&cres, &rres) {
-        (Ok(cp), Ok(rp)) => {
-            assert_eq!(
-                rp.len(),
-                cp.len(),
-                "pgp_armor_headers({:?}) header count: C {cp:?} vs Rust {rp:?}",
-                String::from_utf8_lossy(&text)
-            );
-            for (i, (c, rv)) in cp.iter().zip(rp.iter()).enumerate() {
-                assert_eq!(
-                    rv, c,
-                    "pgp_armor_headers({:?}) header {i}",
-                    String::from_utf8_lossy(&text)
-                );
-            }
-        }
-        (Err(_), Err(())) => {}
-        (Ok(cp), Err(())) => panic!(
-            "pgp_armor_headers({:?}): C ok ({cp:?}), Rust errored",
-            String::from_utf8_lossy(&text)
+        (Ok(n), Err(e)) => panic!(
+            "dearmor({:?}): C ok ({n} bytes), Rust errored {:?}",
+            String::from_utf8_lossy(&text),
+            e.message
         ),
-        (Err(st), Ok(rp)) => panic!(
-            "pgp_armor_headers({:?}): Rust ok ({rp:?}), {}",
+        (Err(st), Ok(_)) => panic!(
+            "dearmor({:?}): Rust ok, {}",
             String::from_utf8_lossy(&text),
             oracle_note(st)
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// arms 4/5: digest(data, type) and hmac(data, key, type)
+// ---------------------------------------------------------------------------
+
+/// Every name `px_find_digest` resolves, plus case variants (C downcases via
+/// `downcase_truncate_identifier`, pgrust via `to_ascii_lowercase`) and the
+/// misses that drive `Cannot use "%s": No such hash algorithm`.
+const HASH_NAMES: [&str; 16] = [
+    "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "MD5", "SHA256", "Sha512", "crc32", "",
+    "sha", "md", "sha2", "sha1 ", " md5",
+];
+
+fn hash_name(r: &mut Rdr, mode: u8) -> String {
+    if mode & 1 == 0 {
+        HASH_NAMES[(mode >> 2) as usize % HASH_NAMES.len()].to_string()
+    } else {
+        let n = r.u8() as usize % 80; // spans NAMEDATALEN-1 = 63 truncation
+        text_field(r.bytes(n))
+    }
+}
+
+fn run_digest(r: &mut Rdr, mode: u8) {
+    let name = hash_name(r, mode);
+    let data = r.rest().to_vec();
+
+    let mut out = vec![0u8; 256];
+    let cres = c_digest(name.as_bytes(), &data, &mut out);
+
+    let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
+    let di = text_image(&data);
+    let ni = text_image(name.as_bytes());
+    // fc_pg_digest(arg0 = data, arg1 = type)
+    let fc = fc_call(
+        lookup("pg_digest"),
+        ctx.mcx(),
+        [
+            Datum::from_usize(di.as_ptr() as usize),
+            Datum::from_usize(ni.as_ptr() as usize),
+        ],
+    );
+    match (&cres, fc) {
+        (Ok(n), Ok(d)) => {
+            // SAFETY: fc_pg_digest returns a live bytea varlena in ctx.
+            let rv = unsafe { result_payload(d) };
+            assert_eq!(rv, &out[..*n], "digest({name:?}, {} bytes) value", data.len());
+        }
+        (Err(st), Err(e)) => assert_eq!(
+            e.sqlstate.0,
+            st.sqlstate,
+            "digest({name:?}) SQLSTATE: Rust {:?}/{} vs {}",
+            e.message,
+            e.sqlstate.0,
+            oracle_note(st)
+        ),
+        (Ok(_), Err(e)) => panic!("digest({name:?}): C ok, Rust errored {:?}", e.message),
+        (Err(st), Ok(_)) => panic!("digest({name:?}): Rust ok, {}", oracle_note(st)),
+    }
+}
+
+fn run_hmac(r: &mut Rdr, mode: u8) {
+    let name = hash_name(r, mode);
+    // Key lengths straddle both block sizes (64 and 128) so the
+    // key-longer-than-B hashing branch and the zero-pad branch both run.
+    let keylen = r.u8() as usize % 160;
+    let key = r.bytes(keylen).to_vec();
+    let data = r.rest().to_vec();
+
+    let mut out = vec![0u8; 256];
+    let cres = c_hmac(name.as_bytes(), &key, &data, &mut out);
+
+    let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
+    let di = text_image(&data);
+    let ki = text_image(&key);
+    let ni = text_image(name.as_bytes());
+    // fc_pg_hmac(arg0 = data, arg1 = key, arg2 = type)
+    let fc = fc_call(
+        lookup("pg_hmac"),
+        ctx.mcx(),
+        [
+            Datum::from_usize(di.as_ptr() as usize),
+            Datum::from_usize(ki.as_ptr() as usize),
+            Datum::from_usize(ni.as_ptr() as usize),
+        ],
+    );
+    match (&cres, fc) {
+        (Ok(n), Ok(d)) => {
+            // SAFETY: fc_pg_hmac returns a live bytea varlena in ctx.
+            let rv = unsafe { result_payload(d) };
+            assert_eq!(
+                rv,
+                &out[..*n],
+                "hmac({name:?}, keylen {}, {} bytes) value",
+                key.len(),
+                data.len()
+            );
+        }
+        (Err(st), Err(e)) => assert_eq!(
+            e.sqlstate.0,
+            st.sqlstate,
+            "hmac({name:?}) SQLSTATE: Rust {:?}/{} vs {}",
+            e.message,
+            e.sqlstate.0,
+            oracle_note(st)
+        ),
+        (Ok(_), Err(e)) => panic!("hmac({name:?}): C ok, Rust errored {:?}", e.message),
+        (Err(st), Ok(_)) => panic!("hmac({name:?}): Rust ok, {}", oracle_note(st)),
     }
 }
 
@@ -1118,7 +1159,7 @@ pub fn pgcryptofam_diff(data: &[u8]) {
         return;
     }
     seams_setup();
-    let sel = data[0] % 5;
+    let sel = data[0] % 6;
     let mode = data[1];
     let mut r = Rdr::new(&data[2..]);
     match sel {
@@ -1126,7 +1167,8 @@ pub fn pgcryptofam_diff(data: &[u8]) {
         1 => run_gen_salt(&mut r, mode),
         2 => run_armor(&mut r, mode),
         3 => run_dearmor(&mut r, mode),
-        _ => run_armor_headers(&mut r, mode),
+        4 => run_digest(&mut r, mode),
+        _ => run_hmac(&mut r, mode),
     }
 }
 
@@ -1147,8 +1189,20 @@ mod tests {
     #[test]
     fn notice_plane_is_live() {
         seams_setup();
+        assert!(guc_store_ready(), "GUC store did not come up");
         drop(take_notices());
-        pgcrypto::crypt::crypt("pw", "$5$rounds=10$abcdefgh").expect("clamped shacrypt");
+        let ctx = mcx::MemoryContext::new("pgcryptofam_notice_probe");
+        let pw = text_image(b"pw");
+        let st = text_image(b"$5$rounds=10$abcdefgh");
+        fc_call(
+            lookup("pg_crypt"),
+            ctx.mcx(),
+            [
+                Datum::from_usize(pw.as_ptr() as usize),
+                Datum::from_usize(st.as_ptr() as usize),
+            ],
+        )
+        .expect("clamped shacrypt succeeds");
         let n = take_notices();
         assert_eq!(n.len(), 1, "Rust NOTICE not captured: {n:?}");
         assert_eq!(
@@ -1159,85 +1213,104 @@ mod tests {
         );
         // ...and the C oracle records its own on the same setting.
         let mut out = [0u8; 256];
-        let (_, st) = c_crypt_status(b"pw", b"$5$rounds=10$abcdefgh", &mut out);
-        assert_eq!(st.notice_count, 1, "C NOTICE not recorded");
-        assert_eq!(numbers_in(st.notice_str()), vec![10, 1000, 1000]);
+        let (_, cst) = c_crypt_status(b"pw", b"$5$rounds=10$abcdefgh", &mut out);
+        assert_eq!(cst.notice_count, 1, "C NOTICE not recorded");
+        assert_eq!(numbers_in(cst.notice_str()), vec![10, 1000, 1000]);
     }
 
-    /// The fc SQLSTATE plane must be LIVE, not silently degraded: the GUC
-    /// store has to come up (fc_pg_crypt/fc_pg_gen_salt* panic without one)
-    /// and the crypt/gen_salt arms must record zero fc skips afterwards. A
-    /// regression here turns P3 into a no-op for arms 0 and 1 while every
-    /// test still passes — the exact vacuity shape the campaign fences.
+    /// Every plane's pgrust side must actually resolve through dfmgr, and the
+    /// GUC store must come up, or arms 0/1 silently degrade to zero execs.
     #[test]
-    fn fc_sqlstate_plane_is_live() {
+    fn fc_plane_is_live() {
         seams_setup();
-        assert!(guc_store_ready(), "GUC store did not come up: P3 is dead for arms 0/1");
+        assert!(guc_store_ready(), "GUC store did not come up: arms 0/1 are dead");
         let before = fc_skips();
         exec(0, 2, b"\x04fooxSzzz0yzz"); // $1$ crypt, succeeds
         exec(0, 12, b"\x04foox"); // $2$ -> C 39000 "crypt(3) returned NULL"
         exec(1, 0b1000_0100, b""); // gen_salt('des', 0)
-        assert_eq!(fc_skips(), before, "fc plane skipped {} execs", fc_skips() - before);
-        // ...and the wrappers really resolve through dfmgr (not a silent miss).
+        assert_eq!(fc_skips(), before, "an arm skipped for want of a GUC store");
         // `lookup` panics on a dfmgr miss, so calling it IS the assertion.
-        for f in ["pg_crypt", "pg_gen_salt", "pg_gen_salt_rounds", "pg_armor", "pg_dearmor"] {
+        for f in [
+            "pg_crypt",
+            "pg_gen_salt",
+            "pg_gen_salt_rounds",
+            "pg_armor",
+            "pg_dearmor",
+            "pg_digest",
+            "pg_hmac",
+        ] {
             lookup(f);
         }
     }
 
-    /// The cost bound must actually fire (and only on the expensive side).
+    /// The cost bound must actually fire, at the RETUNED pins, and must not
+    /// refuse the constant-work engines.
     #[test]
-    fn cost_bound_fires_and_spares_cheap_work() {
+    fn cost_bound_fires_at_the_retuned_pins() {
         seams_setup();
         let before = cost_skips();
-        // $2a$31$… = 2^31 key schedules
+        // bcrypt: 04 accepted, 05 and 31 refused (pinned to 04)
+        exec(0, 8, b"\x02pw04$......................");
+        assert_eq!(cost_skips(), before, "bcrypt cost 04 was wrongly refused");
+        exec(0, 8, b"\x02pw05$......................");
+        assert_eq!(cost_skips(), before + 1, "bcrypt cost 05 was not refused");
         exec(0, 8, b"\x02pw31$abcdefghijklmnopqrstuv");
-        assert_eq!(cost_skips(), before + 1, "bcrypt cost 31 was not refused");
-        // $5$rounds=999999999$
+        assert_eq!(cost_skips(), before + 2, "bcrypt cost 31 was not refused");
+        // shacrypt: 1000 accepted, 1001 / default 5000 / 999999999 refused
+        exec(0, 20, b"\x02pw1000$abcdefgh");
+        assert_eq!(cost_skips(), before + 2, "sha rounds 1000 was wrongly refused");
+        exec(0, 20, b"\x02pw1001$abcdefgh");
+        assert_eq!(cost_skips(), before + 3, "sha rounds 1001 was not refused");
+        exec(0, 4, b"\x02pwabcdefgh"); // $5$abcdefgh -> the 5000 default
+        assert_eq!(cost_skips(), before + 4, "sha default 5000 was not refused");
         exec(0, 20, b"\x02pw999999999$abcdefgh");
-        assert_eq!(cost_skips(), before + 2, "sha rounds 999999999 not refused");
-        // $1$ is constant work and must NOT be refused
-        exec(0, 2, b"\x02pwSzzz0yzz");
-        assert_eq!(cost_skips(), before + 2, "md5 crypt was wrongly refused");
+        assert_eq!(cost_skips(), before + 5, "sha rounds 999999999 not refused");
+        // xdes: '_' + 4 count chars, little-endian 6-bit groups.
+        exec(0, 18, b"\x08passwordz3..abcd"); // 63 | 5<<6 = 383 > 255
+        assert_eq!(cost_skips(), before + 6, "xdes count 383 was not refused");
+        exec(0, 18, b"\x08passwordz1..abcd"); // 63 | 3<<6 = 255 <= 255
+        assert_eq!(cost_skips(), before + 6, "xdes count 255 was wrongly refused");
+        // constant-work engines are never refused
+        exec(0, 2, b"\x04fooxSzzz0yzz"); // $1$ md5, 1000 iterations
+        exec(0, 0, b"\x04fooxrl"); // traditional DES, 25 iterations
+        assert_eq!(cost_skips(), before + 6, "a constant-work engine was refused");
     }
 
     #[test]
     fn arm_smoke() {
         // ---- arm 0: every px_crypt_list row ----
         for prefix_sel in 0u8..12 {
-            exec(0, prefix_sel << 1, b"\x04foox06$......................");
+            exec(0, prefix_sel << 1, b"\x04foox04$......................");
         }
         exec(0, 2, b"\x04fooxSzzz0yzz"); // $1$
-        exec(0, 4, b"\x04fooxSzzz0yzz"); // $5$
-        exec(0, 6, b"\x04fooxSzzz0yzz"); // $6$
         exec(0, 12, b"\x04foox"); // $2$  -> crypt(3) returned NULL / 39000
         exec(0, 0, b"\x04fooxrl"); // traditional DES
-        exec(0, 18, b"\x08passwordJ9..abcd"); // xdes _J9..abcd (count 725)
+        exec(0, 18, b"\x08passwordz1..abcd"); // xdes, count 255
         exec(0, 20, b"\x04foox1000$abcdefgh"); // $5$rounds=1000$
-        exec(0, 20, b"\x04foox$abc"); // $5$rounds=$abc (empty rounds)
-        exec(0, 20, b"\x04foox0$abc"); // $5$rounds=0$abc
+        exec(0, 20, b"\x04foox$abc"); // $5$rounds=$abc (empty rounds -> clamp NOTICE)
+        exec(0, 20, b"\x04foox0$abc"); // $5$rounds=0$abc (clamp NOTICE)
         exec(0, 0, b"\x04foox"); // empty setting -> invalid salt
-        exec(0, 8, b"\x04foox06$......................"); // $2a$06$
+        exec(0, 0, b"\x04foox\xff."); // KNOWN DIVERGENCE 2 regression seed
 
-        // ---- arm 1: every gen_list row + boundaries ----
+        // ---- arm 1: every gen_list row + boundaries, both wrappers ----
         for algo in 0u8..10 {
             for rc in 0u8..16 {
-                exec(1, (algo << 4) | (rc << 2), b"");
+                exec(1, (algo << 4) | (rc << 2) | 4, b""); // pg_gen_salt_rounds
+                exec(1, (algo << 4) | (rc << 2), b""); // pg_gen_salt (rounds 0)
             }
         }
-        exec(1, 1 | 2, b"\x04xdes\x01\x00\x00\x00"); // free-form algo + raw rounds
+        exec(1, 1 | 2 | 4, b"\x04xdes\x01\x00\x00\x00"); // free-form algo + raw rounds
 
         // ---- arm 2: armor with and without headers ----
         exec(2, 0, b"hello pgcrypto");
         exec(2, 1, b"\x02\x07\x03Version1.0\x07\x02Commenthidata");
-        exec(2, 1, b"\x01\x01\x0bk" as &[u8]); // key "k", value from the payload
         // D8 shapes: newline in value / newline in key / ": " in key / non-ASCII
         exec(2, 1, b"\x01\x01\x0ckv\nForged: h");
         exec(2, 1, b"\x01\x03\x01k\nxv");
         exec(2, 1, b"\x01\x04\x01k: xv");
         exec(2, 1, b"\x01\x01\x02k\xc3\xa9");
 
-        // ---- arms 3/4: envelope + every mutation kind ----
+        // ---- arm 3: envelope + every mutation kind ----
         for mode in [0u8, 1] {
             for kind in 0u8..6 {
                 let body: Vec<u8> = vec![1, 3, 4, b'K', b'e', b'y', b'v', b'a', b'l', 6]
@@ -1246,12 +1319,20 @@ mod tests {
                     .chain([kind, 3, 0])
                     .collect();
                 exec(3, mode, &body);
-                exec(4, mode, &body);
             }
         }
         exec(3, 0, b"-----BEGIN PGP MESSAGE-----\n\nYWJj\n=TfTH\n-----END PGP MESSAGE-----\n");
-        exec(4, 0, b"-----BEGIN PGP MESSAGE-----\nA: b\n\nYWJj\n=TfTH\n-----END PGP MESSAGE-----\n");
         exec(3, 0, b"");
-        exec(4, 0, b"");
+
+        // ---- arms 4/5: digest + hmac over every name and both block sizes ----
+        for ni in 0u8..16 {
+            exec(4, ni << 2, b"abc");
+            exec(5, ni << 2, b"\x10keykeykeykeykeykabc");
+        }
+        exec(4, 1, b"\x06sha256The quick brown fox");
+        exec(5, 1, b"\x03md5\x14aaaaaaaaaaaaaaaaaaaadata"); // key < B
+        exec(5, 1, b"\x06sha512\x90"); // keylen 144 > B = 128 -> key is hashed
+        exec(4, 0, b""); // md5 of the empty string
+        exec(5, 0, b"\x00"); // hmac with an empty key
     }
 }

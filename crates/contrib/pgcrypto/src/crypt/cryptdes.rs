@@ -497,7 +497,7 @@ impl DesState {
 }
 
 /// `ascii_to_bin(ch)` — masks chars outside `./0-9A-Za-z` to 0.
-pub fn ascii_to_bin(ch: u8) -> u32 {
+fn ascii_to_bin(ch: u8) -> u32 {
     let ch = ch as i32;
     if ch > b'z' as i32 {
         return 0;

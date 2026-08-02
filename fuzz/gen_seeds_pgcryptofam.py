@@ -2,7 +2,7 @@
 """Seed generator for the pgcryptofam_diff corpus (gen_seeds.sh pattern).
 
 Layout (core/src/pgcryptofam_diff.rs is the protocol of record):
-  [sel][mode][payload], sel % 5:
+  [sel][mode][payload], sel % 6:
 
     0 crypt        [pwlen u8][pw][setting-suffix...]
                    mode>>1 % 12 picks the SETTING PREFIX from
@@ -19,7 +19,9 @@ Layout (core/src/pgcryptofam_diff.rs is the protocol of record):
                    mode&1 = 1 -> envelope builder:
                                  [n u8 %3]{[klen][vlen][k][v]}*n
                                  [bodylen u8][body][mutkind u8][mut args]
-    4 pgp_armor_headers — same shape as 3
+    4 digest       mode&1 = 0 -> hash name from HASH_NAMES[(mode>>2) % 16],
+                   else [namelen u8][name]; rest = data
+    5 hmac         same name selector; then [keylen u8][key][data]
 
 Seeded per the lane charter (exec floors never witness boundaries):
   - zero-length and one-byte settings
@@ -30,6 +32,8 @@ Seeded per the lane charter (exec floors never witness boundaries):
   - armor bodies at base64 length %4 == 0/1/2/3, all-padding, `=` mid-stream,
     a missing CRC line, a CRC line short by one char
   - armor header keys/values containing "\n", ": " and non-ASCII (D8 shapes)
+  - every px_find_digest name + case variants + misses, hmac keys straddling
+    both HMAC block sizes (64 and 128) and the key-longer-than-B branch
   - the ground-truthed divergence inputs from
     docs/verification/evidence/p1-pgcrypto/GROUND-TRUTH-18.3.md (D1..D19)
   - SINGLE-FIELD-DIFFERENCE WITNESS PAIRS for every packing/shift/OR-merge
@@ -132,15 +136,15 @@ for i, p in enumerate(PREFIXES):
 
 # D1: "$2$" and "$2$06$..." -> C raises 39000 "crypt(3) returned NULL".
 crypt_seed("crypt-d1-dollar2-bare", PW, 6, b"")
-crypt_seed("crypt-d1-dollar2-bcryptish", PW, 6, b"06$......................")
+crypt_seed("crypt-d1-dollar2-bcryptish", PW, 6, b"04$......................")
 # D2: "$2b$" has NO row -> traditional DES with the 2-char salt "$2".
-crypt_seed("crypt-d2-dollar2b", PW, 7, b"06$......................")
-crypt_seed("crypt-d2-dollar2y", PW, 8, b"06$......................")
+crypt_seed("crypt-d2-dollar2b", PW, 7, b"04$......................")
+crypt_seed("crypt-d2-dollar2y", PW, 8, b"04$......................")
 # D11: "$2x$" sign-extension bug-compat with a >= 0x80 password byte.
 crypt_seed("crypt-d11-2x-highbyte", "éabc".encode(),
-           5, b"06$......................")
+           5, b"04$......................")
 crypt_seed("crypt-d11-2a-highbyte", "éabc".encode(),
-           4, b"06$......................")
+           4, b"04$......................")
 
 # xdes settings at count 0, 1, even, odd, 0xFFFFFF, 0xFFFFFF+1. The count is
 # 4 itoa64 chars, little-endian 6-bit groups, at setting[1..5].
@@ -148,7 +152,10 @@ def itoa64_4(v: int) -> bytes:
     return bytes(ITOA64[(v >> s) & 0x3F] for s in (0, 6, 12, 18))
 
 
-for count in (0, 1, 2, 3, 724, 725, 726, 4094, 4095, 0xFFFFFF):
+# The driver pins the executed xdes count to <= 255; the larger values are
+# seeded anyway because the cost probe's own parse runs on every one of them.
+for count in (0, 1, 2, 3, 63, 64, 65, 127, 128, 254, 255, 256,
+              724, 725, 726, 4094, 4095, 0xFFFFFF):
     crypt_seed(f"crypt-xdes-count{count}", b"password", 9,
                itoa64_4(count) + b"abcd")
 # 0xFFFFFF+1 cannot be encoded in 4 chars: the wrap is the seed.
@@ -198,13 +205,14 @@ for k in range(0, 10):
     crypt_seed(f"crypt-md5-saltlen{k}", PW, 1, b"Szzz0yzzq"[:k])
 crypt_seed("crypt-md5-salt-dollar", PW, 1, b"ab$cd")
 
-# bcrypt settings at the cost-parse boundaries (all inside the cost bound;
-# 07..31 are refused by the driver's probe, which is itself the seeded case).
+# bcrypt settings at the cost-parse boundaries. The driver PINS the cost to
+# 04, so only "04" executes; every other spelling is a counted cost-probe
+# refusal, which is itself a seeded case (the probe's own parse still runs).
 for cost in ("00", "03", "04", "05", "06", "07", "31", "32", "3a", "0a"):
     crypt_seed(f"crypt-bf-cost{cost}", PW, 4,
                cost.encode() + b"$......................")
-crypt_seed("crypt-bf-short", PW, 4, b"06$")
-crypt_seed("crypt-bf-nodollar", PW, 4, b"06X......................")
+crypt_seed("crypt-bf-short", PW, 4, b"04$")
+crypt_seed("crypt-bf-nodollar", PW, 4, b"04X......................")
 # bf salt chars on/off the BF64 alphabet, one position at a time (witness
 # pairs for bf_decode's per-char alphabet test).
 for pos in (0, 10, 21):
@@ -338,8 +346,8 @@ GOOD = (b"-----BEGIN PGP MESSAGE-----\n\nYWJj\n=TfTH\n"
 GOOD_HDR = (b"-----BEGIN PGP MESSAGE-----\nVersion: 1.0\nComment: hi\n\n"
             b"YWJj\n=TfTH\n-----END PGP MESSAGE-----\n")
 
-for sel in (3, 4):
-    tag = "dearmor" if sel == 3 else "hdrs"
+for sel in (3,):
+    tag = "dearmor"
     raw_text_seed(f"{tag}-good", sel, GOOD)
     raw_text_seed(f"{tag}-good-hdr", sel, GOOD_HDR)
     raw_text_seed(f"{tag}-empty", sel, b"")
@@ -402,5 +410,60 @@ for sel in (3, 4):
     # envelope bodies at each base64 length class
     for blen in range(0, 9):
         env_seed(f"{tag}-env-body{blen}", sel, [], bytes(range(blen)), 0)
+
+
+# ===========================================================================
+# arms 4/5 — digest() and hmac()
+# ===========================================================================
+HASH_NAMES = ["md5", "sha1", "sha224", "sha256", "sha384", "sha512", "MD5",
+              "SHA256", "Sha512", "crc32", "", "sha", "md", "sha2", "sha1 ",
+              " md5"]
+
+
+def digest_seed(name, name_idx: int, data: bytes) -> None:
+    seed(name, bytes([4, (name_idx & 0x3F) << 2]) + data)
+
+
+def digest_raw_seed(name, algo: bytes, data: bytes) -> None:
+    seed(name, bytes([4, 1, len(algo)]) + algo + data)
+
+
+def hmac_seed(name, name_idx: int, key: bytes, data: bytes) -> None:
+    seed(name, bytes([5, (name_idx & 0x3F) << 2, len(key)]) + key + data)
+
+
+def hmac_raw_seed(name, algo: bytes, key: bytes, data: bytes) -> None:
+    seed(name, bytes([5, 1, len(algo)]) + algo + bytes([len(key)]) + key + data)
+
+
+# every resolvable name and every miss, over data-length classes that cross
+# each hash's block boundary (55/56/63/64 for the 64-byte block family,
+# 111/112/127/128 for the 128-byte one) — the padding corner of every hash.
+for i in range(len(HASH_NAMES)):
+    for dl in (0, 1, 3, 55, 56, 63, 64, 65, 111, 112, 119, 120, 127, 128, 129):
+        digest_seed(f"digest-n{i:02d}-d{dl:03d}", i, bytes(range(dl % 256)))
+    digest_seed(f"digest-n{i:02d}-abc", i, b"abc")
+
+# free-form names: case mixtures, whitespace, the NAMEDATALEN-1 = 63
+# truncation boundary C applies via downcase_truncate_identifier
+for nm in (b"MD5", b"Md5", b"mD5", b"SHA1", b"sha256", b"SHA512", b"sha-1",
+           b"md5\x00x"[:3], b"md5 ", b" sha1", b"MD" + b"5" * 62,
+           b"m" * 62 + b"d5", b"s" * 63, b"s" * 64, b"", b"x"):
+    digest_raw_seed(f"digest-name-{nm.hex()[:24] or 'empty'}", nm, b"abc")
+
+# hmac: keys shorter than / equal to / longer than each block size, plus the
+# empty key and a key long enough to force the hash-the-key branch
+for i in (0, 1, 3, 5):  # md5, sha1, sha256, sha512
+    for kl in (0, 1, 63, 64, 65, 127, 128, 129, 159):
+        hmac_seed(f"hmac-n{i}-k{kl:03d}", i, bytes(range(kl % 256)), b"data")
+    for dl in (0, 1, 55, 56, 64, 128):
+        hmac_seed(f"hmac-n{i}-d{dl:03d}", i, b"key", bytes(range(dl % 256)))
+# RFC 2202 shapes
+hmac_raw_seed("hmac-rfc2202-1", b"md5", b"\x0b" * 16, b"Hi There")
+hmac_raw_seed("hmac-rfc2202-2", b"md5", b"Jefe", b"what do ya want for nothing?")
+hmac_raw_seed("hmac-rfc2202-3", b"md5", b"\xaa" * 16, b"\xdd" * 50)
+hmac_raw_seed("hmac-sha256-nist", b"sha256", b"\x0b" * 20, b"Hi There")
+hmac_raw_seed("hmac-miss", b"crc32", b"k", b"d")
+hmac_raw_seed("hmac-empty-name", b"", b"k", b"d")
 
 print(f"wrote {n} seeds to {OUT}")

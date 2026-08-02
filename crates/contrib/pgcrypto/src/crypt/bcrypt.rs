@@ -21,7 +21,7 @@ fn atoi64(c: u8) -> Option<u8> {
 }
 
 /// `BF_decode` — decode `count` bytes from `count*4/3` base-64 chars.
-pub fn bf_decode(src: &[u8], count: usize) -> Option<Vec<u8>> {
+fn bf_decode(src: &[u8], count: usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(count);
     let mut sp = 0usize;
     while out.len() < count {
@@ -47,7 +47,7 @@ pub fn bf_decode(src: &[u8], count: usize) -> Option<Vec<u8>> {
 }
 
 /// `BF_encode` — encode `count` bytes to base-64 (`BF_itoa64`).
-pub fn bf_encode(src: &[u8], count: usize) -> Vec<u8> {
+fn bf_encode(src: &[u8], count: usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut sp = 0usize;
     while sp < count {
