@@ -1647,3 +1647,61 @@ fn varwalk_qual_col_only_split() {
 }
 
 // --- end AGGSEQ-STAGE sub-region ------------------------------------------
+
+// tts_virtual_materialize's expanded-datum leg (C execTuples.c): the size
+// pass adds EOH_get_flat_size and the copy pass EOH_flatten_into's flat
+// varlena, so the materialized slot no longer depends on the expanded object.
+#[test]
+fn virtual_materialize_flattens_expanded_datum() {
+    use ::datum::expandeddatum::{
+        eoh_init_header, eohp_get_rw_datum, ExpandedObjectHeader, ExpandedObjectMethods,
+    };
+
+    #[repr(C)]
+    struct FakeExpanded {
+        hdr: ExpandedObjectHeader,
+        payload: [u8; 8],
+    }
+    unsafe fn flat_size(_eohptr: *mut ExpandedObjectHeader) -> usize {
+        4 + 8
+    }
+    unsafe fn flatten(eohptr: *mut ExpandedObjectHeader, result: *mut u8, n: usize) {
+        assert_eq!(n, 12);
+        let obj = eohptr as *mut FakeExpanded;
+        let word = ::datum::varlena::set_varsize_4b(n);
+        core::ptr::copy_nonoverlapping(word.as_ptr(), result, 4);
+        core::ptr::copy_nonoverlapping((*obj).payload.as_ptr(), result.add(4), 8);
+    }
+    static METHODS: ExpandedObjectMethods =
+        ExpandedObjectMethods { get_flat_size: flat_size, flatten_into: flatten };
+
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let obj = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(FakeExpanded {
+        hdr: ExpandedObjectHeader::empty(),
+        payload: *b"abcdefgh",
+    }));
+    // SAFETY: obj is a live exclusive allocation at its final address.
+    let rw = unsafe {
+        eoh_init_header(core::ptr::addr_of_mut!((*obj).hdr), &METHODS, core::ptr::null());
+        eohp_get_rw_datum(core::ptr::addr_of!((*obj).hdr))
+    };
+
+    let desc = make_desc(mcx, &[col(1, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED)]);
+    let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+    slot.base_mut().tts_values[0] = rw;
+    slot.base_mut().tts_isnull[0] = false;
+    exec_store_virtual_tuple(&mut slot);
+
+    exec_materialize_slot(&mut slot, mcx).unwrap();
+    assert!(slot.base().should_free());
+    let stored = slot.base().tts_values[0];
+    assert_ne!(stored.as_usize(), rw.as_usize());
+    // SAFETY: stored points at the flat 4B-header varlena the flattener wrote.
+    unsafe {
+        let p = stored.as_usize() as *const u8;
+        assert_eq!(varsize_any(p), 12);
+        assert_eq!(core::slice::from_raw_parts(p.add(4), 8), b"abcdefgh");
+    }
+    drop(unsafe { alloc::boxed::Box::from_raw(obj) });
+}

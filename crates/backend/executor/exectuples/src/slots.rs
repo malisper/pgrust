@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -24,18 +23,6 @@ use ::types_tuple::{
 };
 
 use crate::deform::{slot_getallattrs, slot_getmissingattrs, TupleImage};
-
-// unported: EOH_flatten_into (the expandeddatum unit owns it); clean
-// feature error rather than a panic if an expanded datum ever lands here.
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn expanded_datum_unported() -> Box<PgError> {
-    Box::new(
-        PgError::error("materializing an expanded datum is not yet implemented")
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
-}
 
 #[cold]
 #[inline(never)]
@@ -479,11 +466,17 @@ fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>
         }
         // SAFETY: a non-null by-ref column datum points at a live field image.
         unsafe {
-            if att.attlen == -1 && varatt_is_external_expanded(val.as_usize() as *const u8) {
-                return Err(expanded_datum_unported());
-            }
             sz = att_nominal_alignby(sz, att.attalignby);
-            sz = att_addlength_datum(sz, att.attlen as i32, val);
+            if att.attlen == -1 && varatt_is_external_expanded(val.as_usize() as *const u8) {
+                // C flattens the expanded value so the materialized slot
+                // doesn't depend on it (EOH_get_flat_size here,
+                // EOH_flatten_into in the copy pass below).
+                sz += ::datum::expandeddatum::eoh_get_flat_size(
+                    ::datum::expandeddatum::datum_get_eohp(val),
+                );
+            } else {
+                sz = att_addlength_datum(sz, att.attlen as i32, val);
+            }
         }
     }
 
@@ -513,10 +506,24 @@ fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>
         // the live field image the datum points at.
         unsafe {
             off = att_nominal_alignby(off, att.attalignby);
-            let data_length = att_addlength_datum(0, att.attlen as i32, *val);
-            core::ptr::copy_nonoverlapping(val.as_usize() as *const u8, dst0.add(off), data_length);
-            *val = Datum::from_usize(dst0.add(off) as usize);
-            off += data_length;
+            if att.attlen == -1 && varatt_is_external_expanded(val.as_usize() as *const u8) {
+                // EOH_flatten_into: write the flat image and point the
+                // column at it (C execTuples.c tts_virtual_materialize).
+                let eoh = ::datum::expandeddatum::datum_get_eohp(*val);
+                let data_length = ::datum::expandeddatum::eoh_get_flat_size(eoh);
+                ::datum::expandeddatum::eoh_flatten_into(eoh, dst0.add(off), data_length);
+                *val = Datum::from_usize(dst0.add(off) as usize);
+                off += data_length;
+            } else {
+                let data_length = att_addlength_datum(0, att.attlen as i32, *val);
+                core::ptr::copy_nonoverlapping(
+                    val.as_usize() as *const u8,
+                    dst0.add(off),
+                    data_length,
+                );
+                *val = Datum::from_usize(dst0.add(off) as usize);
+                off += data_length;
+            }
         }
     }
 
