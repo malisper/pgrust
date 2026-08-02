@@ -111,6 +111,7 @@ FILECOUNTS=$(cat <<'ROWS'
 2|crates/backend/commands/cluster/src/command.rs
 3|crates/backend/commands/cluster/src/lib.rs
 2|crates/backend/commands/comment/src/lib.rs
+1|crates/backend/commands/extension/src/contents.rs
 5|crates/backend/commands/foreigncmds/src/lib.rs
 2|crates/backend/commands/indexcmds/src/define.rs
 1|crates/backend/commands/matview/src/lib.rs
@@ -128,6 +129,7 @@ FILECOUNTS=$(cat <<'ROWS'
 1|crates/backend/commands/tablecmds/src/rename.rs
 1|crates/backend/commands/tablecmds/src/setrelopts.rs
 3|crates/backend/commands/trigger/src/catalog.rs
+2|crates/backend/commands/trigger/src/ddl.rs
 3|crates/backend/commands/typecmds/src/alter.rs
 4|crates/backend/rewrite/rewrite_define/src/lib.rs
 1|crates/backend/statistics/stats_import/src/relation_stats.rs
