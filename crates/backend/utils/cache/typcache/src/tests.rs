@@ -15,6 +15,7 @@ const F_INT4RANGE_CANONICAL: Oid = 3914;
 const SHELL_OID: Oid = 90003;
 const NOHASH_OID: Oid = 90006;
 const ENUM_OID: Oid = 90008;
+const DOMCOMP_OID: Oid = 90009;
 
 const INT4_BTREE_OPCLASS: Oid = 1978;
 const INT4_HASH_OPCLASS: Oid = 1979;
@@ -102,6 +103,7 @@ fn install() {
                 SHELL_OID => Some(typrow("shell", b'b' as i8, false, InvalidOid, InvalidOid, InvalidOid)),
                 NOHASH_OID => Some(typrow("nohash", b'b' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 ENUM_OID => Some(typrow("mood", b'e' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
+                DOMCOMP_OID => Some(typrow("domcomp", b'd' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 _ => None,
             })
         });
@@ -200,6 +202,20 @@ fn install() {
                 DOMAIN_OID => Some(s::PgTypeBaseShape {
                     typtype: b'd' as i8,
                     typbasetype: INT4OID,
+                    typtypmod: -1,
+                    typelem: InvalidOid,
+                    typsubscript: InvalidOid,
+                }),
+                DOMCOMP_OID => Some(s::PgTypeBaseShape {
+                    typtype: b'd' as i8,
+                    typbasetype: COMPOSITE_OID,
+                    typtypmod: -1,
+                    typelem: InvalidOid,
+                    typsubscript: InvalidOid,
+                }),
+                COMPOSITE_OID => Some(s::PgTypeBaseShape {
+                    typtype: b'c' as i8,
+                    typbasetype: InvalidOid,
                     typtypmod: -1,
                     typelem: InvalidOid,
                     typsubscript: InvalidOid,
@@ -551,4 +567,49 @@ fn compute_ready_tolerates_borrowed_finfo() {
     assert!(Rc::ptr_eq(&e, &e2));
     assert_eq!(e2.lt_opr(), INT4_LT);
     drop(guard);
+}
+
+// cache_record_field_properties TYPTYPE_DOMAIN arm (typcache.c): a domain
+// over a NON-composite base sets only the CHECKED bit (no field properties,
+// no DOMAIN_BASE_IS_COMPOSITE). Pre-fix any domain panicked here.
+#[test]
+fn domain_over_scalar_field_properties() {
+    install();
+    let e = lookup_type_cache(DOMAIN_OID, 0).unwrap();
+    cache_record_field_properties(&e).unwrap();
+    assert_ne!(e.flags_raw() & TCFLAGS_CHECKED_FIELD_PROPERTIES, 0);
+    assert_eq!(e.flags_raw() & TCFLAGS_DOMAIN_BASE_IS_COMPOSITE, 0);
+    assert_eq!(
+        e.flags_raw()
+            & (TCFLAGS_HAVE_FIELD_EQUALITY
+                | TCFLAGS_HAVE_FIELD_COMPARE
+                | TCFLAGS_HAVE_FIELD_HASHING
+                | TCFLAGS_HAVE_FIELD_EXTENDED_HASHING),
+        0
+    );
+    // getBaseTypeAndTypmod resolved the base on the way.
+    assert_eq!(e.domain_base_type(), INT4OID);
+    assert!(!record_fields_have(&e, TCFLAGS_HAVE_FIELD_EQUALITY).unwrap());
+}
+
+// Domain over a COMPOSITE base: C copies exactly the base entry's
+// field-equality/compare/hashing/extended-hashing bits and marks
+// DOMAIN_BASE_IS_COMPOSITE.
+#[test]
+fn domain_over_composite_copies_base_field_properties() {
+    install();
+    // Prime the base entry with two of the four field properties.
+    let base = lookup_type_cache(COMPOSITE_OID, 0).unwrap();
+    base.set_flags(TCFLAGS_HAVE_FIELD_EQUALITY | TCFLAGS_HAVE_FIELD_COMPARE);
+
+    let e = lookup_type_cache(DOMCOMP_OID, 0).unwrap();
+    cache_record_field_properties(&e).unwrap();
+    assert_ne!(e.flags_raw() & TCFLAGS_CHECKED_FIELD_PROPERTIES, 0);
+    assert_ne!(e.flags_raw() & TCFLAGS_DOMAIN_BASE_IS_COMPOSITE, 0);
+    assert_eq!(e.domain_base_type(), COMPOSITE_OID);
+    assert_ne!(e.flags_raw() & TCFLAGS_HAVE_FIELD_EQUALITY, 0);
+    assert_ne!(e.flags_raw() & TCFLAGS_HAVE_FIELD_COMPARE, 0);
+    // Bits the base does not have are not invented.
+    assert_eq!(e.flags_raw() & TCFLAGS_HAVE_FIELD_HASHING, 0);
+    assert_eq!(e.flags_raw() & TCFLAGS_HAVE_FIELD_EXTENDED_HASHING, 0);
 }

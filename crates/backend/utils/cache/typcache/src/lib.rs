@@ -933,7 +933,8 @@ fn record_fields_have(e: &TypeCacheEntry, have_bit: i32) -> PgResult<bool> {
 
 // C cache_record_field_properties: RECORD is assumed sortable (a wrong guess
 // costs a runtime error, matching C); composites check every non-dropped
-// field; domain-over-composite is loud.
+// field; a domain copies its base type's field properties when the base is
+// composite.
 fn cache_record_field_properties(e: &TypeCacheEntry) -> PgResult<()> {
     if e.type_id == types_core::catalog::RECORDOID {
         e.set_flags(TCFLAGS_HAVE_FIELD_EQUALITY | TCFLAGS_HAVE_FIELD_COMPARE);
@@ -972,7 +973,27 @@ fn cache_record_field_properties(e: &TypeCacheEntry) -> PgResult<()> {
         }
         e.set_flags(newflags);
     } else if e.typtype.get() == TYPTYPE_DOMAIN {
-        lane_unported("record field-properties over a domain", e.type_id);
+        // If it's domain over composite, copy the base type's properties.
+        if e.domain_base_type.get() == InvalidOid {
+            let mut typmod = -1;
+            e.domain_base_type.set(lsyscache::getBaseTypeAndTypmod(e.type_id, &mut typmod)?);
+            e.domain_base_typmod.set(typmod);
+        }
+        let be = lookup_type_cache(
+            e.domain_base_type.get(),
+            TYPECACHE_EQ_OPR | TYPECACHE_CMP_PROC | TYPECACHE_HASH_PROC
+                | TYPECACHE_HASH_EXTENDED_PROC,
+        )?;
+        if be.typtype.get() == TYPTYPE_COMPOSITE {
+            e.set_flags(TCFLAGS_DOMAIN_BASE_IS_COMPOSITE);
+            e.set_flags(
+                be.flags.get()
+                    & (TCFLAGS_HAVE_FIELD_EQUALITY
+                        | TCFLAGS_HAVE_FIELD_COMPARE
+                        | TCFLAGS_HAVE_FIELD_HASHING
+                        | TCFLAGS_HAVE_FIELD_EXTENDED_HASHING),
+            );
+        }
     }
     e.set_flags(TCFLAGS_CHECKED_FIELD_PROPERTIES);
     Ok(())
