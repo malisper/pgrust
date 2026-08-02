@@ -1192,10 +1192,20 @@ fn check_valid_result_rel<'mcx>(
     if rel.rd_rel.relkind != RELKIND_RELATION
         && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
     {
-        panic!(
-            "CheckValidResultRel (execMain.c): relkind '{}' result relation not ported",
-            rel.rd_rel.relkind as char
-        );
+        // C's remaining switch arms: sequences and TOAST relations get their
+        // own messages, anything else the generic one; all WRONG_OBJECT_TYPE.
+        let what = match rel.rd_rel.relkind {
+            types_rel::RELKIND_SEQUENCE => "sequence",
+            types_rel::RELKIND_TOASTVALUE => "TOAST relation",
+            _ => "relation",
+        };
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot change {what} \"{}\"",
+                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+            ))
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
     }
     if operation == CmdType::CMD_MERGE {
         let mal = node
@@ -8557,3 +8567,142 @@ pub fn mt_ins_returning<'mcx>(
     exec_process_returning(mt, estate, CmdType::CMD_INSERT, None, Some(result_slot), plan_slot)
 }
 // --- end WS-AG (wave-9) -------------------------------------------------------
+
+// CheckValidResultRel's non-table relkind arms (execMain.c:1086-1089 and the
+// default arm): clean catchable WRONG_OBJECT_TYPE errors, not aborts.
+#[cfg(test)]
+mod check_valid_result_rel_tests {
+    use super::*;
+    use std::cell::Cell;
+    use types_core::INVALID_PROC_NUMBER;
+    use types_rel::{FormData_pg_class, LockInfoData, LockRelId, RelationData};
+    use types_tuple::{CompactAttribute, FormData_pg_attribute, NameData};
+
+    fn one_col_tupdesc<'m>(mcx: ::mcx::Mcx<'m>) -> Rc<TupleDescData<'m>> {
+        let att = FormData_pg_attribute {
+            attnum: 1,
+            atttypid: 23,
+            atttypmod: -1,
+            attlen: 4,
+            attbyval: true,
+            attalign: b'i' as i8,
+            attstorage: b'p' as i8,
+            ..Default::default()
+        };
+        let mut attrs = ::mcx::PgVec::new_in(mcx);
+        let mut compact = ::mcx::PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+        Rc::new(TupleDescData {
+            natts: 1,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
+    fn relation_of_kind<'m>(mcx: ::mcx::Mcx<'m>, name: &str, relkind: u8) -> Relation<'m> {
+        let mut relname = NameData::default();
+        relname.namestrcpy(name);
+        let rd_rel = FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: 0,
+            relfilenode: 70001,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: types_core::RELPERSISTENCE_PERMANENT,
+            relkind,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        };
+        let data = RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
+            rd_id: 70001,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: 70001, dbId: 5 },
+            },
+            rd_rel,
+            rd_att: one_col_tupdesc(mcx),
+            rd_index: None,
+            rd_opcintype: ::mcx::PgVec::new_in(mcx),
+            rd_opfamily: ::mcx::PgVec::new_in(mcx),
+            rd_indoption: ::mcx::PgVec::new_in(mcx),
+            rd_indcollation: ::mcx::PgVec::new_in(mcx),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: ::mcx::PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, None)
+    }
+
+    fn check<'m>(mcx: ::mcx::Mcx<'m>, name: &str, relkind: u8) -> PgResult<()> {
+        let node: &ModifyTable<'_> = ::mcx::alloc_leak_in(
+            mcx,
+            ModifyTable { operation: CmdType::CMD_INSERT, ..Default::default() },
+        )
+        .unwrap();
+        let rel = relation_of_kind(mcx, name, relkind);
+        check_valid_result_rel(mcx, &rel, node, None)
+    }
+
+    // INSERT INTO <sequence>: C gives a clean error, not an abort.
+    #[test]
+    fn sequence_result_rel_is_clean_error() {
+        let cx = ::mcx::MemoryContext::new("cvrr test");
+        let e = check(cx.mcx(), "seq1", types_rel::RELKIND_SEQUENCE).unwrap_err();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
+        assert_eq!(e.message(), "cannot change sequence \"seq1\"");
+    }
+
+    #[test]
+    fn toast_result_rel_is_clean_error() {
+        let cx = ::mcx::MemoryContext::new("cvrr test");
+        let e = check(cx.mcx(), "pg_toast_1", types_rel::RELKIND_TOASTVALUE).unwrap_err();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
+        assert_eq!(e.message(), "cannot change TOAST relation \"pg_toast_1\"");
+    }
+
+    // C's default arm: any other relkind (e.g. an index).
+    #[test]
+    fn other_relkind_result_rel_is_clean_error() {
+        let cx = ::mcx::MemoryContext::new("cvrr test");
+        let e = check(cx.mcx(), "idx1", types_rel::RELKIND_INDEX).unwrap_err();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
+        assert_eq!(e.message(), "cannot change relation \"idx1\"");
+    }
+}
