@@ -115,7 +115,11 @@ fn install_seams() {
             with_fake(|f| Ok(f.tables[&rel.rd_id].len() as BlockNumber))
         });
 
-        heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|htup, _snap, _buf| {
+        heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|htup, snap, _buf| {
+            // Real-dispatch fidelity: SNAPSHOT_ANY sees every version.
+            if snap.snapshot_type == ::types_snapshot::SnapshotType::SNAPSHOT_ANY {
+                return Ok(true);
+            }
             Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
         });
         heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
@@ -654,6 +658,44 @@ fn fetch_row_version_transfers_pin() {
         heapam_fetch_row_version(mcx, &rel, &ItemPointerData::new(0, 2), &snap, &mut slot)
             .unwrap();
     assert!(!found);
+    quiesced();
+}
+
+// C SnapshotAny (the None arm, heapam_handler.c): every tuple version is
+// visible — including one an MVCC snapshot rejects. The former fence
+// panicked on this lane.
+#[test]
+fn fetch_row_version_snapshot_any_sees_every_version() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[
+            Item::Tuple(tuple_image(10, 0, 7)),
+            Item::Tuple(tuple_image(INVISIBLE_XMIN, 0, 8)),
+        ])],
+    );
+    let rel = test_relation(mcx, oid);
+    let mut slot = buffer_slot(mcx, &rel);
+
+    let found =
+        heapam_fetch_row_version(mcx, &rel, &ItemPointerData::new(0, 1), &None, &mut slot)
+            .unwrap();
+    assert!(found);
+    assert_eq!(slot_val(&slot), 7);
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+
+    // The MVCC-invisible version IS visible under SnapshotAny.
+    let found =
+        heapam_fetch_row_version(mcx, &rel, &ItemPointerData::new(0, 2), &None, &mut slot)
+            .unwrap();
+    assert!(found);
+    assert_eq!(slot_val(&slot), 8);
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+    assert_eq!(pins_of(oid, 0), 0);
     quiesced();
 }
 
