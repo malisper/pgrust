@@ -18,6 +18,38 @@ struct Infix<'a> {
     cur: usize,
 }
 
+// C tsquery.c INFIX buffer. C grows the infix() output via RESIZEBUF, which
+// doubles buflen (initial 32 for the top-level buffer, 16 for an operator's
+// sub-buffer) and repallocs; the first doubled buflen above MaxAllocSize
+// makes repalloc raise the CATCHABLE "invalid memory alloc request size
+// {buflen}" (the doubling powers reach 2^30 = 1073741824 > 0x3FFF_FFFF, so
+// the error fires once the needed output crosses 2^29). This port tracks C's
+// buflen and runs the same check at the same call sites with the same
+// addsize expressions; without it, PgVec's infallible growth would hit the
+// allocator ceiling and abort the process where C raises an error.
+struct OutBuf<'mcx> {
+    v: PgVec<'mcx, u8>,
+    buflen: usize,
+}
+
+impl<'mcx> OutBuf<'mcx> {
+    // C RESIZEBUF(inf, addsize): capacity stays >= buflen > len + addsize + 1,
+    // so the pushes an addsize covers never regrow the vec.
+    fn resize(&mut self, addsize: usize) -> PgResult<()> {
+        while self.v.len() + addsize + 1 >= self.buflen {
+            self.buflen *= 2;
+            // C: repalloc(buf, buflen) refuses an over-MaxAllocSize request.
+            ::mcx::check_alloc_size(self.buflen)?;
+        }
+        if self.buflen > self.v.capacity() {
+            let mcx = *self.v.allocator();
+            let add = self.buflen - self.v.len();
+            self.v.try_reserve_exact(add).map_err(|_| mcx.oom(self.buflen))?;
+        }
+        Ok(())
+    }
+}
+
 fn push_escaped(out: &mut PgVec<'_, u8>, op: &[u8]) {
     let mut k = 0usize;
     while k < op.len() {
@@ -55,7 +87,7 @@ fn push_i32_dec(out: &mut PgVec<'_, u8>, v: i32) {
 fn infix<'mcx>(
     mcx: Mcx<'mcx>,
     st: &mut Infix<'_>,
-    out: &mut PgVec<'mcx, u8>,
+    out: &mut OutBuf<'mcx>,
     parent_priority: i32,
     right_phrase_op: bool,
 ) -> PgResult<()> {
@@ -63,26 +95,30 @@ fn infix<'mcx>(
     ::stack_depth::check_stack_depth()?;
     match st.q.item(st.cur) {
         Item::Val(op) => {
-            out.push(b'\'');
+            // C: RESIZEBUF(in, curpol->length * (pg_database_encoding_max_length() + 1) + 2 + 6)
+            out.resize(
+                op.length * (::mbutils::pg_database_encoding_max_length() as usize + 1) + 2 + 6,
+            )?;
+            out.v.push(b'\'');
             // operand is NUL-terminated in the pool; C walks to the NUL.
-            push_escaped(out, st.q.operand_str(&op));
-            out.push(b'\'');
+            push_escaped(&mut out.v, st.q.operand_str(&op));
+            out.v.push(b'\'');
             if op.weight != 0 || op.prefix {
-                out.push(b':');
+                out.v.push(b':');
                 if op.prefix {
-                    out.push(b'*');
+                    out.v.push(b'*');
                 }
                 if op.weight & (1 << 3) != 0 {
-                    out.push(b'A');
+                    out.v.push(b'A');
                 }
                 if op.weight & (1 << 2) != 0 {
-                    out.push(b'B');
+                    out.v.push(b'B');
                 }
                 if op.weight & (1 << 1) != 0 {
-                    out.push(b'C');
+                    out.v.push(b'C');
                 }
                 if op.weight & 1 != 0 {
-                    out.push(b'D');
+                    out.v.push(b'D');
                 }
             }
             st.cur += 1;
@@ -92,13 +128,16 @@ fn infix<'mcx>(
             let priority = op_priority(OP_NOT);
             let paren = priority < parent_priority;
             if paren {
-                out.extend_from_slice(b"( ");
+                out.resize(2)?;
+                out.v.extend_from_slice(b"( ");
             }
-            out.push(b'!');
+            out.resize(1)?;
+            out.v.push(b'!');
             st.cur += 1;
             infix(mcx, st, out, priority, false)?;
             if paren {
-                out.extend_from_slice(b" )");
+                out.resize(2)?;
+                out.v.extend_from_slice(b" )");
             }
             Ok(())
         }
@@ -108,28 +147,33 @@ fn infix<'mcx>(
                 priority < parent_priority || (opr.oper == OP_PHRASE && right_phrase_op);
             st.cur += 1;
             if need_paren {
-                out.extend_from_slice(b"( ");
+                out.resize(2)?;
+                out.v.extend_from_slice(b"( ");
             }
-            let mut nrm: PgVec<u8> = vec_with_capacity_in(mcx, 16)?;
+            // C: nrm.buflen = 16; nrm.buf = palloc(nrm.buflen)
+            let mut nrm = OutBuf { v: vec_with_capacity_in(mcx, 16)?, buflen: 16 };
             infix(mcx, st, &mut nrm, priority, opr.oper == OP_PHRASE)?;
             infix(mcx, st, out, priority, false)?;
+            // C: RESIZEBUF(in, 3 + (2 + 10 /* distance */) + (nrm.cur - nrm.buf))
+            out.resize(3 + (2 + 10) + nrm.v.len())?;
             match opr.oper {
-                OP_OR => out.extend_from_slice(b" | "),
-                OP_AND => out.extend_from_slice(b" & "),
+                OP_OR => out.v.extend_from_slice(b" | "),
+                OP_AND => out.v.extend_from_slice(b" & "),
                 OP_PHRASE => {
                     if opr.distance != 1 {
-                        out.extend_from_slice(b" <");
-                        push_i32_dec(out, opr.distance as i32);
-                        out.extend_from_slice(b"> ");
+                        out.v.extend_from_slice(b" <");
+                        push_i32_dec(&mut out.v, opr.distance as i32);
+                        out.v.extend_from_slice(b"> ");
                     } else {
-                        out.extend_from_slice(b" <-> ");
+                        out.v.extend_from_slice(b" <-> ");
                     }
                 }
                 other => panic!("unrecognized operator type: {other}"),
             }
-            out.extend_from_slice(&nrm);
+            out.v.extend_from_slice(&nrm.v);
             if need_paren {
-                out.extend_from_slice(b" )");
+                out.resize(2)?;
+                out.v.extend_from_slice(b" )");
             }
             Ok(())
         }
@@ -138,11 +182,14 @@ fn infix<'mcx>(
 }
 
 pub fn tsquery_out_core<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>) -> PgResult<PgVec<'mcx, u8>> {
-    let mut out: PgVec<u8> = vec_with_capacity_in(mcx, q.payload.len() + 8)?;
+    // C: nrm.buflen = 32. The vec's larger initial reserve is a perf carve;
+    // the ceiling ledger stays C's.
+    let mut out = OutBuf { v: vec_with_capacity_in(mcx, q.payload.len() + 8)?, buflen: 32 };
     if q.size() != 0 {
         let mut st = Infix { q, cur: 0 };
         infix(mcx, &mut st, &mut out, -1, false)?;
     }
+    let mut out = out.v;
     out.push(0);
     Ok(out)
 }
@@ -163,8 +210,10 @@ pub fn tsquerytree_core<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>) -> PgResult<PgV
             let img = build_query_image(mcx, &items, q.operand_pool())?;
             let q2 = TsQueryRef { payload: &img[4..] };
             let mut st = Infix { q: q2, cur: 0 };
-            infix(mcx, &mut st, &mut out, -1, false)?;
-            Ok(out)
+            // C tsquerytree: nrm.buflen = 32.
+            let mut buf = OutBuf { v: out, buflen: 32 };
+            infix(mcx, &mut st, &mut buf, -1, false)?;
+            Ok(buf.v)
         }
     }
 }

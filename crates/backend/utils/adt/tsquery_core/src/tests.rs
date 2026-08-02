@@ -251,3 +251,45 @@ fn tsquery_deep_recursion_raises_54001_and_does_not_abort() {
         );
     }
 }
+
+/// MaxAllocSize ceiling (task #85 sibling sweep, tsquery arm): C's tsqueryout
+/// grows its INFIX buffer via RESIZEBUF — buflen doubles (top-level initial
+/// 32, sub-buffer 16) and repallocs, so once the needed output crosses 2^29
+/// bytes the doubled request is 2^30 = 1073741824 > MaxAllocSize (0x3FFF_FFFF)
+/// and repalloc raises the CATCHABLE "invalid memory alloc request size
+/// 1073741824". Pre-fix, the port's infallible PgVec growth rode past that
+/// point and ABORTED the process at the allocator ceiling instead of raising.
+///
+/// A balanced AND tree keeps recursion at depth 18 (a left-deep chain of the
+/// same size would trip the stack guard's 54001 first, masking this path):
+/// 2^18 leaves of a shared 2046-byte operand deparse to
+/// 2^18*2048 + (2^18-1)*3 = 537,657,341 bytes > 2^29 = 536,870,912.
+#[test]
+fn tsquery_out_over_ceiling_raises_c_repalloc_error() {
+    use ::adt_tsvector_core::query::{Item, Operand, Operator, OP_AND};
+
+    let ctx = MemoryContext::new("t85");
+    let mcx = ctx.mcx();
+    let oplen = 2046usize;
+    let mut pool = std::vec![b'x'; oplen];
+    pool.push(0);
+    // Every leaf shares the pool's single operand (distance 0); infix never
+    // reads valcrc or Operator.left, so those stay 0.
+    let leaf =
+        Item::Val(Operand { weight: 0, prefix: false, valcrc: 0, length: oplen, distance: 0 });
+    fn gen(items: &mut std::vec::Vec<Item>, depth: u32, leaf: Item) {
+        if depth == 0 {
+            items.push(leaf);
+        } else {
+            items.push(Item::Opr(Operator { oper: OP_AND, distance: 0, left: 0 }));
+            gen(items, depth - 1, leaf);
+            gen(items, depth - 1, leaf);
+        }
+    }
+    let mut items: std::vec::Vec<Item> = std::vec::Vec::with_capacity((1 << 19) - 1);
+    gen(&mut items, 18, leaf);
+    let img = crate::parse::build_query_image(mcx, &items, &pool).expect("image builds");
+    let err = tsquery_out_core(mcx, TsQueryRef { payload: &img[4..] })
+        .expect_err("over-ceiling tsquery output must raise C's repalloc refusal");
+    assert_eq!(err.message(), "invalid memory alloc request size 1073741824");
+}
