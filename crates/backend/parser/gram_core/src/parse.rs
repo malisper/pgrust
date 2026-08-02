@@ -20,6 +20,12 @@ pub(crate) struct Parser<'mcx> {
     la_tok: i32,
     la_val: YYSTYPE<'mcx>,
     la_loc: i32,
+    // C's lookahead_end/lookahead_hold_char discipline (parser.c): while a
+    // peeked token sits in the buffer, the hold-char NUL is re-placed at the
+    // END OF THE CURRENT TOKEN; scanner_yyerror tails stop there. Without a
+    // buffered peek the hold char is the scanner's live position.
+    cur_tok_end: usize,
+    la_end: usize,
     // C's yylloc variable as flex/actions see it: the location of the token
     // most recently returned by base_yylex (parser_yyerror renders here).
     last_yylloc: i32,
@@ -42,6 +48,8 @@ impl<'mcx> Parser<'mcx> {
             la_tok: mode_token,
             la_val: YYSTYPE::None,
             la_loc: 0,
+            cur_tok_end: 0,
+            la_end: 0,
             last_yylloc: 0,
             parsetree: NodeList::nil(),
         })
@@ -55,9 +63,12 @@ impl<'mcx> Parser<'mcx> {
             self.have_lookahead = false;
             *lvalp = mem::take(&mut self.la_val);
             *llocp = self.la_loc;
+            self.cur_tok_end = self.la_end;
             self.la_tok
         } else {
-            self.next_token(lvalp, llocp)?
+            let tok = self.next_token(lvalp, llocp)?;
+            self.cur_tok_end = self.scanner.tok_end();
+            tok
         };
 
         self.last_yylloc = *llocp;
@@ -75,6 +86,7 @@ impl<'mcx> Parser<'mcx> {
         let mut next_val = YYSTYPE::None;
         let mut next_loc = 0;
         let next_tok = self.next_token(&mut next_val, &mut next_loc)?;
+        self.la_end = self.scanner.tok_end();
         self.la_tok = next_tok;
         self.la_val = next_val;
         self.la_loc = next_loc;
@@ -107,6 +119,10 @@ impl<'mcx> Parser<'mcx> {
                     let mut esc_val = YYSTYPE::None;
                     let mut esc_loc = 0;
                     let esc_tok = self.next_token(&mut esc_val, &mut esc_loc)?;
+                    // All three tokens consumed (C clears have_lookahead and
+                    // restores the hold char BEFORE validating the escape, so
+                    // the two escape errors tail at the third token).
+                    self.have_lookahead = false;
                     if esc_tok != tokens::SCONST {
                         return Err(self.syntax_error(
                             "UESCAPE must be followed by a simple string literal",
@@ -121,8 +137,6 @@ impl<'mcx> Parser<'mcx> {
                             self.syntax_error("invalid Unicode escape character", esc_loc)
                         );
                     }
-                    // All three tokens consumed (C clears have_lookahead).
-                    self.have_lookahead = false;
                     escstr[0]
                 } else {
                     b'\\'
@@ -391,12 +405,23 @@ impl<'mcx> Parser<'mcx> {
         Ok(state)
     }
 
-    // scanner_yyerror: "at or near" quotes the failing token's raw text up
-    // to C's hold-char NUL = the match end (recovered by token_extent).
+    // scanner_yyerror: "at or near" quotes the raw text from the error
+    // position up to C's hold-char NUL. The hold char always sits at the
+    // byte just past the MOST RECENTLY SCANNED core token — which is the
+    // live scanner's current position, NOT the end of the failing token:
+    // when base_yylex consumed lookahead (the USCONST/UIDENT + UESCAPE +
+    // SCONST composite, or the WITH/NULLS/NOT peeks), C's tail spans the
+    // whole consumed run (`at or near "U&'a' UESCAPE '-'"`; found by
+    // gram_core_diff CI cluster run 2026-08-01 after directed U& seeding).
     #[cold]
     pub(crate) fn syntax_error(&self, message: &str, yylloc: i32) -> Box<PgError> {
         let loc = (yylloc.max(0) as usize).min(self.scanbuf.len());
-        let end = self.token_extent(loc);
+        let hold = if self.have_lookahead {
+            self.cur_tok_end
+        } else {
+            self.scanner.tok_end()
+        };
+        let end = hold.clamp(loc, self.scanbuf.len());
         let tail = &self.scanbuf[loc..end];
         let tail = &tail[..tail.iter().position(|&b| b == 0).unwrap_or(tail.len())];
         let err = if tail.is_empty() {
@@ -415,30 +440,6 @@ impl<'mcx> Parser<'mcx> {
                     self.settings.encoding,
                 )),
         )
-    }
-
-    // End of the token starting at `loc`: minimal prefix of scanbuf[loc..]
-    // whose first token equals the full-input token (the scanner is in INITIAL
-    // at parser token boundaries, so a fresh scan reproduces the match; the
-    // predicate is monotone between the match end and the next token's start).
-    fn token_extent(&self, loc: usize) -> usize {
-        let sub = &self.scanbuf[loc..];
-        let mut s = Scanner::new(sub, self.mcx, self.settings);
-        let mut ref_val = CoreYYSTYPE::None;
-        let mut ref_loc = 0;
-        let Ok(ref_tok) = s.core_yylex(&mut ref_val, &mut ref_loc) else {
-            return self.scanbuf.len();
-        };
-        if ref_tok == YYEOF {
-            return loc;
-        }
-        // C's hold-char NUL sits at the END OF THE MATCH; the scanner's
-        // tok_end() is exactly that byte. (The former smallest-prefix
-        // binary search diverged whenever a proper prefix re-lexed to the
-        // same token+value — e.g. the leading-zero integer `000000`
-        // reported `at or near "0"`; found by the gram_core_diff fuzz
-        // target, 2026-08-01.)
-        loc + s.tok_end()
     }
 
 }

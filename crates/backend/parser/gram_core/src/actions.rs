@@ -1192,7 +1192,6 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(node));
             }
-            547 => *yyval = YYSTYPE::Node(view.v(1).node()),
             // DomainConstraintElem: CHECK '(' a_expr ')' ConstraintAttributeSpec
             548 => {
                 let mut n = Node::build::<Constraint>(mcx)?;
@@ -1873,11 +1872,7 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(node));
             }
             // opt_qualified_name
-            139 => *yyval = view.v(1),
-            140 => *yyval = YYSTYPE::List(NodeList::nil()),
             // opt_name_list
-            1579 => *yyval = view.v(2),
-            1580 => *yyval = YYSTYPE::List(NodeList::nil()),
             // CreateStatsStmt: CREATE STATISTICS [IF NOT EXISTS]
             // opt_qualified_name opt_name_list ON stats_params FROM from_list
             611 | 612 => {
@@ -1959,8 +1954,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // OptParenthesizedSeqOptList: '(' SeqOptList ')' | /*EMPTY*/
-            638 => *yyval = YYSTYPE::List(view.v(2).list()),
-            639 => *yyval = YYSTYPE::List(NodeList::nil()),
             // SeqOptList: SeqOptElem | SeqOptList SeqOptElem
             640 => {
                 let el = view.v(1).node().expect("SeqOptElem");
@@ -2006,8 +1999,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // OptTableSpaceOwner: OWNER RoleSpec | empty.
-            681 => *yyval = YYSTYPE::Node(view.v(2).node()),
-            682 => *yyval = YYSTYPE::Node(None),
             // DropTableSpaceStmt: DROP TABLESPACE [IF EXISTS] name
             683 | 684 => {
                 let mut n = Node::build::<parsenodes::DropTableSpaceStmt>(mcx)?;
@@ -2038,7 +2029,6 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(2).node().expect("extension opt item"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            688 | 695 => *yyval = YYSTYPE::List(NodeList::nil()),
             689 => {
                 let arg = Node::mk_string(mcx, view.v(2).str_val())?;
                 *yyval = def_elem(mcx, "schema", Some(arg), view.l(1))?;
@@ -2810,8 +2800,6 @@ impl<'mcx> Parser<'mcx> {
                 )
             }
             // opt_merge_when_condition: AND a_expr | empty
-            1684 => *yyval = YYSTYPE::Node(view.v(2).node()),
-            1685 => *yyval = YYSTYPE::Node(None),
             // merge_update: UPDATE SET set_clause_list
             1686 => {
                 let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
@@ -2848,7 +2836,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // merge_values_clause: VALUES '(' expr_list ')'
-            1693 => *yyval = YYSTYPE::List(view.v(3).list()),
             // relation_expr_opt_alias: relation_expr [AS] ColId
             1879 | 1880 => {
                 let rv = view.v(1).node().expect("relation_expr");
@@ -4329,7 +4316,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(list);
             }
             2341 => *yyval = YYSTYPE::Node(Some(Node::mk_a_star(mcx)?)),
-            1944 => *yyval = YYSTYPE::List(NodeList::nil()),
             // [SETOF] SimpleTypename ARRAY -> arrayBounds = [-1]
             1940 | 1941 => {
                 let tn =
@@ -4379,8 +4365,6 @@ impl<'mcx> Parser<'mcx> {
                 )?));
             }
             // opt_slice_bound: a_expr | empty
-            2344 => *yyval = YYSTYPE::Node(view.v(1).node()),
-            2345 => *yyval = YYSTYPE::Node(None),
             2347 => {
                 let mut list = view.v(1).list();
                 let el = view.v(2).node().expect("indirection_el");
@@ -4457,7 +4441,6 @@ impl<'mcx> Parser<'mcx> {
             2450 => *yyval = self.a_const(ValUnion::Boolean(Boolean { boolval: false }), view.l(1))?,
             2455 => *yyval = YYSTYPE::Ival(view.v(2).ival()),
             2456 => *yyval = YYSTYPE::Ival(-view.v(2).ival()),
-            2470..=2486 => *yyval = YYSTYPE::Str(view.v(1).str_val()),
             // opt_boolean_or_string keyword arms.
             232 => *yyval = YYSTYPE::Str("true"),
             233 => *yyval = YYSTYPE::Str("false"),
@@ -5026,26 +5009,6 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(n));
             }
-            2149 | 2150 | 2151 | 2153 | 2154 | 2155 => {
-                use types_nodes::SQLValueFunctionOp::*;
-                let op = match rule {
-                    2149 => SVFOP_CURRENT_ROLE,
-                    2150 => SVFOP_CURRENT_USER,
-                    2151 => SVFOP_SESSION_USER,
-                    2153 => SVFOP_USER,
-                    2154 => SVFOP_CURRENT_CATALOG,
-                    _ => SVFOP_CURRENT_SCHEMA,
-                };
-                *yyval = YYSTYPE::Node(Some(Node::mk(
-                    mcx,
-                    types_nodes::SQLValueFunction {
-                        op,
-                        r#type: 0,
-                        typmod: -1,
-                        location: view.l(1),
-                    },
-                )?));
-            }
             // COLLATION FOR '(' a_expr ')'.
             2139 => {
                 let f = make_func_call(
@@ -5451,7 +5414,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(Node::mk(mcx, LoadStmt { filename })?));
             }
             // file_name: Sconst
-            2436 => *yyval = YYSTYPE::Str(view.v(1).str_val()),
             // CheckPointStmt: CHECKPOINT
             269 => *yyval = YYSTYPE::Node(Some(Node::mk(mcx, CheckPointStmt {})?)),
             // LockStmt: LOCK_P opt_table relation_expr_list opt_lock opt_nowait
@@ -5467,7 +5429,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n));
             }
             // opt_lock: IN lock_type MODE | EMPTY
-            1649 => *yyval = YYSTYPE::Ival(view.v(2).ival()),
             1650 => *yyval = YYSTYPE::Ival(8),
             // lock_type (lockdefs.h values, declaration order)
             1651 => *yyval = YYSTYPE::Ival(1),
@@ -5492,13 +5453,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(Node::mk(mcx, DiscardStmt { target })?));
             }
             // NumericOnly: FCONST | '+' FCONST | '-' FCONST | SignedIconst.
-            660 => *yyval = YYSTYPE::Node(Some(Node::mk_float(mcx, view.v(1).str_val())?)),
-            661 => *yyval = YYSTYPE::Node(Some(Node::mk_float(mcx, view.v(2).str_val())?)),
-            662 => {
-                *yyval =
-                    YYSTYPE::Node(Some(Node::mk_float(mcx, negate_float(mcx, view.v(2).str_val())?)?));
-            }
-            663 => *yyval = YYSTYPE::Node(Some(Node::mk_integer(mcx, view.v(1).ival())?)),
             // NotifyStmt/ListenStmt/UnlistenStmt: parse is C-complete; execution is the loud async lane.
             1452 => {
                 let n = Node::mk(
@@ -6352,14 +6306,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // alter_column_default: SET DEFAULT a_expr | DROP DEFAULT
-            364 => *yyval = YYSTYPE::Node(view.v(3).node()),
-            365 => *yyval = YYSTYPE::Node(Option::None),
-            367 => *yyval = YYSTYPE::Node(Option::None),
             // alter_using: USING a_expr | /*EMPTY*/
-            368 => *yyval = YYSTYPE::Node(view.v(2).node()),
-            369 => *yyval = YYSTYPE::Node(Option::None),
             // TableConstraint: ConstraintElem (536 CONSTRAINT-name arm above)
-            537 => *yyval = YYSTYPE::Node(view.v(1).node()),
             // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME TO name
             1294 | 1295 => {
                 let (rv, nm) = if rule == 1294 { (3, 6) } else { (5, 8) };
@@ -6414,7 +6362,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // opt_column: COLUMN | /*EMPTY*/
-            1329 | 1330 => *yyval = YYSTYPE::Ival(0),
             // opt_set_data: SET DATA_P | /*EMPTY*/
             1331 => *yyval = YYSTYPE::Ival(1),
             1332 => *yyval = YYSTYPE::Ival(0),
@@ -6679,14 +6626,6 @@ impl<'mcx> Parser<'mcx> {
                     None,
                     view.v(3).node(),
                 )?;
-            }
-            359 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_EnableRowSecurity, None, None)?,
-            360 => {
-                *yyval = alter_table_cmd(mcx, AlterTableType::AT_DisableRowSecurity, None, None)?
-            }
-            361 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_ForceRowSecurity, None, None)?,
-            362 => {
-                *yyval = alter_table_cmd(mcx, AlterTableType::AT_NoForceRowSecurity, None, None)?
             }
             363 => {
                 let def = Node::mk_list(mcx, view.v(1).list())?;
@@ -7002,8 +6941,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // opt_with_data: WITH DATA | WITH NO DATA | EMPTY.
-            623 | 625 => *yyval = YYSTYPE::Boolean(true),
-            624 => *yyval = YYSTYPE::Boolean(false),
             // simple_select: TABLE relation_expr.
             1722 => {
                 let star = NodeList::make1(mcx, Node::mk_a_star(mcx)?)?;
@@ -7160,13 +7097,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(Node::mk(mcx, n)?));
             }
             // RowSecurityOptionalExpr: USING '(' a_expr ')' | EMPTY
-            764 => *yyval = YYSTYPE::Node(view.v(3).node()),
-            765 => *yyval = YYSTYPE::Node(None),
             // RowSecurityOptionalWithCheck: WITH CHECK '(' a_expr ')' | EMPTY
-            766 => *yyval = YYSTYPE::Node(view.v(4).node()),
-            767 => *yyval = YYSTYPE::Node(None),
             // RowSecurityDefaultToRole: TO role_list | EMPTY -> [PUBLIC]
-            768 => *yyval = YYSTYPE::List(view.v(2).list()),
             769 => {
                 let mut n = Node::build::<RoleSpec>(mcx)?;
                 n.roletype = RoleSpecType::ROLESPEC_PUBLIC;
@@ -7174,8 +7106,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, n.seal())?);
             }
             // RowSecurityOptionalToRole: TO role_list | EMPTY -> NIL
-            770 => *yyval = YYSTYPE::List(view.v(2).list()),
-            771 => *yyval = YYSTYPE::List(NodeList::nil()),
             // RowSecurityDefaultPermissive: AS IDENT | EMPTY -> true
             772 => {
                 let s = view.v(2).str_val();
@@ -7198,7 +7128,6 @@ impl<'mcx> Parser<'mcx> {
             }
             773 => *yyval = YYSTYPE::Boolean(true),
             // RowSecurityDefaultForCmd: FOR row_security_cmd | EMPTY -> "all"
-            774 => *yyval = YYSTYPE::Str(view.v(2).str_val()),
             775 => *yyval = YYSTYPE::Str("all"),
             // row_security_cmd
             776 => *yyval = YYSTYPE::Str("all"),
@@ -7234,17 +7163,6 @@ impl<'mcx> Parser<'mcx> {
             }
             // DropStmt: DROP object_type_name_on_any_name [IF_P EXISTS] name
             // ON any_name opt_drop_behavior
-            922 | 923 => {
-                let (nm, an, bh) = if rule == 922 { (3, 5, 6) } else { (5, 7, 8) };
-                let mut n = Node::build::<DropStmt>(mcx)?;
-                n.removeType = object_type(view.v(2).ival());
-                let mut any_name = view.v(an).list();
-                any_name.lappend(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
-                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, any_name)?)?;
-                n.behavior = drop_behavior(view.v(bh).ival());
-                n.missing_ok = rule == 923;
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // CreateTrigStmt: CREATE opt_or_replace TRIGGER name
             // TriggerActionTime TriggerEvents ON qualified_name
             // TriggerReferencing TriggerForSpec TriggerWhen EXECUTE ...
@@ -7383,7 +7301,6 @@ impl<'mcx> Parser<'mcx> {
                 n.deferred = view.v(4).boolean();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            265 => *yyval = YYSTYPE::List(NodeList::nil()),
             267 => *yyval = YYSTYPE::Boolean(true),
             268 => *yyval = YYSTYPE::Boolean(false),
             // RenameStmt: ALTER TABLESPACE name RENAME TO name
@@ -7842,48 +7759,8 @@ impl<'mcx> Parser<'mcx> {
                 n.args_unspecified = true;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            1164 => {
-                let p = view.v(1).node().expect("func_arg");
-                let mode = p.as_function_parameter().expect("FunctionParameter").mode;
-                if !matches!(
-                    mode,
-                    FunctionParameterMode::FUNC_PARAM_DEFAULT
-                        | FunctionParameterMode::FUNC_PARAM_IN
-                        | FunctionParameterMode::FUNC_PARAM_VARIADIC
-                ) {
-                    return Err(self.errposition_error_code(
-                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-                        "aggregates cannot have output arguments".into(),
-                        view.l(1),
-                    ));
-                }
-                *yyval = YYSTYPE::Node(Some(p));
-            }
             // aggr_args carrier: [args sublist, numdirectargs Integer].
-            1165..=1167 => {
-                let sub = match rule {
-                    1165 => NodeList::nil(),
-                    1166 => view.v(2).list(),
-                    _ => view.v(4).list(),
-                };
-                let ndirect = if rule == 1167 { 0 } else { -1 };
-                let mut list = NodeList::make1(mcx, Node::mk_list(mcx, sub)?)?;
-                list.lappend(mcx, Node::mk_integer(mcx, ndirect)?)?;
-                *yyval = YYSTYPE::List(list);
-            }
             // aggregate_with_argtypes: objfuncargs = linitial(aggr_args).
-            1171 => {
-                let aggr = view.v(2).list();
-                let sub = aggr.as_slice()[0];
-                // SAFETY: parser-owned carrier; no derived refs live.
-                let params = unsafe { sub.with_mut::<NodeList, _>(core::mem::take) }
-                    .expect("aggr_args sublist");
-                let mut n = Node::build::<ObjectWithArgs>(mcx)?;
-                n.objname = view.v(1).list();
-                n.objargs = extract_arg_types(mcx, &params)?;
-                n.objfuncargs = params;
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             1217..=1219 => {
                 let mut n = Node::build::<AlterFunctionStmt>(mcx)?;
                 n.objtype = match rule {
@@ -8414,8 +8291,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // privileges: list | ALL [PRIVILEGES] -> NIL | ALL [(cols)].
-            1030 => *yyval = YYSTYPE::List(view.v(1).list()),
-            1031 | 1032 => *yyval = YYSTYPE::List(NodeList::nil()),
             1033 | 1034 => {
                 let cols = view.v(if rule == 1033 { 3 } else { 4 }).list();
                 let mut n = Node::build::<AccessPriv>(mcx)?;
@@ -8567,13 +8442,9 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("grantee"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            1069 => *yyval = YYSTYPE::Node(view.v(1).node()),
-            1070 => *yyval = YYSTYPE::Node(view.v(2).node()),
             1071 => *yyval = YYSTYPE::Boolean(true),
             1072 => *yyval = YYSTYPE::Boolean(false),
             // opt_granted_by: GRANTED BY RoleSpec | EMPTY.
-            1083 => *yyval = YYSTYPE::Node(view.v(3).node()),
-            1084 => *yyval = YYSTYPE::Node(None),
             // AlterDefaultPrivilegesStmt: ALTER DEFAULT PRIVILEGES
             // DefACLOptionList DefACLAction.
             1085 => {
@@ -8587,7 +8458,6 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(2).node().expect("DefACLOption"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            1087 => *yyval = YYSTYPE::List(NodeList::nil()),
             // DefACLOption: IN SCHEMA name_list | FOR ROLE/USER role_list.
             1088..=1090 => {
                 let arg = Node::mk_list(mcx, view.v(3).list())?;
@@ -8710,14 +8580,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(list);
             }
             // func_arg_expr: param_name COLON_EQUALS/EQUALS_GREATER a_expr
-            2295 | 2296 => {
-                let mut n = Node::build::<types_nodes::primnodes::NamedArgExpr>(mcx)?;
-                n.name = Some(view.v(1).str_val());
-                n.arg = Some(view.v(3).node().expect("a_expr"));
-                n.argnumber = -1;
-                n.location = view.l(1);
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // CallStmt: CALL func_application
             146 => {
                 let mut n = Node::build::<types_nodes::CallStmt>(mcx)?;
@@ -8944,13 +8806,11 @@ impl<'mcx> Parser<'mcx> {
                     972 => ObjectType::OBJECT_COLUMN,
                     974 => ObjectType::OBJECT_TYPE,
                     975 => ObjectType::OBJECT_DOMAIN,
-                    976 => ObjectType::OBJECT_AGGREGATE,
-                    977 => ObjectType::OBJECT_FUNCTION,
+                    // 976/977/982/983 (AGGREGATE/FUNCTION/PROCEDURE/ROUTINE)
+                    // are claimed by the dedicated arm above (never reach here).
                     978 => ObjectType::OBJECT_OPERATOR,
                     979 => ObjectType::OBJECT_TABCONSTRAINT,
                     980 => ObjectType::OBJECT_DOMCONSTRAINT,
-                    982 => ObjectType::OBJECT_PROCEDURE,
-                    983 => ObjectType::OBJECT_ROUTINE,
                     984 => ObjectType::OBJECT_TRANSFORM,
                     985 => ObjectType::OBJECT_OPCLASS,
                     986 => ObjectType::OBJECT_OPFAMILY,
@@ -8995,14 +8855,6 @@ impl<'mcx> Parser<'mcx> {
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            973 => {
-                let mut n = Node::build::<CommentStmt>(mcx)?;
-                n.objtype = object_type(view.v(3).ival());
-                n.object = Some(Node::mk_string(mcx, view.v(4).str_val())?);
-                let c = view.v(6);
-                n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // SecLabelStmt; LARGE OBJECT (998) shifts object/label one slot right.
             991..=1000 => {
                 let mut n = Node::build::<SecLabelStmt>(mcx)?;
@@ -9028,15 +8880,6 @@ impl<'mcx> Parser<'mcx> {
                 let l = view.v(if rule == 998 { 9 } else { 8 });
                 n.label = if l.is_null_node() { None } else { Some(l.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            670 => {
-                let s = Node::mk_string(mcx, view.v(1).str_val())?;
-                *yyval = YYSTYPE::List(NodeList::make1(mcx, s)?);
-            }
-            671 => {
-                let mut list = view.v(2).list();
-                list.lcons(mcx, Node::mk_string(mcx, view.v(1).str_val())?)?;
-                *yyval = YYSTYPE::List(list);
             }
             // CreateAmStmt; am_type rides as Ival(AMTYPE_*).
             781 => {
@@ -9400,10 +9243,7 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // definition: '(' def_list ')'
-            864 => *yyval = YYSTYPE::List(view.v(2).list()),
             // opt_enum_val_list: enum_val_list | /*EMPTY*/
-            879 => *yyval = YYSTYPE::List(view.v(1).list()),
-            880 => *yyval = YYSTYPE::List(NodeList::nil()),
             // enum_val_list: Sconst | enum_val_list ',' Sconst
             881 => {
                 let s = Node::mk_string(mcx, view.v(1).str_val())?;
@@ -9483,40 +9323,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(list);
             }
             // CompositeTypeStmt: CREATE TYPE_P any_name AS '(' OptTableFuncElementList ')'
-            853 => {
-                let names = view.v(3).list();
-                let loc = view.l(3);
-                let mut parts = [None; 3];
-                for (i, el) in names.iter().enumerate() {
-                    if i < 3 {
-                        parts[i] = el.as_string().map(|s| s.sval);
-                    }
-                }
-                // makeRangeVarFromAnyName: makeNode zero-fill leaves inh=false.
-                let (catalogname, schemaname, relname) = match names.len() {
-                    1 => (None, None, parts[0]),
-                    2 => (None, parts[0], parts[1]),
-                    3 => (parts[0], parts[1], parts[2]),
-                    _ => return Err(self.improper_qualified_name(None, &names, loc)),
-                };
-                let rv = Node::mk_mut(
-                    mcx,
-                    RangeVar {
-                        catalogname,
-                        schemaname,
-                        relname,
-                        inh: false,
-                        relpersistence: RELPERSISTENCE_PERMANENT,
-                        alias: None,
-                        location: loc,
-                    },
-                )?
-                .seal_ref();
-                let mut n = Node::build::<CompositeTypeStmt>(mcx)?;
-                n.typevar = Some(rv);
-                n.coldeflist = view.v(6).list();
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // DefineStmt: CREATE TEXT_P SEARCH {PARSER|DICTIONARY|TEMPLATE|CONFIGURATION}
             // any_name definition
             856..=859 => {
@@ -9581,24 +9387,6 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // TableFuncElementList / TableFuncElement (1898/1899 ride DISPATCH)
-            1900 => {
-                let el = view.v(1).node().expect("TableFuncElement");
-                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
-            }
-            1901 => {
-                let mut list = view.v(1).list();
-                list.lappend(mcx, view.v(3).node().expect("TableFuncElement"))?;
-                *yyval = YYSTYPE::List(list);
-            }
-            1902 => {
-                let mut n = Node::build::<ColumnDef>(mcx)?;
-                n.colname = Some(view.v(1).str_val());
-                n.typeName = view.v(2).node();
-                n.is_local = true;
-                n.collClause = view.v(3).node();
-                n.location = view.l(1);
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // opt_interval single-field / X TO Y masks (values vs datetime.h).
             2003..=2007 | 2009..=2011 | 2013 => {
                 let mask = match rule {
@@ -10052,25 +9840,6 @@ impl<'mcx> Parser<'mcx> {
             1450 | 1451 => *yyval = YYSTYPE::Boolean(false),
             // DropStmt: DROP object_type_name_on_any_name [IF_P EXISTS] name
             // ON any_name opt_drop_behavior
-            922 => {
-                let mut objects = view.v(5).list();
-                objects.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
-                let mut n = Node::build::<DropStmt>(mcx)?;
-                n.removeType = object_type(view.v(2).ival());
-                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, objects)?)?;
-                n.behavior = drop_behavior(view.v(6).ival());
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            923 => {
-                let mut objects = view.v(7).list();
-                objects.lappend(mcx, Node::mk_string(mcx, view.v(5).str_val())?)?;
-                let mut n = Node::build::<DropStmt>(mcx)?;
-                n.removeType = object_type(view.v(2).ival());
-                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, objects)?)?;
-                n.behavior = drop_behavior(view.v(8).ival());
-                n.missing_ok = true;
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // --- sqljson-lane arms (append-only) ---
             2187 => {
                 *yyval = YYSTYPE::Node(Some(Node::mk(

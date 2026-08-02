@@ -2715,3 +2715,18 @@ fn regress_rename_constraint_relation_type_stays_zero() {
     assert_eq!(rs.relationType, ObjectType::OBJECT_ACCESS_METHOD);
     assert!(rs.missing_ok);
 }
+
+// Defect 7 (final CI cluster floor, 2026-08-01): the "at or near" tail must stop
+// at C's hold char = the byte past the most recently SCANNED core token —
+// which spans a consumed U&-UESCAPE composite, but is re-placed at the FIRST
+// token's end while a peeked token sits in the lookahead buffer (parser.c
+// lookahead_hold_char discipline).
+#[test]
+fn regress_error_tail_holdchar_spans_consumed_lookahead() {
+    // Failing token is the full composite: tail spans all three tokens.
+    let e = parse_err("SELECT 1 U&'a' UESCAPE '-';");
+    assert_eq!(e.message(), "syntax error at or near \"U&'a' UESCAPE '-'\"");
+    // Buffered one-token peek (WITH looks ahead): tail stays at "WITH".
+    let e = parse_err("CREATE SEQUENCE s10 WITH 1;");
+    assert_eq!(e.message(), "syntax error at or near \"WITH\"");
+}
