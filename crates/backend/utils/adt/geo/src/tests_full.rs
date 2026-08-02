@@ -84,7 +84,7 @@ fn path_io() {
 
     let v = io::path_in(ctx.mcx(), "((0,0),(1,0),(1,1))", None).unwrap();
     let r = PathRef::from_payload(v.data());
-    assert_eq!(out_str(|o| io::path_out(&r, o)), "((0,0),(1,0),(1,1))");
+    assert_eq!(out_str(|o| io::path_out(&r, o).unwrap()), "((0,0),(1,0),(1,1))");
 
     assert!(io::path_in(ctx.mcx(), "(0,0),(1,1)x", None).is_err());
     assert!(io::path_in(ctx.mcx(), "", None).is_err());
@@ -100,7 +100,7 @@ fn poly_io_and_boundbox() {
     assert_eq!(r.boundbox.low, p(0.0, 0.0));
     assert_eq!(r.boundbox.high, p(2.0, 2.0));
     assert_eq!(
-        out_str(|o| io::poly_out(&r, o)),
+        out_str(|o| io::poly_out(&r, o).unwrap()),
         "((0,0),(2,0),(2,2),(0,2))"
     );
     assert!(io::poly_in(ctx.mcx(), "((0,0),(1,1)", None).is_err());
@@ -302,4 +302,54 @@ fn lseg_line_codecs() {
         C: 3.5,
     };
     assert_eq!(LINE::from_datum_bytes(&l.to_datum_bytes()), l);
+}
+
+/// Task #85 ceiling class (geo arm): C's path_encode (geo_ops.c) builds path
+/// and polygon text into a StringInfo, so output past MaxAllocSize raises
+/// enlargeStringInfo's catchable 54000 "string buffer exceeds maximum allowed
+/// length" error. The port accumulated into an unceilinged std Vec: a valid
+/// ~330MB polygon (~21M points, 16 bytes each) produced a >1GB text form and
+/// kept growing where C errors. Pre-fix this test FAILS: the over-ceiling
+/// out call returns unit after building the whole multi-GB string.
+#[test]
+fn path_poly_out_over_ceiling_raise_stringinfo_error() {
+    // A coordinate with a 24-char shortest round-trip repr maximizes text
+    // per stored point (~52 text bytes per 16 payload bytes).
+    let x: f64 = -1.4916681462400413e-154;
+    let mut b = [0u8; 64];
+    let n = ::adt_float::float8out_internal(x, &mut b);
+    let per_point_text = 2 * n + 4; // ( x , y ) ,
+    let npts = ::mcx::MAX_ALLOC_SIZE / per_point_text + 2;
+
+    let pt_img = p(x, x).to_datum_bytes();
+    let pts_bytes = pt_img.repeat(npts);
+
+    let expect_ceiling = |r: ::types_error::PgResult<()>| {
+        let err = r.expect_err("over-ceiling geo text output must raise the StringInfo error");
+        assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(
+            err.message(),
+            format!(
+                "string buffer exceeds maximum allowed length ({} bytes)",
+                ::mcx::MAX_ALLOC_SIZE
+            )
+        );
+    };
+
+    // polygon
+    let boundbox = ::types_core::geo::BOX { high: p(x, x), low: p(x, x) };
+    let pr = PolyRef::from_parts(boundbox, npts, &pts_bytes);
+    let mut out = Vec::new();
+    expect_ceiling(io::poly_out(&pr, &mut out));
+
+    // path: payload = [npts i32][closed i32][pad to PATH_HEADER_SIZE-4][points]
+    let mut img = Vec::with_capacity(::types_core::geo::PATH_HEADER_SIZE - 4 + pts_bytes.len());
+    img.extend_from_slice(&(npts as i32).to_ne_bytes());
+    img.extend_from_slice(&1i32.to_ne_bytes());
+    img.resize(::types_core::geo::PATH_HEADER_SIZE - 4, 0);
+    img.extend_from_slice(&pts_bytes);
+    drop(pts_bytes);
+    let pr = PathRef::from_payload(&img);
+    let mut out = Vec::new();
+    expect_ceiling(io::path_out(&pr, &mut out));
 }

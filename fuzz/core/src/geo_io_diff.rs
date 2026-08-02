@@ -352,7 +352,7 @@ fn path_arm(payload: &[u8], raw_out: bool) {
         }
         let pr = adt_geo::PathRef::from_payload(&img);
         let mut out = Vec::new();
-        adt_geo::io::path_out(&pr, &mut out);
+        adt_geo::io::path_out(&pr, &mut out).expect("fuzz geo inputs are far below MaxAllocSize");
         out_compare("path", &(npts, closed), clen, &cbuf, &out);
         return;
     }
@@ -391,7 +391,7 @@ fn path_arm(payload: &[u8], raw_out: bool) {
                 pg_diff_geo_path_out(cn, cclosed, cxys.as_ptr(), cbuf.as_mut_ptr(), CBUF as i32)
             };
             let mut out = Vec::new();
-            adt_geo::io::path_out(&pr, &mut out);
+            adt_geo::io::path_out(&pr, &mut out).expect("fuzz geo inputs are far below MaxAllocSize");
             out_compare("path(rt)", &s, clen, &cbuf, &out);
         }
         Err(e) => {
@@ -424,7 +424,7 @@ fn poly_arm(payload: &[u8], raw_out: bool) {
         }
         let pr = adt_geo::PolyRef::from_payload(&img);
         let mut out = Vec::new();
-        adt_geo::io::poly_out(&pr, &mut out);
+        adt_geo::io::poly_out(&pr, &mut out).expect("fuzz geo inputs are far below MaxAllocSize");
         out_compare("poly", &npts, clen, &cbuf, &out);
         return;
     }
@@ -474,7 +474,7 @@ fn poly_arm(payload: &[u8], raw_out: bool) {
                 pg_diff_geo_poly_out(cn, cxys.as_ptr(), cbuf.as_mut_ptr(), CBUF as i32)
             };
             let mut out = Vec::new();
-            adt_geo::io::poly_out(&pr, &mut out);
+            adt_geo::io::poly_out(&pr, &mut out).expect("fuzz geo inputs are far below MaxAllocSize");
             out_compare("poly(rt)", &s, clen, &cbuf, &out);
         }
         Err(e) => {

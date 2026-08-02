@@ -242,28 +242,49 @@ pub(crate) enum PathDelim {
     Closed,
 }
 
-pub(crate) fn path_encode(delim: PathDelim, pts: &impl Pts, out: &mut Vec<u8>) {
+// C path_encode (geo_ops.c) builds into a StringInfo: every append is
+// admitted by enlargeStringInfo against MaxAllocSize, so an over-1GB text
+// form (paths/polygons amplify ~3x: 16 stored bytes -> up to ~50 text bytes
+// per point) raises the catchable 54000 ceiling error at the crossing
+// append instead of growing without bound.
+pub(crate) fn path_encode(delim: PathDelim, pts: &impl Pts, out: &mut Vec<u8>) -> PgResult<()> {
     match delim {
-        PathDelim::Closed => out.push(LDELIM),
-        PathDelim::Open => out.push(LDELIM_EP),
+        PathDelim::Closed => {
+            crate::si_admit(out, 1)?;
+            out.push(LDELIM)
+        }
+        PathDelim::Open => {
+            crate::si_admit(out, 1)?;
+            out.push(LDELIM_EP)
+        }
         PathDelim::None => {}
     }
 
     for i in 0..pts.n() {
         if i > 0 {
+            crate::si_admit(out, 1)?;
             out.push(DELIM);
         }
+        crate::si_admit(out, 1)?;
         out.push(LDELIM);
         let p = pts.pt(i);
-        crate::pair_encode(p.x, p.y, out);
+        crate::pair_encode(p.x, p.y, out)?;
+        crate::si_admit(out, 1)?;
         out.push(RDELIM);
     }
 
     match delim {
-        PathDelim::Closed => out.push(RDELIM),
-        PathDelim::Open => out.push(RDELIM_EP),
+        PathDelim::Closed => {
+            crate::si_admit(out, 1)?;
+            out.push(RDELIM)
+        }
+        PathDelim::Open => {
+            crate::si_admit(out, 1)?;
+            out.push(RDELIM_EP)
+        }
         PathDelim::None => {}
     }
+    Ok(())
 }
 
 // C computes base_size/size as 32-bit int; the guard relies on that wraparound.
@@ -287,7 +308,9 @@ pub fn point_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult
 
 pub fn point_out(pt: &Point, out: &mut Vec<u8>) {
     let one: &[Point] = core::slice::from_ref(pt);
-    path_encode(PathDelim::None, &one, out);
+    // Fixed cardinality: a point's text form is a few dozen bytes, so the
+    // StringInfo ceiling is unreachable.
+    path_encode(PathDelim::None, &one, out).expect("fixed-size geo output is below MaxAllocSize");
 }
 
 pub fn box_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<BOX> {
@@ -323,7 +346,8 @@ pub fn box_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResu
 
 pub fn box_out(b: &BOX, out: &mut Vec<u8>) {
     let pts: &[Point] = &[b.high, b.low];
-    path_encode(PathDelim::None, &pts, out);
+    path_encode(PathDelim::None, &pts, out)
+        .expect("fixed-size geo output is below MaxAllocSize");
 }
 
 fn line_decode(
@@ -440,7 +464,8 @@ pub fn lseg_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgRes
 
 pub fn lseg_out(ls: &LSEG, out: &mut Vec<u8>) {
     let pts: &[Point] = &ls.p;
-    path_encode(PathDelim::Open, &pts, out);
+    path_encode(PathDelim::Open, &pts, out)
+        .expect("fixed-size geo output is below MaxAllocSize");
 }
 
 fn empty_path_image<'m>(mcx: Mcx<'m>) -> PgResult<Varlena<'m>> {
@@ -582,7 +607,7 @@ pub fn path_in<'m>(
     path_image(mcx, !isopen, npts, |i| Ok(points[i]))
 }
 
-pub fn path_out(path: &PathRef<'_>, out: &mut Vec<u8>) {
+pub fn path_out(path: &PathRef<'_>, out: &mut Vec<u8>) -> PgResult<()> {
     path_encode(
         if path.closed {
             PathDelim::Closed
@@ -591,7 +616,7 @@ pub fn path_out(path: &PathRef<'_>, out: &mut Vec<u8>) {
         },
         path,
         out,
-    );
+    )
 }
 
 pub fn poly_in<'m>(
@@ -628,8 +653,8 @@ pub fn poly_in<'m>(
     poly_image(mcx, npts, |i| Ok(points[i]))
 }
 
-pub fn poly_out(poly: &PolyRef<'_>, out: &mut Vec<u8>) {
-    path_encode(PathDelim::Closed, poly, out);
+pub fn poly_out(poly: &PolyRef<'_>, out: &mut Vec<u8>) -> PgResult<()> {
+    path_encode(PathDelim::Closed, poly, out)
 }
 
 pub fn circle_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<CIRCLE> {
@@ -690,7 +715,8 @@ pub fn circle_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgR
 pub fn circle_out(circle: &CIRCLE, out: &mut Vec<u8>) {
     out.push(LDELIM_C);
     out.push(LDELIM);
-    crate::pair_encode(circle.center.x, circle.center.y, out);
+    crate::pair_encode(circle.center.x, circle.center.y, out)
+        .expect("fixed-size geo output is below MaxAllocSize");
     out.push(RDELIM);
     out.push(DELIM);
     single_encode(circle.radius, out);

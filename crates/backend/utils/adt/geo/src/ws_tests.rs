@@ -28,11 +28,11 @@ fn roundtrip(ctx: &MemoryContext, typ: &str, s: &str) -> Result<String, ()> {
         "circle" => io::circle_out(&io::circle_in(s, None).map_err(|_| ())?, &mut out),
         "path" => {
             let v = io::path_in(ctx.mcx(), s, None).map_err(|_| ())?;
-            io::path_out(&PathRef::from_payload(v.data()), &mut out);
+            io::path_out(&PathRef::from_payload(v.data()), &mut out).map_err(|_| ())?;
         }
         "polygon" => {
             let v = io::poly_in(ctx.mcx(), s, None).map_err(|_| ())?;
-            io::poly_out(&PolyRef::from_payload(v.data()), &mut out);
+            io::poly_out(&PolyRef::from_payload(v.data()), &mut out).map_err(|_| ())?;
         }
         _ => unreachable!(),
     }

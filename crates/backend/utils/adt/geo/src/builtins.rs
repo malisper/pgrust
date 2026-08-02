@@ -68,7 +68,7 @@ struct OutBuf(Vec<u8>);
 
 fn out_cstring(
     flinfo: Option<&mut FmgrInfo>,
-    fill: impl FnOnce(&mut Vec<u8>),
+    fill: impl FnOnce(&mut Vec<u8>) -> PgResult<()>,
 ) -> PgResult<Datum> {
     let Some(flinfo) = flinfo else {
         panic!("geo out: cstring result needs a resolved FmgrInfo's scratch")
@@ -78,7 +78,7 @@ fn out_cstring(
     }
     let buf = &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0;
     buf.clear();
-    fill(buf);
+    fill(buf)?;
     buf.push(0);
     Ok(Datum::from_usize(buf.as_ptr() as usize))
 }
@@ -120,7 +120,10 @@ fn fc_point_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
 fn fc_point_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let p = unsafe { arg_point(fcinfo, 0) };
-    out_cstring(f, |buf| io::point_out(&p, buf))
+    out_cstring(f, |buf| {
+        io::point_out(&p, buf);
+        Ok(())
+    })
 }
 
 fn fc_box_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -133,7 +136,10 @@ fn fc_box_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> 
 fn fc_box_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let b = unsafe { arg_box(fcinfo, 0) };
-    out_cstring(f, |buf| io::box_out(&b, buf))
+    out_cstring(f, |buf| {
+        io::box_out(&b, buf);
+        Ok(())
+    })
 }
 
 fn fc_lseg_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -146,7 +152,10 @@ fn fc_lseg_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum>
 fn fc_lseg_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let ls = unsafe { arg_lseg(fcinfo, 0) };
-    out_cstring(f, |buf| io::lseg_out(&ls, buf))
+    out_cstring(f, |buf| {
+        io::lseg_out(&ls, buf);
+        Ok(())
+    })
 }
 
 fn fc_line_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -159,7 +168,10 @@ fn fc_line_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum>
 fn fc_line_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let l = unsafe { arg_line(fcinfo, 0) };
-    out_cstring(f, |buf| io::line_out(&l, buf))
+    out_cstring(f, |buf| {
+        io::line_out(&l, buf);
+        Ok(())
+    })
 }
 
 fn fc_circle_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -172,7 +184,10 @@ fn fc_circle_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
 fn fc_circle_out(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: module contract.
     let c = unsafe { arg_circle(fcinfo, 0) };
-    out_cstring(f, |buf| io::circle_out(&c, buf))
+    out_cstring(f, |buf| {
+        io::circle_out(&c, buf);
+        Ok(())
+    })
 }
 
 fn fc_path_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

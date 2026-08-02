@@ -143,25 +143,58 @@ pub fn point_in(s: &str) -> PgResult<Point> {
     io::point_in(s, None)
 }
 
-pub(crate) fn pair_encode(x: f64, y: f64, out: &mut Vec<u8>) {
-    let mut buf = [0u8; 64];
-    let n = ::adt_float::float8out_internal(x, &mut buf);
-    out.extend_from_slice(&buf[..n]);
+// enlargeStringInfo's refusal (stringinfo.c): C's path_encode builds into a
+// StringInfo, so the first append past MaxAllocSize raises this catchable
+// error rather than growing without bound.
+#[cold]
+pub(crate) fn enlarge_ceiling_error(len: usize, needed: usize) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "string buffer exceeds maximum allowed length ({} bytes)",
+            ::mcx::MAX_ALLOC_SIZE
+        ))
+        .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .with_detail(format!(
+            "Cannot enlarge string buffer containing {len} bytes by {needed} more bytes."
+        )),
+    )
+}
+
+#[inline]
+pub(crate) fn si_admit(out: &Vec<u8>, needed: usize) -> PgResult<()> {
+    if needed >= ::mcx::MAX_ALLOC_SIZE - out.len() {
+        return Err(enlarge_ceiling_error(out.len(), needed));
+    }
+    Ok(())
+}
+
+pub(crate) fn pair_encode(x: f64, y: f64, out: &mut Vec<u8>) -> PgResult<()> {
+    let mut bx = [0u8; 64];
+    let nx = ::adt_float::float8out_internal(x, &mut bx);
+    let mut by = [0u8; 64];
+    let ny = ::adt_float::float8out_internal(y, &mut by);
+    // C: appendStringInfo(str, "%s,%s", ...) — one enlarge for the whole pair.
+    si_admit(out, nx + 1 + ny)?;
+    out.extend_from_slice(&bx[..nx]);
     out.push(b',');
-    let n = ::adt_float::float8out_internal(y, &mut buf);
-    out.extend_from_slice(&buf[..n]);
+    out.extend_from_slice(&by[..ny]);
+    Ok(())
 }
 
 /// path_encode(PATH_NONE) over the given points.
-pub fn path_encode_none(pts: &[Point], out: &mut Vec<u8>) {
+pub fn path_encode_none(pts: &[Point], out: &mut Vec<u8>) -> PgResult<()> {
     for (i, p) in pts.iter().enumerate() {
         if i > 0 {
+            si_admit(out, 1)?;
             out.push(b',');
         }
+        si_admit(out, 1)?;
         out.push(b'(');
-        pair_encode(p.x, p.y, out);
+        pair_encode(p.x, p.y, out)?;
+        si_admit(out, 1)?;
         out.push(b')');
     }
+    Ok(())
 }
 
 /// adjustBox (gistproc.c): grow b to include addon (also usable here).
@@ -474,7 +507,7 @@ mod tests {
         assert!(box_in("1,2,3").is_err());
 
         let mut out = Vec::new();
-        path_encode_none(&[b.high, b.low], &mut out);
+        path_encode_none(&[b.high, b.low], &mut out).unwrap();
         assert_eq!(out, b"(3,4),(1,2)");
     }
 
@@ -484,7 +517,7 @@ mod tests {
         assert_eq!((p.x, p.y), (1.5, -2.0));
         assert!(point_in("(1,2) x").is_err());
         let mut out = Vec::new();
-        path_encode_none(&[p], &mut out);
+        path_encode_none(&[p], &mut out).unwrap();
         assert_eq!(out, b"(1.5,-2)");
     }
 
