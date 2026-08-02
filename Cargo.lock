@@ -3896,6 +3896,7 @@ name = "commands_define"
 version = "0.0.0"
 dependencies = [
  "adt_int8",
+ "format_type",
  "mcx",
  "types_error",
  "types_nodes",
