@@ -538,11 +538,12 @@ pub fn statement_task_shared(
     if g::InterruptHoldoffCount() != 0 || g::CritSectionCount() != 0 {
         return Ok(None);
     }
-    // Unported C arm (SerializeUncommittedEnums): the launched path raises
-    // a clean ERROR; the statement task simply refuses — the incumbent
-    // loop serves the statement. (In practice unreachable: uncommitted
-    // enums co-occur with pending invalidations, which the arm's binder
-    // policy gate already refused.)
+    // The launched path serializes the leader's uncommitted-enum sets
+    // (SerializeUncommittedEnums, InitializeParallelDSM above); this
+    // pgrust-only dop-1 lever refuses instead of filling them — the
+    // incumbent loop serves the statement. (In practice unreachable:
+    // uncommitted enums co-occur with pending invalidations, which the
+    // arm's binder policy gate already refused.)
     if pg_enum::HasUncommittedEnums() {
         return Ok(None);
     }
