@@ -23,9 +23,23 @@ fn trim_trailing_zeros(s: &str) -> &str {
 // %e branch is real once a table exceeds ~1e6 tuples.
 fn append_g6(buf: &mut StringInfo<'_>, v: f64) -> PgResult<()> {
     if v == 0.0 {
-        return buf.append_str("0");
+        // C %g prints negative zero as "-0" (rmgrdesc_diff CI cluster floor
+        // divergence, 2026-08-01).
+        return buf.append_str(if v.is_sign_negative() { "-0" } else { "0" });
     }
     let neg = v.is_sign_negative();
+    if !v.is_finite() {
+        // C parity = src/port/snprintf.c fmtfloat (the backend's printf):
+        // platform-independent "NaN" (never signed) / "Infinity" /
+        // "-Infinity". A corrupt record can carry any f64 bit pattern;
+        // found by rmgrdesc_diff — format!("{:.5e}") emits no 'e' for
+        // non-finite values and the pre-fix code panicked instead of
+        // rendering.
+        if v.is_nan() {
+            return buf.append_str("NaN");
+        }
+        return appendf!(buf, "{}Infinity", if neg { "-" } else { "" });
+    }
     let av = v.abs();
     let sci = format!("{av:.5e}");
     let epos = sci.find('e').expect("Rust {:e} always emits 'e'");
@@ -151,5 +165,37 @@ pub fn hash_identify(info: u8) -> Option<&'static str> {
         XLOG_HASH_UPDATE_META_PAGE => Some("UPDATE_META_PAGE"),
         XLOG_HASH_VACUUM_ONE_PAGE => Some("VACUUM_ONE_PAGE"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_g6;
+    use stringinfo::StringInfo;
+
+    fn g6(v: f64) -> String {
+        let cx = mcx::MemoryContext::new("hashdesc_g6_test");
+        let mut buf = StringInfo::new_in(cx.mcx()).unwrap();
+        append_g6(&mut buf, v).unwrap();
+        String::from_utf8(buf.as_bytes().to_vec()).unwrap()
+    }
+
+    /// C parity = src/port/snprintf.c fmtfloat: non-finite doubles render
+    /// as "NaN" (never signed) / "Infinity" / "-Infinity"; a corrupt WAL
+    /// record can carry any f64 bit pattern (found by rmgrdesc_diff: the
+    /// pre-fix code panicked in format!("{:.5e}") on non-finite input).
+    #[test]
+    fn g6_non_finite_c_parity() {
+        assert_eq!(g6(f64::NAN), "NaN");
+        assert_eq!(g6(-f64::NAN), "NaN");
+        assert_eq!(g6(f64::INFINITY), "Infinity");
+        assert_eq!(g6(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    /// C %g prints negative zero as "-0" (CI cluster rmgrdesc_diff divergence).
+    #[test]
+    fn g6_negative_zero_keeps_sign() {
+        assert_eq!(g6(0.0), "0");
+        assert_eq!(g6(-0.0), "-0");
     }
 }
