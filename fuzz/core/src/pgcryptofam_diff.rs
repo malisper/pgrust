@@ -421,29 +421,21 @@ fn oracle_note(st: &PgcryptofamStatus) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// KNOWN DIVERGENCE 1 — px_THROW_ERROR SQLSTATE (found by this target at plane
-// creation, 2026-08-02). CLASS: pgrust bug, NOT a harness defect.
+// DIVERGENCE 1 — px_THROW_ERROR SQLSTATE — FOUND BY THIS TARGET AND FIXED.
 //
-// C: contrib/pgcrypto/pgp-pgsql.c `pg_dearmor` ends in `px_THROW_ERROR(res)`,
-// and px.c:94-108 raises everything except PXE_NO_RANDOM with
-// ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION = 39000. pgrust:
-// `fc_pg_dearmor` maps the failure through lib.rs `px_msg` -> `px_err`, which
-// hardcodes ERRCODE_INVALID_PARAMETER_VALUE = 22023 for every pgcrypto error.
-// Same message text ("Corrupt ascii-armor"), wrong SQLSTATE. The C side is
-// the running verbatim 18.3 oracle, not a reading of the source.
+// Found at plane creation (2026-08-02) against the running verbatim 18.3
+// oracle, not a reading of the source. C: `pg_dearmor` (pgp-pgsql.c) ends in
+// `px_THROW_ERROR(res)`, and px.c:94-108 raises everything except
+// PXE_NO_RANDOM with ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION = 39000.
+// pgrust's `px_msg` hardcoded ERRCODE_INVALID_PARAMETER_VALUE = 22023 for
+// every px-throwing path — same message text, wrong SQLSTATE, on dearmor,
+// pgp_armor_headers and the four pgp sym/pub wrappers.
 //
-// The lane's product fixes are frozen, so the P3 plane carves EXACTLY this
-// pair and nothing else: C must be 39000 AND Rust must be 22023 AND the two
-// message texts must still agree. Any other (C, Rust) SQLSTATE pair still
-// fails, so a second, different mapping defect cannot hide behind this carve.
-// Deleting these two constants is the fix gate.
+// FIXED in crates/contrib/pgcrypto/src/lib.rs (`px_msg` now mirrors
+// px_THROW_ERROR: 39000, or XX000 for the PXE_NO_RANDOM message). The P3
+// plane below is therefore UNCARVED — SQLSTATE is compared unconditionally,
+// and this comment is the record, not an exception.
 // ---------------------------------------------------------------------------
-const C_SQLSTATE_39000: i32 = 3 + (9 << 6); // MAKE_SQLSTATE("39000")
-const RUST_SQLSTATE_22023: i32 = 2 + (2 << 6) + (2 << 18) + (3 << 24);
-
-fn is_known_px_throw_sqlstate_divergence(c: i32, r: i32) -> bool {
-    c == C_SQLSTATE_39000 && r == RUST_SQLSTATE_22023
-}
 
 // ---------------------------------------------------------------------------
 // KNOWN DIVERGENCE 2 — CRYPT VALUE IS `text` MADE FROM A `String` (found by
@@ -1009,22 +1001,18 @@ fn run_dearmor(r: &mut Rdr, mode: u8) {
             );
         }
         (Err(st), Err(e)) => {
-            if !is_known_px_throw_sqlstate_divergence(st.sqlstate, e.sqlstate.0) {
-                assert_eq!(
-                    e.sqlstate.0,
-                    st.sqlstate,
-                    "dearmor({:?}) SQLSTATE: Rust {:?} vs {}",
-                    String::from_utf8_lossy(&text),
-                    e.message,
-                    oracle_note(st)
-                );
-            }
-            // The carve covers the SQLSTATE only — the message text must
-            // still match, or the carve would swallow a second defect.
+            assert_eq!(
+                e.sqlstate.0,
+                st.sqlstate,
+                "dearmor({:?}) SQLSTATE: Rust {:?} vs {}",
+                String::from_utf8_lossy(&text),
+                e.message,
+                oracle_note(st)
+            );
             assert_eq!(
                 e.message,
                 st.msg_str(),
-                "dearmor({:?}) message under the known-SQLSTATE carve",
+                "dearmor({:?}) message",
                 String::from_utf8_lossy(&text)
             );
         }

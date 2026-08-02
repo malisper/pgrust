@@ -8,8 +8,8 @@ use datum::Datum;
 use elog::ereport;
 use types_error::{ErrorLocation, PgError, PgResult, NOTICE,
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION,
-    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_NULL_VALUE_NOT_ALLOWED};
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 const LIBRARY: &str = "pgcrypto";
@@ -183,9 +183,25 @@ fn pgp_notice(msg: &str) {
 }
 
 // pgcrypto px_THROW text is rendered verbatim (byte-identical to C's ERROR).
+//
+// SQLSTATE follows px_THROW_ERROR (px.c:94-109) exactly: every px error is
+// ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION (39000) EXCEPT PXE_NO_RANDOM,
+// which C raises as ERRCODE_INTERNAL_ERROR (XX000). Stamping 22023 here — as
+// this did until the p1-pgcryptofam differential caught it on the pg_dearmor
+// arm — mis-states the code on every px-throwing path (dearmor,
+// pgp_armor_headers, and the four pgp sym/pub wrappers).
 fn px_msg(msg: &str) -> Box<PgError> {
-    px_err(msg.to_string())
+    let sqlstate = if msg == PXE_NO_RANDOM_MSG {
+        ERRCODE_INTERNAL_ERROR
+    } else {
+        ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION
+    };
+    PgError::error(msg.to_string()).with_sqlstate(sqlstate).into()
 }
+
+/// C's `PXE_NO_RANDOM` message (px.c:96-101) — the one px error whose
+/// SQLSTATE is XX000 rather than 39000.
+const PXE_NO_RANDOM_MSG: &str = "could not generate a random number";
 
 fn opt_arg_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<Option<Vec<u8>>> {
     if i >= fcinfo.nargs() || fcinfo.args[i].isnull {
