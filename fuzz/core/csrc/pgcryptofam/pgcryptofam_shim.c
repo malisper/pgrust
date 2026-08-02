@@ -524,6 +524,47 @@ pg_mblen_cstr(const char *mbstr)
 	return 1;					/* PG_SQL_ASCII mblen (pinned encoding) */
 }
 
+/*
+ * [MOCK] encoding selection for the vendored scansup.c downcase path
+ * (digest()/hmac() find_provider). The campaign pins a SINGLE-BYTE
+ * database encoding, so this is 1 — the value a SQL_ASCII/LATIN1 server
+ * reports. Only the SELECTION is mocked; the computation below is
+ * verbatim.
+ */
+int
+pg_database_encoding_max_length(void)
+{
+	return 1;
+}
+
+/*
+ * [VERBATIM] src/backend/utils/mb/mbutils.c `cliplen` (PostgreSQL 18.3,
+ * upstream 62d6c7d3df) — copied byte-for-byte.
+ */
+static int
+cliplen(const char *str, int len, int limit)
+{
+	int			l = 0;
+
+	len = Min(len, limit);
+	while (l < len && str[l])
+		l++;
+	return l;
+}
+
+/*
+ * pg_mbcliplen: under the pinned single-byte encoding the verbatim
+ * pg_encoding_mbcliplen body (mbutils.c) takes its
+ * `pg_encoding_max_length(encoding) == 1` early return, which IS
+ * `cliplen(mbstr, len, limit)` above. The [MOCK] here is the encoding
+ * pin, not the computation.
+ */
+int
+pg_mbcliplen(const char *mbstr, int len, int limit)
+{
+	return cliplen(mbstr, len, limit);
+}
+
 char *
 pgcryptofam_strerror_r(int errnum, char *buf, size_t buflen)
 {

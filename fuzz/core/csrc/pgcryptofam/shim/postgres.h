@@ -186,6 +186,21 @@ extern char *pgcryptofam_pstrdup(const char *s);
 #define ERRCODE_SYNTAX_ERROR MAKE_SQLSTATE('4','2','6','0','1')
 #define ERRCODE_PROGRAM_LIMIT_EXCEEDED MAKE_SQLSTATE('5','4','0','0','0')
 #define ERRCODE_INTERNAL_ERROR MAKE_SQLSTATE('X','X','0','0','0')
+#define ERRCODE_NAME_TOO_LONG MAKE_SQLSTATE('4','2','6','2','2')
+
+/* verbatim src/include/pg_config_manual.h value (identifier truncation
+ * length used by the vendored scansup.c) */
+#define NAMEDATALEN 64
+
+/*
+ * Encoding environment for the vendored scansup.c downcase path. The
+ * campaign pins a SINGLE-BYTE database encoding (SQL_ASCII), so
+ * pg_database_encoding_max_length() is 1 and pg_mbcliplen() reduces to
+ * mbutils.c's `cliplen` — see pgcryptofam_shim.c for the verbatim body
+ * and the ENVIRONMENT MOCK note.
+ */
+extern int	pg_database_encoding_max_length(void);
+extern int	pg_mbcliplen(const char *mbstr, int len, int limit);
 
 /* ---- ereport channel (see header comment; impl in pgcryptofam_shim.c) ---- */
 

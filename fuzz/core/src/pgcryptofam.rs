@@ -152,6 +152,26 @@ extern "C" {
         nheaders: *mut i32,
         st: *mut PgcryptofamStatus,
     ) -> i64;
+    fn pg_diff_pgcryptofam_digest(
+        name: *const u8,
+        namelen: usize,
+        data: *const u8,
+        datalen: usize,
+        out: *mut u8,
+        outcap: usize,
+        st: *mut PgcryptofamStatus,
+    ) -> i64;
+    fn pg_diff_pgcryptofam_hmac(
+        name: *const u8,
+        namelen: usize,
+        key: *const u8,
+        keylen: usize,
+        data: *const u8,
+        datalen: usize,
+        out: *mut u8,
+        outcap: usize,
+        st: *mut PgcryptofamStatus,
+    ) -> i64;
     fn pg_diff_pgcryptofam_cost_probe(
         setting: *const u8,
         settinglen: usize,
@@ -203,6 +223,63 @@ pub fn c_crypt(pw: &[u8], setting: &[u8], out: &mut [u8]) -> PgcryptofamResult {
         )
     };
     finish(ret, st, "crypt")
+}
+
+/// Like [`c_crypt`], but keeps the status on the SUCCESS path too. The
+/// NOTICE plane needs it: crypt-sha.c's rounds-clamp NOTICE rides a call
+/// that returns normally, and `PgcryptofamResult` drops the status on `Ok`.
+/// `Ok(n)` bytes live in `out[..n]`.
+pub fn c_crypt_status(
+    pw: &[u8],
+    setting: &[u8],
+    out: &mut [u8],
+) -> (Option<usize>, Box<PgcryptofamStatus>) {
+    let mut st: Box<PgcryptofamStatus> = Box::default();
+    let ret = unsafe {
+        pg_diff_pgcryptofam_crypt(
+            pw.as_ptr(),
+            pw.len(),
+            setting.as_ptr(),
+            setting.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut *st,
+        )
+    };
+    (status_split(ret, "crypt"), st)
+}
+
+/// [`c_gen_salt`]'s status-preserving twin (same rationale as
+/// [`c_crypt_status`]).
+pub fn c_gen_salt_status(
+    algo: &[u8],
+    rounds: i32,
+    entropy: &[u8],
+    out: &mut [u8],
+) -> (Option<usize>, Box<PgcryptofamStatus>) {
+    let mut st: Box<PgcryptofamStatus> = Box::default();
+    let ret = unsafe {
+        pg_diff_pgcryptofam_gen_salt(
+            algo.as_ptr(),
+            algo.len(),
+            rounds,
+            entropy.as_ptr(),
+            entropy.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut *st,
+        )
+    };
+    (status_split(ret, "gen_salt"), st)
+}
+
+fn status_split(ret: i64, what: &str) -> Option<usize> {
+    match ret {
+        n if n >= 0 => Some(n as usize),
+        -1 => None,
+        -2 => panic!("pgcryptofam oracle: {what}: output buffer too small (harness sizing bug)"),
+        other => panic!("pgcryptofam oracle: {what}: unexpected return {other}"),
+    }
 }
 
 /// C `gen_salt(algo[, rounds])` with injectable entropy (`rounds == 0`
@@ -305,6 +382,44 @@ pub fn c_armor_headers(text: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<Pgcry
         pairs.push((key, val));
     }
     Ok(pairs)
+}
+
+/// C `digest(data, type)` -> pgcrypto.c pg_digest over px_find_digest, with
+/// find_provider's verbatim downcase_truncate_identifier name fold.
+pub fn c_digest(name: &[u8], data: &[u8], out: &mut [u8]) -> PgcryptofamResult {
+    let mut st: Box<PgcryptofamStatus> = Box::default();
+    let ret = unsafe {
+        pg_diff_pgcryptofam_digest(
+            name.as_ptr(),
+            name.len(),
+            data.as_ptr(),
+            data.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut *st,
+        )
+    };
+    finish(ret, st, "digest")
+}
+
+/// C `hmac(data, key, type)` -> pgcrypto.c pg_hmac over the verbatim
+/// px-hmac.c RFC 2104 engine.
+pub fn c_hmac(name: &[u8], key: &[u8], data: &[u8], out: &mut [u8]) -> PgcryptofamResult {
+    let mut st: Box<PgcryptofamStatus> = Box::default();
+    let ret = unsafe {
+        pg_diff_pgcryptofam_hmac(
+            name.as_ptr(),
+            name.len(),
+            key.as_ptr(),
+            key.len(),
+            data.as_ptr(),
+            data.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut *st,
+        )
+    };
+    finish(ret, st, "hmac")
 }
 
 /// HARNESS FACILITY: parse `setting` the way the vendored preambles do and
@@ -458,6 +573,34 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0], (b"Version".to_vec(), b"1.0".to_vec()));
         assert_eq!(pairs[1], (b"Comment".to_vec(), b"hi".to_vec()));
+    }
+
+    #[test]
+    fn smoke_digest_hmac() {
+        let mut out = [0u8; 64];
+        // RFC 1321 / FIPS 180: digest('abc', 'md5'/'sha256')
+        let n = c_digest(b"md5", b"abc", &mut out).expect("md5");
+        assert_eq!(
+            out[..n].iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
+        // find_provider downcases: "MD5" resolves too
+        let n2 = c_digest(b"MD5", b"abc", &mut out).expect("MD5");
+        assert_eq!(n2, n);
+        let n = c_digest(b"sha256", b"abc", &mut out).expect("sha256");
+        assert_eq!(
+            out[..n].iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // unknown algo -> 22023 Cannot use "...": No such hash algorithm
+        let e = c_digest(b"crc32", b"abc", &mut out).unwrap_err();
+        assert_eq!(e.sqlstate, 2 + (2 << 6) + (2 << 18) + (3 << 24));
+        // RFC 2104 A.2 with a 16-byte key (crate's own vector)
+        let n = c_hmac(b"md5", &[0x0bu8; 16], b"Hi There", &mut out).expect("hmac");
+        assert_eq!(
+            out[..n].iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "9294727a3638bb1c13f48ef8158bfc9d"
+        );
     }
 
     #[test]

@@ -40,6 +40,7 @@
 #include "vendor/px-crypt.h"
 #include "vendor/pgp.h"
 #include "common/string.h"
+#include "parser/scansup.h"
 
 /* exporters defined in the wrap_*.c inclusion TUs */
 extern void pg_diff_pgcryptofam_to64(char *s, unsigned long v, int n);
@@ -260,6 +261,116 @@ pg_diff_pgcryptofam_armor_headers(const unsigned char *text, size_t textlen,
 	}
 	*nheaders = nh;
 	return (int64_t) used;
+}
+
+/*
+ * digest(data, type) / hmac(data, key, type) — pgcrypto.c's pg_digest /
+ * pg_hmac over the verbatim px_find_digest / px_find_hmac providers.
+ * The name goes through the VERBATIM scansup.c downcase_truncate_identifier
+ * exactly as find_provider does, so the fold/truncate behavior is compared
+ * rather than assumed.
+ */
+
+/*
+ * [VERBATIM-WRAPPER] pgcrypto.c find_provider(): downcase the name, look
+ * it up, ereport 22023 `Cannot use "%s": %s` with px_strerror on failure.
+ * Split in two here only because C's PFN cast (void ** vs PX_MD **) has no
+ * portable single spelling; each copy is line-for-line the original.
+ */
+static PX_MD *
+find_digest_provider(const char *nameptr, int namelen)
+{
+	PX_MD	   *res;
+	char	   *buf;
+	int			err;
+
+	buf = downcase_truncate_identifier(nameptr, namelen, false);
+
+	err = px_find_digest(buf, &res);
+
+	if (err)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Cannot use \"%s\": %s", buf, px_strerror(err))));
+
+	pfree(buf);
+
+	return res;
+}
+
+static PX_HMAC *
+find_hmac_provider(const char *nameptr, int namelen)
+{
+	PX_HMAC    *res;
+	char	   *buf;
+	int			err;
+
+	buf = downcase_truncate_identifier(nameptr, namelen, false);
+
+	err = px_find_hmac(buf, &res);
+
+	if (err)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Cannot use \"%s\": %s", buf, px_strerror(err))));
+
+	pfree(buf);
+
+	return res;
+}
+
+int64_t
+pg_diff_pgcryptofam_digest(const unsigned char *name, size_t namelen,
+						   const unsigned char *data, size_t datalen,
+						   unsigned char *out, size_t outcap,
+						   PgcryptofamStatus *st)
+{
+	PX_MD	   *md;
+	unsigned	hlen;
+	unsigned char *res;
+
+	ENTER(st);
+
+	/* [VERBATIM-WRAPPER] pgcrypto.c pg_digest() */
+	md = find_digest_provider((const char *) name, (int) namelen);
+
+	hlen = px_md_result_size(md);
+
+	res = palloc(hlen);
+
+	px_md_update(md, data, (unsigned) datalen);
+	px_md_finish(md, res);
+	px_md_free(md);
+
+	return copy_out((const char *) res, hlen, out, outcap);
+}
+
+int64_t
+pg_diff_pgcryptofam_hmac(const unsigned char *name, size_t namelen,
+						 const unsigned char *key, size_t keylen,
+						 const unsigned char *data, size_t datalen,
+						 unsigned char *out, size_t outcap,
+						 PgcryptofamStatus *st)
+{
+	PX_HMAC    *h;
+	unsigned	hlen;
+	unsigned char *res;
+
+	ENTER(st);
+
+	/* [VERBATIM-WRAPPER] pgcrypto.c pg_hmac() */
+	h = find_hmac_provider((const char *) name, (int) namelen);
+
+	hlen = px_hmac_result_size(h);
+
+	res = palloc(hlen);
+
+	px_hmac_init(h, key, (unsigned) keylen);
+	px_hmac_update(h, data, (unsigned) datalen);
+	px_hmac_finish(h, res);
+	px_hmac_free(h);
+
+	return copy_out((const char *) res, hlen, out, outcap);
 }
 
 /* ------------------------------------------------------------------ */

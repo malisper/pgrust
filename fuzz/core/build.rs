@@ -1133,6 +1133,11 @@ fn main() {
         // px.c
         "px_THROW_ERROR", "px_strerror", "px_memset", "px_resolve_alias",
         "px_set_debug_handler", "px_debug", "px_find_combo",
+        // px-hmac.c + scansup.c (digest()/hmac() arms)
+        "px_find_hmac",
+        "downcase_truncate_identifier", "downcase_identifier",
+        "truncate_identifier", "scanner_isspace",
+        "pg_database_encoding_max_length", "pg_mbcliplen",
         // shim-owned but PG-named (provider mocks + crypto-mode plumbing)
         "px_find_digest", "px_find_cipher", "CheckFIPSMode",
         "CheckBuiltinCryptoMode", "builtin_crypto_enabled",
@@ -1186,6 +1191,8 @@ fn main() {
         "vendor/crypt-sha.c",
         "vendor/pgp-armor.c",
         "vendor/px.c",
+        "vendor/px-hmac.c",
+        "vendor/scansup.c",
         "vendor/stringinfo.c",
         "vendor/psprintf.c",
         "vendor/string.c",
