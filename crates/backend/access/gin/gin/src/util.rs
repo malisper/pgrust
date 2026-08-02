@@ -124,6 +124,18 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
                         .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION),
                     ));
                 }
+                // C's fmgr_info_copy site (initGinState): resolve eagerly so
+                // a missing or not-ported comparator raises a catchable ERROR
+                // here rather than mid-compare (gist state.rs pattern; the
+                // gate covers test mocks that install only fmgr_info).
+                let finfo = ::fmgr_seams::fmgr_info::call(cmp_proc)?;
+                if ::fmgr_seams::fmgr_info_not_ported_name::is_installed() {
+                    if let Some(name) = ::fmgr_seams::fmgr_info_not_ported_name::call(&finfo) {
+                        return Err(crate::unsupported(format!(
+                            "GIN array_ops element comparator {name} (oid {cmp_proc}) is not supported"
+                        )));
+                    }
+                }
                 GinElemCmp::Fmgr(cmp_proc)
             }
         }

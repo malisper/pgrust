@@ -196,10 +196,13 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
                 ::varlena::varstr_cmp(x, y, col.support_collation)
                     .expect("collation resolved for gin array_ops key compare")
             }),
-            // The element type's default btree comparator through fmgr (C's
-            // fmgr_info_copy'd compareFn); the callee's own argument fetch
-            // detoasts compressed keys, as C's PG_GETARG does. Failures are
-            // lookup-class (the proc oid resolved at initGinState).
+            // The element type's default btree comparator through fmgr (C
+            // caches the fmgr_info_copy'd compareFn in GinState; GinColState
+            // is Copy so we re-resolve the proc oid per compare — cost-only,
+            // initGinState already resolved it and raised any lookup error
+            // catchably). The callee's own argument fetch detoasts compressed
+            // keys, as C's PG_GETARG does. A comparator-raised error panics,
+            // like the sibling Text arm's infallible-compare pattern.
             GinElemCmp::Fmgr(cmp_proc) => {
                 let mut finfo = ::fmgr_seams::fmgr_info::call(cmp_proc)
                     .expect("array_ops element comparator resolved at initGinState");
