@@ -303,14 +303,28 @@ pub fn FreeConfigVariables(list: &mut Vec<ConfigVariable>) {
 
 // DeescapeQuotedString: strip surrounding quotes, collapse '' and the C-style
 // backslash escapes.
+//
+// The &str form is the exported (bootstrap-scanner) entry point; the parser
+// calls the BYTE core directly. The distinction is load-bearing: C operates
+// on the raw yytext bytes, so running the escape arithmetic over an already
+// UTF-8-lossy String changes which byte is dropped as the trailing quote and
+// how far octal runs reach (each invalid byte becomes a 3-byte U+FFFD).
+// Found by guc_file_diff on a value of high-bit bytes.
 pub fn DeescapeQuotedString(s: &str) -> String {
-    let bytes = s.as_bytes();
+    String::from_utf8_lossy(&deescape_quoted_bytes(s.as_bytes())).into_owned()
+}
+
+// C's body, byte-for-byte. `s` is the raw token text as C sees it: NUL
+// truncated (strlen), leading quote present, trailing quote present unless
+// the NUL truncation removed it.
+pub fn deescape_quoted_bytes(s: &[u8]) -> Vec<u8> {
+    let bytes = s;
     // C only Asserts the surrounding quotes, and Assert() is compiled out in
     // the release build that is the behavior of record. The assertion is in
     // fact REACHABLE upstream: a STRING token containing an embedded NUL is
-    // truncated by strlen/pstrdup (see token_text), leaving a string with no
-    // trailing quote, which this loop then handles exactly as C's does. A
-    // debug_assert here would be a ported-in constraint C does not enforce.
+    // truncated by strlen, leaving a string with no trailing quote, which
+    // this loop then handles exactly as C's does. A debug_assert here would
+    // be a ported-in constraint C does not enforce.
 
     let mut out = Vec::with_capacity(bytes.len().saturating_sub(2));
     let mut i = 1;
@@ -345,7 +359,7 @@ pub fn DeescapeQuotedString(s: &str) -> String {
         }
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 // C records below ERROR and longjmps at/above it.
@@ -430,9 +444,13 @@ enum TokenKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Token {
+struct Token<'a> {
     kind: TokenKind,
+    /// C's pstrdup(yytext)/%s view: UTF-8-lossy, truncated at the first NUL.
     text: String,
+    /// The same bytes BEFORE the lossy conversion (still NUL-truncated, as
+    /// strlen() sees them). DeescapeQuotedString's arithmetic runs on these.
+    raw: &'a [u8],
 }
 
 enum ParseLineError {
@@ -450,7 +468,7 @@ impl<'a> Lexer<'a> {
         Self { line, pos: 0 }
     }
 
-    fn next_token(&mut self) -> Option<Token> {
+    fn next_token(&mut self) -> Option<Token<'a>> {
         self.skip_ws();
         let first = self.line.get(self.pos).copied()?;
         if first == b'#' {
@@ -482,12 +500,13 @@ impl<'a> Lexer<'a> {
             // The catch-all `.` consumes one byte and returns GUC_ERROR (also
             // the unterminated-quote path).
             self.pos += 1;
-            return Some(Token { kind: TokenKind::Error, text: token_text(&[first]) });
+            let raw = &self.line[self.pos - 1..self.pos];
+            return Some(Token { kind: TokenKind::Error, text: token_text(raw), raw: nul_trunc(raw) });
         }
 
         let text = &rest[..best_len];
         self.pos += best_len;
-        Some(Token { kind: best_kind, text: token_text(text) })
+        Some(Token { kind: best_kind, text: token_text(text), raw: nul_trunc(text) })
     }
 
     fn skip_ws(&mut self) {
@@ -498,7 +517,10 @@ impl<'a> Lexer<'a> {
 }
 
 // The per-line grammar of ParseConfigFp: NAME [=] VALUE.
-fn parse_line(lexer: &mut Lexer<'_>, first: Token) -> Result<(String, String), ParseLineError> {
+fn parse_line<'a>(
+    lexer: &mut Lexer<'a>,
+    first: Token<'a>,
+) -> Result<(String, String), ParseLineError> {
     if !matches!(first.kind, TokenKind::Id | TokenKind::QualifiedId) {
         return Err(ParseLineError::NearToken(first.text));
     }
@@ -513,7 +535,13 @@ fn parse_line(lexer: &mut Lexer<'_>, first: Token) -> Result<(String, String), P
         TokenKind::Id | TokenKind::Integer | TokenKind::Real | TokenKind::UnquotedString => {
             token.text
         }
-        TokenKind::String => DeescapeQuotedString(&token.text),
+        // C: opt_value = DeescapeQuotedString(yytext) — raw bytes in, and the
+        // palloc'd result is read back as a C string (so it ends at the first
+        // NUL an escape may have produced).
+        TokenKind::String => {
+            let de = deescape_quoted_bytes(token.raw);
+            String::from_utf8_lossy(nul_trunc(&de)).into_owned()
+        }
         TokenKind::QualifiedId | TokenKind::Equals | TokenKind::Error => {
             return Err(ParseLineError::NearToken(token.text));
         }
@@ -534,8 +562,13 @@ fn parse_line(lexer: &mut Lexer<'_>, first: Token) -> Result<(String, String), P
 // the scan position still advances past the whole token. Reproduce that
 // exactly (found by guc_file_diff: "a\0b = 1" and "x = 'nul\0byte'").
 fn token_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(nul_trunc(bytes)).into_owned()
+}
+
+/// The prefix a C string API (strlen/pstrdup/%s) would see.
+fn nul_trunc(bytes: &[u8]) -> &[u8] {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    &bytes[..end]
 }
 
 fn match_id(rest: &[u8]) -> usize {
@@ -560,35 +593,40 @@ fn match_qualified_id(rest: &[u8]) -> usize {
     left + 1 + right
 }
 
-// Longest match that still ends at a closing quote: a doubled '' is body
-// content only when the string terminates afterwards.
+// STRING = \'([^'\\\n]|\\.|\'\')*\'. The body must DECOMPOSE into those
+// elements, so scanning is deterministic, not a search for the last quote: a
+// doubled '' is body content and the scan continues; a LONE quote is the
+// terminator and the match ends there. Greedily consuming '' is what makes
+// the match maximal — there is no longer alternative, because continuing
+// past a lone quote would leave an unmatchable single quote in the body.
+// (Found by guc_file_diff: "ate''='doubled''quote''end'" lexed as one long
+// STRING in pgrust where flex produces ID + STRING '' + EQUALS + ...).
 fn match_string(rest: &[u8]) -> usize {
     if rest.first() != Some(&b'\'') {
         return 0;
     }
     let mut i = 1;
-    let mut best = 0;
     while i < rest.len() {
         match rest[i] {
             b'\n' => break,
             b'\\' => {
-                if i + 1 >= rest.len() {
+                // \\. cannot match a newline (`.` excludes it) or run off the end.
+                if i + 1 >= rest.len() || rest[i + 1] == b'\n' {
                     break;
                 }
                 i += 2;
             }
             b'\'' => {
-                best = i + 1;
                 if rest.get(i + 1) == Some(&b'\'') {
-                    i += 2;
+                    i += 2; // '' — body content, keep scanning
                 } else {
-                    i += 1;
+                    return i + 1; // lone quote — the terminator
                 }
             }
             _ => i += 1,
         }
     }
-    best
+    0 // unterminated: the STRING rule does not match at all
 }
 
 fn match_unquoted_string(rest: &[u8]) -> usize {
