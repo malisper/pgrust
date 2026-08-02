@@ -772,3 +772,44 @@ fn session_bind_matches_string_restore_end_state() {
     .unwrap();
     assert_eq!(bound, restored);
 }
+
+thread_local! {
+    static HAS_PRIVS: Cell<bool> = const { Cell::new(false) };
+}
+
+// GetConfigOption(restrict_privileged=true) over a GUC_SUPERUSER_ONLY
+// option: C's ConfigOptionIsVisible gate — has_privs_of_role(GetUserId(),
+// ROLE_PG_READ_ALL_SETTINGS) — with the exact 42501 error. Pre-fix this
+// panicked instead of resolving the privilege check.
+#[test]
+fn get_config_option_superuser_only_gate() {
+    setup();
+    static SEAM: Once = Once::new();
+    SEAM.call_once(|| {
+        acl_seams::has_privs_of_role::set(|_member, role| {
+            assert_eq!(role, 3374, "pg_read_all_settings");
+            Ok(HAS_PRIVS.get())
+        });
+    });
+    miscinit::SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, 0);
+
+    HAS_PRIVS.set(false);
+    let err = GetConfigOption("krb_server_keyfile", false, true).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+    assert_eq!(err.message(), "permission denied to examine \"krb_server_keyfile\"");
+    assert_eq!(
+        err.detail(),
+        Some(
+            "Only roles with privileges of the \"pg_read_all_settings\" role may examine this parameter."
+        )
+    );
+    // Unprivileged read without the restriction still passes (C callers
+    // that pass restrict_privileged=false skip the gate entirely).
+    assert!(GetConfigOption("krb_server_keyfile", false, false).unwrap().is_some());
+    // With the role privilege the restricted read passes too.
+    HAS_PRIVS.set(true);
+    assert!(GetConfigOption("krb_server_keyfile", false, true).unwrap().is_some());
+    // Non-superuser-only options never consult the gate.
+    HAS_PRIVS.set(false);
+    assert!(GetConfigOption("work_mem", false, true).unwrap().is_some());
+}
