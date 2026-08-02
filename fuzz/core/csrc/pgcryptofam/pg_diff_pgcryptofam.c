@@ -166,8 +166,10 @@ pg_diff_pgcryptofam_armor(const unsigned char *data, size_t datalen,
 						  PgcryptofamStatus *st)
 {
 	StringInfoData buf;
-	char	  **ckeys = NULL;
-	char	  **cvalues = NULL;
+	/* volatile: these live across the ENTER sigsetjmp (silences gcc
+	 * -Wclobbered; they are never read on the longjmp path anyway) */
+	char	  **volatile ckeys = NULL;
+	char	  **volatile cvalues = NULL;
 	int			i;
 
 	ENTER(st);
