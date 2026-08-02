@@ -111,6 +111,7 @@ fn expected_send1_image(payload: u8) -> [u8; 5] {
 //   sel % 6 == 5: charrecv over a StringInfo of the payload + wire parity.
 
 pub fn char_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };
@@ -425,6 +426,7 @@ fn char_recv_case(payload: &[u8]) {
 //                 (inv-on-NULL parity; non-agg-context pinned message).
 
 pub fn bool_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     // init_seams is real startup surface (scalar_seams registration); run it
     // once and pin that the installed seam answers like parse_bool.
     static SEAMS: std::sync::Once = std::sync::Once::new();

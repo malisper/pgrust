@@ -237,6 +237,7 @@ fn datum_text_bytes<'a>(d: Datum) -> &'a [u8] {
 // ---------------------------------------------------------------------------
 
 pub fn fmt_dch_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let _oracle_guard = oracle_lock();
     pin_environment();
     let Some((&sel, payload)) = data.split_first() else {

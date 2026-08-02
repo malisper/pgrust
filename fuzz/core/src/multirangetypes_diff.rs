@@ -1160,6 +1160,7 @@ fn install_seams() {
 }
 
 pub fn multirangetypes_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     // Skip when a foreign module owns the typcache env — see the identical
     // guard in rangetypes_diff (rowtypes_diff convention; RESIDUE: composite
     // fixture would retire this).

@@ -506,6 +506,7 @@ fn admit_zone_name(name: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn datetime_closeout_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     super::datetime_io_diff::init_env_for_siblings();
     let Some((&sel, payload)) = data.split_first() else {
         return;

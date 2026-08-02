@@ -1089,6 +1089,7 @@ fn arraykey_case(r: &mut Rdr<'_>) {
 // ---------------- entry ----------------
 
 pub fn hstorefam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if data.is_empty() {
         return;
     }

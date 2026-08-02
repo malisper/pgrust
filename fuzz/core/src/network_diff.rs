@@ -1271,6 +1271,7 @@ fn scan_diff(p: &[u8]) {
 use adt_network::builtins as fcb;
 
 pub fn network_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, p)) = data.split_first() else {
         return;
     };

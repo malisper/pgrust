@@ -239,7 +239,7 @@ pub fn wire_pqformat(data: &[u8]) {
 
 // Differential targets (shipped Rust vs vendored PostgreSQL C oracle):
 // float4in/float8in, float4out/float8out, point_out/on_ppath. See diff.rs.
-/// Serialize `cargo test` cases that drive the in-process C oracles.
+/// Serialize every path into the in-process C oracles.
 ///
 /// The vendored C carries process-global mutable state with no C-side
 /// synchronization (C Postgres is one-thread-per-backend and never sees
@@ -248,14 +248,48 @@ pub fn wire_pqformat(data: &[u8]) {
 /// "divergence" (C returned -1.6e-303 for cotd(-1e308), true value 0.4877…)
 /// — with jsonbio_diff implicated (its oracle externs into pg_float_io.c);
 /// seam-env installs also TOCTOU-race across modules. Fuzz binaries are
-/// one-target-per-process and unaffected. A follow-up owns finding the
-/// racing writer; this lock makes the `cargo test` signal deterministic
-/// without masking single-run divergences. Poison-tolerant: a divergence
-/// panic in one test must not cascade "poisoned Mutex" noise into siblings.
+/// one-target-per-process and unaffected (the uncontended lock is noise
+/// next to an exec).
+///
+/// 2026-08-02 (fix/mutants-rail): serialization moved from test discipline to
+/// the ORACLE ENTRY itself — every `pub fn *_diff`/`*_replay` driver takes
+/// `oracle_serial()` on entry, so a caller that forgets the test-side guard
+/// (that is how crypt-des.c:662's `static char output[21]` got raced) is
+/// still safe, and a suite's verdict no longer depends on `--test-threads`.
+/// Reentrant per thread: tests hold `c_oracle_serial()` and then call a
+/// driver, and drivers may call sibling drivers — an inner acquisition on
+/// the owning thread is a no-op instead of a self-deadlock.
+static ORACLE_M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+thread_local! {
+    static ORACLE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) struct OracleSerial(#[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>);
+
+impl Drop for OracleSerial {
+    fn drop(&mut self) {
+        ORACLE_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
+pub(crate) fn oracle_serial() -> OracleSerial {
+    let depth = ORACLE_DEPTH.with(|d| {
+        let v = d.get();
+        d.set(v + 1);
+        v
+    });
+    if depth == 0 {
+        // Poison-tolerant: a divergence panic in one test must not cascade
+        // "poisoned Mutex" noise into siblings.
+        OracleSerial(Some(ORACLE_M.lock().unwrap_or_else(|e| e.into_inner())))
+    } else {
+        OracleSerial(None)
+    }
+}
+
 #[cfg(test)]
-pub(crate) fn c_oracle_serial() -> std::sync::MutexGuard<'static, ()> {
-    static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    M.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) fn c_oracle_serial() -> OracleSerial {
+    oracle_serial()
 }
 
 // stubs: the shared stub-pin facility (stub:guc / stub:clock / stub:prng /

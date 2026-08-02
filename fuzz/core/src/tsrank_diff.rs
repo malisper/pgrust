@@ -252,6 +252,7 @@ fn is_f_variant(variant: u8) -> bool {
 }
 
 pub fn tsrank_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     // The rank_cd cover walks reach the TS_execute CHECK_FOR_INTERRUPTS
     // calls (tsvector_core::execute); shared no-op install, first-wins.
     crate::install_check_for_interrupts_seam_once();

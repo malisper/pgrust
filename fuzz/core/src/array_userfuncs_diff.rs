@@ -755,6 +755,7 @@ fn compare_imgres(
 // ---------------------------------------------------------------------------
 
 pub fn array_userfuncs_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if !setup() {
         return; // another diff module owns the seam environment (see OWNED)
     }

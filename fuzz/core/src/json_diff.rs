@@ -267,6 +267,7 @@ fn text_array_image(ndim: usize, dims: &[i32], elems: &[Option<&[u8]>]) -> Vec<u
 // ---------------------------------------------------------------------------
 
 pub fn json_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };
@@ -1188,7 +1189,13 @@ mod tests {
     #[test]
     #[ignore = "a0 exhaustive sweep: run explicitly in release"]
     fn exhaustive_unicode_escape_domain() {
-        let _serial = crate::c_oracle_serial();
+        // NO outer c_oracle_serial here: phase 2's scoped workers call the
+        // guarded driver entries (json_get_field_diff/json_in_diff take
+        // oracle_serial at entry since the 2026-08-02 rework), and an outer
+        // guard held across the spawn would deadlock them. Entry-level
+        // serialization also means phase 2 now runs lock-stepped rather
+        // than truly parallel — correctness of the shared C oracle state
+        // outranks sweep wall-time (this is an explicit --ignored run).
         const HEX: &[u8; 16] = b"0123456789abcdef";
         fn esc(cp: u32, out: &mut Vec<u8>) {
             out.extend_from_slice(b"\\u");

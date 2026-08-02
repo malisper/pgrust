@@ -169,6 +169,7 @@ dependencies = [
  "arrayfuncs",
  "datum",
  "format_type",
+ "funcapi",
  "hashfn",
  "mcx",
  "pg_enum_seams",
@@ -513,6 +514,7 @@ dependencies = [
  "adt_float",
  "arrayfuncs",
  "datum",
+ "detoast_seams",
  "funcapi_srf",
  "hashfn",
  "hyperloglog",
@@ -2403,6 +2405,7 @@ dependencies = [
 name = "guc"
 version = "0.0.0"
 dependencies = [
+ "acl_seams",
  "aclchk_seams",
  "elog",
  "guc_file",
@@ -2906,9 +2909,11 @@ dependencies = [
 name = "lmgr"
 version = "0.0.0"
 dependencies = [
+ "backend_progress_seams",
  "catalog_seams",
  "init_small",
  "inval_seams",
+ "lmgr_proc",
  "lmgr_seams",
  "lock",
  "lock_seams",
@@ -4640,6 +4645,7 @@ dependencies = [
  "elog",
  "guc_tables",
  "keywords",
+ "mbutils",
  "mcx",
  "numutils",
  "parser_small1",
@@ -6377,6 +6383,7 @@ version = "0.1.0"
 dependencies = [
  "adt_tsvector_core",
  "datum",
+ "fmgr_seams",
  "funcapi",
  "heaptuple",
  "libc",
@@ -6627,8 +6634,10 @@ dependencies = [
  "elog",
  "file_seams",
  "guc_tables",
+ "init_small",
  "libc",
  "mcx",
+ "postgres_seams",
  "relpath_seams",
  "smgr_seams",
  "timeline_seams",

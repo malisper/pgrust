@@ -636,6 +636,7 @@ enum Arm {
 const EMPTY_OBJECT: &[u8] = b"{}";
 
 pub fn jsonpathexec_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if data.len() < 5 {
         return;
     }

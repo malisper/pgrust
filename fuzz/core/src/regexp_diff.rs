@@ -371,6 +371,7 @@ fn fc_expect_text(
 // ---------------------------------------------------------------------------
 
 pub fn regexp_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };
@@ -1452,6 +1453,7 @@ fn regexp_fixed_prefix_diff(payload: &[u8]) {
 /// Diff parse_re_flags over one option string (None = absent argument).
 /// Panics on any plane divergence.  Used by the tests below.
 pub fn parse_re_flags_diff(opts: Option<&[u8]>) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     pin();
     if let Some(o) = opts {
         if !text_ok(o) {

@@ -95,6 +95,7 @@ fn rust_err_class(e: &PgError) -> i32 {
 // oracle parses.
 
 pub fn float_in_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, text)) = data.split_first() else {
         return;
     };
@@ -185,6 +186,7 @@ pub fn float_in_diff(data: &[u8]) {
 // parity. Extra bytes ignored so libFuzzer can grow/shrink freely.
 
 pub fn float_out_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
@@ -274,6 +276,7 @@ pub fn float_out_diff(data: &[u8]) {
 const PATH_HEADER_PAYLOAD: usize = 12; /* npts i32 + closed i32 + pad4 */
 
 pub fn geo_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
@@ -465,6 +468,7 @@ fn float_math_compare(name: &str, fn_id: i32, a: f64, b: f64, rres: types_error:
 // Input layout: [selector][8 bytes le f64]. selector % 28 picks the unary
 // function. Extra bytes ignored so libFuzzer can grow/shrink freely.
 pub fn float_math_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
@@ -480,6 +484,7 @@ pub fn float_math_diff(data: &[u8]) {
 // Input layout: [selector][16 bytes le f64 pair]. selector % 3 picks the
 // two-argument function (C ids 28..=30).
 pub fn float_math2_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
@@ -555,6 +560,7 @@ pub const FLOAT_MATH1B: &[(&str, i32, Math1)] = &[
 ];
 
 pub fn float_misc_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };
@@ -1095,11 +1101,25 @@ mod tests {
         let _serial = c_oracle_serial();
         let x = f64::from_bits(0xbfe000000000003f);
         let r = adt_float::dasind(x).unwrap();
-        assert_eq!(r.to_bits(), 0xc03e000000000082, "pinned uncontracted result");
-        // The (now -ffp-contract=off) oracle agrees bit-exactly.
+        // The PORTABLE witness is the differential plane: if either compiler
+        // re-contracts the degree-constant chain, the two sides split.
         let mut cval = 0.0f64;
         let cerr = unsafe { pg_diff_float_math(4, x, 0.0, &mut cval) };
-        assert_eq!((cerr, cval.to_bits()), (0, 0xc03e000000000082));
+        assert_eq!(cerr, 0, "oracle errored on the contraction-witness input");
+        assert_eq!(
+            cval.to_bits(),
+            r.to_bits(),
+            "C and Rust dasind bits split — FP contraction regressed on one side"
+        );
+        // The absolute-bits pin holds only where it was minted: asind_q1
+        // routes through libm asin/acos and glibc's last-ulp differs from
+        // Apple's, so on gcc/linux-aarch64 BOTH sides agree on a different
+        // bit pattern and this pin was red on every CI cluster rail baseline
+        // regardless of mutants (fix/mutants-rail 2026-08-02). Platform-
+        // variant pins must be cfg-gated to their minting platform; the
+        // cross-compare above is the enforcement everywhere else.
+        #[cfg(target_os = "macos")]
+        assert_eq!(r.to_bits(), 0xc03e000000000082, "pinned uncontracted result");
     }
 
     #[test]

@@ -557,6 +557,7 @@ fn math_sized(nd: usize, weight: i16) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn numeric_io_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, mut rest)) = data.split_first() else {
         return;
     };
@@ -841,6 +842,7 @@ pub fn numeric_io_diff(data: &[u8]) {
 // ---------------------------------------------------------------------------
 
 pub fn numeric_ops_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, mut rest)) = data.split_first() else {
         return;
     };

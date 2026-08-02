@@ -1051,6 +1051,7 @@ fn run_getmsg(r: &mut Rdr) {
 // ---------------- entry ----------------
 
 pub fn netfam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     init_seams();
     set_convert(false);
     let Some((&sel, payload)) = data.split_first() else {

@@ -975,6 +975,7 @@ fn text_reverse_diff(enc: pg_enc, payload: &[u8]) {
 // ---------------------------------------------------------------------------
 
 pub fn oraclefam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };

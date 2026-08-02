@@ -390,6 +390,7 @@ fn fc_wrappers_case(payload: &[u8]) {
 // ---------------------------------------------------------------------------
 
 pub fn enc_tables_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&fam, payload)) = data.split_first() else {
         return;
     };

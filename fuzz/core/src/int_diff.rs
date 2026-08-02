@@ -779,6 +779,7 @@ fn fn_diff(fn_id: i32, a: i64, b: i64, c: i64, sub: bool, less: bool) {
 }
 
 pub fn int_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     // Exception-audit rail: every exec turns the crate's never_reached! arms
     // (OOM defensive arms, recorded exception rows) into panics if they fire.
     static ARM: std::sync::Once = std::sync::Once::new();

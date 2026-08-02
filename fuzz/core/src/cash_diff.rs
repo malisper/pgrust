@@ -201,6 +201,7 @@ fn read_varlena_data<'a>(d: Datum) -> &'a [u8] {
 }
 
 pub fn cash_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };

@@ -220,6 +220,7 @@ fn fc_expect_bool(fname: &str, f: PGFunction, coll: u32, args: [Datum; 2], want:
 // ---------------------------------------------------------------------------
 
 pub fn name_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     setup();
     let Some((&sel, payload)) = data.split_first() else {
         return;

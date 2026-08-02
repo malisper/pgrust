@@ -337,6 +337,7 @@ fn datum_cstr_bytes<'a>(d: Datum) -> &'a [u8] {
 // ---------------------------------------------------------------------------
 
 pub fn datetime_io_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     init_env();
     let Some((&sel, payload)) = data.split_first() else {
         return;

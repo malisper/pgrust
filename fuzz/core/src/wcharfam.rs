@@ -788,6 +788,7 @@ pub fn cmp_set_invalid(enc: i32) {
 // ---------------------------------------------------------------------------
 
 pub fn wcharfam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&fam, payload)) = data.split_first() else {
         return;
     };

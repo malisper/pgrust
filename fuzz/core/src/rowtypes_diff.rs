@@ -1092,6 +1092,7 @@ fn verdict(r: &PgResult<Datum>, esc: Option<&ErrorSaveNode>) -> (i32, Option<i32
 // ---------------------------------------------------------------------------
 
 pub fn rowtypes_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if !install() {
         return; // seams owned by a sibling diff module in this process
     }

@@ -513,6 +513,7 @@ fn drive_numeric_pg_lsn(text: &[u8]) {
 ///   2 cmp family (16B le pair)    6 mii (8B le u64 + numeric text)
 ///   3 recv/send (raw wire bytes)  7 numeric_pg_lsn (numeric text)
 pub fn pg_lsn_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };

@@ -179,6 +179,7 @@ fn text_ok(b: &[u8], cap: usize) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn fmt_num_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let _oracle_guard = crate::fmt_dch_diff::oracle_lock();
     crate::fmt_dch_diff::pin_environment();
     let Some((&sel, payload)) = data.split_first() else {

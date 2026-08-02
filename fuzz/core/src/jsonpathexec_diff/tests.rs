@@ -344,8 +344,18 @@ fn recursion_guard_probe() {
                     let doc = format!("{}1{}", open.repeat(n), close.repeat(n));
                     let cx = mcx::MemoryContext::new("recursion_probe");
                     let m = cx.mcx();
-                    let Ok(Some(doc_image)) = adt_jsonb::io::jsonb_in(m, doc.as_bytes(), None)
-                    else {
+                    // Asymmetric budgets make the probe frame-size-independent
+                    // (stack-guard-bounds-in-bytes law: a ladder that needs
+                    // exec frames to outweigh parse frames is alive in debug
+                    // on macOS and dead in release on linux-aarch64 — the
+                    // CI cluster rail baseline hit exactly that). PARSE under the
+                    // production 2048kB budget so deep docs survive to exec;
+                    // EXEC under the 100kB GUC floor so its guard must fire
+                    // on any platform once the doc out-recurses ~100kB.
+                    stack_depth_core::set_max_stack_depth(2048);
+                    let parsed = adt_jsonb::io::jsonb_in(m, doc.as_bytes(), None);
+                    stack_depth_core::set_max_stack_depth(100);
+                    let Ok(Some(doc_image)) = parsed else {
                         // Doc-parse guard (adt_jsonb's plane) bounded the
                         // input first; exec can never see a deeper doc.
                         continue;

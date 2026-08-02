@@ -121,6 +121,7 @@ fn f64s(payload: &[u8], n: usize) -> Option<Vec<f64>> {
 }
 
 pub fn geo_io_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, rest)) = data.split_first() else {
         return;
     };

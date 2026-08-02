@@ -310,6 +310,7 @@ fn parse_rust(m: mcx::Mcx<'_>, cs: &CString) -> Option<Datum> {
 }
 
 pub fn jsonbops_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     init_ops_env();
     let Some((&sel, payload)) = data.split_first() else {
         return;

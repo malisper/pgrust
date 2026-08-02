@@ -200,6 +200,7 @@ pub(crate) fn init_session_env() {
 }
 
 pub fn jsonbio_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     init_session_env();
     let Some((&sel, payload)) = data.split_first() else {
         return;

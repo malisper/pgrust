@@ -817,6 +817,7 @@ fn init_seams() {
 }
 
 pub fn arrayfuncs_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     init_seams();
     let Some((&sel, rest)) = data.split_first() else {
         return;

@@ -516,6 +516,7 @@ fn crc_family(payload: &[u8]) {
 }
 
 pub fn hashenc_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, payload)) = data.split_first() else { return };
     if payload.len() > 4096 {
         return; // keep exec rate up; every arm is length-generic

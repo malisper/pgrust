@@ -485,6 +485,7 @@ fn pin_utf8() {
 /// NUL-free (the C side is NUL-terminated — a stream-representation
 /// non-surface, not a behavior difference), len < 2000.
 pub fn quoted_diff(s: &str, maxlen: i32) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if s.len() >= 2000 || s.as_bytes().contains(&0) {
         return;
     }
@@ -510,6 +511,7 @@ pub fn quoted_diff(s: &str, maxlen: i32) {
 /// Fuzz entry: [selector, flags, src...] (see module doc).
 /// selector 84 (mod 85) = quoted-append mode: flags = maxlen, src = utf8.
 pub fn mbconv_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if data.len() < 2 {
         return;
     }

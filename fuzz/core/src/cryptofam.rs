@@ -439,6 +439,7 @@ fn diff_crc(payload: &[u8]) {
 
 /// Entry point: data[0] selects the family member, the rest is its payload.
 pub fn cryptofam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let (op, payload) = match data.split_first() {
         Some((op, p)) => (*op, p),
         None => return,

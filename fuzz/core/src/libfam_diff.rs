@@ -164,6 +164,7 @@ fn cmp_i64(a: &i64, b: &i64) -> i32 {
 }
 
 pub fn libfam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };

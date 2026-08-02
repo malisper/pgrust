@@ -1034,6 +1034,7 @@ fn run_arrayop(op: i32, name: &str, arr1: &[u8], arr2: &[u8], ctx: &dyn std::fmt
 // ---------------------------------------------------------------------------
 
 pub fn contribb_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if data.is_empty() {
         return;
     }

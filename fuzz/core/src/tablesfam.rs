@@ -146,6 +146,7 @@ fn diff_unicode(payload: &[u8]) {
 
 /// Entry point: data[0] selects the member, the rest is its payload.
 pub fn tablesfam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let (op, payload) = match data.split_first() {
         Some((op, p)) => (*op, p),
         None => return,

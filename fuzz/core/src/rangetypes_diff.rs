@@ -976,6 +976,7 @@ fn install_seams() {
 }
 
 pub fn rangetypes_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     // This harness's contract is "the typcache seam never fires" (fn_extra
     // memos everywhere). In the SHARED cargo-test binary another lane's
     // module (array_userfuncs_diff / rowtypes_diff) may own

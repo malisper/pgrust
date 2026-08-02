@@ -178,6 +178,7 @@ fn czstr(s: &str) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 pub fn define_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };
