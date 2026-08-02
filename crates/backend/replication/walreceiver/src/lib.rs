@@ -253,10 +253,17 @@ fn wal_receiver_main_inner() -> PgResult<()> {
 
         WalRcvFetchTimeLineHistoryFiles(startpointTLI, primaryTLI)?;
 
+        // Create temporary replication slot if requested, and update slot
+        // name in shared memory. (The slot name cannot already be set in
+        // this case; walreceiver.c:355-368.)
         if is_temp_slot {
-            panic!(
-                "walreceiver: wal_receiver_create_temp_slot needs the CREATE_REPLICATION_SLOT client command (unported)"
-            );
+            slotname = format!("pg_walreceiver_{}", with_conn(|c| c.backend_pid()) as i64);
+            with_conn(|c| client::create_slot_physical(c, &slotname, true))?;
+            // strlcpy(walrcv->slotname, ..., NAMEDATALEN): the generated name
+            // is ASCII and far below NAMEDATALEN, no truncation needed.
+            debug_assert!(slotname.len() < NAMEDATALEN);
+            let name = slotname.clone();
+            with_walrcv(|d| d.slotname = name);
         }
 
         let slot = if slotname.is_empty() { None } else { Some(slotname.clone()) };

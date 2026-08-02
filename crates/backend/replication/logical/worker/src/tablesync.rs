@@ -406,14 +406,36 @@ fn fetch_remote_table_info(
     })
 }
 
-// copy_table (tablesync.c:1143), plain-table arm.
+// copy_table's publisher command (tablesync.c:1172-1226): plain tables COPY
+// directly; other relkinds (views, partitioned tables published via root)
+// need COPY (SELECT ...). Row filters and published generated columns refuse
+// loudly before this point (fetch_remote_table_info), so the SELECT arm never
+// carries quals and C's ONLY-for-RELKIND_RELATION branch inside it is
+// unreachable here.
+fn copy_table_cmd(relkind: u8, nspname: &str, relname: &str, attnames: &[String]) -> String {
+    let collist =
+        attnames.iter().map(|a| quote_ident(a)).collect::<Vec<_>>().join(", ");
+    if relkind == b'r' {
+        let mut cmd = format!("COPY {}.{}", quote_ident(nspname), quote_ident(relname));
+        if !attnames.is_empty() {
+            cmd.push_str(" (");
+            cmd.push_str(&collist);
+            cmd.push(')');
+        }
+        cmd.push_str(" TO STDOUT");
+        cmd
+    } else {
+        format!(
+            "COPY (SELECT {collist} FROM {}.{}) TO STDOUT",
+            quote_ident(nspname),
+            quote_ident(relname)
+        )
+    }
+}
+
+// copy_table (tablesync.c:1143).
 fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str) -> PgResult<()> {
     let lrel = fetch_remote_table_info(conn, nspname, relname)?;
-
-    if lrel.relkind != b'r' {
-        // Sequences/views/partitioned publisher rels: COPY (SELECT ...) arm.
-        panic!("unported: tablesync of non-plain publisher relation (relkind '{}')", lrel.relkind as char);
-    }
 
     logicalrelation::logicalrep_relmap_update(&lrel);
     let subid = my_sub(|s| s.oid);
@@ -421,14 +443,7 @@ fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str
         logicalrelation::logicalrep_rel_open(mcx, lrel.remoteid, types_rel::NoLock, subid)?;
     let _ = &entry;
 
-    // COPY nsp.rel (cols...) TO STDOUT on the publisher.
-    let mut cmd = format!("COPY {}.{}", quote_ident(nspname), quote_ident(relname));
-    if lrel.natts > 0 {
-        cmd.push_str(" (");
-        cmd.push_str(&lrel.attnames.iter().map(|a| quote_ident(a)).collect::<Vec<_>>().join(", "));
-        cmd.push(')');
-    }
-    cmd.push_str(" TO STDOUT");
+    let cmd = copy_table_cmd(lrel.relkind, nspname, relname, &lrel.attnames);
 
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::CopyOut {
@@ -500,21 +515,28 @@ fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str
     Ok(())
 }
 
+// libpqrcv_create_slot's command text (libpqwalreceiver.c), permanent
+// logical USE_SNAPSHOT arm: options in C's order (FAILOVER before SNAPSHOT).
+fn create_slot_use_snapshot_cmd(slotname: &str, failover: bool) -> String {
+    let mut opts: Vec<&str> = Vec::new();
+    if failover {
+        opts.push("FAILOVER");
+    }
+    opts.push("SNAPSHOT 'use'");
+    format!(
+        "CREATE_REPLICATION_SLOT \"{}\" LOGICAL pgoutput ({})",
+        slotname.replace('"', "\"\""),
+        opts.join(", ")
+    )
+}
+
 // walrcv_create_slot's USE_SNAPSHOT arm: returns the consistent point.
 fn create_slot_use_snapshot(
     conn: &mut PgConn,
     slotname: &str,
     failover: bool,
 ) -> PgResult<XLogRecPtr> {
-    let mut opts: Vec<&str> = vec!["SNAPSHOT 'use'"];
-    if failover {
-        opts.push("FAILOVER");
-    }
-    let cmd = format!(
-        "CREATE_REPLICATION_SLOT \"{}\" LOGICAL pgoutput ({})",
-        slotname.replace('"', "\"\""),
-        opts.join(", ")
-    );
+    let cmd = create_slot_use_snapshot_cmd(slotname, failover);
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::TuplesOk || res.rows.is_empty() {
         ereport(ERROR)
@@ -632,15 +654,21 @@ pub(crate) fn LogicalRepSyncTableStart(
             .finish(loc("LogicalRepSyncTableStart"))?;
     }
 
-    let failover = false; // C passes MySubscription->failover; failover slots unported here
+    // C passes MySubscription->failover so the tablesync slot of a failover
+    // subscription is failover-marked too (tablesync.c:1491).
+    let failover = my_sub(|s| s.failover);
     let origin_startpos = create_slot_use_snapshot(&mut conn, &slotname, failover)?;
 
     origin::replorigin_advance(originid, origin_startpos, InvalidXLogRecPtr, true, true)?;
     origin::replorigin_session_setup(originid, 0)?;
     origin::set_replorigin_session_origin(originid);
 
-    // SwitchToUntrustedUser (run_as_owner=false) is not ported — recorded
-    // divergence shared with the apply worker; RLS-enabled targets refuse.
+    // Make sure that the copy command runs as the table owner, unless the
+    // user has opted out of that behavior (tablesync.c:1515).
+    let ucxt = crate::apply::maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
+
+    // RLS-enabled targets refuse (recorded divergence: C refuses only when
+    // the acting user does not bypass RLS, check_enable_rls).
     if rel.rd_rel.relrowsecurity {
         ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -661,6 +689,9 @@ pub(crate) fn LogicalRepSyncTableStart(
             .errmsg(format!("table copy could not finish transaction on publisher: {}", res.err))
             .finish(loc("LogicalRepSyncTableStart"))?;
     }
+
+    // Restore the per-table copy state (tablesync.c:1557).
+    crate::apply::restore_user_context(&ucxt)?;
 
     rel.close(types_rel::NoLock)?;
     xact::CommandCounterIncrement()?;
@@ -704,6 +735,32 @@ pub(crate) fn run_tablesync_worker(mcx: Mcx<'static>, relid: Oid) -> PgResult<()
 
 #[cfg(test)]
 mod tests {
+    // walrcv_create_slot command text (libpqwalreceiver.c option order:
+    // FAILOVER before SNAPSHOT) and copy_table's two publisher commands
+    // (tablesync.c:1172-1226).
+    #[test]
+    fn create_slot_and_copy_commands() {
+        assert_eq!(
+            super::create_slot_use_snapshot_cmd("s1", false),
+            "CREATE_REPLICATION_SLOT \"s1\" LOGICAL pgoutput (SNAPSHOT 'use')"
+        );
+        assert_eq!(
+            super::create_slot_use_snapshot_cmd("s1", true),
+            "CREATE_REPLICATION_SLOT \"s1\" LOGICAL pgoutput (FAILOVER, SNAPSHOT 'use')"
+        );
+        // Plain table: direct COPY with a column list.
+        assert_eq!(
+            super::copy_table_cmd(b'r', "public", "t", &["a".to_string(), "b".to_string()]),
+            "COPY \"public\".\"t\" (\"a\", \"b\") TO STDOUT"
+        );
+        // Non-plain publisher relkind (partitioned via root, views): the
+        // COPY (SELECT ...) arm.
+        assert_eq!(
+            super::copy_table_cmd(b'p', "public", "t", &["a".to_string(), "b".to_string()]),
+            "COPY (SELECT \"a\", \"b\" FROM \"public\".\"t\") TO STDOUT"
+        );
+    }
+
     // ReplicationSlotNameForTablesync embeds the system identifier; verify the
     // C format "pg_%u_sync_%u_" UINT64 (tablesync.c:1302) structurally.
     #[test]

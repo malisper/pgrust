@@ -122,9 +122,25 @@ fn xlog_get_last_removed_segno() -> XLogSegNo {
     ctl.info_lck.with(|| ctl.lastRemovedSegNo.load(Relaxed))
 }
 
-// KeepLogSeg (xlog.c), hosted here until WAL removal lands: the
-// GetOldestUnsummarizedLSN arm is dropped (walsummarizer unported).
-fn keep_log_seg(recptr: XLogRecPtr, log_seg_no: XLogSegNo) -> XLogSegNo {
+// KeepLogSeg's unsummarized-WAL arm (xlog.c:8033): don't let the kept segment
+// pass WAL that summarization has yet to consume.
+pub(crate) fn apply_unsummarized_keep(
+    segno: XLogSegNo,
+    keep: XLogRecPtr,
+    segsize: i32,
+) -> XLogSegNo {
+    if keep != InvalidXLogRecPtr {
+        let unsummarized_segno = transam_xlog::XLByteToSeg(keep, segsize);
+        if unsummarized_segno < segno {
+            return unsummarized_segno;
+        }
+    }
+    segno
+}
+
+// KeepLogSeg (xlog.c), hosted here until WAL removal lands (this copy feeds
+// GetWALAvailability only).
+fn keep_log_seg(recptr: XLogRecPtr, log_seg_no: XLogSegNo) -> PgResult<XLogSegNo> {
     let segsize = transam_xlog::wal_segment_size();
     let curr_seg_no = transam_xlog::XLByteToSeg(recptr, segsize);
     let mut segno = curr_seg_no;
@@ -142,6 +158,11 @@ fn keep_log_seg(recptr: XLogRecPtr, log_seg_no: XLogSegNo) -> XLogSegNo {
         }
     }
 
+    // If WAL summarization is in use, don't remove WAL that has yet to be
+    // summarized (C passes NULL, NULL).
+    let keep = walsummarizer::GetOldestUnsummarizedLSN(None, None)?.unwrap_or(InvalidXLogRecPtr);
+    segno = apply_unsummarized_keep(segno, keep, segsize);
+
     let wal_keep_size_mb = guc_tables::vars::wal_keep_size_mb.read();
     if wal_keep_size_mb > 0 {
         let keep_segs = convert_to_xsegs(wal_keep_size_mb, segsize);
@@ -150,18 +171,18 @@ fn keep_log_seg(recptr: XLogRecPtr, log_seg_no: XLogSegNo) -> XLogSegNo {
         }
     }
 
-    if segno < log_seg_no { segno } else { log_seg_no }
+    Ok(if segno < log_seg_no { segno } else { log_seg_no })
 }
 
 // GetWALAvailability (xlog.c), hosted here for the same reason.
-pub(crate) fn get_wal_availability(target_lsn: XLogRecPtr) -> WALAvailability {
+pub(crate) fn get_wal_availability(target_lsn: XLogRecPtr) -> PgResult<WALAvailability> {
     if target_lsn == InvalidXLogRecPtr {
-        return WALAvailability::InvalidLsn;
+        return Ok(WALAvailability::InvalidLsn);
     }
 
     let segsize = transam_xlog::wal_segment_size();
     let currpos = get_xlog_write_rec_ptr();
-    let oldest_slot_seg = keep_log_seg(currpos, transam_xlog::XLByteToSeg(currpos, segsize));
+    let oldest_slot_seg = keep_log_seg(currpos, transam_xlog::XLByteToSeg(currpos, segsize))?;
 
     let oldest_seg = xlog_get_last_removed_segno() + 1;
 
@@ -173,14 +194,14 @@ pub(crate) fn get_wal_availability(target_lsn: XLogRecPtr) -> WALAvailability {
 
     if target_seg >= oldest_slot_seg {
         if target_seg >= oldest_seg_max_wal_size {
-            return WALAvailability::Reserved;
+            return Ok(WALAvailability::Reserved);
         }
-        return WALAvailability::Extended;
+        return Ok(WALAvailability::Extended);
     }
     if target_seg >= oldest_seg {
-        return WALAvailability::Unreserved;
+        return Ok(WALAvailability::Unreserved);
     }
-    WALAvailability::Removed
+    Ok(WALAvailability::Removed)
 }
 
 #[inline(always)]
@@ -191,23 +212,15 @@ fn cfi() -> PgResult<()> {
     Ok(())
 }
 
-// PhysicalWakeupLogicalWalSnd (walsender.c): the actual wakeup is
-// ConditionVariableBroadcast(&WalSndCtl->wal_confirm_rcv_cv), unreachable
-// today because no walsender is ever waiting on it (unported); the early
-// exits this port needs to be correct for (RecoveryInProgress, no configured
-// sync standby slots) are live.
-pub(crate) fn PhysicalWakeupLogicalWalSnd() -> PgResult<()> {
-    let slot = slot::MyReplicationSlot().expect("PhysicalWakeupLogicalWalSnd: no slot acquired");
-    debug_assert!(slot::SlotIsPhysical(slot));
-
-    if transam_xlog::RecoveryInProgress() {
-        return Ok(());
+// PhysicalWakeupLogicalWalSnd (walsender.c:1728): the implementation lives in
+// the walsender crate (it owns WalSndCtl's wal_confirm_rcv_cv) and is routed
+// through a seam — slotfuncs cannot depend on walsender. Uninstalled
+// (walsender not linked) no logical walsender can be waiting on the CV, so
+// skipping matches C's no-waiter broadcast.
+pub(crate) fn PhysicalWakeupLogicalWalSnd() {
+    if walsender_seams::physical_wakeup_logical_walsnd::is_installed() {
+        walsender_seams::physical_wakeup_logical_walsnd::call();
     }
-    let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
-    if slot::SlotExistsInSyncStandbySlots(&name) {
-        panic!("PhysicalWakeupLogicalWalSnd: wal_confirm_rcv_cv broadcast unported (walsender unported)");
-    }
-    Ok(())
 }
 
 // pg_physical_replication_slot_advance (slotfuncs.c).
@@ -226,7 +239,10 @@ pub(crate) fn pg_physical_replication_slot_advance(moveto: XLogRecPtr) -> PgResu
         retlsn = moveto;
 
         slot::ReplicationSlotMarkDirty();
-        PhysicalWakeupLogicalWalSnd()?;
+
+        // Wake up logical walsenders holding logical failover slots after
+        // updating the restart_lsn of the physical slot (slotfuncs.c:490).
+        PhysicalWakeupLogicalWalSnd();
     }
 
     Ok(retlsn)

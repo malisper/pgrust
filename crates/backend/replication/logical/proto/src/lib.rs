@@ -74,12 +74,6 @@ pub const PUBLISH_GENCOLS_STORED: u8 = b's';
 
 const ATTRIBUTE_GENERATED_STORED: i8 = b's' as i8;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported callee reached from proto.c: {what} (phase-2)")
-}
-
 pub type LogicalRepRelId = u32;
 
 /// A tuple received via logical replication; columns are the REMOTE table's.
@@ -1194,11 +1188,32 @@ pub fn logicalrep_read_rollback_prepared(
         gid: gid_truncate(r.get_string()?),
     })
 }
-pub fn logicalrep_write_stream_prepare(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_stream_prepare (streaming two-phase)")
+/// logicalrep_write_stream_prepare (proto.c:353): prepare_lsn is the
+/// caller's, end_lsn/prepare_time/xid/gid are C's txn fields.
+pub fn logicalrep_write_stream_prepare(
+    out: &mut Vec<u8>,
+    prepare_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    prepare_time: TimestampTz,
+    xid: TransactionId,
+    gid: &str,
+) {
+    logicalrep_write_prepare_common(
+        out,
+        LOGICAL_REP_MSG_STREAM_PREPARE,
+        prepare_lsn,
+        end_lsn,
+        prepare_time,
+        xid,
+        gid,
+    );
 }
-pub fn logicalrep_read_stream_prepare(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_stream_prepare (streaming two-phase)")
+
+/// logicalrep_read_stream_prepare (proto.c:365).
+pub fn logicalrep_read_stream_prepare(
+    r: &mut Reader<'_>,
+) -> PgResult<LogicalRepPreparedTxnData> {
+    logicalrep_read_prepare_common(r, "stream prepare")
 }
 
 /// logicalrep_message_type (proto.c:1209).

@@ -53,6 +53,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PhysicalWakeupLogicalWalSnd (walsender.c:1728), called from
+    // pg_replication_slot_advance (slotfuncs.c:490) on a physical slot named
+    // in synchronized_standby_slots. Uninstalled (walsender not linked) no
+    // logical walsender can be waiting on wal_confirm_rcv_cv, so skipping
+    // matches C's no-waiter broadcast.
+    pub fn physical_wakeup_logical_walsnd()
+);
+
+seam_core::seam!(
     // SendBaseBackup(cmd): the BASE_BACKUP replication command, installed by the
     // basebackup crate. Off the serial path; walsender dispatches to it.
     pub fn base_backup(cmd: repl_gram::BaseBackupCmd) -> types_error::PgResult<()>

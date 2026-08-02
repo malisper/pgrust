@@ -470,6 +470,76 @@ pub fn UpdateTwoPhaseState<'mcx>(mcx: Mcx<'mcx>, suboid: Oid, new_state: u8) -> 
     rel.close(RowExclusiveLock)
 }
 
+// clear_subscription_skip_lsn's catalog body (worker.c:4955): reset
+// pg_subscription.subskiplsn to invalid iff it still equals myskiplsn (a
+// user may have re-set it meanwhile). Returns whether it was cleared; the
+// caller (apply worker) owns the transaction/snapshot and emits C's
+// mismatch WARNING. C hosts the whole function in worker.c; the catalog
+// half lives beside the other pg_subscription updaters here.
+pub fn ClearSubscriptionSkipLsn<'mcx>(
+    mcx: Mcx<'mcx>,
+    suboid: Oid,
+    subname: &str,
+    myskiplsn: XLogRecPtr,
+) -> PgResult<bool> {
+    // Protect subskiplsn from being concurrently updated while clearing it.
+    lmgr::LockSharedObject(SubscriptionRelationId, suboid, 0, AccessShareLock)?;
+
+    let rel = table::table_open(mcx, SubscriptionRelationId, RowExclusiveLock)?;
+
+    // The cached tuple can't change under the object lock; reading the
+    // attribute through the cache then copying for the update sees the same
+    // tuple version C's single copied tuple does.
+    let Some(cached) = SearchSysCache1(SUBSCRIPTIONOID, SysCacheKey::Value(Datum::from_oid(suboid)))?
+    else {
+        return Err(Box::new(PgError::error(format!(
+            "subscription \"{subname}\" does not exist"
+        ))));
+    };
+    let subskiplsn =
+        SysCacheGetAttrNotNull(SUBSCRIPTIONOID, &cached, Anum_pg_subscription_subskiplsn)?.as_u64();
+    ReleaseSysCache(cached);
+
+    let mut cleared = false;
+    if subskiplsn == myskiplsn {
+        let Some(tup) = SearchSysCacheCopy(
+            mcx,
+            SUBSCRIPTIONOID,
+            SysCacheKey::Value(Datum::from_oid(suboid)),
+            SysCacheKey::UNUSED,
+            SysCacheKey::UNUSED,
+            SysCacheKey::UNUSED,
+        )?
+        else {
+            return Err(Box::new(PgError::error(format!(
+                "subscription \"{subname}\" does not exist"
+            ))));
+        };
+
+        let mut values = [Datum::null(); Natts_pg_subscription];
+        let mut nulls = [false; Natts_pg_subscription];
+        let mut replaces = [false; Natts_pg_subscription];
+        values[(Anum_pg_subscription_subskiplsn - 1) as usize] =
+            Datum::from_u64(InvalidXLogRecPtr);
+        replaces[(Anum_pg_subscription_subskiplsn - 1) as usize] = true;
+
+        let mut new_tup = heaptuple::heap_modify_tuple(
+            mcx,
+            tup.as_tuple(),
+            rel.descr(),
+            &values,
+            &nulls,
+            &replaces,
+        )?;
+        let otid = tup.as_tuple().t_self;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut new_tup)?;
+        cleared = true;
+    }
+
+    rel.close(NoLock)?;
+    Ok(cleared)
+}
+
 pub fn GetSubscriptionRelState<'mcx>(
     mcx: Mcx<'mcx>,
     subid: Oid,

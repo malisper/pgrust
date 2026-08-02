@@ -1235,6 +1235,7 @@ pub fn init_seams() {
         set: |v| WAL_SENDER_TIMEOUT.set(v),
     });
     walsender_seams::exec_replication_command::set(exec_replication_command);
+    walsender_seams::physical_wakeup_logical_walsnd::set(PhysicalWakeupLogicalWalSnd);
     walsender_seams::init_wal_sender::set(InitWalSender);
     walsender_seams::wal_snd_error_cleanup::set(WalSndErrorCleanup);
     walsender_seams::wal_snd_wakeup::set(wakeup::WalSndWakeup);

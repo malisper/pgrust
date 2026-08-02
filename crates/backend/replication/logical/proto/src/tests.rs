@@ -297,6 +297,34 @@ fn prepare_roundtrip_and_layout() {
 }
 
 #[test]
+fn stream_prepare_roundtrip_and_layout() {
+    let mut out = Vec::new();
+    logicalrep_write_stream_prepare(&mut out, 0xDEAD, 0xBEEF, -5, 77, "sp_gid");
+    // Shares logicalrep_write_prepare_common (proto.c:353): type byte,
+    // flags 0, prepare_lsn, end_lsn, prepare_time, xid, gid + NUL.
+    assert_eq!(out[0], LOGICAL_REP_MSG_STREAM_PREPARE);
+    assert_eq!(out[1], 0);
+    assert_eq!(out.len(), 1 + 1 + 8 + 8 + 8 + 4 + 6 + 1);
+    let mut r = Reader::new(&out[1..]);
+    let p = logicalrep_read_stream_prepare(&mut r).unwrap();
+    assert_eq!(p.prepare_lsn, 0xDEAD);
+    assert_eq!(p.end_lsn, 0xBEEF);
+    assert_eq!(p.prepare_time, -5);
+    assert_eq!(p.xid, 77);
+    assert_eq!(p.gid, "sp_gid");
+}
+
+#[test]
+fn stream_prepare_rejects_bad_flags() {
+    let mut out = Vec::new();
+    logicalrep_write_stream_prepare(&mut out, 1, 2, 3, 4, "g");
+    out[1] = 9;
+    let mut r = Reader::new(&out[1..]);
+    // C: elog(ERROR, "unrecognized flags ... in stream prepare message").
+    assert!(logicalrep_read_stream_prepare(&mut r).is_err());
+}
+
+#[test]
 fn prepare_rejects_bad_flags_and_invalid_xid() {
     let mut out = Vec::new();
     logicalrep_write_prepare(&mut out, 1, 2, 3, 4, "g");

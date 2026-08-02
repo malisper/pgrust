@@ -130,6 +130,46 @@ fn checksum_covers_exact_range() {
     assert_ne!(state_file_checksum(&altered), header_checksum(&image));
 }
 
+// am_walsender acquired/released log lines (slot.c:702 and the
+// ReplicationSlotRelease tail): exact C messages; DEBUG1 unless
+// log_replication_commands (default off).
+#[test]
+fn walsender_slot_log_lines() {
+    use crate::{walsender_slot_log_level, walsender_slot_log_message};
+    use types_error::{DEBUG1, LOG};
+
+    assert_eq!(
+        walsender_slot_log_message(true, true, "s1"),
+        "acquired logical replication slot \"s1\""
+    );
+    assert_eq!(
+        walsender_slot_log_message(true, false, "s1"),
+        "acquired physical replication slot \"s1\""
+    );
+    assert_eq!(
+        walsender_slot_log_message(false, true, "s1"),
+        "released logical replication slot \"s1\""
+    );
+    assert_eq!(
+        walsender_slot_log_message(false, false, "s1"),
+        "released physical replication slot \"s1\""
+    );
+
+    // In the server the GUC storage is installed by walsender's init_seams;
+    // stand in for it here.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOG_REPLICATION_COMMANDS: AtomicBool = AtomicBool::new(false);
+    guc_tables::vars::log_replication_commands.install(guc_tables::GucVarAccessors {
+        get: || LOG_REPLICATION_COMMANDS.load(Ordering::Relaxed),
+        set: |v| LOG_REPLICATION_COMMANDS.store(v, Ordering::Relaxed),
+    });
+
+    // log_replication_commands defaults to off -> DEBUG1; on -> LOG.
+    assert_eq!(walsender_slot_log_level(), DEBUG1);
+    LOG_REPLICATION_COMMANDS.store(true, Ordering::Relaxed);
+    assert_eq!(walsender_slot_log_level(), LOG);
+}
+
 #[test]
 fn invalidation_cause_names() {
     use crate::{GetSlotInvalidationCause, GetSlotInvalidationCauseName};

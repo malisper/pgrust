@@ -25,7 +25,8 @@ use logicalrelation::LogicalRepRelMapEntry;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{
-    PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION, ERROR, LOG,
+    PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_PROTOCOL_VIOLATION, ERROR, LOG,
 };
 use types_rel::Relation;
 use types_scan::scankey::{ScanKeyData, BTEqualStrategyNumber, SK_ISNULL, SK_SEARCHNULL};
@@ -69,11 +70,17 @@ pub(crate) fn logicalrep_relmap_prepare() -> PgResult<()> {
 // nondeterministic dangling varlenas in heap_form_tuple (round-4 crash).
 pub(crate) struct InFuncs {
     per_col: Vec<Option<(fmgr::FmgrInfo, Oid)>>,
+    // Receive functions for LOGICALREP_COLUMN_BINARY columns, cached under
+    // the same lifetime discipline.
+    recv_per_col: Vec<Option<(fmgr::FmgrInfo, Oid)>>,
 }
 
 impl InFuncs {
     fn new(natts: usize) -> Self {
-        InFuncs { per_col: (0..natts).map(|_| None).collect() }
+        InFuncs {
+            per_col: (0..natts).map(|_| None).collect(),
+            recv_per_col: (0..natts).map(|_| None).collect(),
+        }
     }
     fn get(&mut self, i: usize, atttypid: Oid) -> PgResult<&mut (fmgr::FmgrInfo, Oid)> {
         if self.per_col[i].is_none() {
@@ -82,6 +89,81 @@ impl InFuncs {
         }
         Ok(self.per_col[i].as_mut().expect("just filled"))
     }
+    fn get_recv(&mut self, i: usize, atttypid: Oid) -> PgResult<&mut (fmgr::FmgrInfo, Oid)> {
+        if self.recv_per_col[i].is_none() {
+            let (typreceive, typioparam) = lsyscache::getTypeBinaryInputInfo(atttypid)?;
+            self.recv_per_col[i] = Some((fmgr_seams::fmgr_info::call(typreceive)?, typioparam));
+        }
+        Ok(self.recv_per_col[i].as_mut().expect("just filled"))
+    }
+}
+
+// The shared per-column conversion of slot_store_data / slot_modify_data
+// (worker.c:826,941): TEXT through the type input function, BINARY through
+// the type receive function (getTypeBinaryInputInfo + OidReceiveFunctionCall),
+// anything else NULL.
+fn slot_store_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    infuncs: &mut InFuncs,
+    i: usize,
+    atttypid: Oid,
+    atttypmod: i32,
+    colstatus: u8,
+    bytes: &[u8],
+    remoteattnum: usize,
+) -> PgResult<(Datum, bool)> {
+    match colstatus {
+        LOGICALREP_COLUMN_TEXT => {
+            let cstr = CString::new(bytes).map_err(|_| {
+                Box::new(types_error::PgError::error(
+                    "invalid text column data in logical replication message".to_string(),
+                ))
+            })?;
+            let (flinfo, typioparam) = infuncs.get(i, atttypid)?;
+            let ioparam = *typioparam;
+            let d = fmgr::soft::input_function_call(
+                flinfo,
+                Some(cstr.as_c_str()),
+                ioparam,
+                atttypmod,
+                mcx,
+            )?;
+            Ok((d, false))
+        }
+        LOGICALREP_COLUMN_BINARY => {
+            let (flinfo, typioparam) = infuncs.get_recv(i, atttypid)?;
+            let ioparam = *typioparam;
+            let d = receive_binary_column(mcx, flinfo, ioparam, atttypmod, bytes, remoteattnum)?;
+            Ok((d, false))
+        }
+        // NULL from remote (an unexpected UNCHANGED is treated as NULL too).
+        _ => Ok((Datum::null(), true)),
+    }
+}
+
+// The BINARY decode itself: OidReceiveFunctionCall over the column bytes,
+// erroring as C when the receive function doesn't eat the whole buffer.
+pub(crate) fn receive_binary_column<'mcx>(
+    mcx: Mcx<'mcx>,
+    flinfo: &mut fmgr::FmgrInfo,
+    typioparam: Oid,
+    atttypmod: i32,
+    bytes: &[u8],
+    remoteattnum: usize,
+) -> PgResult<Datum> {
+    let mut buf = stringinfo::StringInfo::from_vec(mcx::slice_in(mcx, bytes)?)?;
+    let d = fmgr::receive_function_call(flinfo, Some(&mut buf), typioparam, atttypmod, mcx)?;
+    // Trouble if it didn't eat the whole buffer.
+    if buf.cursor != buf.len() {
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
+            .errmsg(format!(
+                "incorrect binary data format in logical replication column {}",
+                remoteattnum + 1
+            ))
+            .finish(loc("slot_store_data"))?;
+    }
+    Ok(d)
 }
 
 // begin_replication_step (worker.c:501).
@@ -132,6 +214,14 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
         return Ok(());
     }
     let action = buf[0];
+    // C checks is_skipping_changes() at the entry of the four data-
+    // modification handlers only (worker.c:2404,2564,2769,3257); RELATION/
+    // TYPE/MESSAGE are processed even while skipping.
+    if matches!(action, MSG_INSERT | MSG_UPDATE | MSG_DELETE | MSG_TRUNCATE)
+        && crate::is_skipping_changes()
+    {
+        return Ok(());
+    }
     if matches!(
         action,
         MSG_RELATION | MSG_TYPE | MSG_INSERT | MSG_UPDATE | MSG_DELETE | MSG_TRUNCATE | MSG_MESSAGE
@@ -162,11 +252,7 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
         MSG_STREAM_STOP => crate::stream_apply::apply_handle_stream_stop(mcx),
         MSG_STREAM_COMMIT => crate::stream_apply::apply_handle_stream_commit(mcx, conn, &mut r),
         MSG_STREAM_ABORT => crate::stream_apply::apply_handle_stream_abort(mcx, &mut r),
-        MSG_STREAM_PREPARE => {
-            // Streamed two-phase is a named follow-up (GL-LOGDEC-1 ASK-1);
-            // the publisher side refuses it before this can arrive.
-            panic!("unported: streamed two-phase apply (stream_prepare); message '{}'", action as char)
-        }
+        MSG_STREAM_PREPARE => crate::stream_apply::apply_handle_stream_prepare(mcx, conn, &mut r),
         MSG_BEGIN_PREPARE => apply_handle_begin_prepare(&mut r),
         MSG_PREPARE => apply_handle_prepare(mcx, conn, &mut r),
         MSG_COMMIT_PREPARED => apply_handle_commit_prepared(mcx, conn, &mut r),
@@ -185,6 +271,7 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
 fn apply_handle_begin(r: &mut Reader<'_>) -> PgResult<()> {
     let begin = logicalproto::logicalrep_read_begin(r)?;
     REMOTE_FINAL_LSN.set(begin.final_lsn);
+    crate::maybe_start_skipping_changes(begin.final_lsn);
     IN_REMOTE_TRANSACTION.set(true);
     Ok(())
 }
@@ -217,7 +304,21 @@ pub(crate) fn apply_handle_commit_internal(
     mcx: Mcx<'static>,
     commit: &logicalproto::LogicalRepCommitData,
 ) -> PgResult<()> {
+    if crate::is_skipping_changes() {
+        crate::stop_skipping_changes();
+
+        // Start a new transaction to clear the subskiplsn, if not started
+        // yet.
+        if !xact::IsTransactionState() {
+            xact::StartTransactionCommand()?;
+        }
+    }
+
     if xact::IsTransactionState() {
+        // The transaction is either non-empty or skipped, so we clear the
+        // subskiplsn.
+        crate::clear_subscription_skip_lsn(mcx, commit.commit_lsn)?;
+
         // Update origin state so streaming restarts from the right position
         // after a crash: the session origin lsn/timestamp ride the local
         // commit record (origin crate seams feed xact's commit writer).
@@ -225,6 +326,11 @@ pub(crate) fn apply_handle_commit_internal(
         origin::set_replorigin_session_origin_timestamp(commit.committime);
 
         xact::CommitTransactionCommand()?;
+
+        if xact::IsTransactionBlock() {
+            xact::EndTransactionBlock(false)?;
+            xact::CommitTransactionCommand()?;
+        }
 
         let local_end = transam_xlog_seams::xact_last_commit_end::call();
         crate::store_flush_position(commit.end_lsn, local_end);
@@ -250,12 +356,14 @@ fn apply_handle_begin_prepare(r: &mut Reader<'_>) -> PgResult<()> {
 
     let begin = logicalproto::logicalrep_read_begin_prepare(r)?;
     REMOTE_FINAL_LSN.set(begin.prepare_lsn);
+    crate::maybe_start_skipping_changes(begin.prepare_lsn);
     IN_REMOTE_TRANSACTION.set(true);
     Ok(())
 }
 
-// apply_handle_prepare_internal (worker.c:1065).
-fn apply_handle_prepare_internal(
+// apply_handle_prepare_internal (worker.c:1065), shared by the live PREPARE
+// and the streamed STREAM PREPARE replay.
+pub(crate) fn apply_handle_prepare_internal(
     prepare_data: &logicalproto::LogicalRepPreparedTxnData,
 ) -> PgResult<()> {
     // Compute a unique GID for the two_phase transaction; the publisher's own
@@ -311,7 +419,14 @@ fn apply_handle_prepare(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>
     IN_REMOTE_TRANSACTION.set(false);
 
     // Process any tables that are being synchronized in parallel.
-    crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)
+    crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)?;
+
+    // Since the transaction is already prepared, a crash before clearing the
+    // subskiplsn leaves it set, but the transaction won't be resent; the
+    // subskiplsn is then cleared when finishing the next transaction.
+    crate::stop_skipping_changes();
+    crate::clear_subscription_skip_lsn(mcx, prepare_data.prepare_lsn)?;
+    Ok(())
 }
 
 // apply_handle_commit_prepared (worker.c:1173).
@@ -340,7 +455,10 @@ fn apply_handle_commit_prepared(
     crate::store_flush_position(prepare_data.end_lsn, local_end);
     IN_REMOTE_TRANSACTION.set(false);
 
-    crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)
+    crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)?;
+
+    crate::clear_subscription_skip_lsn(mcx, prepare_data.end_lsn)?;
+    Ok(())
 }
 
 // apply_handle_rollback_prepared (worker.c:1222).
@@ -367,6 +485,8 @@ fn apply_handle_rollback_prepared(
         twophase::FinishPreparedTransaction(&gid, false)?;
         end_replication_step()?;
         xact::CommitTransactionCommand()?;
+
+        crate::clear_subscription_skip_lsn(mcx, rollback_data.rollback_end_lsn)?;
     }
 
     // The rollback WAL record is always flushed (worker.c:1259).
@@ -405,32 +525,17 @@ fn slot_store_data<'mcx>(
         let (value, isnull) = if !att.attisdropped && remote >= 0 {
             let m = remote as usize;
             debug_assert!(m < tup.ncols);
-            match tup.colstatus[m] {
-                LOGICALREP_COLUMN_TEXT => {
-                    let atttypmod = att.atttypmod;
-                    let atttypid = att.atttypid;
-                    let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
-                    let cstr = CString::new(bytes).map_err(|_| {
-                        Box::new(types_error::PgError::error(
-                            "invalid text column data in logical replication message".to_string(),
-                        ))
-                    })?;
-                    let (flinfo, typioparam) = infuncs.get(i, atttypid)?;
-                    let ioparam = *typioparam;
-                    let d = fmgr::soft::input_function_call(
-                        flinfo,
-                        Some(cstr.as_c_str()),
-                        ioparam,
-                        atttypmod,
-                        mcx,
-                    )?;
-                    (d, false)
-                }
-                LOGICALREP_COLUMN_BINARY => {
-                    panic!("unported: binary-format logical replication column (binary=true)")
-                }
-                _ => (Datum::null(), true), // NULL (or unexpected UNCHANGED)
-            }
+            let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
+            slot_store_datum(
+                mcx,
+                infuncs,
+                i,
+                att.atttypid,
+                att.atttypmod,
+                tup.colstatus[m],
+                bytes,
+                m,
+            )?
         } else {
             (Datum::null(), true)
         };
@@ -441,6 +546,60 @@ fn slot_store_data<'mcx>(
 
     exectuples::exec_store_virtual_tuple(slot);
     Ok(())
+}
+
+// slot_fill_defaults (worker.c:734): evaluate non-NULL column defaults for
+// subscriber-only columns on INSERT apply (tables with more columns on the
+// subscriber than on the publisher); slot_store_data left them NULL.
+// expression_planner is rendered as eval_const_expressions + fix_opfuncids
+// (the COPY FROM defaults convention). Returns the compiled expressions as a
+// keep-alive: a result datum may live in flinfo-owned scratch (see InFuncs),
+// so the states must outlive the DML that consumes the slot.
+// slot_fill_defaults' column filter (worker.c:757-766): dropped and generated
+// columns never get defaults; replicated columns (attrmap >= 0) keep the
+// received value.
+pub(crate) fn needs_default_fill(attisdropped: bool, attgenerated: i8, remote: i16) -> bool {
+    !attisdropped && attgenerated == 0 && remote < 0
+}
+
+fn slot_fill_defaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    entry: &LogicalRepRelMapEntry,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<Vec<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>> {
+    let mut keep_alive = Vec::new();
+    let natts = rel.rd_att.natts as usize;
+
+    // We got all the data via replication: no need to evaluate anything.
+    if natts == entry.remoterel.natts {
+        return Ok(keep_alive);
+    }
+
+    for i in 0..natts {
+        let att = rel.rd_att.attr(i);
+        let remote = entry.attrmap.get(i).copied().unwrap_or(-1);
+        if !needs_default_fill(att.attisdropped, att.attgenerated, remote) {
+            continue;
+        }
+        let Some(defexpr) = rewrite_handler::build_column_default(mcx, rel, i + 1)? else {
+            continue;
+        };
+        let defexpr = clauses::eval_const_expressions(mcx, defexpr)?;
+        nodes_core::fix_opfuncids(defexpr)?;
+        let mut state = execexpr::exec_init_expr(mcx, Some(defexpr), execexpr::ParamBind::NONE)?
+            .expect("column default expression");
+        state.arm_result_mcx(mcx);
+
+        let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
+        let r = execexpr::exec_eval_expr(&mut state, &mut slots)?;
+        let base = slot.base_mut();
+        base.tts_values[i] = r.value;
+        base.tts_isnull[i] = r.isnull;
+
+        keep_alive.push(state);
+    }
+    Ok(keep_alive)
 }
 
 // slot_modify_data (worker.c:892): copy srcslot, replace replicated columns.
@@ -477,38 +636,128 @@ fn slot_modify_data<'mcx>(
         if tup.colstatus[m] == LOGICALREP_COLUMN_UNCHANGED {
             continue;
         }
-        let (value, isnull) = match tup.colstatus[m] {
-            LOGICALREP_COLUMN_TEXT => {
-                let atttypmod = att.atttypmod;
-                let atttypid = att.atttypid;
-                let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
-                let cstr = CString::new(bytes).map_err(|_| {
-                    Box::new(types_error::PgError::error(
-                        "invalid text column data in logical replication message".to_string(),
-                    ))
-                })?;
-                let (flinfo, typioparam) = infuncs.get(i, atttypid)?;
-                let ioparam = *typioparam;
-                let d = fmgr::soft::input_function_call(
-                    flinfo,
-                    Some(cstr.as_c_str()),
-                    ioparam,
-                    atttypmod,
-                    mcx,
-                )?;
-                (d, false)
-            }
-            LOGICALREP_COLUMN_BINARY => {
-                panic!("unported: binary-format logical replication column (binary=true)")
-            }
-            _ => (Datum::null(), true), // LOGICALREP_COLUMN_NULL
-        };
+        let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
+        let (value, isnull) = slot_store_datum(
+            mcx,
+            infuncs,
+            i,
+            att.atttypid,
+            att.atttypmod,
+            tup.colstatus[m],
+            bytes,
+            m,
+        )?;
         let base = slot.base_mut();
         base.tts_values[i] = value;
         base.tts_isnull[i] = isnull;
     }
 
     exectuples::exec_store_virtual_tuple(slot);
+    Ok(())
+}
+
+// GetTupleTransactionInfo (conflict.c:62): the local tuple's xmin plus the
+// commit timestamp data (timestamp, origin) of the transaction that created
+// that version; the data half is None when track_commit_timestamp is off or
+// the xid is outside the retained commit-ts range, as C's false return.
+fn get_tuple_transaction_info(
+    localslot: &SlotData<'_>,
+) -> PgResult<(types_core::TransactionId, Option<(types_core::TimestampTz, types_core::RepOriginId)>)> {
+    let mut isnull = false;
+    let xmin_d = exectuples::slot_getsysattr(
+        localslot,
+        types_tuple::MinTransactionIdAttributeNumber,
+        &mut isnull,
+    )?;
+    debug_assert!(!isnull);
+    let xmin = xmin_d.as_u32();
+
+    // The commit timestamp data is not available if track_commit_timestamp
+    // is disabled.
+    if !guc_tables::vars::track_commit_timestamp.read() {
+        return Ok((xmin, None));
+    }
+    Ok((xmin, commit_ts::TransactionIdGetCommitTsData(xmin)?))
+}
+
+// errdetail_apply_conflict's origin-differs explanation (conflict.c),
+// rendered into this file's single-line conflict LOG convention (C's DETAIL
+// sentence, lowercased, without the trailing period).
+pub(crate) fn origin_differs_detail(
+    action: &str,
+    localorigin_valid: bool,
+    origin_name: Option<&str>,
+    localxmin: types_core::TransactionId,
+    ts: &str,
+) -> String {
+    match (localorigin_valid, origin_name) {
+        (false, _) => format!(
+            "{action} the row that was modified locally in transaction {localxmin} at {ts}"
+        ),
+        (true, Some(name)) => format!(
+            "{action} the row that was modified by a different origin \"{name}\" in transaction {localxmin} at {ts}"
+        ),
+        // The origin that modified this row has been removed.
+        (true, None) => format!(
+            "{action} the row that was modified by a non-existent origin in transaction {localxmin} at {ts}"
+        ),
+    }
+}
+
+// ReportApplyConflict for CT_UPDATE_ORIGIN_DIFFERS / CT_DELETE_ORIGIN_DIFFERS
+// (conflict.c; called from worker.c:2696,2879), rendered as this file's
+// conflict LOG lines.
+fn report_origin_differs_conflict(
+    mcx: Mcx<'_>,
+    entry: &LogicalRepRelMapEntry,
+    updating: bool,
+    localxmin: types_core::TransactionId,
+    localorigin: types_core::RepOriginId,
+    localts: types_core::TimestampTz,
+) -> PgResult<()> {
+    let localorigin_valid = localorigin != types_core::InvalidRepOriginId;
+    let origin_name = if localorigin_valid {
+        origin::replorigin_by_oid(mcx, localorigin, true)?
+    } else {
+        None
+    };
+    let ts = adt_timestamp::timestamptz_to_str(localts);
+    let detail = origin_differs_detail(
+        if updating { "updating" } else { "deleting" },
+        localorigin_valid,
+        origin_name.as_deref(),
+        localxmin,
+        &ts,
+    );
+    let conflict = if updating { "update_origin_differs" } else { "delete_origin_differs" };
+    let (nsp, name) = (&entry.remoterel.nspname, &entry.remoterel.relname);
+    let _ = elog::elog(
+        LOG,
+        format!("conflict detected on relation \"{nsp}.{name}\": conflict={conflict}; {detail}"),
+    );
+    Ok(())
+}
+
+// The run_as_owner arm shared by the DML handlers (worker.c:2427 etc.) and
+// tablesync (tablesync.c:1515): unless the subscription opted out, any
+// user-supplied code runs as the table owner. Returns the context to restore
+// (None when running as owner was requested).
+pub(crate) fn maybe_switch_to_table_owner(
+    mcx: Mcx<'_>,
+    relowner: Oid,
+) -> PgResult<Option<types_core::UserContext>> {
+    if my_sub(|s| s.runasowner) {
+        return Ok(None);
+    }
+    let mut ucxt = types_core::UserContext::new(InvalidOid, 0, 0);
+    init_small::SwitchToUntrustedUser(mcx, relowner, &mut ucxt)?;
+    Ok(Some(ucxt))
+}
+
+pub(crate) fn restore_user_context(ucxt: &Option<types_core::UserContext>) -> PgResult<()> {
+    if let Some(ucxt) = ucxt {
+        init_small::RestoreUserContext(ucxt)?;
+    }
     Ok(())
 }
 
@@ -950,16 +1199,22 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         return end_replication_step();
     }
 
+    // Make sure that any user-supplied code runs as the table owner, unless
+    // the user has opted out of that behavior (worker.c:2427).
+    let ucxt = maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
+
     // Keep the input-function cache alive past do_insert: flinfo-owned
     // scratch backs the by-ref datums in the slot (see InFuncs).
     let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
     slot_store_data(mcx, &mut remoteslot, &entry, &rel, &newtup, &mut infuncs)?;
-    // slot_fill_defaults: subscriber-only columns keep NULL; evaluating
-    // non-NULL column defaults on apply is not ported (recorded divergence —
-    // C fills defaults for columns absent on the publisher).
+    // Keep-alive for the same reason as infuncs: default datums may live in
+    // flinfo-owned scratch until do_insert materializes the tuple.
+    let _default_exprs = slot_fill_defaults(mcx, &entry, &rel, &mut remoteslot)?;
 
     do_insert(mcx, &rel, &mut remoteslot)?;
+
+    restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
     end_replication_step()
@@ -979,6 +1234,10 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
     check_relation_updatable(&entry)?;
 
+    // Make sure that any user-supplied code runs as the table owner, unless
+    // the user has opted out of that behavior (worker.c:2594).
+    let ucxt = maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
+
     let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
     let searchtup = if upd.has_oldtuple {
@@ -992,6 +1251,15 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     let found = find_repl_tuple(mcx, &rel, &entry, &mut remoteslot, &mut localslot)?;
 
     if found {
+        // Report the conflict if the tuple was modified by a different origin
+        // (worker.c:2696): commit-ts data present and origin != session's.
+        let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
+        if let Some((localts, localorigin)) = ctsdata {
+            if localorigin != origin::replorigin_session_origin() {
+                report_origin_differs_conflict(mcx, &entry, true, localxmin, localorigin, localts)?;
+            }
+        }
+
         // A second cache: slot_modify_data's writes reuse per-column scratch,
         // which would invalidate remoteslot's datums mid-use otherwise.
         let mut modfuncs = InFuncs::new(rel.rd_att.natts as usize);
@@ -1009,6 +1277,8 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
             ),
         );
     }
+
+    restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
     end_replication_step()
@@ -1028,6 +1298,10 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
     check_relation_updatable(&entry)?;
 
+    // Make sure that any user-supplied code runs as the table owner, unless
+    // the user has opted out of that behavior (worker.c:2798).
+    let ucxt = maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
+
     let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
     slot_store_data(mcx, &mut remoteslot, &entry, &rel, &oldtup, &mut infuncs)?;
@@ -1036,6 +1310,15 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     let found = find_repl_tuple(mcx, &rel, &entry, &mut remoteslot, &mut localslot)?;
 
     if found {
+        // Report the conflict if the tuple was modified by a different origin
+        // (worker.c:2879).
+        let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
+        if let Some((localts, localorigin)) = ctsdata {
+            if localorigin != origin::replorigin_session_origin() {
+                report_origin_differs_conflict(mcx, &entry, false, localxmin, localorigin, localts)?;
+            }
+        }
+
         do_delete(mcx, &rel, &mut localslot)?;
     } else {
         let (nsp, name) =
@@ -1049,14 +1332,16 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         );
     }
 
+    restore_user_context(&ucxt)?;
+
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
     end_replication_step()
 }
 
 // apply_handle_truncate (worker.c:3232). Even if the publisher used CASCADE,
-// C explicitly replays without further cascading (DROP_RESTRICT); the
-// TargetPrivilegesCheck / run-as-owner arm follows the port's existing
-// convention in the other handlers (elided, recorded divergence).
+// C explicitly replays without further cascading (DROP_RESTRICT).
+// TargetPrivilegesCheck (ACL_TRUNCATE) is elided as in the other handlers
+// (recorded divergence); C's truncate has no run-as-owner arm.
 fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     begin_replication_step(mcx)?;
 

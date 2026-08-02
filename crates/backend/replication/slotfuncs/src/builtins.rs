@@ -228,7 +228,7 @@ pub fn fc_pg_get_replication_slots(
             let mut walstate = if data.invalidated != RS_INVAL_NONE {
                 WALAvailability::Removed
             } else {
-                get_wal_availability(data.restart_lsn)
+                get_wal_availability(data.restart_lsn)?
             };
 
             match walstate {
@@ -455,9 +455,11 @@ fn fc_copy_replication_slot(
     );
     if let Err(e) = copied {
         // As with create_logical: an ephemeral (logical) destination slot
-        // drops itself on release; a physical one just releases (C's
-        // resource-owner-driven drop of a mid-flight physical slot is
-        // unported, matching create_physical_replication_slot's gap above).
+        // drops itself on release. A temporary physical one stays pinned to
+        // this backend (release keeps active_pid) until the propagating error
+        // reaches top-level recovery, whose ReplicationSlotCleanup drops it —
+        // C's exact mechanism (postgres.c:4467; tcop main_loop.rs). A
+        // persistent physical destination survives the error, as in C.
         if slot::MyReplicationSlot().is_some() {
             let _ = slot::ReplicationSlotRelease();
         }

@@ -211,6 +211,34 @@ pub fn start_streaming(
     }
 }
 
+// libpqrcv_create_slot's physical command text (new options syntax; the
+// publisher is same-version).
+pub(crate) fn create_slot_physical_cmd(slotname: &str, temporary: bool) -> String {
+    let mut cmd = format!("CREATE_REPLICATION_SLOT \"{slotname}\"");
+    if temporary {
+        cmd.push_str(" TEMPORARY");
+    }
+    cmd.push_str(" PHYSICAL (RESERVE_WAL)");
+    cmd
+}
+
+/// libpqrcv_create_slot, physical arm (the walreceiver's temporary slot;
+/// walreceiver.c:362 passes lsn = NULL, so the reserved LSN is not returned).
+pub fn create_slot_physical(conn: &mut PgConn, slotname: &str, temporary: bool) -> PgResult<()> {
+    let cmd = create_slot_physical_cmd(slotname, temporary);
+    let res = conn.exec(&cmd)?;
+    if res.status != ExecStatus::TuplesOk {
+        return throw(ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg(format!(
+                "could not create replication slot \"{slotname}\": {}",
+                pchomp(&res.err)
+            ))
+            .finish(loc("libpqrcv_create_slot")));
+    }
+    Ok(())
+}
+
 /// libpqrcv_endstreaming. Returns the next timeline ID (0 if not reported).
 pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
     if conn.put_copy_end().is_err() {
@@ -400,5 +428,21 @@ mod tests {
             Err(e) => assert!(e.message().contains("password is required")),
             Ok(_) => panic!("expected password-required ereport"),
         }
+    }
+
+    // walrcv_create_slot for wal_receiver_create_temp_slot (walreceiver.c:355):
+    // the physical CREATE_REPLICATION_SLOT command and the generated name.
+    #[test]
+    fn temp_slot_command_text() {
+        assert_eq!(
+            super::create_slot_physical_cmd("pg_walreceiver_12345", true),
+            "CREATE_REPLICATION_SLOT \"pg_walreceiver_12345\" TEMPORARY PHYSICAL (RESERVE_WAL)"
+        );
+        assert_eq!(
+            super::create_slot_physical_cmd("s", false),
+            "CREATE_REPLICATION_SLOT \"s\" PHYSICAL (RESERVE_WAL)"
+        );
+        // snprintf "pg_walreceiver_%lld" over the backend pid (walreceiver.c:359).
+        assert_eq!(format!("pg_walreceiver_{}", 42i32 as i64), "pg_walreceiver_42");
     }
 }
