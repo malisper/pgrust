@@ -1,5 +1,5 @@
-//! pg_collation.c. checkMembershipInCurrentExtension, extension deps and the
-//! post-create hook are unported no-ops (extensions unported repo-wide).
+//! pg_collation.c. InvokeObjectPostCreateHook is the repo-wide objectaccess
+//! carve; everything else in CollationCreate is C-exact.
 
 #![allow(non_snake_case, non_upper_case_globals)]
 
@@ -67,6 +67,11 @@ pub fn CollationCreate<'mcx>(
             return Ok(InvalidOid);
         }
         if if_not_exists {
+            // In an extension script, insist the pre-existing object be a
+            // member of the extension, to avoid security risks.
+            let myself = ObjectAddress::set(COLLATION_RELATION_ID, oid);
+            pg_depend::checkMembershipInCurrentExtension(mcx, &myself)?;
+
             let msg = if form.collencoding == -1 {
                 format!("collation \"{collname}\" already exists, skipping")
             } else {
@@ -101,6 +106,11 @@ pub fn CollationCreate<'mcx>(
             return Ok(InvalidOid);
         }
         if if_not_exists {
+            // In an extension script, insist the pre-existing object be a
+            // member of the extension, to avoid security risks.
+            let myself = ObjectAddress::set(COLLATION_RELATION_ID, oid);
+            pg_depend::checkMembershipInCurrentExtension(mcx, &myself)?;
+
             rel.close(NoLock)?;
             ereport(NOTICE)
                 .errcode(ERRCODE_DUPLICATE_OBJECT)
@@ -156,7 +166,68 @@ pub fn CollationCreate<'mcx>(
     let referenced = ObjectAddress::set(NAMESPACE_RELATION_ID, collnamespace);
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     pg_depend::recordDependencyOnOwner(mcx, COLLATION_RELATION_ID, oid, collowner)?;
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     rel.close(NoLock)?;
     Ok(oid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXISTING_COLLATION: Oid = 88001;
+    const NSP: Oid = 2200;
+    const OWNER: Oid = 10;
+
+    fn install_seams() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::lookup_pg_collation_by_name_enc_nsp::set(|name, _enc, nsp| {
+                Ok((name == "dupe" && nsp == NSP).then_some(
+                    syscache_seams::PgCollationNameEncNspRow {
+                        oid: EXISTING_COLLATION,
+                        collprovider: pg_database_seams::COLLPROVIDER_LIBC,
+                    },
+                ))
+            });
+        });
+    }
+
+    fn libc_form() -> CollationForm<'static> {
+        CollationForm {
+            collprovider: pg_database_seams::COLLPROVIDER_LIBC,
+            collisdeterministic: true,
+            collencoding: -1,
+            collcollate: Some("C"),
+            collctype: Some("C"),
+            colllocale: None,
+            collicurules: None,
+            collversion: None,
+        }
+    }
+
+    // IF NOT EXISTS over an existing collation outside an extension script:
+    // checkMembershipInCurrentExtension is a no-op (creating_extension is
+    // false) and the NOTICE lane returns InvalidOid, as in C.
+    #[test]
+    fn if_not_exists_membership_gate_open_outside_extension() {
+        install_seams();
+        assert!(!pg_depend::creating_extension());
+        let ctx = mcx::MemoryContext::new("t");
+        let oid =
+            CollationCreate(ctx.mcx(), "dupe", NSP, OWNER, &libc_form(), true, false).unwrap();
+        assert_eq!(oid, InvalidOid);
+    }
+
+    // The quiet lane returns before the membership check, as in C.
+    #[test]
+    fn quiet_lane_skips_membership_check() {
+        install_seams();
+        let ctx = mcx::MemoryContext::new("t");
+        let oid =
+            CollationCreate(ctx.mcx(), "dupe", NSP, OWNER, &libc_form(), false, true).unwrap();
+        assert_eq!(oid, InvalidOid);
+    }
 }
