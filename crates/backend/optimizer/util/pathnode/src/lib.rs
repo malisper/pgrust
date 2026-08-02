@@ -421,18 +421,19 @@ pub fn path_req_outer<'p, 'mcx>(path: &'p Path<'mcx>) -> &'p Relids<'mcx> {
     }
 }
 
-// reparameterize_path (pathnode.c): rebuild a path with more (never less)
-// parameterization. Returns None when the path can't serve; the SeqScan and
-// RTE_RESULT arms are the live surface (parameterized-append children), the
-// remaining C arms stay loud until a lane needs them.
+// reparameterize_path (pathnode.c:4242): rebuild a path with more (never
+// less) parameterization. Returns None when the path can't serve, exactly as
+// C's default arm and its two in-switch `break`s do.
 pub fn reparameterize_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
     required_outer: &types_pathnodes::Relids<'mcx>,
-    _loop_count: f64,
+    loop_count: f64,
 ) -> PgResult<Option<PathId>> {
+    let mcx = run.mcx;
     let (pathtype, rel_id) = {
         let p = run.root.path(path_id).base();
+        // Can only increase, not decrease, path's parameterization.
         if !types_pathnodes::relids::relids_is_subset(path_req_outer(p), required_outer) {
             return Ok(None);
         }
@@ -441,17 +442,155 @@ pub fn reparameterize_path<'mcx>(
     if pathtype == tag16(NodeTag::T_SeqScan) {
         return Ok(Some(create_seqscan_path(run, rel_id, required_outer, 0)?));
     }
-    if pathtype == tag16(NodeTag::T_Result)
-        && matches!(run.root.path(path_id), PathNode::Path(_))
-    {
-        return Ok(Some(create_resultscan_path(run, rel_id, required_outer)?));
+    if pathtype == tag16(NodeTag::T_SampleScan) {
+        return Ok(Some(create_samplescan_path(run, rel_id, required_outer)?));
     }
-    // C's default arm returns NULL: a path kind we cannot reparameterize is
-    // simply unavailable at this parameterization; callers skip it. The
-    // per-pathtype rebuild arms C has beyond SeqScan/Result (IndexScan,
-    // BitmapHeapScan, SubqueryScan, Material, Memoize, Append, MergeAppend,
-    // ...) are unported, so those kinds fall through to None here too --
-    // fewer parameterized-append plan choices than C, never a wrong plan.
+    if pathtype == tag16(NodeTag::T_IndexScan) || pathtype == tag16(NodeTag::T_IndexOnlyScan) {
+        // We can't use create_index_path directly, and would not want to
+        // because it would re-compute the indexqual conditions which is
+        // wasted effort. Instead we hack things a bit: flat-copy the path
+        // node, revise its param_info, and redo the cost estimate.
+        let PathNode::IndexPath(ipath) = run.root.path(path_id) else {
+            panic!("T_IndexScan pathtype on a non-IndexPath node")
+        };
+        let mut newpath = ipath.clone();
+        newpath.path.param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
+        let id = run.root.alloc_path(PathNode::IndexPath(newpath));
+        costsize::cost_index(run, id, loop_count, false)?;
+        return Ok(Some(id));
+    }
+    if pathtype == tag16(NodeTag::T_BitmapHeapScan) {
+        let PathNode::BitmapHeapPath(bpath) = run.root.path(path_id) else {
+            panic!("T_BitmapHeapScan pathtype on a non-BitmapHeapPath node")
+        };
+        let bitmapqual = bpath.bitmapqual.expect("BitmapHeapPath.bitmapqual");
+        return Ok(Some(create_bitmap_heap_path(
+            run,
+            rel_id,
+            bitmapqual,
+            required_outer,
+            loop_count,
+            0,
+        )?));
+    }
+    if pathtype == tag16(NodeTag::T_SubqueryScan) {
+        let PathNode::SubqueryScanPath(spath) = run.root.path(path_id) else {
+            panic!("T_SubqueryScan pathtype on a non-SubqueryScanPath node")
+        };
+        let subpath = spath.subroot_subpath.expect("SubqueryScanPath.subroot_subpath");
+        let spath_total_cost = spath.path.total_cost;
+        let pathkeys = types_pathnodes::relids::pgvec_clone_shallow(mcx, &spath.path.pathkeys);
+        // The subpath lives in the rel's own subroot (C reads it straight off
+        // spath->subpath, which is a pointer into the same arena).
+        let idx = run.root.rel(rel_id).subroot_idx.expect("subquery rel has a subroot");
+        run.swap_with_rel_subroot(idx);
+        let sub = {
+            let p = run.root.path(subpath).base();
+            SubqueryScanInfo {
+                rows: p.rows,
+                disabled_nodes: p.disabled_nodes,
+                startup_cost: p.startup_cost,
+                total_cost: p.total_cost,
+                parallel_safe: p.parallel_safe,
+                parallel_workers: p.parallel_workers,
+            }
+        };
+        run.swap_with_rel_subroot(idx);
+        // If existing node has zero extra cost, we must have decided its
+        // target is trivial. (The converse is not true, because it might have
+        // a trivial target but quals to enforce; but in that case the new
+        // node will too, so it doesn't matter whether we get the right answer
+        // here.)
+        let trivial_pathtarget = sub.total_cost == spath_total_cost;
+        return Ok(Some(create_subqueryscan_path(
+            run,
+            rel_id,
+            subpath,
+            trivial_pathtarget,
+            pathkeys,
+            required_outer,
+            &sub,
+        )?));
+    }
+    if pathtype == tag16(NodeTag::T_Result) {
+        // Supported only for RTE_RESULT scan paths; C breaks out of the
+        // switch (falling to the NULL return) for any other Result path.
+        if matches!(run.root.path(path_id), PathNode::Path(_)) {
+            return Ok(Some(create_resultscan_path(run, rel_id, required_outer)?));
+        }
+        return Ok(None);
+    }
+    if pathtype == tag16(NodeTag::T_Append) {
+        let PathNode::AppendPath(apath) = run.root.path(path_id) else {
+            panic!("T_Append pathtype on a non-AppendPath node")
+        };
+        let subpaths = types_pathnodes::relids::pgvec_clone_shallow(mcx, &apath.subpaths);
+        let first_partial_path = apath.first_partial_path;
+        let pathkeys = types_pathnodes::relids::pgvec_clone_shallow(mcx, &apath.path.pathkeys);
+        let parallel_workers = apath.path.parallel_workers;
+        let parallel_aware = apath.path.parallel_aware;
+        // Reparameterize the children.
+        let mut childpaths: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+        let mut partialpaths: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+        for (i, &sp) in subpaths.iter().enumerate() {
+            let Some(sp) = reparameterize_path(run, sp, required_outer, loop_count)? else {
+                return Ok(None);
+            };
+            // We have to re-split the regular and partial paths.
+            if (i as i32) < first_partial_path {
+                childpaths.push(sp);
+            } else {
+                partialpaths.push(sp);
+            }
+        }
+        return Ok(Some(create_append_path(
+            run,
+            rel_id,
+            childpaths,
+            partialpaths,
+            pathkeys,
+            required_outer,
+            parallel_workers,
+            parallel_aware,
+            -1.0,
+        )?));
+    }
+    if pathtype == tag16(NodeTag::T_Material) {
+        let PathNode::MaterialPath(mpath) = run.root.path(path_id) else {
+            panic!("T_Material pathtype on a non-MaterialPath node")
+        };
+        let subpath = mpath.subpath.expect("MaterialPath.subpath");
+        let Some(subpath) = reparameterize_path(run, subpath, required_outer, loop_count)? else {
+            return Ok(None);
+        };
+        return Ok(Some(create_material_path(run, rel_id, subpath)));
+    }
+    if pathtype == tag16(NodeTag::T_Memoize) {
+        let PathNode::MemoizePath(mpath) = run.root.path(path_id) else {
+            panic!("T_Memoize pathtype on a non-MemoizePath node")
+        };
+        let subpath = mpath.subpath.expect("MemoizePath.subpath");
+        let param_exprs = types_pathnodes::relids::pgvec_clone_shallow(mcx, &mpath.param_exprs);
+        let hash_operators =
+            types_pathnodes::relids::pgvec_clone_shallow(mcx, &mpath.hash_operators);
+        let (singlerow, binary_mode, calls) = (mpath.singlerow, mpath.binary_mode, mpath.calls);
+        let Some(subpath) = reparameterize_path(run, subpath, required_outer, loop_count)? else {
+            return Ok(None);
+        };
+        return Ok(Some(create_memoize_path(
+            run,
+            rel_id,
+            subpath,
+            param_exprs,
+            hash_operators,
+            singlerow,
+            binary_mode,
+            calls,
+        )));
+    }
+    // C's default arm returns NULL: a path kind C does not rebuild (MergeAppend,
+    // joins, foreign/custom scans, ...) is simply unavailable at this
+    // parameterization; callers skip it.
     Ok(None)
 }
 

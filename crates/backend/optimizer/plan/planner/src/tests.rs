@@ -7664,3 +7664,231 @@ mod jsonb_join_stats {
         assert_eq!(rows, 161250.0);
     }
 }
+
+// make_subplan's tuple_fraction chain (subselect.c:208-215).
+#[test]
+fn subplan_tuple_fraction_matches_c_chain() {
+    use crate::subselect::subplan_tuple_fraction;
+    use types_nodes::primnodes::SubLinkType;
+
+    assert_eq!(subplan_tuple_fraction(SubLinkType::EXISTS_SUBLINK), 1.0);
+    assert_eq!(subplan_tuple_fraction(SubLinkType::ALL_SUBLINK), 0.5);
+    assert_eq!(subplan_tuple_fraction(SubLinkType::ANY_SUBLINK), 0.5);
+    // C's else branch: every remaining type, CTE_SUBLINK included.
+    for t in [
+        SubLinkType::ROWCOMPARE_SUBLINK,
+        SubLinkType::EXPR_SUBLINK,
+        SubLinkType::MULTIEXPR_SUBLINK,
+        SubLinkType::ARRAY_SUBLINK,
+        SubLinkType::CTE_SUBLINK,
+    ] {
+        assert_eq!(subplan_tuple_fraction(t), 0.0, "{t:?}");
+    }
+}
+
+// expand_virtual_generated_columns' ON CONFLICT leg (prepjointree.c:1063 ->
+// query_tree_mutator's Query.onConflict field -> expression_tree_mutator's
+// T_OnConflictExpr arm). Every one of C's five mutated sub-fields must have
+// its target-relation Vars replaced by the generation expression.
+#[test]
+fn on_conflict_vars_are_replaced_by_generation_expressions() {
+    use crate::prepjointree::{replace_vars_in_on_conflict, PullupPhCtx, WRAP_NONE};
+    use types_nodes::primnodes::{OnConflictAction, OnConflictExpr};
+
+    let ctx = MemoryContext::new("on-conflict-expand");
+    let mcx = ctx.mcx();
+
+    // Relation rt_index 1 with a virtual generated column at attno 2; the
+    // caller's tlist maps resno 2 to its generation expression.
+    let gen_expr = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(42), false, true).unwrap();
+    let mut tlist = NodeList::nil();
+    tlist
+        .lappend(
+            mcx,
+            Node::mk_target_entry(
+                mcx,
+                Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap(),
+                1,
+                None,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, gen_expr, 2, None, false).unwrap())
+        .unwrap();
+
+    let gencol = || Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+    let oc_node = Node::mk(
+        mcx,
+        OnConflictExpr {
+            action: OnConflictAction::ONCONFLICT_UPDATE,
+            arbiterElems: NodeList::make1(mcx, gencol()).unwrap(),
+            arbiterWhere: Some(gencol()),
+            constraint: 0,
+            onConflictSet: NodeList::make1(
+                mcx,
+                Node::mk_target_entry(mcx, gencol(), 1, None, false).unwrap(),
+            )
+            .unwrap(),
+            onConflictWhere: Some(gencol()),
+            exclRelIndex: 2,
+            exclRelTlist: NodeList::make1(
+                mcx,
+                Node::mk_target_entry(mcx, gencol(), 1, None, false).unwrap(),
+            )
+            .unwrap(),
+        },
+    )
+    .unwrap();
+
+    let last_ph_id = std::cell::Cell::new(0u32);
+    let rv_cache = std::cell::RefCell::new(mcx::vec_from_elem_in::<Option<Node<'_>>>(
+        mcx,
+        None,
+        tlist.len() + 1,
+    ));
+    let empty_relids = types_nodes::Bitmapset::empty();
+    let phc = PullupPhCtx {
+        wrap_option: std::cell::Cell::new(WRAP_NONE),
+        last_ph_id: &last_ph_id,
+        rv_cache: &rv_cache,
+        sub_relids: &empty_relids,
+        eref: None,
+        nullinfo: None,
+        result_relation: 0,
+    };
+
+    replace_vars_in_on_conflict(mcx, oc_node, 1, &tlist, &phc).unwrap();
+
+    let oc = oc_node.as_on_conflict_expr().unwrap();
+    let is_gen = |n: Node<'_>| n.as_const().is_some_and(|c| c.constvalue.as_i32() == 42);
+    assert!(is_gen(oc.arbiterElems.nth(0)), "arbiterElems not expanded");
+    assert!(is_gen(oc.arbiterWhere.unwrap()), "arbiterWhere not expanded");
+    assert!(
+        is_gen(oc.onConflictSet.nth(0).as_target_entry().unwrap().expr),
+        "onConflictSet not expanded"
+    );
+    assert!(is_gen(oc.onConflictWhere.unwrap()), "onConflictWhere not expanded");
+    assert!(
+        is_gen(oc.exclRelTlist.nth(0).as_target_entry().unwrap().expr),
+        "exclRelTlist not expanded"
+    );
+    // Scalars C's FLATCOPY carries over unchanged.
+    assert_eq!(oc.action, OnConflictAction::ONCONFLICT_UPDATE);
+    assert_eq!(oc.exclRelIndex, 2);
+}
+
+// reparameterize_path's per-pathtype rebuild arms (pathnode.c:4242). Each
+// kind C rebuilds must produce a fresh, equivalently-costed path; the kinds
+// C has no arm for keep returning None (C's default `return NULL`).
+#[test]
+fn reparameterize_path_rebuilds_c_path_kinds() {
+    use types_pathnodes::PathNode;
+
+    let cx = cx();
+    let mcx = cx.mcx();
+    let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
+    let mut run = crate::run::PlannerRun::new(mcx);
+    crate::subquery::subquery_planner(&mut run, leak_q(mcx, parse), false, 0.0, None).unwrap();
+    let final_rel = crate::planmain::fetch_final_rel(&mut run);
+    let ipath = run.root.rel(final_rel).cheapest_total_path.unwrap();
+    assert!(matches!(run.root.path(ipath), PathNode::IndexPath(_)));
+    let baserel = run.root.path(ipath).base().parent;
+    let none = &crate::relnode::RELIDS_UNSET;
+
+    // T_IndexScan: flat-copy the node, revise param_info, redo cost_index.
+    let icost = run.root.path(ipath).base().total_cost;
+    let re = crate::pathnode::reparameterize_path(&mut run, ipath, none, 1.0).unwrap().unwrap();
+    assert_ne!(re, ipath, "index path must be rebuilt, not reused");
+    let PathNode::IndexPath(rip) = run.root.path(re) else {
+        panic!("expected a rebuilt IndexPath")
+    };
+    assert!((rip.path.total_cost - icost).abs() < 1e-9);
+    assert!(rip.path.param_info.is_none());
+
+    // T_BitmapHeapScan: rebuilt through create_bitmap_heap_path.
+    let bpath =
+        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, none, 1.0, 0).unwrap();
+    let bcost = run.root.path(bpath).base().total_cost;
+    let re = crate::pathnode::reparameterize_path(&mut run, bpath, none, 1.0).unwrap().unwrap();
+    assert_ne!(re, bpath);
+    assert!(matches!(run.root.path(re), PathNode::BitmapHeapPath(_)));
+    assert!((run.root.path(re).base().total_cost - bcost).abs() < 1e-9);
+
+    // T_Material: recursive leg -- the subpath is reparameterized first.
+    let mpath = crate::pathnode::create_material_path(&mut run, baserel, ipath);
+    let mcost = run.root.path(mpath).base().total_cost;
+    let re = crate::pathnode::reparameterize_path(&mut run, mpath, none, 1.0).unwrap().unwrap();
+    assert_ne!(re, mpath);
+    let PathNode::MaterialPath(rmp) = run.root.path(re) else {
+        panic!("expected a rebuilt MaterialPath")
+    };
+    assert_ne!(rmp.subpath.unwrap(), ipath, "Material's subpath is rebuilt too");
+    assert!((rmp.path.total_cost - mcost).abs() < 1e-9);
+
+    // C has no arm for MergeAppend: still None.
+    let mut subpaths = mcx::PgVec::new_in(mcx);
+    subpaths.push(ipath);
+    let mapath = crate::pathnode::create_merge_append_path(
+        &mut run,
+        baserel,
+        subpaths,
+        mcx::PgVec::new_in(mcx),
+    )
+    .unwrap();
+    assert!(crate::pathnode::reparameterize_path(&mut run, mapath, none, 1.0).unwrap().is_none());
+}
+
+// replace_rte_variables_mutator's T_Query arm (rewriteManip.c): a bare Query
+// expression is recursed into with sublevels_up incremented, so only the
+// Vars that are uplevel refs to the pulled-up rel from inside that Query get
+// replaced.
+#[test]
+fn replace_rte_variables_recurses_into_a_bare_query() {
+    use crate::prepjointree::replace_var_expr_su;
+
+    let ctx = MemoryContext::new("replace-rte-vars-query");
+    let mcx = ctx.mcx();
+
+    // The pulled-up rel's output: resno 1 -> a Const.
+    let repl = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+    let tlist =
+        NodeList::make1(mcx, Node::mk_target_entry(mcx, repl, 1, None, false).unwrap()).unwrap();
+
+    let jointree = Node::mk_mut(mcx, FromExpr::default()).unwrap().seal_ref();
+    let mut inner = Query::default();
+    // varlevelsup 1: an outer reference to rel 1 from one level down.
+    inner.targetList = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap(), 1, None, false)
+            .unwrap(),
+    )
+    .unwrap();
+    inner.jointree = Some(jointree);
+    let qnode = Node::mk(mcx, inner).unwrap();
+
+    let out = replace_var_expr_su(mcx, qnode, 1, &tlist, false, None, 0)
+        .unwrap()
+        .expect("the bare Query is rewritten");
+    let outq = out.as_query().expect("Query out");
+    let tle = outq.targetList.nth(0).as_target_entry().unwrap();
+    assert_eq!(
+        tle.expr.as_const().expect("uplevel Var replaced").constvalue.as_i32(),
+        7
+    );
+
+    // A level-0 Var inside the same Query is NOT this level's reference, so
+    // the recursion must leave it alone (and report "unchanged").
+    let mut inner2 = Query::default();
+    inner2.targetList = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(mcx, Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap(), 1, None, false)
+            .unwrap(),
+    )
+    .unwrap();
+    inner2.jointree = Some(jointree);
+    let qnode2 = Node::mk(mcx, inner2).unwrap();
+    assert!(replace_var_expr_su(mcx, qnode2, 1, &tlist, false, None, 0).unwrap().is_none());
+}

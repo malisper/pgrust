@@ -24,6 +24,8 @@ const F_TEXTEQ_GATED: u32 = 67;
 const F_FAKE_NONSTRICT: u32 = 9994;
 const OP_FAKE_EQ: u32 = 9901;
 const OP_FAKE_NE: u32 = 9902;
+const OP_FAKE_LT: u32 = 9903;
+const OP_FAKE_GT: u32 = 9904;
 const F_TEXTREGEXEQ_SUPPORT: u32 = 1364;
 const F_FAKE_SQL_INLINE: u32 = 9995;
 const F_FAKE_SQL_REC: u32 = 9996;
@@ -101,6 +103,14 @@ fn install_fixtures() {
             Ok(match opno {
                 OP_FAKE_EQ => Some(op(OP_FAKE_NE)),
                 OP_FAKE_NE => Some(op(OP_FAKE_EQ)),
+                // A commutator pair that is not self-commuting, so a
+                // commutation is observable in opno as well as arg order.
+                OP_FAKE_LT => {
+                    Some(syscache_seams::PgOperatorShape { oprcom: OP_FAKE_GT, ..op(0) })
+                }
+                OP_FAKE_GT => {
+                    Some(syscache_seams::PgOperatorShape { oprcom: OP_FAKE_LT, ..op(0) })
+                }
                 _ => None,
             })
         });
@@ -380,6 +390,48 @@ fn nonstrict_and_srf_rows() {
     assert!(!contain_window_function(strict).unwrap());
     assert!(!contain_subplans(strict).unwrap());
     assert!(!contain_context_dependent_node(strict).unwrap());
+}
+
+#[test]
+fn commute_op_expr_rewrites_clause_in_place() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let c = int4_const(mcx, Some(1));
+    let var = Node::mk_var(mcx, 1, 3, 23, -1, 0, 0).unwrap();
+    let clause = op_expr(mcx, OP_FAKE_LT, F_INT4EQ, 16, &[c, var]);
+    commute_op_expr(clause).unwrap();
+    let oe = clause.as_op_expr().unwrap();
+    assert_eq!(oe.opno, OP_FAKE_GT);
+    // opfuncid is reset; the commutator's own opcode is resolved lazily.
+    assert_eq!(oe.opfuncid, 0);
+    // opresulttype, opretset, opcollid, inputcollid need not change.
+    assert_eq!(oe.opresulttype, 16);
+    assert!(!oe.opretset);
+    // Arguments swapped: the Var is now first.
+    assert_eq!(oe.args.nth(0).as_var().unwrap().varattno, 3);
+    assert!(oe.args.nth(1).as_const().is_some());
+
+    // Commuting back restores the original clause.
+    commute_op_expr(clause).unwrap();
+    let oe = clause.as_op_expr().unwrap();
+    assert_eq!(oe.opno, OP_FAKE_LT);
+    assert!(oe.args.nth(0).as_const().is_some());
+
+    // C's two elog(ERROR) sanity checks.
+    let unary = op_expr(mcx, OP_FAKE_LT, F_INT4EQ, 16, &[c]);
+    assert_eq!(
+        commute_op_expr(unary).unwrap_err().message(),
+        "cannot commute non-binary-operator clause"
+    );
+    assert_eq!(
+        commute_op_expr(var).unwrap_err().message(),
+        "cannot commute non-binary-operator clause"
+    );
+    let no_commutator = op_expr(mcx, 551, F_INT4PL, 23, &[c, var]);
+    assert_eq!(
+        commute_op_expr(no_commutator).unwrap_err().message(),
+        "could not find commutator for operator 551"
+    );
 }
 
 fn bool_c(mcx: Mcx<'_>, v: Option<bool>) -> Node<'_> {
@@ -905,4 +957,28 @@ fn eval_const_nullif_nonconst_keeps_node() {
     let n = out.as_null_if_expr().expect("stays a NullIfExpr");
     assert_eq!(n.opno, 96);
     assert!(n.args.nth(0).as_var().is_some());
+}
+
+// contain_volatile_functions_after_planning (clauses.c:657): the wrapper runs
+// expression_planner first, so its verdict is taken on the PLANNED tree.
+#[test]
+fn volatile_after_planning_runs_expression_planner_first() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+
+    // A volatile SQL function whose body inlines to an immutable int4pl:
+    // the raw walk says volatile, the after-planning walk does not. This is
+    // exactly the difference the wrapper exists for.
+    let inlinable = func_expr(mcx, F_FAKE_SQL_INLINE, &[var]);
+    assert!(contain_volatile_functions(inlinable).unwrap());
+    assert!(!contain_volatile_functions_after_planning(mcx, inlinable).unwrap());
+
+    // A volatile call that survives planning is still reported.
+    let vol = func_expr(mcx, F_FAKE_VOLATILE, &[var, var]);
+    assert!(contain_volatile_functions_after_planning(mcx, vol).unwrap());
+
+    // Immutable input stays immutable.
+    let plus = op_expr(mcx, 551, F_INT4PL, 23, &[var, int4_const(mcx, Some(1))]);
+    assert!(!contain_volatile_functions_after_planning(mcx, plus).unwrap());
 }
