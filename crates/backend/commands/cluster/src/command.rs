@@ -172,6 +172,11 @@ fn cluster_multiple_rels<'mcx>(
     Ok(())
 }
 
+// cluster.c:445-457 matview gate: RelationIsPopulated (rel.h) over rd_rel.
+fn is_unpopulated_matview(form: &types_rel::FormData_pg_class) -> bool {
+    form.relkind == RELKIND_MATVIEW && !form.relispopulated
+}
+
 pub fn cluster_rel<'mcx>(
     mcx: Mcx<'mcx>,
     old_heap: Relation<'mcx>,
@@ -231,9 +236,12 @@ pub fn cluster_rel<'mcx>(
             None
         };
 
-        if old_heap.rd_rel.relkind == RELKIND_MATVIEW {
-            // unported: cluster_rel materialized views (RelationIsPopulated)
-            return Err(feature_err("clustering a materialized view is not supported yet"));
+        // Quietly ignore a materialized view not populated from its query:
+        // no data to deal with, and a multi-relation request (e.g. CLUSTER of
+        // the entire database) must not fail. Populated matviews proceed to
+        // the rewrite like plain tables.
+        if is_unpopulated_matview(&old_heap.rd_rel) {
+            return old_heap.close(AccessExclusiveLock);
         }
         debug_assert!(matches!(
             old_heap.rd_rel.relkind,
@@ -664,4 +672,47 @@ fn seam_cluster_rel<'mcx>(
     options: u32,
 ) -> PgResult<()> {
     cluster_rel(mcx, old_heap, index_oid, &ClusterParams { options })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pg_class_form(relkind: u8, relispopulated: bool) -> types_rel::FormData_pg_class {
+        types_rel::FormData_pg_class {
+            relname: types_tuple::NameData::default(),
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: 2,
+            relfilenode: 50001,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: types_core::RELPERSISTENCE_PERMANENT,
+            relkind,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        }
+    }
+
+    // cluster.c:452-457: an unpopulated matview is quietly skipped; a
+    // populated matview and a plain table proceed to the rewrite (previously
+    // every matview was fenced with 0A000).
+    #[test]
+    fn matview_gate_matches_c() {
+        assert!(is_unpopulated_matview(&pg_class_form(RELKIND_MATVIEW, false)));
+        assert!(!is_unpopulated_matview(&pg_class_form(RELKIND_MATVIEW, true)));
+        assert!(!is_unpopulated_matview(&pg_class_form(RELKIND_RELATION, true)));
+        assert!(!is_unpopulated_matview(&pg_class_form(RELKIND_TOASTVALUE, true)));
+    }
 }
