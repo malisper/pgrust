@@ -1024,17 +1024,19 @@ fn unported_shape_carve_is_live_and_singular() {
         UNPORTED_CARVES.load(std::sync::atomic::Ordering::Relaxed) > before,
         "XID list was not charged to the unported carve"
     );
-    // the port must not grow new "unported" PANICS unnoticed. Three exist:
+    // the port must not grow new "unported" PANICS unnoticed. Two exist
+    // (down from three: 484033d90b9 ported the RTE_RESULT rtekind arm —
+    // C 18.3 reads no kind-specific fields there — so _readRangeTblEntry's
+    // out-of-charter rtekind panic is gone and RTEKind is exhaustive):
     //   - `(x ...)` XID lists (this test's witness)
     //   - parseNodeString's out-of-charter label arm (the OutOfCharter class)
-    //   - _readRangeTblEntry's out-of-charter rtekind arm
-    // (a fourth "unported" mention is a comment, not a panic).
+    // (another "unported" mention is a comment, not a panic).
     let src = include_str!("../../../crates/backend/nodes/readfuncs/src/lib.rs");
     let n = src
         .lines()
         .filter(|l| l.contains("unported") && l.contains("panic!") || l.contains("arm unported"))
         .count();
-    assert_eq!(n, 3, "the read port now has {n} unported panics — record them");
+    assert_eq!(n, 2, "the read port now has {n} unported panics — record them");
 }
 
 /// A NULL Const writes its value as exactly `<>`; C's _readConst skips that
@@ -1073,12 +1075,12 @@ fn custom_shape_key_includes_discriminants() {
 /// or that branch is silently gated out of the compared domain (the
 /// coverage-completeness trap, one level below the tag census).
 ///
-/// SCOPE GAP OF RECORD: the port implements 8 of C's 10 rtekind arms.
-/// RTE_RESULT (8) alone hits its `arm unported` panic, so it is exercised on
-/// the C side and charged to the unported carve rather than compared. Named
-/// here so the gap is visible: RTE_RESULT is legal in a stored view rule
-/// (SELECT with no FROM), so this is a genuine port TODO, not a non-surface.
-const UNPORTED_RTEKINDS: &[i64] = &[8];
+/// SCOPE GAP CLOSED (was: RTE_RESULT (8) unported): 484033d90b9 ported the
+/// RTE_RESULT arm (C 18.3 reads/writes no kind-specific fields there), so
+/// every RTEKind now reaches a full comparison and this list is empty. It
+/// stays as the census hook: any future rtekind carve must be recorded here
+/// or `every_rtekind_branch_has_a_seed_and_is_compared` fails.
+const UNPORTED_RTEKINDS: &[i64] = &[];
 
 #[test]
 fn every_rtekind_branch_has_a_seed_and_is_compared() {
