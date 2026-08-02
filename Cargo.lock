@@ -2994,6 +2994,7 @@ dependencies = [
  "dbcommands",
  "dbcommands_seams",
  "detoast",
+ "elog",
  "extension",
  "fmgr_core",
  "fmgr_seams",
@@ -12005,6 +12006,7 @@ version = "0.1.0"
 dependencies = [
  "aclchk",
  "aclchk_seams",
+ "adt_acl",
  "cache_syscache",
  "catalog",
  "catalog_indexing",
@@ -12021,6 +12023,7 @@ dependencies = [
  "heaptuple",
  "lsyscache",
  "mcx",
+ "miscinit",
  "nodes_core",
  "outfuncs",
  "pg_depend",

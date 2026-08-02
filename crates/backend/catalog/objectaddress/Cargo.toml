@@ -31,6 +31,7 @@ pg_constraint = { path = "../pg_constraint" }
 pg_largeobject = { path = "../pg_largeobject" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
 table = { path = "../../access/table/table" }
 relation = { path = "../../access/common/relation" }
