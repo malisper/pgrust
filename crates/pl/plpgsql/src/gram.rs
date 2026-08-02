@@ -1092,7 +1092,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             K_FETCH => Ok(Some(self.parse_fetch(lloc)?)),
             K_MOVE => Ok(Some(self.parse_move(lloc)?)),
             K_CLOSE => Ok(Some(self.parse_close(lloc)?)),
-            K_CALL => {
+            // stmt_call (pl_gram.y): DO uses the same structures as CALL,
+            // for simplicity — the whole statement re-reads as SQL and
+            // is_call routes the executor's CALL-target handling.
+            K_CALL | K_DO => {
                 let lineno = self.lineno(lloc);
                 self.push_back(&t)?;
                 let expr = self.read_sql_construct(
@@ -1106,11 +1109,8 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                     None,
                     None,
                 )?;
-                Ok(Some(PlStmt::Call { lineno, expr, is_call: true }))
+                Ok(Some(PlStmt::Call { lineno, expr, is_call: t.0 == K_CALL }))
             }
-            K_DO => panic!(
-                "stmt_call (pl_gram.y): DO unported — unit backend-pl-plpgsql-gram"
-            ),
             K_COMMIT | K_ROLLBACK => {
                 let lineno = self.lineno(lloc);
                 let chain = self.parse_opt_transaction_chain()?;
@@ -2837,5 +2837,43 @@ pub fn getdiag_kindname(kind: i32) -> &'static str {
         GETDIAG_TABLE_NAME => "TABLE_NAME",
         GETDIAG_SCHEMA_NAME => "SCHEMA_NAME",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Witness for the retired K_DO fence: stmt_call's K_DO production
+    // (pl_gram.y:969-987) compiles DO inside a PL/pgSQL body to the same
+    // CALL statement shape with is_call=false; the whole DO statement is
+    // re-read as SQL text.
+    #[test]
+    fn do_statement_parses_as_call_shape() {
+        let cx = mcx::MemoryContext::new("plpgsql DO parse test");
+        let src = b"DO $x$ SELECT 1 $x$;";
+        let buf = mcx::slice_borrow_in(cx.mcx(), src).unwrap();
+        let mut comp = crate::comp::CompState::new();
+        let mut parser = Parser {
+            sc: PlScanner::new(cx.mcx(), buf),
+            comp: &mut comp,
+            check_syntax: false,
+            fn_rettype: 2278, // VOIDOID
+            fn_retset: false,
+            fn_prokind: b'f' as i8,
+            fn_input_collation: types_core::InvalidOid,
+            fn_is_trigger: false,
+            out_param_varno: -1,
+            scratch: cx.mcx(),
+            last_endtoken_loc: -1,
+        };
+        let t = parser.yylex().unwrap();
+        assert_eq!(t.0, crate::scanner::K_DO);
+        let stmt = parser.parse_statement(t).unwrap().expect("a statement");
+        let PlStmt::Call { expr, is_call, .. } = stmt else {
+            panic!("DO must parse to the CALL statement shape");
+        };
+        assert!(!is_call, "DO carries is_call=false");
+        assert_eq!(expr.query, "DO $x$ SELECT 1 $x$");
     }
 }

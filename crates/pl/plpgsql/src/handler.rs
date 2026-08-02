@@ -1341,6 +1341,20 @@ fn plpgsql_exec_event_trigger(
     Ok(())
 }
 
+// C pl_exec.c TYPEFUNC_COMPOSITE_DOMAIN arm: the coerced result tuple must
+// satisfy the domain's constraints (domain_check on the tuple datum);
+// TYPEFUNC_COMPOSITE has no check.
+fn check_composite_domain_result(
+    class: funcapi::TypeFuncClass,
+    result: Datum,
+    domain_oid: Oid,
+) -> PgResult<()> {
+    if class == funcapi::TypeFuncClass::CompositeDomain {
+        adt_domains::domain_check(result, false, domain_oid)?;
+    }
+    Ok(())
+}
+
 // coerce_function_result_tuple (pl_exec.c:824) + the get_call_result_type
 // dispatch of plpgsql_exec_function's retistuple arm.
 fn coerce_function_result_tuple(
@@ -1378,12 +1392,6 @@ fn coerce_function_result_tuple(
     let out_mcx = fcinfo.result_mcx();
     match resolved.class {
         TypeFuncClass::Composite | TypeFuncClass::CompositeDomain => {
-            if resolved.class == TypeFuncClass::CompositeDomain {
-                panic!(
-                    "plpgsql coerce_function_result_tuple: domain-over-composite \
-                     return (domain_check) unported — unit backend-pl-plpgsql-exec"
-                );
-            }
             let expected = resolved
                 .result_tuple_desc
                 .as_ref()
@@ -1397,7 +1405,12 @@ fn coerce_function_result_tuple(
                 "returned record type does not match expected record type",
             )?;
             let mut td = tupdesc::CreateTupleDescCopy(out_mcx, expected)?;
-            td.tdtypeid = resolved.result_type_id;
+            if resolved.class == TypeFuncClass::Composite {
+                td.tdtypeid = resolved.result_type_id;
+            }
+            // For a composite domain, result_type_id is the domain OID; the
+            // tuple keeps the base rowtype's id, as C's SPI_returntuple
+            // labels with the looked-up base tupdesc (pl_exec.c:723).
             if td.tdtypeid == RECORDOID {
                 // C BlessTupleDesc in internal_get_result_type: OUT-param
                 // rowtypes are anonymous records.
@@ -1410,7 +1423,9 @@ fn coerce_function_result_tuple(
             let tup = heaptuple::heap_form_tuple(out_mcx, &td, &values, &nulls)?;
             let img = tup.header_ptr();
             core::mem::forget(tup);
-            Ok(Datum::from_usize(img as usize))
+            let result = Datum::from_usize(img as usize);
+            check_composite_domain_result(resolved.class, result, resolved.result_type_id)?;
+            Ok(result)
         }
         _ => {
             // Generic RECORD caller: pass the row back with a blessed typmod.
@@ -1787,4 +1802,48 @@ fn plpgsql_exec_trigger(
     let boxed = mcx::alloc_in(out_mcx, htd)?;
     let p = mcx::leak_in(boxed) as *mut types_tuple::HeapTupleData<'_>;
     Ok(Datum::from_usize(p as usize))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    std::thread_local! {
+        static CHECKED: core::cell::RefCell<Vec<(usize, bool, Oid)>> =
+            const { core::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_domain_check(
+        value: Datum,
+        isnull: bool,
+        domain_type: Oid,
+        _escontext: Option<&mut types_error::SoftErrorContext>,
+    ) -> PgResult<()> {
+        CHECKED.with(|c| c.borrow_mut().push((value.as_usize(), isnull, domain_type)));
+        Ok(())
+    }
+
+    // Witness for the retired domain-over-composite return fence: C's
+    // TYPEFUNC_COMPOSITE_DOMAIN arm runs domain_check on the coerced tuple
+    // (pl_exec.c:723-729); TYPEFUNC_COMPOSITE does not.
+    #[test]
+    fn composite_domain_result_is_domain_checked() {
+        typcache_seams::domain_check_input::set(record_domain_check);
+        check_composite_domain_result(
+            funcapi::TypeFuncClass::Composite,
+            Datum::from_usize(0xbeef),
+            1234,
+        )
+        .unwrap();
+        CHECKED.with(|c| {
+            assert!(c.borrow().is_empty(), "plain composite must not be domain-checked")
+        });
+        check_composite_domain_result(
+            funcapi::TypeFuncClass::CompositeDomain,
+            Datum::from_usize(0xbeef),
+            1234,
+        )
+        .unwrap();
+        CHECKED.with(|c| assert_eq!(*c.borrow(), vec![(0xbeef, false, 1234)]));
+    }
 }

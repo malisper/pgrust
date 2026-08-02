@@ -68,38 +68,16 @@ pub const KIND_MINVALUE: i8 = -1;
 pub const KIND_VALUE: i8 = 0;
 pub const KIND_MAXVALUE: i8 = 1;
 
-// datumCopy (datum.c) into `mcx`; cstring datums unreachable for key types.
+// datumCopy (datum.c) into `mcx`: the canonical port covers every C typlen
+// form (fixed, varlena incl. short/compressed/external, cstring) and raises
+// C's catchable "invalid typLen" error for anything else.
 pub(crate) fn datum_copy<'m>(
     mcx: Mcx<'m>,
     value: Datum,
     typbyval: bool,
     typlen: i16,
 ) -> PgResult<Datum> {
-    if typbyval {
-        return Ok(value);
-    }
-    let p = value.as_usize() as *const u8;
-    let len = match typlen {
-        l if l > 0 => l as usize,
-        -1 => {
-            // SAFETY: byref bound datum is a live inline varlena.
-            unsafe {
-                let b0 = *p;
-                if b0 & 0x01 != 0 {
-                    (b0 as usize >> 1) & 0x7F
-                } else {
-                    (u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap())
-                        as usize)
-                        >> 2
-                }
-            }
-        }
-        other => panic!("datum_copy: typlen {other} unported"),
-    };
-    let mut buf: PgVec<'m, u8> = mcx::vec_with_capacity_in(mcx, len)?;
-    // SAFETY: len derived from the datum's own image.
-    buf.extend_from_slice(unsafe { core::slice::from_raw_parts(p, len) });
-    Ok(Datum::from_usize(buf.leak().as_ptr() as usize))
+    adt_scalar::datum_ops::datum_copy(mcx, value, typbyval, typlen)
 }
 
 fn spec_const<'a>(n: types_nodes::Node<'a>) -> &'a Const {

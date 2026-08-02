@@ -47,6 +47,7 @@ syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
 types_guc = { path = "../../_support/types/types_guc" }
 # phase 2: connection layer + executor data flow
 rustc-hash = "2"
+libc = "0.2"
 pgclient = { path = "../../interfaces/pgclient" }
 xact = { path = "../../backend/access/transam/xact" }
 waitevent = { path = "../../backend/utils/activity/waitevent" }
