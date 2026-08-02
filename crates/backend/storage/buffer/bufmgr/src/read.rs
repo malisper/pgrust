@@ -126,8 +126,39 @@ pub fn ReadBuffer_common(
     mode: ReadBufferMode,
     strategy: BufferAccessStrategy,
 ) -> PgResult<(Buffer, bool)> {
+    // Backward compatibility path, most code should use ExtendBufferedRel()
+    // instead, as acquiring the extension lock inside ExtendBufferedRel()
+    // scales a lot better.
     if blkno == P_NEW {
-        panic!("unported callee reached from bufmgr.c ReadBuffer_common: ExtendBufferedRel (P_NEW back-compat path)");
+        let mut flags = bufmgr_seams::EB_SKIP_EXTENSION_LOCK;
+
+        // Since no-one else can be looking at the page contents yet, there is
+        // no difference between an exclusive lock and a cleanup-strength
+        // lock.
+        if matches!(
+            mode,
+            ReadBufferMode::ZeroAndLock | ReadBufferMode::ZeroAndCleanupLock
+        ) {
+            flags |= bufmgr_seams::EB_LOCK_FIRST;
+        }
+
+        // C routes through ExtendBufferedRel(BMR_REL) -> ExtendBufferedRelBy
+        // with extend_by=1; with the extension lock skipped nothing consults
+        // the Relation, so the common core takes the smgr shape directly.
+        let mut buffers = [InvalidBuffer; 1];
+        let (_, extended_by) = crate::extend::ExtendBufferedRelCommon(
+            None,
+            smgr,
+            persistence,
+            forknum,
+            &strategy,
+            flags,
+            1,
+            InvalidBlockNumber,
+            &mut buffers,
+        )?;
+        debug_assert!(extended_by == 1);
+        return Ok((buffers[0], false));
     }
     if matches!(
         mode,

@@ -186,7 +186,7 @@ fn extend_to_guts(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ExtendBufferedRelCommon(
+pub(crate) fn ExtendBufferedRelCommon(
     rel: Option<&RelationData<'_>>,
     smgr: RelFileLocatorBackend,
     relpersistence: u8,
