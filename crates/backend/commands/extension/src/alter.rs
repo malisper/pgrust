@@ -26,7 +26,7 @@ use crate::{
     ExtensionOidIndexId, Natts_pg_extension,
 };
 
-fn oid_key(attno: i32, oid: Oid) -> types_scan::scankey::ScanKeyData {
+pub(crate) fn oid_key(attno: i32, oid: Oid) -> types_scan::scankey::ScanKeyData {
     let mut key = types_scan::scankey::ScanKeyData::empty();
     key.sk_attno = attno as types_core::AttrNumber;
     key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
