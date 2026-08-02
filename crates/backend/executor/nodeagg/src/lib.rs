@@ -860,21 +860,6 @@ fn agg_permission_denied(aggfnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE))
 }
 
-// unported: node families this walker does not know raise a clean
-// ERRCODE_FEATURE_NOT_SUPPORTED error at ExecInitAgg time (C uses the
-// generic expression_tree_walker, which cannot miss a family).
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn agg_tlist_unported(tag: ::types_nodes::NodeTag) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!(
-            "aggregate target list over {tag:?} expressions is not yet implemented"
-        ))
-        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
-}
-
 fn collect_aggrefs<'mcx>(
     node: Node<'mcx>,
     out: &mut PgVec<'mcx, (Node<'mcx>, &'mcx Aggref<'mcx>)>,
@@ -1053,8 +1038,22 @@ fn collect_aggrefs<'mcx>(
                 collect_aggrefs(a, out)?;
             }
         }
-        // unported: any family this walker does not know.
-        tag => return Err(agg_tlist_unported(tag)),
+        // C registers Aggrefs during total expression_tree_walker-based
+        // walks (execExpr.c ExecInitExprRec T_Aggref; nodeAgg.c
+        // find_cols_walker), which cannot miss a family: everything without
+        // a special arm above descends through the canonical walker.
+        _ => {
+            struct Collect<'a, 'mcx> {
+                out: &'a mut PgVec<'mcx, (Node<'mcx>, &'mcx Aggref<'mcx>)>,
+            }
+            impl<'mcx> ::nodes_core::NodeWalker<'mcx> for Collect<'_, 'mcx> {
+                fn visit(&mut self, child: Node<'mcx>) -> PgResult<bool> {
+                    collect_aggrefs(child, self.out)?;
+                    Ok(false)
+                }
+            }
+            ::nodes_core::expression_tree_walker_dyn(node, &mut Collect { out })?;
+        }
     }
     Ok(())
 }

@@ -3050,3 +3050,35 @@ mod strict_trans_compat {
         assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION);
     }
 }
+
+// collect_aggrefs' generic default arm: families without a special arm
+// descend through the canonical expression_tree_walker (C registers Aggrefs
+// during total walks — execExpr.c T_Aggref, nodeAgg.c find_cols_walker —
+// which cannot miss a family). A ReturningExpr wrapper used to error 0A000.
+#[test]
+fn collect_aggrefs_walks_unlisted_node_families() {
+    let ctx = ::mcx::MemoryContext::new("collect-aggrefs-test");
+    let mcx = ctx.mcx();
+    let aggref = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Aggref {
+            aggfnoid: COUNT_STAR_OID,
+            aggtype: 20,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let wrapped = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::ReturningExpr {
+            retlevelsup: 0,
+            retold: false,
+            retexpr: aggref,
+        },
+    )
+    .unwrap();
+    let mut out = ::mcx::PgVec::new_in(mcx);
+    crate::collect_aggrefs(wrapped, &mut out).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].1.aggfnoid, COUNT_STAR_OID);
+}
