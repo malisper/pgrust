@@ -220,15 +220,15 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
     let typoid: Oid;
     if tn.names.is_nil() {
         // We have the OID already if it's an internally generated TypeName —
-        // but C still fetches the pg_type tuple, so a vanished OID takes the
-        // common does-not-exist tail below.
-        typoid = if tn.typeOid != InvalidOid
-            && syscache_seams::lookup_pg_type_shape::call(tn.typeOid)?.is_none()
-        {
-            InvalidOid
-        } else {
-            tn.typeOid
-        };
+        // but C still fetches the pg_type tuple, so a vanished OID fails
+        // that fetch ("should not happen"): an internal error regardless of
+        // missing_ok, never the user-facing does-not-exist tail.
+        typoid = tn.typeOid;
+        if typoid != InvalidOid && syscache_seams::lookup_pg_type_shape::call(typoid)?.is_none() {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for type {typoid}"
+            ))));
+        }
     } else if tn.pct_type {
         // Handle %TYPE reference to type of an existing field.
         let parts: Vec<&str> =
@@ -1751,15 +1751,20 @@ mod tests {
     }
 
     // The pre-resolved typeOid lane (names == NIL), previously fenced: the
-    // OID passes through, but a vanished OID still takes C's tuple-fetch
-    // does-not-exist tail.
+    // OID passes through, but a vanished OID fails C's tuple fetch — an
+    // internal error even under missing_ok (parse_type.c "should not
+    // happen"), never the user-facing does-not-exist tail.
     #[test]
     fn lookup_type_name_oid_pre_resolved_lane() {
         install_seams();
         let tn = TypeName { typeOid: KNOWN_TYPE, typemod: -1, location: -1, ..Default::default() };
         assert_eq!(LookupTypeNameOid(&tn, false).unwrap(), KNOWN_TYPE);
         let gone = TypeName { typeOid: 99999, typemod: -1, location: -1, ..Default::default() };
-        assert_eq!(LookupTypeNameOid(&gone, true).unwrap(), InvalidOid);
+        for missing_ok in [true, false] {
+            let e = LookupTypeNameOid(&gone, missing_ok).unwrap_err();
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.message, "cache lookup failed for type 99999");
+        }
     }
 
     // The %TYPE lane's name-count errors, previously fenced (parse_type.c).
