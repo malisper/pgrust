@@ -347,14 +347,19 @@ fn recursion_guard_probe() {
                     // Asymmetric budgets make the probe frame-size-independent
                     // (stack-guard-bounds-in-bytes law: a ladder that needs
                     // exec frames to outweigh parse frames is alive in debug
-                    // on macOS and dead in release on linux-aarch64 — the
-                    // CI cluster rail baseline hit exactly that). PARSE under the
+                    // and dead in release — the CI cluster rail baseline and any
+                    // macOS --release run hit exactly that). PARSE under the
                     // production 2048kB budget so deep docs survive to exec;
                     // EXEC under the 100kB GUC floor so its guard must fire
                     // on any platform once the doc out-recurses ~100kB.
+                    // assign_* is the setter the guard actually reads
+                    // (MAX_STACK_DEPTH_BYTES); set_* alone only changes the
+                    // kB value echoed in the errhint.
                     stack_depth_core::set_max_stack_depth(2048);
+                    stack_depth_core::assign_max_stack_depth(2048);
                     let parsed = adt_jsonb::io::jsonb_in(m, doc.as_bytes(), None);
                     stack_depth_core::set_max_stack_depth(100);
+                    stack_depth_core::assign_max_stack_depth(100);
                     let Ok(Some(doc_image)) = parsed else {
                         // Doc-parse guard (adt_jsonb's plane) bounded the
                         // input first; exec can never see a deeper doc.
