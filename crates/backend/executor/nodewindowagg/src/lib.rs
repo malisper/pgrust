@@ -262,6 +262,54 @@ fn wfunc_permission_denied(fnoid: Oid) -> Box<PgError> {
     )
 }
 
+// initialize_peragg (nodeWindowAgg.c:2957): the selected finalfn isn't
+// read-only, so the aggregate can't run as a window function.
+#[cold]
+#[inline(never)]
+fn wfunc_not_window_capable<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    fnoid: Oid,
+) -> PgResult<Box<PgError>> {
+    let name = ::regproc::format_procedure(mcx, fnoid)?;
+    Ok(Box::new(
+        PgError::error(format!(
+            "aggregate function {name} does not support use as a window function"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
+}
+
+// initialize_peragg (nodeWindowAgg.c:3038): strict transfn + NULL initval
+// needs the first input binary-coercible to the transtype.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn wfunc_incompatible_trans_type(fnoid: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "aggregate {fnoid} needs to have compatible input type and transition type"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION),
+    )
+}
+
+// initialize_peragg (nodeWindowAgg.c:2911-2944): EXECUTE check on one
+// component function, run as the aggregate owner (pg_proc.proowner).
+// InvokeFunctionExecuteHook: no hook surface exists (repo-wide).
+fn component_fn_aclcheck(mcx: ::mcx::Mcx<'_>, fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
+    let aclresult =
+        aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, fnoid, agg_owner, ACL_EXECUTE)?;
+    if aclresult != ACLCHECK_OK {
+        let name = lsyscache::get_func_name(mcx, fnoid)?;
+        aclchk_seams::aclcheck_error::call(
+            aclresult,
+            ::types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION as i32,
+            name.as_ref().map(|n| n.as_str()).unwrap_or(""),
+        )?;
+    }
+    Ok(())
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -934,12 +982,23 @@ fn initialize_peragg_default<'mcx>(
             wfunc.winfnoid
         );
     }
+    // Check that aggregate owner has permission to call component fns.
+    {
+        let agg_owner = syscache_seams::lookup_pg_proc_secdef::call(wfunc.winfnoid)?
+            .ok_or_else(|| {
+                Box::new(PgError::error(format!(
+                    "cache lookup failed for function {}",
+                    wfunc.winfnoid
+                )))
+            })?
+            .proowner;
+        component_fn_aclcheck(mcx, shape.aggtransfn, agg_owner)?;
+        if shape.aggfinalfn != 0 {
+            component_fn_aclcheck(mcx, shape.aggfinalfn, agg_owner)?;
+        }
+    }
     if shape.aggfinalmodify != AGGMODIFY_READ_ONLY {
-        panic!(
-            "initialize_peragg (nodeWindowAgg.c): non-read-only finalfn error arm \
-             (format_procedure) not ported; aggregate {}",
-            wfunc.winfnoid
-        );
+        return Err(wfunc_not_window_capable(mcx, wfunc.winfnoid)?);
     }
     let transtype =
         resolve_aggregate_transtype(mcx, wfunc.winfnoid, shape.aggtranstype, &wfunc.args)?;
@@ -973,16 +1032,14 @@ fn initialize_peragg_default<'mcx>(
     });
     let initval = syscache_seams::pg_aggregate_agginitval::call(mcx, wfunc.winfnoid)?
         .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
-    // C's IsBinaryCoercible guard for strict transfn + NULL initval; only the
-    // equal-types case is ported (framed-lane precedent).
+    // C's IsBinaryCoercible guard for strict transfn + NULL initval: the
+    // first input value seeds the transValue, so it must be coercible.
     if initval.is_none() && fmgr_core::fmgr_info(shape.aggtransfn)?.fn_strict {
         let first_type = wfunc.args.first().map(expr_type);
-        if first_type != Some(transtype) {
-            panic!(
-                "initialize_peragg (nodeWindowAgg.c): IsBinaryCoercible input/transtype \
-                 check not ported (aggregate {})",
-                wfunc.winfnoid
-            );
+        if first_type.is_none()
+            || !coerce::IsBinaryCoercible(first_type.unwrap(), transtype)?
+        {
+            return Err(wfunc_incompatible_trans_type(wfunc.winfnoid));
         }
     }
     trans_init.push(match initval {
@@ -1006,8 +1063,7 @@ fn initialize_peragg_default<'mcx>(
 
 // initialize_peragg (nodeWindowAgg.c), framed lane: C's moving-aggregate
 // selection verbatim, then closed-set kernel dispatch. Component-fn ACL
-// checks vs the aggregate owner are skipped (proowner projection unported;
-// C divergence, superuser-owned builtins in the live set).
+// checks run as the aggregate owner (pg_proc.proowner), like C.
 fn initialize_peragg_framed<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     wnode: Node<'mcx>,
@@ -1061,12 +1117,26 @@ fn initialize_peragg_framed<'mcx>(
                 false,
             )
         };
+    // Check that aggregate owner has permission to call component fns.
+    {
+        let agg_owner = syscache_seams::lookup_pg_proc_secdef::call(wfunc.winfnoid)?
+            .ok_or_else(|| {
+                Box::new(PgError::error(format!(
+                    "cache lookup failed for function {}",
+                    wfunc.winfnoid
+                )))
+            })?
+            .proowner;
+        component_fn_aclcheck(mcx, transfn_oid, agg_owner)?;
+        if invtransfn_oid != 0 {
+            component_fn_aclcheck(mcx, invtransfn_oid, agg_owner)?;
+        }
+        if finalfn_oid != 0 {
+            component_fn_aclcheck(mcx, finalfn_oid, agg_owner)?;
+        }
+    }
     if finalmodify != AGGMODIFY_READ_ONLY {
-        panic!(
-            "initialize_peragg (nodeWindowAgg.c): non-read-only finalfn error arm \
-             (format_procedure) not ported; aggregate {}",
-            wfunc.winfnoid
-        );
+        return Err(wfunc_not_window_capable(mcx, wfunc.winfnoid)?);
     }
     let initval = if minit {
         syscache_seams::pg_aggregate_aggminitval::call(mcx, wfunc.winfnoid)?
@@ -1156,16 +1226,14 @@ fn initialize_peragg_framed<'mcx>(
     } else {
         (shared_agg_state, false)
     };
-    // C's IsBinaryCoercible guard for strict transfn + NULL initval; only the
-    // equal-types case is ported.
+    // C's IsBinaryCoercible guard for strict transfn + NULL initval: the
+    // first input value seeds the transValue, so it must be coercible.
     if fn_strict && init_value.isnull {
         let first_type = wfunc.args.first().map(expr_type);
-        if first_type != Some(aggtranstype) {
-            panic!(
-                "initialize_peragg (nodeWindowAgg.c): IsBinaryCoercible input/transtype \
-                 check not ported (aggregate {})",
-                wfunc.winfnoid
-            );
+        if first_type.is_none()
+            || !coerce::IsBinaryCoercible(first_type.unwrap(), aggtranstype)?
+        {
+            return Err(wfunc_incompatible_trans_type(wfunc.winfnoid));
         }
     }
 
