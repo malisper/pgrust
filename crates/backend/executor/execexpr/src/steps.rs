@@ -77,6 +77,10 @@ pub enum Step {
     // (C d.casetest.value/isnull); the EXT econtext forms point slot at the
     // state's ext_case_test/ext_domain_test cell instead.
     CaseTestVal { slot: NonNull<NullableDatum>, out: OutRef },
+    // EEOP_CURRENTOFEXPR: unconditionally errors at eval — the planner
+    // converts WHERE CURRENT OF into a TidScan qual for heap tables; only
+    // other table types reach a compiled CurrentOfExpr.
+    CurrentOfExpr,
     // C EEOP_MAKE_READONLY, in place on the CASE testval workspace
     // (source and target alias there in C too).
     MakeReadonly { slot: NonNull<NullableDatum> },

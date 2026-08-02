@@ -79,6 +79,19 @@ fn no_result_slot() -> ! {
     panic!("execexpr: projection step without a result slot")
 }
 
+// EEOP_CURRENTOFEXPR (execExprInterp.c): the planner turns WHERE CURRENT OF
+// into a TidScan qual for heap tables; a compiled CurrentOfExpr means the
+// table type can't support it.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn current_of_unsupported() -> Box<PgError> {
+    Box::new(
+        PgError::error("WHERE CURRENT OF is not supported for this table type".to_string())
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 #[cold]
 #[inline(never)]
 fn param_exec_plan_pending() -> ! {
@@ -977,6 +990,7 @@ fn run_program<'mcx>(
                 let cur = read_out(*out);
                 crate::jsonbsubs::fetch_old(st, cur)?;
             }
+            Step::CurrentOfExpr => return Err(current_of_unsupported()),
             Step::JsonbSbsrefAssign { state, out } => {
                 // SAFETY: as ArrayExprEval.
                 let st = unsafe { &mut *state.as_ptr() };
@@ -4496,6 +4510,7 @@ pub(crate) fn exec_one_step<'mcx>(
             let cur = read_out(out);
             crate::jsonbsubs::fetch_old(st, cur)?;
         }
+        Step::CurrentOfExpr => return Err(current_of_unsupported()),
         Step::JsonbSbsrefAssign { state: sref, out } => {
             // SAFETY: as ArrayExprEval.
             let st = unsafe { &mut *sref.as_ptr() };
@@ -4804,6 +4819,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::HashDatumFirst { .. }
         | Step::HashDatumNext32 { .. }
         | Step::RowCompareStep { .. }
-        | Step::RowCompareFinal { .. } => true,
+        | Step::RowCompareFinal { .. }
+        | Step::CurrentOfExpr => true,
     }
 }

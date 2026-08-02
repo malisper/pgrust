@@ -1628,7 +1628,19 @@ fn setup_walker<'mcx>(node: Node<'mcx>, info: &mut SetupInfo<'mcx>) {
                 setup_walker(v, info);
             }
         }
-        tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
+        // C expr_setup_walker is total: everything without a special arm
+        // above descends through the generic expression_tree_walker.
+        _ => {
+            struct Setup<'a, 'mcx>(&'a mut SetupInfo<'mcx>);
+            impl<'mcx> ::nodes_core::NodeWalker<'mcx> for Setup<'_, 'mcx> {
+                fn visit(&mut self, child: Node<'mcx>) -> PgResult<bool> {
+                    setup_walker(child, self.0);
+                    Ok(false)
+                }
+            }
+            ::nodes_core::expression_tree_walker_dyn(node, &mut Setup(info))
+                .expect("infallible visitor: the generic walk cannot error");
+        }
     }
 }
 
@@ -2302,7 +2314,13 @@ pub(crate) fn init_expr_rec<'mcx>(
             }
             Ok(())
         }
-        tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
+        // The planner converts WHERE CURRENT OF into a TidScan qual for
+        // heap tables; anything else compiles the always-erroring step.
+        NodeTag::T_CurrentOfExpr => push_step(state, mcx, Step::CurrentOfExpr),
+        // C ExecInitExprRec's default arm is a catchable elog, and after
+        // T_CurrentOfExpr the match covers exactly C's case set, so an
+        // unlisted tag here is the same "can't happen" C's default guards.
+        tag => Err(Box::new(PgError::error(format!("unrecognized node type: {tag:?}")))),
     }
 }
 

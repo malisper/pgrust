@@ -4461,3 +4461,30 @@ fn expr_type_resolves_delegated_node_families() {
     .unwrap();
     assert_eq!(crate::compile::expr_type(std_node), INT8OID);
 }
+
+// T_CurrentOfExpr compiles C's EEOP_CURRENTOFEXPR (execExpr.c:2617): an
+// always-erroring step — the planner rewrites WHERE CURRENT OF into a
+// TidScan qual for heap tables, so evaluation means an unsupported table
+// type. Compiling it also drives the expr-setup walker's new generic
+// default arm (expr_setup_walker totality) over the fieldless leaf.
+#[test]
+fn current_of_expr_compiles_and_errors_cleanly_at_eval() {
+    install_seams();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let node = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::CurrentOfExpr {
+            cvarno: 1,
+            cursor_name: Some("c1"),
+            cursor_param: 0,
+        },
+    )
+    .unwrap();
+    let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+    state.arm_result_mcx(mcx);
+    let mut slots = EvalSlots::default();
+    let e = exec_eval_expr(&mut state, &mut slots).unwrap_err();
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(e.message(), "WHERE CURRENT OF is not supported for this table type");
+}
