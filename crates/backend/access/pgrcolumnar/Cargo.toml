@@ -36,7 +36,7 @@ tuplesort_seams = { version = "0.0.0", path = "../../utils/sort/tuplesort_seams"
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 
 # zstd links C (zstd-sys); no wasm32 build. The wasm arm refuses the codec
-# at the two call sites (reader/writer) -- cbstore zstd frames are not
+# at the two call sites (reader/writer) -- pgrcolumnar zstd frames are not
 # readable on wasm until a pure-Rust decoder is adopted (documented out).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 zstd = "0.13"

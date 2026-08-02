@@ -745,7 +745,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// pure predicates; re-checking would only repeat work).
     pub fn set_granule_range(&mut self, g0: u64, g1: u64) -> PgResult<()> {
         debug_assert!(self.adaptive.is_none(), "granule-range drive vs adaptive drive");
-        // GL-Q4142 — the tripwire's cbstore leg (heapam::heap_set_block_range
+        // GL-Q4142 — the tripwire's pgrcolumnar leg (heapam::heap_set_block_range
         // is the heap one, verbatim in shape). A scan carrying a SHARED
         // parallel descriptor divides its work through `phs_nallocated`
         // (claim_next_rg); a private granule range abandons that cursor, so
@@ -1164,7 +1164,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             sums: sum_cols.iter().map(|&c| (c, 0i128)).collect(),
         };
         let Some(part) = self.part.as_ref() else { return Ok(Some(out)) };
-        // With a zero-count qual the cbstore zone quals are exactly that
+        // With a zero-count qual the pgrcolumnar zone quals are exactly that
         // conjunct (advisory); the bare arm still requires none.
         debug_assert!(zq.is_some() || self.zone_quals.is_empty());
         // Per-granule visible-row count under the qual: grows - zeros for

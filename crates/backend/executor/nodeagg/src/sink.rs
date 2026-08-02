@@ -2377,7 +2377,7 @@ unsafe fn sink_own_new_varlena(
 /// Checked text-transvalue payload (SE-T2AGG CAR B): pointer + length of the
 /// content bytes of a plain short-header or 4B-uncompressed varlena image.
 /// Compressed/external headers ERROR (fail-closed shape backstop — the
-/// admitted cbstore feeds stage detoasted plain images, so the class is
+/// admitted pgrcolumnar feeds stage detoasted plain images, so the class is
 /// unreachable; the error mirrors `int8_avg_trans_read`'s discipline).
 ///
 /// # Safety

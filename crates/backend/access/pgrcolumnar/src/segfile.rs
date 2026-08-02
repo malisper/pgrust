@@ -378,7 +378,7 @@ pub struct SegMap {
 // sealed part bytes into an owned heap buffer via positioned reads — same
 // bytes() contract, no address-space tricks. Cost: whole-part reads and
 // resident copies (fine at boot-increment scale; a paged reader is the
-// structural fix if cbstore-on-wasm ever needs to be cheap).
+// structural fix if pgrcolumnar-on-wasm ever needs to be cheap).
 #[cfg(target_family = "wasm")]
 pub struct SegMap {
     buf: Vec<u8>,

@@ -2751,7 +2751,7 @@ fn exprkey_batch<'mcx>(
     // sink cap + flush law bounds the table between batches, and
     // `agg_hash_compact_over_limits` is classic-build accounting (its own
     // doc). A NULL derived key REFUSES (no C-table leg; the strict-chain +
-    // cbstore no-NULLs admission makes this unreachable at defaults — the
+    // pgrcolumnar no-NULLs admission makes this unreachable at defaults — the
     // belt covers slot-stream windows and future widenings).
     if *coded && xk.sink_build {
         if xk.knull.iter().any(|&nl| nl) {

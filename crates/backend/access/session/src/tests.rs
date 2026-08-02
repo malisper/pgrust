@@ -768,7 +768,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // copyerr-teardown delta, deliberately NON-SESSION TLS:
     //   84. access/table/tableam/src/lib.rs — CB_EOXACT_REGISTERED: one-shot
     //      Cell<bool> recording that this backend thread registered the
-    //      cbstore ingest-writer purge as a xact callback (the errored-COPY
+    //      pgrcolumnar ingest-writer purge as a xact callback (the errored-COPY
     //      teardown fix: abandoned TLS writers must drop at transaction end,
     //      inside the arena lifetime, never in the thread's TLS destructor).
     //      Pure per-thread registration bookkeeping, the slot-20

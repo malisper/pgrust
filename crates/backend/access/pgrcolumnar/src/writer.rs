@@ -303,7 +303,7 @@ impl CodecCtx {
                 }
             }
             // wasm32: no zstd build (zstd-sys links C); Zstd/Auto degrade to
-            // the LZ4-only decision so cbstore writes stay functional and
+            // the LZ4-only decision so pgrcolumnar writes stay functional and
             // wasm-written tables remain readable on every target.
             #[cfg(target_family = "wasm")]
             CodecChoice::Zstd | CodecChoice::Auto => {

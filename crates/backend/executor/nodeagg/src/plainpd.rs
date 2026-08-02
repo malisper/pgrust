@@ -590,7 +590,7 @@ pub fn plain_sd_derive_spec(
 /// bytes wrap in 4B-header text varlenas in each buf's own arena (equal
 /// payload bytes = the serial path's text value; header form is
 /// representation, not identity). `seen_null` appends one SQL-NULL row
-/// (DISTINCT groups all NULLs together) — unreachable on the cbstore feeds
+/// (DISTINCT groups all NULLs together) — unreachable on the pgrcolumnar feeds
 /// (the AM refuses NULLs) but exact if a feed ever carries one.
 ///
 /// Emit order is partition-then-set order — DIVERGENT from the serial hash

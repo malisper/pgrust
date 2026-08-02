@@ -130,7 +130,7 @@ pub enum CoverClass {
     /// guards, per rel: unindexed (no serial merge/NL-with-inner-index
     /// shapes for the costing to prefer), nbatch==1 estimate (EVERY rel —
     /// any of them may be a build side; the multibuild walk is unbatched
-    /// only), cbstore AM (heap sides: SE-JHEAP keys them knob-gated
+    /// only), pgrcolumnar AM (heap sides: SE-JHEAP keys them knob-gated
     /// behind PGRUST_LANE_V2_JHEAP — the K2 executor feed has been
     /// DEFAULT-ON since the SE9/SE15 flips, the coherence mirror keys its
     /// kills; the earlier "K2 DEFAULT-OFF" claim here was stale).
@@ -139,7 +139,7 @@ pub enum CoverClass {
     /// disconnected graphs — classifies uncovered by construction.
     CbHashJoinMultiBuild,
     /// SE-AGGJOIN row flip (band 87001): GROUPED (hashed) aggregation over
-    /// 2..=6 cbstore relations joined by a CONNECTED int-family equi graph —
+    /// 2..=6 pgrcolumnar relations joined by a CONNECTED int-family equi graph —
     /// the grouped-agg-over-join sink (per-worker hashed builds, grouped
     /// partial export/combine, leader-table absorb + canonical retrieve).
     /// FROM forms keyed: the flat N-RangeTblRef INNER forms and left-deep
@@ -150,7 +150,7 @@ pub enum CoverClass {
     /// numeric-family int states (avg/sum int2/4/8, AvgAccum/Int128 inline)
     /// INCLUDED, unlike the scan-grouped GROUPED_SINK_AGGS row (the grouped
     /// sink exports them via the runtime-partial states). Planner-choice
-    /// guards: multibuild rel guards verbatim (distinct unindexed cbstore
+    /// guards: multibuild rel guards verbatim (distinct unindexed pgrcolumnar
     /// rels, every rel nbatch==1 — the B1 discipline inherited),
     /// enable_hashagg + enable_hashjoin required ON (either off costs a
     /// sort/merge/NL serial shape the walk refuses — the suppress-then-
@@ -1262,7 +1262,7 @@ fn aggjoin_numeric_enabled() -> bool {
 }
 
 /// SE-JHEAP (the GL-JHEAP-1 lane, conversion-scope car 2 — the heap-side join blocker):
-/// heap-side join admission. Every join classifier admitted cbstore rels
+/// heap-side join admission. Every join classifier admitted pgrcolumnar rels
 /// ONLY ('side not cbstore' — the pure-shape census refusal), while the
 /// executor's K2 heap feed (BatchGranuleSource seam) has been DEFAULT ON
 /// since the SE9/SE15 flips: the single-join arm and the multibuild
@@ -1342,7 +1342,7 @@ fn hj_knobpath_2m_guard() -> FloorGuard {
 /// PROVISIONAL floor for heap-fed join shapes: the heap fold arms'
 /// economics (rows>=1M & dop>=12 — the HeapCmpFoldPrefix/AggPolyHeapPlain
 /// reuse; the scoping's "heap fold floor" note), with the hashjoin-nbatch1
-/// 2M ceiling kept from the cbstore classes. GL-JHEAP-1 owns re-measuring.
+/// 2M ceiling kept from the pgrcolumnar classes. GL-JHEAP-1 owns re-measuring.
 fn jheap_guard() -> FloorGuard {
     FloorGuard {
         min_rows: 1_000_000.0,
@@ -2851,7 +2851,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // count(DISTINCT SearchPhrase)). The runtime PLAIN-distinct SINK
             // (runtime_plaindistinct.rs) admits int AND canonical-bytes text
             // distinct VALUES; suppressing Gather yields the serial
-            // `Aggregate(AGG_PLAIN) <- Sort <- SeqScan(cbstore)` shape its
+            // `Aggregate(AGG_PLAIN) <- Sort <- SeqScan(pgrcolumnar)` shape its
             // skip-sort dispatch owns. Gated on the SEPARATE plain sub-knob;
             // NARROW: no quals, no sort/limit, EXACTLY the single
             // count(DISTINCT) tlist entry (the sink stages the distinct arg
@@ -4021,7 +4021,7 @@ fn classify_scanpass(parse: &Query<'_>, rti: usize, is_cb: bool, has_quals: bool
     // Gather to (every runtime arm folds). Owning enabler: the parallel
     // row-emit-boundary subsystem (notes/se-scanpass.md §4). The serial
     // lane executor (`pgrust.lane_executor`) already row-emits this exact
-    // shape through `try_own_seq_scan`'s admitted standalone-cbstore path —
+    // shape through `try_own_seq_scan`'s admitted standalone-pgrcolumnar path —
     // that is the World-A reuse, not a World-B Gather suppression.
     if has_quals {
         refuse_scanpass("bare filtered pgrcolumnar passthrough — no parallel row-emit arm (owning car: parallel-row-emit-boundary)")
@@ -4087,7 +4087,7 @@ fn classify_join_sides<'mcx>(
         side_rows[i] = rel.rows.max(0.0);
         // Unindexed-only guard (see the fn doc): an index on either side
         // lets the costing pick serial merge/NL shapes the walk refuses.
-        // cbstore keeps it verbatim; heap rides the jheap tolerance.
+        // pgrcolumnar keeps it verbatim; heap rides the jheap tolerance.
         if is_cb && !rel.indexlist.is_empty() {
             return refuse_join("side has indexes");
         }
@@ -4228,7 +4228,7 @@ fn classify_join_sides<'mcx>(
     // enable_hashjoin, index tolerance + NL margin). The 2-rel plain form
     // additionally refuses heap SELF-joins outright (the B1 alias-EC
     // hazard is newly reachable on this row's heap surface — fail-closed;
-    // the cbstore census is byte-untouched).
+    // the pgrcolumnar census is byte-untouched).
     if !heap.is_empty() {
         if relids[0] == relids[1] {
             return refuse_join("relation appears more than once (EC self-join clause)");
@@ -4278,7 +4278,7 @@ fn classify_join_sides<'mcx>(
     // runtime probe at the witnessed 1.15-1.66x vs PHJ — the letter's
     // bounded residual. Non-seat-shaped joins keep the 2M ceiling unchanged.
     // SEAT-LIFT ORDERING (conversion-flips train): the lift's witnessed
-    // band is the BOOTSTRAP census (cbstore rels, bare-int emits) — the
+    // band is the BOOTSTRAP census (pgrcolumnar rels, bare-int emits) — the
     // heap-fed and numeric-emit widenings below were not in its dataset
     // and carry their OWN floors (the jheap 1M min must not be bypassed by
     // the ceiling lift), so only pure-bootstrap shapes reach it.
@@ -5013,7 +5013,7 @@ fn classify_multibuild<'mcx>(
 
 /// The multibuild per-relation guards, shared by the plain and grouped rows
 /// (extracted verbatim at SE-AGGJOIN): plain DISTINCT rels (the B1
-/// self-join discipline), EVERY rel's build estimate nbatch==1; cbstore
+/// self-join discipline), EVERY rel's build estimate nbatch==1; pgrcolumnar
 /// rels stay unindexed-only verbatim. SE-JHEAP: HEAP rels admit
 /// knob-gated (the executor's K2 feed is default-ON; the coherence mirror
 /// keys both kills) — their index tolerance and stats discipline are the
@@ -5055,7 +5055,7 @@ fn multibuild_rel_guards(
         let rel = run.root.rel(rel_id);
         let is_cb = rel.amflags & AMFLAG_PGRCOLUMNAR != 0;
         if !is_cb {
-            // SE-JHEAP: a non-cbstore plain relation is the heap AM (the
+            // SE-JHEAP: a non-pgrcolumnar plain relation is the heap AM (the
             // TableAm vocabulary is {Heap, Pgrcolumnar}; the executor walk
             // double-checks via seq_scan_is_heap). Knob OFF (or either
             // executor feed kill thrown) takes the pre-existing refusal
@@ -5066,7 +5066,7 @@ fn multibuild_rel_guards(
             heap.push((i, rel_id));
         }
         max_rows = max_rows.max(rel.rows.max(0.0));
-        // cbstore keeps the blanket unindexed-only rule verbatim; heap
+        // pgrcolumnar keeps the blanket unindexed-only rule verbatim; heap
         // index tolerance is the caller's jheap_shape_guards (needs quals).
         if is_cb && !rel.indexlist.is_empty() {
             return refuse_join_none("side has indexes");
@@ -6209,11 +6209,11 @@ fn serial_shadow_tail(
 /// delivers the SERIAL lane and the verdict prices t_ser/t_leg on the
 /// serial support floor instead of the engaged curve. Instances are
 /// MIRRORS of witnessed engage floors, never new economics:
-///   * cbstore classes — the scan/sort/agg arms' 64-granule geometry
+///   * pgrcolumnar classes — the scan/sort/agg arms' 64-granule geometry
 ///     floor (64 x 8192 = 524,288 rows; HJ_ARM_MIN_ROWS is the same
 ///     constant, S1's re-derivation): the nine-job grid witnessed
 ///     runtime:absent at <= 500k rows and engagement at >= 1M on every
-///     cbstore class.
+///     pgrcolumnar class.
 ///   * CbGroupedAggTopN — F1's 500k post-qual floor (the sorted serial
 ///     election the arm refuses).
 ///   * HeapPlainCountStar — the rowdrive 64MB block floor
@@ -7296,7 +7296,7 @@ fn extract_key_image_fits(int_widths_sum: usize, n_text: usize) -> bool {
     fixed + 8 <= 16 || fixed + 4 <= 16
 }
 
-/// SE-EXTRACTKEY (ts-extract class) recognizer: a single-cbstore-rel grouped
+/// SE-EXTRACTKEY (ts-extract class) recognizer: a single-pgrcolumnar-rel grouped
 /// agg whose keys are bare int-family Vars, at most ONE bare
 /// default-collation text Var (the Multi walk caps TextRaw components at
 /// one — dict/intern lane), and EXACTLY ONE `extract(field FROM ts)`
@@ -7629,7 +7629,7 @@ fn is_case_dict_key(expr: Node<'_>, rti: usize) -> bool {
     !dc.constisnull && dc.consttype == TEXTOID
 }
 
-/// OPEN-ROWS car 3 recognizer: a single-cbstore-rel grouped agg whose
+/// OPEN-ROWS car 3 recognizer: a single-pgrcolumnar-rel grouped agg whose
 /// keys are bare int-family Vars, at most ONE bare default-collation text
 /// Var (the Multi walk caps TextRaw components at one), and EXACTLY ONE
 /// computed key — the conditional-text-select CASE (packed as an Intern
@@ -7871,7 +7871,7 @@ fn dictkey_guard() -> FloorGuard {
     FloorGuard { min_dop: 4, low_dop_max_rows: 0.0, ..NO_GUARD }
 }
 
-/// GL-DICTDRAIN-1 recognizer: a single-cbstore-rel grouped agg whose ONE
+/// GL-DICTDRAIN-1 recognizer: a single-pgrcolumnar-rel grouped agg whose ONE
 /// group key is the regexp-extracted computed text key
 /// (`regexp_dict_key_var`) over a PLAN-TIME DICT-ANSWERABLE column (the v7
 /// stitch discipline — `topn_nonint_text_key_stitched`; a no-stitch column
@@ -8827,14 +8827,14 @@ mod tests {
     }
 
     /// R1 arm-admission mirror pins: every instance mirrors a WITNESSED
-    /// engage floor (never new economics) — the cbstore 64-granule
+    /// engage floor (never new economics) — the pgrcolumnar 64-granule
     /// geometry floor (== HJ_ARM_MIN_ROWS == S1's constant), F1's 500k
     /// grouped-topn post-qual floor, the heap-count block floor; the
     /// heap cmp-fold arm has no witnessed floor and always admits.
     #[test]
     fn arm_admission_mirror_matches_the_witnessed_floors() {
         use costsize::runtime_model as rtm;
-        // cbstore classes: the nine-job grid witnessed absent <= 500k /
+        // pgrcolumnar classes: the nine-job grid witnessed absent <= 500k /
         // engaged >= 1M — the 64-granule mirror splits inside that band.
         for class in [
             CoverClass::CbPlainAggFold,

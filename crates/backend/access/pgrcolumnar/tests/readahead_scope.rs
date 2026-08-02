@@ -420,13 +420,13 @@ fn serial_kill_switch_covers_claim_channel() {
 }
 
 // ---------------------------------------------------------------------------
-// GL-Q4142: the morsel-range tripwire's cbstore leg.
+// GL-Q4142: the morsel-range tripwire's pgrcolumnar leg.
 //
 // `heapam::heap_set_block_range` refuses block-range positioning on a scan
 // that carries a shared parallel scan descriptor: a private range drive
 // abandons the shared `phs_nallocated` cursor, so every participant would
 // walk the WHOLE relation and each partial aggregate would be the global
-// answer — a silent result inflated by the participant count. The cbstore
+// answer — a silent result inflated by the participant count. The pgrcolumnar
 // leg of the same dispatch (`table_scan_set_morsel_range`) carried no such
 // check, so the columnar side of that tripwire fail-OPENED where the heap
 // side fail-CLOSES. Release-effective (an `Err`, not a `debug_assert`) —

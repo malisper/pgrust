@@ -6020,7 +6020,7 @@ fn scan_mk_admit<'mcx>(
     // Packing admission + table arm (nullable = heap; pgrcolumnar rides the
     // no-NULLs per-chunk proof and packs no null byte). Text components
     // pass as the Intern att set (heap sources reach here textless — the
-    // has_text block above requires cbstore): one att = the historical
+    // has_text block above requires pgrcolumnar): one att = the historical
     // dict-component admission verbatim; two atts = the SE-MKTEXT knob path
     // (mk_admit_n packs both through the shared intern pool).
     let interns_buf;

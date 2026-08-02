@@ -2243,7 +2243,7 @@ thread_local! {
     static CB_EOXACT_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn cbstore_eoxact_callback(
+fn pgrcolumnar_eoxact_callback(
     event: ::types_core::xact::XactEvent,
     _arg: ::datum::Datum,
 ) -> PgResult<()> {
@@ -2256,18 +2256,18 @@ fn cbstore_eoxact_callback(
     Ok(())
 }
 
-/// The cbstore ingest writer is buffered in backend TLS across the
+/// The pgrcolumnar ingest writer is buffered in backend TLS across the
 /// statement (multi_insert opens it, finish_bulk_insert publishes it). A
 /// statement that errors mid-ingest unwinds past its finish, so transaction
 /// end must own the drop of whatever is left — C parity with copyfrom.c,
 /// whose COPY state dies with the statement's memory contexts during abort
 /// processing, never at backend exit. Registered once per backend thread on
-/// the first cbstore insert (the xact callback registry is per-thread; the
+/// the first pgrcolumnar insert (the xact callback registry is per-thread; the
 /// postgres_fdw connection callback is the precedent).
-fn ensure_cbstore_eoxact_registered() {
+fn ensure_pgrcolumnar_eoxact_registered() {
     CB_EOXACT_REGISTERED.with(|c| {
         if !c.get() {
-            xact::RegisterXactCallback(cbstore_eoxact_callback, ::datum::Datum::null());
+            xact::RegisterXactCallback(pgrcolumnar_eoxact_callback, ::datum::Datum::null());
             c.set(true);
         }
     });
@@ -2285,7 +2285,7 @@ pub fn table_tuple_insert<'mcx>(
         TableAm::Heap => heap::tuple_insert(mcx, rel, slot, cid, options, bistate),
         TableAm::Pgrcolumnar => {
             let _ = (cid, options, bistate);
-            ensure_cbstore_eoxact_registered();
+            ensure_pgrcolumnar_eoxact_registered();
             exectuples::exec_materialize_slot(slot, mcx)?;
             ::pgrcolumnar::tuple_insert(rel, slot)
         }
@@ -2335,7 +2335,7 @@ pub fn table_multi_insert<'mcx>(
         TableAm::Heap => heap::multi_insert(mcx, rel, slots, cid, options, bistate),
         TableAm::Pgrcolumnar => {
             let _ = (mcx, cid, options, bistate);
-            ensure_cbstore_eoxact_registered();
+            ensure_pgrcolumnar_eoxact_registered();
             ::pgrcolumnar::multi_insert(rel, slots)
         }
     }

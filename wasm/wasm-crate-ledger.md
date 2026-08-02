@@ -27,10 +27,10 @@ compat module; the one remaining row is below.
 Compile-clean is not feature-complete; these are the honest functional
 fences the wasm arms document in code:
 
-- **cbstore ZSTD frames**: `zstd` is target-gated out (links C); the wasm
+- **pgrcolumnar ZSTD frames**: `zstd` is target-gated out (links C); the wasm
   codec arm refuses ZSTD frames at read and degrades Zstd/Auto codec choice
   to LZ4 at write. A pure-Rust decoder (ruzstd) is the documented out.
-- **cbstore SegMap**: no mmap on WASI — the wasm arm materializes parts
+- **pgrcolumnar SegMap**: no mmap on WASI — the wasm arm materializes parts
   into an owned heap buffer (whole-part reads; paged reader if ever needed).
 - **timeouts are inert**: no threads and no SIGALRM on wasm32-wasip1; armed
   timeouts never fire (statement_timeout/lock_timeout).

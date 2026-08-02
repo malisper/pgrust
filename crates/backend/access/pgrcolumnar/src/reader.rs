@@ -1036,7 +1036,7 @@ pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], ra
                 .expect("cbstore: corrupt ZSTD frame");
             assert_eq!(got, raw_len, "cbstore: ZSTD frame length mismatch");
         }
-        // wasm32: zstd-sys links C and has no wasm build; cbstore tables
+        // wasm32: zstd-sys links C and has no wasm build; pgrcolumnar tables
         // carrying ZSTD frames are unreadable on this target (documented
         // ledger out until a pure-Rust decoder is adopted).
         #[cfg(target_family = "wasm")]

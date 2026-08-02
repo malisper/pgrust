@@ -1752,7 +1752,7 @@ fn distinct_spill_enabled() -> bool {
 /// iff exactly `1`/`on`; the flip rides the measured verdict). Widens BOTH
 /// distinct sinks' admission from pgrcolumnar-only to heap seq scans: the
 /// morsel positioner is already AM-dispatched (`seq_scan_set_morsel_range`
-/// — the morsel bodies never needed cbstore), so the widening is the
+/// — the morsel bodies never needed pgrcolumnar), so the widening is the
 /// leader-side geometry/source fork below plus the probe's heap
 /// classification (same spelling there — GROUPSINK coherence). Heap
 /// engagements ride the GENERIC accept lanes (RowFeed / collected
@@ -1772,7 +1772,7 @@ pub(super) fn distinct_heap_enabled() -> bool {
 }
 
 /// GL-LOWDIST-4 B1: per-AM morsel space for the distinct sinks — the
-/// hashjoin `k2_task_source` fork verbatim. cbstore → RG-boundary granule
+/// hashjoin `k2_task_source` fork verbatim. pgrcolumnar → RG-boundary granule
 /// source (the historical wire; claims feed straight into
 /// `set_granule_range`, never coalesce); heap → the boundary-free block
 /// source (granule = ONE heap block, sizer-truncated, non-coalescing — the
@@ -2611,7 +2611,7 @@ fn engage_ceremony<'mcx>(
 
         // Submit the pinned RG (accept → freeze → combine) before launch.
         // The per-AM morsel source was built at admission
-        // (distinct_task_source — GL-LOWDIST-4 B1): cbstore RG-boundary
+        // (distinct_task_source — GL-LOWDIST-4 B1): pgrcolumnar RG-boundary
         // claims fed straight into set_granule_range, or heap block-range
         // claims through the same AM-dispatched positioner.
         let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =

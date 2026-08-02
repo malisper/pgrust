@@ -224,7 +224,7 @@ fn run_lz4_effective() -> bool {
 /// the merge/fill/stitch back half is the byte-proven text-path machinery).
 /// Default OFF: parquet loads refuse to the serial reader verbatim.
 /// Requires the sort mode (a presort key + PGRUST_PARALLEL_COPY_SORT=1) —
-/// order-preserving parquet parallelism would move cbstore RG seams off the
+/// order-preserving parquet parallelism would move pgrcolumnar RG seams off the
 /// serial writer's and is refused by design.
 fn parquet_parallel_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
