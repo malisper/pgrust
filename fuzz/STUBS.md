@@ -244,6 +244,87 @@ by targets) guarantees the id means the same encoding everywhere.
 pg_conversion-style tables extend this module; the id/name/maxmblen pin is
 the substrate.
 
+## stub:syscache-row (`stub_syscache.rs` + `csrc/pg_stub_syscache.c`)
+
+The NINTH facility (Michael-ratified 2026-08-01, phase2-plan.md §8 Q7):
+catalog rows supplied as fuzz input, constructed identically both sides.
+PostgreSQL's `lsyscache` layer is hundreds of single-row catalog probes
+(`get_atttype`, `get_typlenbyval`, `get_opclass_family`, ...) — OPEN
+through syscache→catcache→relation→buffers, but pure over (arguments, that
+row) once the row is input. Rust side: a thread-local row store answering
+the existing `syscache_seams` probes the shipped `lsyscache` crate reads.
+C side: the same store loaded from the same wire, a
+SearchSysCacheN/GetSysCacheOidN interception layer (fake-tuple GETSTRUCT
+over vendored-verbatim FormData fixed prefixes), and VERBATIM 18.3
+lsyscache consumer bodies (`get_opfamily_proc`, `get_opfamily_member`,
+`get_opcode`, `get_opclass_family`, `get_typlenbyval`, `get_atttype`,
+`get_func_rettype`) compiled over it — C bodies verbatim, interception
+pure preprocessor. All C exports prefixed `pg_stub_syscache_` (nm census:
+16 exports, all prefixed). New oracle TUs intercept via
+`csrc/stubshims/pg_stub_syscache.h`.
+
+Covered caches (extensible BY TABLE, never per lane): pg_amop
+(AMOPSTRATEGY + AMOPOPID), pg_amproc (AMPROCNUM), pg_operator (OPEROID),
+pg_opclass (CLAOID), pg_type (TYPEOID), pg_attribute (ATTNUM), pg_proc
+(PROCOID). Fields carried = the wire fields in stub_syscache.rs; anything
+else is NOT covered (zero on the C side, absent from the Rust shapes).
+
+How a target uses it:
+
+```rust
+use crate::stub_syscache::*;
+install_seams();                      // shipped lsyscache -> the store
+let rows = decode_rows(&mut cur);     // fuzz path (menu-anchored), or
+let rows = my_harvested_rows();       //   programmatic (migrated lanes)
+assert_syscache_construction_agrees(&rows);   // loads BOTH sides + plane
+// Rust side: lsyscache::get_opfamily_proc(...) (seam-routed) or rows_*();
+// C side: c_get_opfamily_proc(...) etc. (verbatim bodies over the store).
+```
+
+Clamps (compared-input contract): ≤16 rows per cache (`% 17`); FIRST
+matching row wins on BOTH sides (duplicate keys legal; wire-order scan;
+pinned by `syscache_duplicate_key_first_match_pins_order`); attname 64 raw
+bytes with byte 63 forced 0; all other fields raw LE, NOT normalized.
+Fuzz derivation is menu-anchored: each row = a HARVESTED real catalog row
+(index `% menu len`) with at most one mutated field — the domain stays
+anchored to catalog-reachable shapes while the differential still sees
+drifted fields.
+
+UNREACHABLE-STATE HAZARD (band-2, the reason this facility is
+`harness-audit:required`): a supplied row can be INCONSISTENT with the
+catalog it was not supplied alongside (an amproc row whose proc oid names
+no pg_proc row) — real PostgreSQL only reaches catalog-consistent states,
+so verdicts over invented rows can exercise unreachable states.
+Mitigations, both committed: the derivation menu/seed rows are HARVESTED
+from a live catalog (`stub_syscache_harvest.rs`: 437 real rows from the
+dev server's 18.3-.dat-pinned catalog; regenerate with
+`fuzz/core/harvest_syscache.py`; replayed row-by-row through both
+constructors AND the verbatim consumers by
+`syscache_harvest_rows_all_agree`), and the constructor injection sweep
+below.
+
+SHARED-BINARY COLLISION BEHAVIOR (absorbed from the two lanes that solved
+it independently): `install_seams()` claims the facility's nine
+`syscache_seams` slots first-install-wins and returns whether it owns ALL
+of them (`authoritative()`). In the shared `cargo test` binary a foreign
+oracle (arrayfuncs/rowtypes/tupaccess pins) may own some — consumers must
+then downgrade exactly as the absorbed lanes did (brin_bloom: Lazy→Pinned
+mode; brin_minmax_multi: cache pre-seeding). Store-direct `rows_*` probes
+and the construction plane never depend on seam ownership, so the
+facility's own suite is collision-immune. In a one-target fuzz binary the
+facility always owns its seams.
+
+ABSORBED (pg_qsort consolidation rule — two lanes hand-rolled pinned
+syscache menus on 2026-08-01 before this was a facility, now migrated):
+`brin_bloom_diff` (was: a private `amproc_menu` + OnceLock install) and
+`brin_minmax_multi_diff` (was: private pg_amop/pg_amproc/pg_operator/
+pg_type menus + `slow_path_ok()`). Do not hand-roll a third menu — extend
+the facility's row shapes by table instead.
+
+Unlocks: the lsyscache single-probe family (7 of the caches bucket's 10
+phase-2 OPENs are exactly this shape) and callers open only through those
+probes; immediate phase-1 value = the two migrated brin lanes.
+
 ## Must-fail controls (all committed, all green)
 
 | control | plants | proves |
@@ -256,6 +337,12 @@ the substrate.
 | `snapshot_control_rust_side_tamper_is_caught` | xip[0] flipped on the Rust side only | field plane sees Rust-side drift |
 | `encoding_control_shifted_index_is_caught` | every Rust row compared against the wrong C row | comparator live at every index |
 | `encoding_clamp_is_pinned` | – | the `% 42` clamp is a pinned contract, not silent drift |
+| `syscache_control_one_side_{amop,amproc,operator,opclass,type,attribute,proc}_tamper_is_caught` (7) | one row field flipped on the C side only, per cache | store plane sees one-side row drift in EVERY covered cache |
+| `syscache_control_rust_side_tamper_is_caught` | amopstrategy flipped on the Rust side only | plane sees Rust-side drift |
+| `syscache_control_consumer_divergence_is_caught` | one-side amproc row difference, probed through REAL consumers | shipped Rust lsyscache vs verbatim C get_opfamily_proc DIVERGE — the differential a migrated target computes catches it |
+| `syscache_seam_route_or_downgrade` | – | seam-authoritative: shipped lsyscache answers from the store; foreign-owned: `authoritative()` reports false (downgrade contract) |
+| `syscache_duplicate_key_first_match_pins_order` | duplicate-keyed rows, different payloads | FIRST-match-wins is pinned on BOTH sides |
+| `syscache_decode_clamps_are_pinned` | – | the `% 17` count clamp + `% menu len` index clamp are pinned contracts |
 
 Plus baseline-agreement tests: `snapshot_construction_agrees` (fixed spec +
 500 seeded pseudo-random specs through both constructors) and
@@ -289,3 +376,19 @@ documented-silent class, kept in the table so the limitation stays visible.
 Reporting per the harness-detection-power law: counts above are honest; the
 one expected-silent plant is the documented nodes blind class, kept in the
 table so the limitation stays visible.
+
+## stub:syscache-row injection sweep (2026-08-01)
+
+Scratch plants applied to the constructor (one at a time; committed test
+slice = `cargo test -p decoder_fuzz stub_ -- --test-threads=1`):
+
+| plant | constructor defect | verdict |
+|---|---|---|
+| Y1 | `rows_wire` drops amoppurpose (wire writer field drop) | CAUGHT (13 tests fail: short-read loader status + plane) |
+| Y2 | C decoder reads amprocnum as ONE byte (width defect) | CAUGHT (14 tests fail: plane + consumer parity) |
+| Y3 | `rows_amproc` scans reversed — LAST-match-wins on the Rust side only | CAUGHT (`syscache_duplicate_key_first_match_pins_order`) |
+| Y4 | derivation menu-index clamp drifts to `% (len-1)` | CAUGHT (`syscache_decode_clamps_are_pinned`) — but note the DIFFERENTIAL is blind to this class (a different-but-legal row selection reaches both sides identically, same as nodes N3); the clamp-pin control is what closes it |
+
+Final: 4/4 caught. The Y4 class (derivation drift) never falsifies a
+verdict — it shrinks the explored row surface — and is bounded by the
+clamp pins, the same containment the nodes facility documents for N3.

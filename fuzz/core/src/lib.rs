@@ -419,6 +419,8 @@ pub mod stub_encoding;
 mod stub_controls_tests;
 pub mod stub_nodes;
 pub mod stub_snapshot;
+pub mod stub_syscache;
+pub mod stub_syscache_harvest;
 pub mod stub_tupdesc;
 
 // tupaccess_diff: heaptuple/tupdesc/attmap/tupconvert differential (p1-tupaccess).

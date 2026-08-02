@@ -101,6 +101,10 @@ fn main() {
         // src/stub_snapshot.rs / src/stub_encoding.rs)
         .file("csrc/pg_stub_snapshot.c")
         .file("csrc/pg_stub_encoding.c")
+        // stub:syscache-row constructed-state builder shim (supplied catalog
+        // rows + SearchSysCacheN interception + verbatim lsyscache
+        // consumers; contract in src/stub_syscache.rs / fuzz/STUBS.md)
+        .file("csrc/pg_stub_syscache.c")
         // range + multirange oracles, ONE translation unit: this file
         // #includes csrc/pg_rangetypes_io.c (which is therefore NOT listed
         // here — listing both would define every pg_diff_* entry twice).

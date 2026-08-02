@@ -249,3 +249,149 @@ fn encoding_clamp_is_pinned() {
     assert_eq!(stub_encoding::enc_from_byte(42), 0);
     assert_eq!(stub_encoding::enc_from_byte(255), 255 % 42);
 }
+
+// -------------------------------------------------------------------------
+// stub:syscache-row
+// -------------------------------------------------------------------------
+
+use crate::stub_syscache::{
+    self, c_syscache_plane, demo_rows, rows_wire, ser_syscache_plane, set_rows, SysCacheRows,
+};
+
+/// Shared helper: load `good` on the Rust side and `bad` on the C SIDE
+/// ONLY, then return (rust plane, c plane). A live plane must see the
+/// difference.
+fn syscache_planes_one_side(good: &SysCacheRows, bad: &SysCacheRows) -> (Vec<u8>, Vec<u8>) {
+    set_rows(good); // both sides = good
+    let st = stub_syscache::c_load_raw(&rows_wire(bad)); // C side -> bad
+    assert_eq!(st, 0, "control C load must succeed");
+    let mut r = Vec::new();
+    ser_syscache_plane(&mut r);
+    (r, c_syscache_plane())
+}
+
+macro_rules! syscache_one_side_control {
+    ($name:ident, $tamper:expr) => {
+        #[test]
+        fn $name() {
+            let _serial = crate::c_oracle_serial();
+            let good = demo_rows();
+            // baseline: both sides identical
+            stub_syscache::assert_syscache_construction_agrees(&good);
+            let mut bad = good.clone();
+            #[allow(clippy::redundant_closure_call)]
+            ($tamper)(&mut bad);
+            let (r, c) = syscache_planes_one_side(&good, &bad);
+            assert_ne!(
+                r, c,
+                "syscache store plane is BLIND to a one-side row difference"
+            );
+        }
+    };
+}
+
+syscache_one_side_control!(syscache_control_one_side_amop_tamper_is_caught, |b: &mut SysCacheRows| {
+    b.amop[0].amopopr ^= 1;
+});
+syscache_one_side_control!(syscache_control_one_side_amproc_tamper_is_caught, |b: &mut SysCacheRows| {
+    b.amproc[0].amproc ^= 1;
+});
+syscache_one_side_control!(syscache_control_one_side_operator_tamper_is_caught, |b: &mut SysCacheRows| {
+    b.operator[0].oprcode ^= 1;
+});
+syscache_one_side_control!(syscache_control_one_side_opclass_tamper_is_caught, |b: &mut SysCacheRows| {
+    b.opclass[0].opcfamily ^= 1;
+});
+syscache_one_side_control!(syscache_control_one_side_type_tamper_is_caught, |b: &mut SysCacheRows| {
+    b.typ[0].typlen ^= 1;
+});
+syscache_one_side_control!(syscache_control_one_side_attribute_tamper_is_caught, |b: &mut SysCacheRows| {
+    b.attribute[0].atttypid ^= 1;
+});
+syscache_one_side_control!(syscache_control_one_side_proc_tamper_is_caught, |b: &mut SysCacheRows| {
+    b.proc[0].prorettype ^= 1;
+});
+
+/// Control: perturb the RUST side only — the same plane must diverge in
+/// the other direction.
+#[test]
+fn syscache_control_rust_side_tamper_is_caught() {
+    let _serial = crate::c_oracle_serial();
+    let good = demo_rows();
+    let mut bad = good.clone();
+    bad.amop[0].amopstrategy ^= 1;
+    set_rows(&bad); // Rust (and C) = bad ...
+    let st = stub_syscache::c_load_raw(&rows_wire(&good)); // ... C -> good
+    assert_eq!(st, 0);
+    let mut r = Vec::new();
+    ser_syscache_plane(&mut r);
+    assert_ne!(r, c_syscache_plane(), "plane is BLIND to a Rust-side tamper");
+}
+
+/// Control THROUGH THE REAL CONSUMERS: with a one-side-only amproc row
+/// difference, the shipped Rust lsyscache probe (over the facility store)
+/// and the VERBATIM 18.3 C get_opfamily_proc (over the tampered C store)
+/// must answer DIFFERENTLY — the differential a migrated target computes
+/// catches exactly this.
+#[test]
+fn syscache_control_consumer_divergence_is_caught() {
+    let _serial = crate::c_oracle_serial();
+    let good = demo_rows();
+    let key = good.amproc[0];
+    let mut bad = good.clone();
+    bad.amproc[0].amproc ^= 0x10;
+    set_rows(&good);
+    let st = stub_syscache::c_load_raw(&rows_wire(&bad));
+    assert_eq!(st, 0);
+
+    let rust = stub_syscache::rows_amproc(
+        key.amprocfamily,
+        key.amproclefttype,
+        key.amprocrighttype,
+        key.amprocnum,
+    );
+    let c = stub_syscache::c_get_opfamily_proc(
+        key.amprocfamily,
+        key.amproclefttype,
+        key.amprocrighttype,
+        key.amprocnum,
+    );
+    assert_eq!(rust, key.amproc, "Rust side answers from the good store");
+    assert_ne!(rust, c, "consumer differential is BLIND to a one-side row difference");
+}
+
+/// If this process's seam slots are OURS (one-target binary or first
+/// installer), the SHIPPED lsyscache layer must answer from the facility
+/// store; if a foreign oracle owns them (shared test binary), the
+/// downgrade probe must say so instead of silently mixing menus.
+#[test]
+fn syscache_seam_route_or_downgrade() {
+    let _serial = crate::c_oracle_serial();
+    let good = demo_rows();
+    set_rows(&good);
+    let key = good.amproc[0];
+    if stub_syscache::install_seams() {
+        let got = lsyscache::get_opfamily_proc(
+            key.amprocfamily,
+            key.amproclefttype,
+            key.amprocrighttype,
+            key.amprocnum,
+        )
+        .expect("seam-routed lookup");
+        assert_eq!(got, key.amproc, "shipped lsyscache must read the facility store");
+    } else {
+        // Foreign menu owns >=1 seam: the facility must report
+        // non-authoritative so consumers downgrade (bloom Lazy->Pinned /
+        // mm pre-seed patterns). Store-direct probes keep working.
+        assert!(!stub_syscache::authoritative());
+        assert_eq!(
+            stub_syscache::rows_amproc(
+                key.amprocfamily,
+                key.amproclefttype,
+                key.amprocrighttype,
+                key.amprocnum
+            ),
+            key.amproc
+        );
+    }
+}
