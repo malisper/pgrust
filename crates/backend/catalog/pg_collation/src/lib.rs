@@ -174,25 +174,135 @@ pub fn CollationCreate<'mcx>(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use super::*;
+    use mcx::PgVec;
+    use types_core::{INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
+    use types_rel::{
+        FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, RELKIND_RELATION,
+        REPLICA_IDENTITY_DEFAULT,
+    };
+    use types_tuple::TupleDescData;
 
     const EXISTING_COLLATION: Oid = 88001;
+    const SHADOW_COLLATION: Oid = 88002;
+    const CURRENT_EXTENSION: Oid = 88100;
     const NSP: Oid = 2200;
     const OWNER: Oid = 10;
+    // DependRelationId (pg_depend.h): the relation getExtensionOfObject scans.
+    const DEPEND_RELATION_ID: Oid = 2608;
+
+    // Just enough of pg_collation for the second duplicate lane to hold the
+    // relation open across its membership check; nothing reads the tupdesc.
+    fn fake_pg_collation_rel(mcx: Mcx<'_>) -> Relation<'_> {
+        let mut relname = NameData::default();
+        relname.namestrcpy("pg_collation");
+        let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+            rd_id: COLLATION_RELATION_ID,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: COLLATION_RELATION_ID, dbId: 5 },
+            },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 11,
+                reltype: 0,
+                relowner: 10,
+                relam: 2,
+                relfilenode: COLLATION_RELATION_ID,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: -1.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: true,
+                relisshared: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                relkind: RELKIND_RELATION,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: true,
+                relreplident: REPLICA_IDENTITY_DEFAULT,
+                relispartition: false,
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            rd_att: Rc::new(TupleDescData {
+                natts: 0,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: 1,
+                constr: None,
+                compact_attrs: PgVec::new_in(mcx),
+                attrs: PgVec::new_in(mcx),
+            }),
+            rd_index: None,
+            rd_opcintype: PgVec::new_in(mcx),
+            rd_opfamily: PgVec::new_in(mcx),
+            rd_indoption: PgVec::new_in(mcx),
+            rd_indcollation: PgVec::new_in(mcx),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false, rd_hasrules: false,
+        };
+        Relation::open(data, None)
+    }
 
     fn install_seams() {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            syscache_seams::lookup_pg_collation_by_name_enc_nsp::set(|name, _enc, nsp| {
-                Ok((name == "dupe" && nsp == NSP).then_some(
-                    syscache_seams::PgCollationNameEncNspRow {
-                        oid: EXISTING_COLLATION,
-                        collprovider: pg_database_seams::COLLPROVIDER_LIBC,
-                    },
-                ))
+            syscache_seams::lookup_pg_collation_by_name_enc_nsp::set(|name, enc, nsp| {
+                let row = |oid| syscache_seams::PgCollationNameEncNspRow {
+                    oid,
+                    collprovider: pg_database_seams::COLLPROVIDER_LIBC,
+                };
+                if name == "dupe" && nsp == NSP {
+                    return Ok(Some(row(EXISTING_COLLATION)));
+                }
+                // Visible only at a real encoding, so a collencoding=-1
+                // request reaches the any-encoding shadow probe's lane.
+                if name == "shadowdupe" && nsp == NSP && enc != -1 {
+                    return Ok(Some(row(SHADOW_COLLATION)));
+                }
+                Ok(None)
+            });
+            // pg_collation opens succeed (the second duplicate lane sits past
+            // table_open); any other open — the first step of
+            // getExtensionOfObject's pg_depend membership scan — stops with a
+            // distinctive error the extension-script tests assert on.
+            relation_seams::relation_open::set(|mcx, oid, _lockmode| {
+                if oid == COLLATION_RELATION_ID {
+                    return Ok(fake_pg_collation_rel(mcx));
+                }
+                Err(PgError::error(format!("test probe: relation {oid} opened")).into())
             });
         });
+    }
+
+    fn with_extension_script<T>(f: impl FnOnce() -> T) -> T {
+        pg_depend::set_creating_extension(true);
+        pg_depend::set_current_extension_object(CURRENT_EXTENSION);
+        let r = f();
+        pg_depend::set_creating_extension(false);
+        pg_depend::set_current_extension_object(InvalidOid);
+        r
     }
 
     fn libc_form() -> CollationForm<'static> {
@@ -229,5 +339,33 @@ mod tests {
         let oid =
             CollationCreate(ctx.mcx(), "dupe", NSP, OWNER, &libc_form(), false, true).unwrap();
         assert_eq!(oid, InvalidOid);
+    }
+
+    // Inside an extension script the IF NOT EXISTS duplicate lane must
+    // consult the pre-existing collation's extension membership (C's
+    // checkMembershipInCurrentExtension) instead of skipping with a NOTICE:
+    // the membership probe scans pg_depend, where the harness stops it.
+    #[test]
+    fn if_not_exists_inside_extension_script_checks_membership() {
+        install_seams();
+        let ctx = mcx::MemoryContext::new("t");
+        let e = with_extension_script(|| {
+            CollationCreate(ctx.mcx(), "dupe", NSP, OWNER, &libc_form(), true, false)
+        })
+        .unwrap_err();
+        assert_eq!(e.message, format!("test probe: relation {DEPEND_RELATION_ID} opened"));
+    }
+
+    // Same gate in the any-encoding duplicate lane (the shadow probe past
+    // table_open).
+    #[test]
+    fn shadow_encoding_lane_inside_extension_script_checks_membership() {
+        install_seams();
+        let ctx = mcx::MemoryContext::new("t");
+        let e = with_extension_script(|| {
+            CollationCreate(ctx.mcx(), "shadowdupe", NSP, OWNER, &libc_form(), true, false)
+        })
+        .unwrap_err();
+        assert_eq!(e.message, format!("test probe: relation {DEPEND_RELATION_ID} opened"));
     }
 }

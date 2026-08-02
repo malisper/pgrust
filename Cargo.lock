@@ -11498,6 +11498,7 @@ dependencies = [
  "mcx",
  "pg_database_seams",
  "pg_depend",
+ "relation_seams",
  "syscache_seams",
  "table",
  "types_core",

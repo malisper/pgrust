@@ -24,3 +24,6 @@ pg_database_seams = { path = "../pg_database_seams" }
 varlena = { path = "../../utils/adt/varlena" }
 mbutils = { path = "../../utils/mb/mbutils" }
 elog = { path = "../../utils/error/elog" }
+
+[dev-dependencies]
+relation_seams = { path = "../../access/common/relation_seams" }
