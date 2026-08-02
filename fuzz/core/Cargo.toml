@@ -194,5 +194,9 @@ adt_tsrank = { path = "../../crates/backend/utils/adt/tsrank" }  # tsrank_diff (
 
 adt_network = { path = "../../crates/backend/utils/adt/network" }  # network_diff (scaffold.py)
 
+# pgcryptofam_diff (p1-pgcryptofam): contrib/pgcrypto crypt()/gen_salt()/armor
+# family vs the verbatim 18.3 C oracle in csrc/pgcryptofam/.
+pgcrypto = { path = "../../crates/contrib/pgcrypto" }
+
 [build-dependencies]
 cc = "1"

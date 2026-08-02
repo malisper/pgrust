@@ -533,3 +533,12 @@ path = "fuzz_targets/network_diff.rs"
 test = false
 doc = false
 bench = false
+
+# pgcryptofam_diff (p1-pgcryptofam): contrib/pgcrypto crypt()/gen_salt()/armor
+# family vs the verbatim 18.3 C oracle (fuzz/core/csrc/pgcryptofam/).
+[[bin]]
+name = "pgcryptofam_diff"
+path = "fuzz_targets/pgcryptofam_diff.rs"
+test = false
+doc = false
+bench = false

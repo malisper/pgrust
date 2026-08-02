@@ -1,8 +1,14 @@
 
 mod cipher;
-mod crypt;
+// VISIBILITY ONLY (lane p1-pgcryptofam, differential-fuzz driver): `crypt`
+// and `pgp` are the cores the pgcryptofam_diff target compares against the
+// verbatim 18.3 C oracle (fuzz/core/src/pgcryptofam_diff.rs). No behavior,
+// no signature and no body changed — only the module declarations widened,
+// exactly as isn/fuzzystrmatch/hstore already expose their cores to their
+// differential drivers.
+pub mod crypt;
 mod hashing;
-mod pgp;
+pub mod pgp;
 
 use datum::Datum;
 use elog::ereport;

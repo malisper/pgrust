@@ -5,8 +5,13 @@
 //! byte-identity holds on the CI cluster.
 #![allow(deprecated)]
 
-mod bcrypt;
-mod cryptdes;
+// VISIBILITY ONLY (lane p1-pgcryptofam): `bcrypt`, `cryptdes` and the
+// `to64` helper below are the file-static C bodies the campaign's
+// EXHAUSTIVE-DOMAIN sweeps enumerate against their verbatim 18.3
+// counterparts (fuzz/core/src/pgcryptofam_sweeps.rs). Declarations widened,
+// nothing else: no signature, body or behavior changed.
+pub mod bcrypt;
+pub mod cryptdes;
 mod desc;
 #[cfg(test)]
 mod divergence_witness;
@@ -265,7 +270,10 @@ pub fn crypt(password: &str, salt: &str) -> Result<String, CryptError> {
     }
 }
 
-fn to64(out: &mut Vec<u8>, mut v: u32, n: usize) {
+/// `_crypt_to64` (crypt-md5.c) — `n` itoa64 chars of `v`, low bits first.
+/// `pub` for the exhaustive-domain sweep (visibility only, see the module
+/// declarations above).
+pub fn to64(out: &mut Vec<u8>, mut v: u32, n: usize) {
     for _ in 0..n {
         out.push(ITOA64[(v & 0x3f) as usize]);
         v >>= 6;

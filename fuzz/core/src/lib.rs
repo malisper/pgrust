@@ -676,3 +676,10 @@ pub use network_diff::network_diff;
 // Declarations + thin wrappers only; the differential driver is a
 // separate step.
 pub mod pgcryptofam;
+
+// pgcryptofam_diff (p1-pgcryptofam): the differential driver over the oracle
+// above, plus the exhaustive-domain sweeps for its file-static helpers.
+pub mod pgcryptofam_diff;
+pub use pgcryptofam_diff::pgcryptofam_diff;
+#[cfg(test)]
+mod pgcryptofam_sweeps;
