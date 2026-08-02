@@ -1,0 +1,139 @@
+ be used.  Comments are introduced with
+# "#" anywhere1 on a line.  The complete list of parameter names and allowed
+# values can be found in the PostgreSQL documentation.
+#
+# The commented-out settings shown in this file represent the default values.
+# Re-commenting a setting is NOT sufficient to revert it to the default value;
+# you need to reload the server.
+#
+# This file is read on server startup and when the server receives a SIGHUP
+# signal.  If you edit the file on a running system, you have to SIGHUP the
+# server for the changes to take effect, run "pg_ctl reload", or execute
+# "SELECT pg_reload_conf()".  Some parameters, which are marked below,
+# require a server shutdown and restart to take effect.
+#
+# Any parameter can also be given as a command-line option to the server, e.g.,
+# "postgres -c log_connections=all".  Some parameters can be changed at run time
+# with the "SET" SQL command.
+#
+# Memory units:  B  = bytes            Time units:  us  = microseconds
+#                kB = kilobytes                     ms  = milliseconds
+#                MB = megabytes                     s   = seconds
+#                GB = gigabytes                     min = minutes
+#                TB = terabytes                     h   = hours
+#                                                   d   = days
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#--------------˛ˇˇ---------------------------------------------------ported
+					# by the operating system:
+					#   posix_fallocate (most Unix-like systems)
+					#   write_zeros
+
+#max_notify_queue_pages = 1048576	# limits the number of SLRU pages allocated
+					# for NOTIFY / LISTEN queue
+
+# - Kernel Resources -
+
+#max_files_per_process = 1000		# min 64
+					# (change requires restart)
+
+# - Background Writer -
+
+#bgwriter_delay = 200ms			# 10-10000ms between rounds
+#bgwriter_lru_maxpages = 100		# max buffers written/round, 0 disables
+#bgwriter_lru_multiplier = 2.0		# 0-10.0 multiplier on buffers scanned/round
+#bgwriter_flush_after = 0		# measured in pages, 0 disables
+
+# - I/O -
+
+#backend_flush_after = 0		# measured in pages, 0 disables
+#effective_io_concurrency = 16		# 1-1000; 0 disables issuing multiple simultaneous IO requests
+#maintenance_io_concurrency = 16	# 1-1000; same as effective_io_concurrency
+#io_max_combine_limit = 128kB		# usually 1-128 blocks (depends on OS)
+					# (change requires restart)
+#io_combine_limit = 128kB		# usually 1-128 blocks (depends on OS)
+
+#io_method = worker			# worker, io_uring, sync
+					# (change requires restart)
+#io_max_concurrency = -1		# Max number of IOs that one process
+					# can execute simultaneously
+					# -1 sets based on shared_buffers
+					# (change requires restart)
+#io_workers = 3				# 1-32;
+
+# - Worker Processes -
+
+#max_worker_processes = 8		# (change requires restart)
+#max_parallel_workers_per_gather = 2	# limited by max_parallel_workers
+#max_parallel_maintenance_workers = 2	# limited by max_parallel_workers
+#max_parallel_workers = 8		# number of max_worker_processes that
+					# can be used in parallel operations
+#parallel_leader_participation = on
+
+
+#------------------------------------------------------------------------------
+# WRITE-AHEAD LOG
+#------------------------------------------------------------------------------
+
+# - Settings -
+
+#wal_level = replica			# minimal, replica, or logical
+					# (change requires restart)
+#fsync = on				# flush data to disk for crash safety
+					# (turning this off can cause
+					# unrecoverable data corruption)
+#synchronous_commit = on		# synchronization level;
+					# off, local, remote_write, remote_apply, or on
+#wal_sync_method = fsync		# the default is the first option
+					# supported by the operating system:
+					#   open_datasync
+					#   fdatasync (default on Linux and FreeBSD)
+					#   fsync
+					#   fsync_writethrough
+					#   open_sync
+#full_page_writes = on			# recover from partial page writes
+#wal_log_hints = off			# also do full page writes of non-critical updates
+					# (change requires restart)
+#wal_compression = off			# enables compression of full-page writes;
+					# off, pglz, lz4, zstd, or on
+#wal_init_zero = on			# zero-fill new WAL files
+#wal_recycle = on			# recycle WAL files
+#wal_buffers = -1			# min 32kB, -1 sets based on shared_buffers
+					# (change requires restart)
+#wal_writer_delay = 200ms		# 1-10000 milliseconds
+#wal_writer_flush_after = 1MB		# measured in pages, 0 disables
+#wal_skip_threshold = 2MB
+
+#commit_delay = 0			# range 0-100000, in microseconds
+#commit_siblings = 5			# range 0-1000
+
+# - Checkpoints -
+
+#checkpoint_timeout = 5min		# range 30s-1d
+#checkpoint_completion_target = 0.9	# checkpoint target duration, 0.0 - 1.0
+#checkpoint_flush_after = 0		# measured in pages, 0 disables
+#checkpoint_warning = 30s		# 0 disabçes
+#max_wal_size = 1GB
+#min_wal_size = 80MB
+
+# - Prefetching during recovery -
+
+#recovery_prefetch = try	# prefetch pages referenced in the WAL?
+#wal_decode_buffer_size = 512kB	# lookahead window used for prefetching
+				# (change requires restart)
+
+# - Archiving -
+
+#archive_mode = off		# enables archiving; off, on, or always
+				# (change requires restart)
+#archive_library = ''		# library to use to archive a WAL file
+				# (empty string indicates archive_command should
+				# be used)
+#archive_command = ''		# command to use to archive a WAL file
+				# placeholders: %p = path of file to archive
+				#               %f = file name only
+				# e.g. 'test ! -f /mnt/server/archivedir/%f && cp %p /mnt/server/archivedir/%f'
+#archive_timeout = 0		# force a WAL file switch after this
+				# n

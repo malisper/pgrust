@@ -100,6 +100,21 @@ fn contains_include(payload: &[u8]) -> bool {
         .any(|w| w.eq_ignore_ascii_case(b"include"))
 }
 
+/// UPSTREAM-UB CARVE (PostgreSQL 18.3 guc-file.l DeescapeQuotedString).
+///
+/// A STRING token whose byte right after the opening quote is NUL makes C's
+/// `len = strlen(s)` 1, so after `s++, len--` the copy loop never runs and
+/// `newStr[--j] = '\0'` with j == 0 writes ONE BYTE BEFORE a palloc(0)
+/// chunk. Confirmed under ASan against this very oracle (heap-buffer-
+/// overflow, WRITE of size 1, "1 bytes before 1-byte region") for the line
+/// `a = '<NUL>x'`. The C result is undefined there, so there is nothing
+/// sound to compare against: skip the exec rather than bank a divergence
+/// against UB. Deliberately over-approximate — any quote immediately
+/// followed by NUL anywhere in the payload skips the input.
+fn touches_upstream_deescape_ub(payload: &[u8]) -> bool {
+    payload.windows(2).any(|w| w == [b'\'', 0])
+}
+
 static INIT: Once = Once::new();
 
 /// The verbatim flex scanner owns plain (non-thread-local) statics
@@ -130,8 +145,8 @@ pub fn guc_file_diff(data: &[u8]) {
         _ => DEBUG1,
     };
 
-    if contains_include(payload) {
-        return; // census domain restriction; see module header
+    if contains_include(payload) || touches_upstream_deescape_ub(payload) {
+        return; // census domain restriction / upstream-UB carve
     }
 
     // ---- C oracle ---- (held until the last accessor read below)

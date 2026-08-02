@@ -317,48 +317,71 @@ pub fn DeescapeQuotedString(s: &str) -> String {
 // C's body, byte-for-byte. `s` is the raw token text as C sees it: NUL
 // truncated (strlen), leading quote present, trailing quote present unless
 // the NUL truncation removed it.
-pub fn deescape_quoted_bytes(s: &[u8]) -> Vec<u8> {
-    let bytes = s;
+//
+// The structure matters and is easy to get subtly wrong: C copies EVERY
+// input byte (including the trailing quote) and then overwrites the LAST
+// OUTPUT byte with NUL. Stopping the loop one input byte early instead is
+// equivalent only while every body element is one byte wide — escapes
+// compress, so "'x\n\t\4" (NUL-truncated, no closing quote) keeps a byte in
+// pgrust that C drops. Found by guc_file_diff.
+//
+// UPSTREAM DEFECT (PostgreSQL 18.3 guc-file.l, unreported): when the
+// NUL-truncated token is just "'", C's len becomes 0, palloc(0) returns a
+// zero-length chunk, the copy loop never runs and `newStr[--j]` with j == 0
+// writes one byte BEFORE the allocation. Confirmed under ASan against the
+// vendored scanner (heap-buffer-overflow, WRITE of size 1, 1 byte before a
+// 1-byte region) for the config line `a = '<NUL>x'`. pgrust cannot
+// reproduce a wild write, so it returns empty there; the differential
+// target carves that input class rather than comparing against UB.
+pub fn deescape_quoted_bytes(bytes: &[u8]) -> Vec<u8> {
     // C only Asserts the surrounding quotes, and Assert() is compiled out in
-    // the release build that is the behavior of record. The assertion is in
-    // fact REACHABLE upstream: a STRING token containing an embedded NUL is
-    // truncated by strlen, leaving a string with no trailing quote, which
-    // this loop then handles exactly as C's does. A debug_assert here would
-    // be a ported-in constraint C does not enforce.
+    // the release build that is the behavior of record; the assertion is in
+    // fact reachable upstream via the NUL truncation above. A debug_assert
+    // here would be a ported-in constraint C does not enforce.
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let s = &bytes[1..]; // C: s++, len--
+    let len = s.len();
+    // C's buffer is NUL-terminated, so s[len] reads as 0 and the scans below
+    // stop there exactly as they do in C.
+    let at = |i: usize| -> u8 { if i < len { s[i] } else { 0 } };
 
-    let mut out = Vec::with_capacity(bytes.len().saturating_sub(2));
-    let mut i = 1;
-    while i + 1 < bytes.len() {
-        match bytes[i] {
-            b'\\' if i + 1 < bytes.len() => {
-                i += 1;
-                match bytes[i] {
-                    b'b' => out.push(0x08),
-                    b'f' => out.push(0x0c),
-                    b'n' => out.push(b'\n'),
-                    b'r' => out.push(b'\r'),
-                    b't' => out.push(b'\t'),
-                    b'0'..=b'7' => {
-                        let mut oct = 0u8;
-                        let mut k = 0;
-                        while i + k < bytes.len() && k < 3 && matches!(bytes[i + k], b'0'..=b'7') {
-                            oct = (oct << 3).wrapping_add(bytes[i + k] - b'0');
-                            k += 1;
-                        }
-                        out.push(oct);
-                        i += k - 1;
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if at(i) == b'\\' {
+            i += 1;
+            match at(i) {
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0c),
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'0'..=b'7' => {
+                    let mut oct = 0u8;
+                    let mut k = 0;
+                    while k < 3 && matches!(at(i + k), b'0'..=b'7') {
+                        oct = (oct << 3).wrapping_add(at(i + k) - b'0');
+                        k += 1;
                     }
-                    other => out.push(other),
+                    out.push(oct);
+                    i = i + k - 1;
                 }
+                other => out.push(other),
             }
-            b'\'' if i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
-                i += 1;
-                out.push(b'\'');
-            }
-            other => out.push(other),
+        } else if at(i) == b'\'' && at(i + 1) == b'\'' {
+            i += 1;
+            out.push(at(i));
+        } else {
+            out.push(at(i));
         }
         i += 1;
     }
+
+    // C: newStr[--j] = '\0' — the ending quote was copied, so drop it.
+    // j == 0 is the upstream underflow carved above; pgrust yields empty.
+    out.pop();
     out
 }
 
