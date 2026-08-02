@@ -18,13 +18,22 @@ pub struct UdeescapeError {
     pub hint: Option<&'static str>,
 }
 
-/// Either one of str_udeescape's own escape errors (the caller renders the
-/// cursor) or a hard error out of pg_unicode_to_server, which C raises
-/// as-is, with no cursor.
+/// Either one of str_udeescape's own escape errors or a hard error out of
+/// pg_unicode_to_server (0A000). C wraps each escape's processing —
+/// including the pg_unicode_to_server calls — in
+/// setup_scanner_errposition_callback(.., in - str + position + 3)
+/// (parser.c: "Any errors reported while processing this escape sequence
+/// will have an error cursor pointing at the escape"), so both kinds carry
+/// the escape's offset and the caller renders the cursor.
 #[derive(Debug)]
 pub enum UdeescapeFailure {
     Escape(UdeescapeError),
-    Hard(Box<PgError>),
+    Hard {
+        error: Box<PgError>,
+        /// Byte offset of the escape whose conversion failed
+        /// (C's `in - str + position + 3`).
+        location: i32,
+    },
 }
 
 impl From<UdeescapeError> for UdeescapeFailure {
@@ -61,13 +70,15 @@ pub fn check_uescapechar(escape: u8) -> bool {
 
 // pg_unicode_to_server (mbutils.c) with the ASCII / UTF-8-server fast paths
 // inlined; other server encodings run the mbutils conversion-proc lane,
-// whose errors C raises as-is (untranslatable character / missing default
-// conversion), with no cursor.
+// whose errors (untranslatable character / missing default conversion) C
+// reports with an error cursor at the escape via str_udeescape's
+// setup_scanner_errposition_callback; `escpos` threads that offset.
 fn pg_unicode_to_server<'mcx>(
     mcx: Mcx<'mcx>,
     c: pg_wchar,
     out: &mut PgVec<'mcx, u8>,
     server_encoding: pg_enc,
+    escpos: i32,
 ) -> Result<(), UdeescapeFailure> {
     if c > 0x7F && server_encoding != PG_UTF8 {
         // The encoding parameter is a port-ism (C reads GetDatabaseEncoding
@@ -78,7 +89,8 @@ fn pg_unicode_to_server<'mcx>(
             mbutils::GetDatabaseEncoding(),
             "str_udeescape encoding drifted from the database encoding"
         );
-        let bytes = mbutils::pg_unicode_to_server(mcx, c).map_err(UdeescapeFailure::Hard)?;
+        let bytes = mbutils::pg_unicode_to_server(mcx, c)
+            .map_err(|error| UdeescapeFailure::Hard { error, location: escpos })?;
         mcx::vec_append_bytes(out, &bytes).unwrap_or_else(|e| panic!("{}", e.message()));
         return Ok(());
     }
@@ -186,5 +198,5 @@ fn emit<'mcx>(
     } else {
         unicode
     };
-    pg_unicode_to_server(mcx, cp, out, server_encoding)
+    pg_unicode_to_server(mcx, cp, out, server_encoding, escpos)
 }

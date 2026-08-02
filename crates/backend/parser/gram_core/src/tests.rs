@@ -2730,3 +2730,30 @@ fn regress_error_tail_holdchar_spans_consumed_lookahead() {
     let e = parse_err("CREATE SEQUENCE s10 WITH 1;");
     assert_eq!(e.message(), "syntax error at or near \"WITH\"");
 }
+
+// C str_udeescape wraps each escape's processing in
+// setup_scanner_errposition_callback (parser.c: "Any errors reported while
+// processing this escape sequence will have an error cursor pointing at the
+// escape"), so hard pg_unicode_to_server errors (0A000, reachable only on
+// non-UTF8 server encodings) carry a cursor exactly like the function's own
+// escape errors. raw_parser pins the scanner to PG_UTF8, so the mapping is
+// exercised directly.
+#[test]
+fn udeescape_hard_failures_carry_an_error_cursor() {
+    use parser_small1::udeescape::UdeescapeFailure;
+
+    let mcx = test_ctx().mcx();
+    let sql = "SELECT U&'\\00e9'";
+    let scanbuf = mcx::slice_borrow_in(mcx, sql.as_bytes()).unwrap();
+    let parser = crate::parse::Parser::new(mcx, scanbuf, 0).unwrap();
+    let hard = Box::new(
+        types_error::PgError::error("conversion between UTF8 and LATIN1 is not supported")
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    );
+    // Escape at body offset 0 of the token at byte 7: location 0 + 7 + 3,
+    // rendered as a 1-based character position.
+    let err = parser.udeescape_failure(UdeescapeFailure::Hard { error: hard, location: 10 });
+    assert_eq!(err.message(), "conversion between UTF8 and LATIN1 is not supported");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.cursor_position(), Some(11));
+}

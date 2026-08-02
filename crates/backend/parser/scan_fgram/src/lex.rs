@@ -632,8 +632,9 @@ impl<'mcx> Scanner<'mcx> {
 
     // addunicode (scan.l:1408) with pg_unicode_to_server's ASCII / UTF-8
     // fast paths inlined; other server encodings run the mbutils
-    // conversion-proc lane. C expects pg_unicode_to_server to complain about
-    // any unconvertible code point, so its errors propagate uncursored.
+    // conversion-proc lane. C wraps the conversion in
+    // setup_scanner_errposition_callback(&scbstate, yyscanner, *(yylloc)),
+    // so its errors carry an error cursor pointing at the escape.
     fn addunicode(&mut self, c: u32) -> PgResult<()> {
         if !wchar::is_valid_unicode_codepoint(c) {
             return Err(self.yyerr("invalid Unicode escape value"));
@@ -655,7 +656,9 @@ impl<'mcx> Scanner<'mcx> {
                 mbutils::GetDatabaseEncoding(),
                 "scanner encoding drifted from the database encoding"
             );
-            let bytes = mbutils::pg_unicode_to_server(self.mcx, c)?;
+            let bytes = mbutils::pg_unicode_to_server(self.mcx, c).map_err(|e| {
+                Box::new((*e).with_cursor_position(self.scanner_errposition(self.yylloc)))
+            })?;
             self.addlit(&bytes)?;
         }
         self.saw_non_ascii = true;

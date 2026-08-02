@@ -311,6 +311,10 @@ fn addunicode_non_utf8_server_runs_the_conversion_lane() {
         }
     };
     assert_eq!(err.message(), "conversion between UTF8 and LATIN1 is not supported");
+    // C addunicode wraps pg_unicode_to_server in
+    // setup_scanner_errposition_callback(&scbstate, yyscanner, *(yylloc)):
+    // the cursor points at the escape (byte 2, 1-based character 3).
+    assert_eq!(err.cursor_position(), Some(3));
 
     mbutils::SetDatabaseEncoding(saved).unwrap();
 }

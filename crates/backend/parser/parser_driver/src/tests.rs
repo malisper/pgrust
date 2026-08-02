@@ -8,7 +8,9 @@ fn de(s: &[u8], escape: u8) -> Result<alloc::vec::Vec<u8>, UdeescapeError> {
     str_udeescape(ctx.mcx(), s, escape, 0, PG_UTF8).map(|v| v[..].to_vec()).map_err(
         |e| match e {
             UdeescapeFailure::Escape(e) => e,
-            UdeescapeFailure::Hard(e) => panic!("unexpected hard failure: {}", e.message()),
+            UdeescapeFailure::Hard { error, .. } => {
+                panic!("unexpected hard failure: {}", error.message())
+            }
         },
     )
 }

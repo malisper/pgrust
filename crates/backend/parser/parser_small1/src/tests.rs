@@ -601,9 +601,19 @@ fn udeescape_non_utf8_server_runs_the_conversion_lane() {
     assert_eq!(&*ascii, b"A");
 
     match str_udeescape(ctx.mcx(), br"\00e9", b'\\', 0, PG_LATIN1) {
-        Err(UdeescapeFailure::Hard(e)) => {
-            assert_eq!(e.message(), "conversion between UTF8 and LATIN1 is not supported");
+        Err(UdeescapeFailure::Hard { error, location }) => {
+            assert_eq!(error.message(), "conversion between UTF8 and LATIN1 is not supported");
+            // C wraps the escape in setup_scanner_errposition_callback at
+            // in - str + position + 3: the escape starts the string here.
+            assert_eq!(location, 3);
         }
+        other => panic!("expected the conversion-proc lane to report: {other:?}"),
+    }
+
+    // The cursor offset tracks the escape's position within the body plus
+    // the token position (C's `in - str + position + 3`).
+    match str_udeescape(ctx.mcx(), br"ab\00e9", b'\\', 10, PG_LATIN1) {
+        Err(UdeescapeFailure::Hard { location, .. }) => assert_eq!(location, 2 + 10 + 3),
         other => panic!("expected the conversion-proc lane to report: {other:?}"),
     }
 
