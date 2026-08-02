@@ -560,3 +560,66 @@ fn negative_typmod_relabels_var_to_unspecified_typmod() {
     assert_eq!(r.resultcollid, 100);
     assert_eq!(r.relabelformat, CoercionForm::COERCE_EXPLICIT_CAST);
 }
+
+#[test]
+fn expression_returns_set_walks_tags_beyond_the_old_closed_set() {
+    // expression_returns_set_walker recurses via expression_tree_walker in
+    // C; arms the old closed set lacked must recurse (or answer false for
+    // the no-subnode primitives) instead of panicking.
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let srf = Node::mk(
+        mcx,
+        types_nodes::FuncExpr {
+            funcid: 1069,
+            funcresulttype: INT4OID,
+            funcretset: true,
+            funcvariadic: false,
+            funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+            funccollid: InvalidOid,
+            inputcollid: InvalidOid,
+            args: types_nodes::NodeList::nil(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let na = Node::mk(
+        mcx,
+        types_nodes::primnodes::NamedArgExpr {
+            arg: Some(srf),
+            name: Some("x"),
+            argnumber: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert!(crate::expression_returns_set(na));
+
+    let te = Node::mk(
+        mcx,
+        types_nodes::TargetEntry {
+            expr: srf,
+            resno: 1,
+            resname: None,
+            ressortgroupref: 0,
+            resorigtbl: 0,
+            resorigcol: 0,
+            resjunk: false,
+        },
+    )
+    .unwrap();
+    assert!(crate::expression_returns_set(te));
+
+    // No-subnode primitives are false, per expression_tree_walker.
+    let std = Node::mk(
+        mcx,
+        types_nodes::primnodes::SetToDefault {
+            typeId: INT4OID,
+            typeMod: -1,
+            collation: InvalidOid,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert!(!crate::expression_returns_set(std));
+}
