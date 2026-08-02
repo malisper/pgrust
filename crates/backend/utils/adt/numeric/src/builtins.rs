@@ -870,7 +870,20 @@ unsafe fn int8_transarray_at(fcinfo: &Fcinfo, i: usize, copy: bool) -> PgResult<
             core::ptr::copy_nonoverlapping(p.add(1), dst.add(4), payload_len);
             dst
         } else if !::types_tuple::varatt::varatt_is_4b_u(p) {
-            panic!("int8 transarray: toasted array datum (detoast unported)");
+            // C pg_detoast_datum: an external or compressed image expands
+            // into CurrentMemoryContext (the result mcx here); re-copied
+            // 8-aligned so the int8 slots read like C's MAXALIGNed palloc
+            // image (PgVec<u8> carries no alignment guarantee).
+            let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+            let mcx = fcinfo.result_mcx();
+            let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+            let layout = core::alloc::Layout::from_size_align(flat.len(), 8)
+                .expect("transarray layout");
+            let dst: core::ptr::NonNull<u8> = ::mcx::Allocator::allocate(&mcx, layout)
+                .map_err(|_| mcx.oom(layout.size()))?
+                .cast();
+            core::ptr::copy_nonoverlapping(flat.as_ptr(), dst.as_ptr(), flat.len());
+            dst.as_ptr()
         } else if copy {
             let img = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_4b(p));
             byref_result(fcinfo.result_mcx(), img)?.as_usize() as *mut u8

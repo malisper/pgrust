@@ -1544,9 +1544,9 @@ mod wrap_parity {
 
     // A 1-D, no-nulls _int8[2] {count,sum} image (Int8TransTypeData lane).
     #[repr(C, align(8))]
-    struct Int8TransArray([u8; 40]);
+    pub(super) struct Int8TransArray(pub(super) [u8; 40]);
 
-    fn transarray(count: i64, sum: i64) -> Int8TransArray {
+    pub(super) fn transarray(count: i64, sum: i64) -> Int8TransArray {
         let mut a = Int8TransArray([0u8; 40]);
         let p = a.0.as_mut_ptr();
         // SAFETY: in-bounds writes into the 40-byte backing array.
@@ -1563,7 +1563,7 @@ mod wrap_parity {
         a
     }
 
-    fn read2(d: Datum) -> [i64; 2] {
+    pub(super) fn read2(d: Datum) -> [i64; 2] {
         let p = d.as_usize() as *const u8;
         // SAFETY: result is a live validated int8[2] transarray image.
         unsafe { [p.add(24).cast::<i64>().read(), p.add(32).cast::<i64>().read()] }
@@ -1666,5 +1666,77 @@ mod wrap_parity {
         assert_eq!(s1.n, 2);
         assert_eq!(s1.sum_x, i128::MIN);
         assert_eq!(s1.sum_x2, i128::MIN);
+    }
+}
+
+// C PG_GETARG_ARRAYTYPE_P detoasts: a compressed or external transarray
+// image (e.g. off the parallel tuple queue) expands via detoast before the
+// {count,sum} slots are touched. Pre-fix this boundary panicked.
+mod transarray_detoast {
+    use ::datum::Datum;
+    use ::mcx::MemoryContext;
+    use ::types_fmgr::LocalFcinfo;
+
+    use super::wrap_parity::{read2, transarray};
+    use crate::builtins::*;
+
+    fn install_detoast_mock() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if !::detoast_seams::detoast_attr::is_installed() {
+                // The rig's images are [4B_C header][plain 4B_U image]; the
+                // mock hands back the embedded plain image, standing in for
+                // the real decompression engine (tested in its own crate).
+                ::detoast_seams::detoast_attr::set(|mcx, image| {
+                    assert_eq!(image[0] & 0x03, 0x02, "4B_C compressed header");
+                    let mut v = ::mcx::vec_with_capacity_in(mcx, image.len() - 4)?;
+                    ::mcx::vec_append_bytes(&mut v, &image[4..])?;
+                    Ok(v)
+                });
+            }
+        });
+    }
+
+    // [u32 4B_C header][plain transarray image] — varsize_any covers the
+    // whole compressed image, as a real inline-compressed varlena would.
+    #[repr(C, align(8))]
+    struct Compressed([u8; 44]);
+
+    fn compressed_transarray(count: i64, sum: i64) -> Compressed {
+        let plain = transarray(count, sum);
+        let mut c = Compressed([0u8; 44]);
+        c.0[0..4].copy_from_slice(&(((44u32) << 2) | 0x02).to_ne_bytes());
+        c.0[4..44].copy_from_slice(&plain.0);
+        c
+    }
+
+    #[test]
+    fn int_avg_accum_detoasts_compressed_transarray() {
+        install_detoast_mock();
+        let ctx = MemoryContext::new_bump("t");
+        let img = compressed_transarray(4, 100);
+        let mut fci = LocalFcinfo::<2>::fresh(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(img.0.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_i32(23));
+        let d = fc_int4_avg_accum(None, &mut fci).unwrap();
+        assert_eq!(read2(d), [5, 123]);
+        // The result is the fresh detoasted copy, not the compressed input.
+        assert_ne!(d.as_usize(), img.0.as_ptr() as usize);
+    }
+
+    #[test]
+    fn int_avg_accum_inv_detoasts_compressed_transarray() {
+        install_detoast_mock();
+        let ctx = MemoryContext::new_bump("t");
+        let img = compressed_transarray(5, 123);
+        let mut fci = LocalFcinfo::<2>::fresh(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(img.0.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_i16(23));
+        let d = fc_int2_avg_accum_inv(None, &mut fci).unwrap();
+        assert_eq!(read2(d), [4, 100]);
     }
 }
