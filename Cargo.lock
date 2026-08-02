@@ -6180,6 +6180,7 @@ dependencies = [
  "parser_small1",
  "pg_depend",
  "pg_shdepend",
+ "pglz",
  "superuser",
  "table",
  "types_core",

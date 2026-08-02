@@ -32,17 +32,14 @@ impl<'mcx> OptionPair<'mcx> {
     }
 }
 
-/// Borrow the flat varlena image behind a text[]/text datum. Catalog option
-/// arrays never toast in this port; a toasted image is loud, not misread.
+/// Borrow the varlena image behind a text[]/text datum in any header form
+/// (inline, compressed, or external); the detoast that follows expands it,
+/// as C's pg_detoast_datum does.
 pub(crate) fn varlena_image<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
-    // SAFETY: caller passes a datum into a held catalog tuple or an mcx image.
-    unsafe {
-        if !types_tuple::varatt::varatt_is_4b_u(p) && !types_tuple::varatt::varatt_is_1b(p) {
-            panic!("unported: foreigncmds toasted/compressed options varlena");
-        }
-        core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
-    }
+    // SAFETY: caller passes a datum into a held catalog tuple or an mcx
+    // image; varsize_any covers every header form incl. toast pointers.
+    unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) }
 }
 
 pub(crate) fn text_body(image: &[u8]) -> &[u8] {
@@ -72,7 +69,9 @@ pub fn untransform_options<'mcx>(
         arrayfuncs::construct::deconstruct_array_builtin(mcx, &image, TEXTOID, false)?;
     debug_assert!(!nulls.iter().any(|&n| n));
     for elem in elems.iter() {
-        let body = text_body(varlena_image(*elem));
+        // TextDatumGetCString: per-element detoast as C's text_to_cstring.
+        let elem_img = detoast::detoast_attr(mcx, varlena_image(*elem))?;
+        let body = text_body(&elem_img);
         let s = mcx::slice_borrow_in(mcx, body)?;
         // SAFETY: catalog text in server encoding; written by this module.
         let s = unsafe { core::str::from_utf8_unchecked(s) };
@@ -104,7 +103,9 @@ pub fn pg_options_to_table(
         arrayfuncs::construct::deconstruct_array_builtin(mcx, &image, TEXTOID, false)?;
     debug_assert!(!elem_nulls.iter().any(|&n| n));
     for elem in elems.iter() {
-        let body = text_body(varlena_image(*elem));
+        // TextDatumGetCString: per-element detoast as C's text_to_cstring.
+        let elem_img = detoast::detoast_attr(mcx, varlena_image(*elem))?;
+        let body = text_body(&elem_img);
         let mut values = [Datum::null(); 2];
         let mut nulls = [false; 2];
         match body.iter().position(|&b| b == b'=') {
@@ -334,4 +335,48 @@ pub fn postgresql_fdw_validator<'mcx>(
         return Err(err.into_error().into());
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::MaybeUninit;
+
+    fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> Datum {
+        let t = varlena::cstring_to_text(mcx, s.as_bytes()).unwrap();
+        let d = Datum::from_usize(t.as_bytes().as_ptr() as usize);
+        core::mem::forget(t);
+        d
+    }
+
+    // untransformRelOptions over a pglz-compressed options array: C's
+    // DatumGetArrayTypeP detoasts; this image form previously panicked.
+    #[test]
+    fn untransform_options_detoasts_compressed_arrays() {
+        let ctx = mcx::MemoryContext::new("foreigncmds-test");
+        let mcx = ctx.mcx();
+        let elems = [text_datum(mcx, "host=localhost"), text_datum(mcx, "checked")];
+        // text: elmlen -1, byval false, align 'i' (construct_array_builtin).
+        let plain = arrayfuncs::construct_array(mcx, &elems, TEXTOID, -1, false, b'i').unwrap();
+
+        // Compress the array payload into a 4B_C varlena (VARATT_4B_C).
+        let payload = &plain[4..];
+        let mut dest = vec![MaybeUninit::<u8>::uninit(); pglz::pglz_max_output(payload.len())];
+        let n = pglz::pglz_compress_into(payload, &mut dest, &pglz::PGLZ_STRATEGY_ALWAYS)
+            .expect("array payload is compressible");
+        let total = 8 + n;
+        let mut image: Vec<u8> = Vec::with_capacity(total);
+        image.extend_from_slice(&(((total as u32) << 2) | 0x02).to_ne_bytes());
+        image.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+        image.extend(dest[..n].iter().map(|b| unsafe { b.assume_init() }));
+
+        let d = Datum::from_usize(image.as_ptr() as usize);
+        let pairs = untransform_options(mcx, Some(d)).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].name, "host");
+        assert_eq!(pairs[0].value, Some("localhost"));
+        // C: text without '=' becomes a DefElem with a NULL value.
+        assert_eq!(pairs[1].name, "checked");
+        assert_eq!(pairs[1].value, None);
+    }
 }
