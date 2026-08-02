@@ -32,3 +32,25 @@ fn diff_ms_rounds_up_and_clamps() {
     assert_eq!(diff_ms(0, 1000), 1);
     assert_eq!(diff_ms(0, 10_000_000), 10_000);
 }
+
+// GetLatestLSN's recovery arm: C takes max(GetWalRcvFlushRecPtr, replay) —
+// flushed-but-unreplayed WAL on a streaming standby advances the summarizer.
+#[test]
+fn latest_lsn_prefers_further_ahead_flush() {
+    // Flush ahead of replay: flush wins, with the flush TLI.
+    assert_eq!(
+        latest_lsn_from_flush_and_replay((0x2000, 2), (0x1000, 1)),
+        (0x2000, 2)
+    );
+    // Replay ahead (or equal): replay wins, with the replay TLI.
+    assert_eq!(
+        latest_lsn_from_flush_and_replay((0x1000, 2), (0x3000, 1)),
+        (0x3000, 1)
+    );
+    assert_eq!(
+        latest_lsn_from_flush_and_replay((0x1000, 2), (0x1000, 1)),
+        (0x1000, 1)
+    );
+    // No walreceiver: invalid flush LSN reduces to the replay position.
+    assert_eq!(latest_lsn_from_flush_and_replay((0, 0), (0x1000, 1)), (0x1000, 1));
+}

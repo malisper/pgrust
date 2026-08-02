@@ -19928,6 +19928,7 @@ dependencies = [
  "types_startup",
  "types_storage",
  "waitevent_seams",
+ "walreceiverfuncs_seams",
  "walsummarizer_seams",
  "xact",
  "xlogreader",

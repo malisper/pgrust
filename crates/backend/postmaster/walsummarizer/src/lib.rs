@@ -1,8 +1,7 @@
 //! walsummarizer.c: the WAL summarizer as a postmaster child thread (pgarch
 //! precedent), plus the walsummary.c file helpers it consumes (GetWalSummaries,
 //! RemoveWalSummaryIfOlderThan, WriteWalSummary; backend-backup-walsummary
-//! stays non-core). GetWalRcvFlushRecPtr is InvalidXLogRecPtr (walreceiver
-//! unported): C's max(flush, replay) reduces to the replay LSN.
+//! stays non-core).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -560,9 +559,36 @@ fn GetLatestLSN() -> (XLogRecPtr, TimeLineID) {
             return (replay_lsn, insert_tli);
         }
 
-        // Walreceiver unported: its flush LSN is invalid, so replay wins.
-        let (replay_lsn, replay_tli) = xlogrecovery::GetXLogReplayRecPtr();
-        (replay_lsn, replay_tli)
+        // What we really want to know is how much WAL has been flushed to
+        // disk, but the only flush position available is the one provided by
+        // the walreceiver, which may not be running, because this could be
+        // crash recovery or recovery via restore_command. So use either the
+        // WAL receiver's flush position or the replay position, whichever is
+        // further ahead, on the theory that if the WAL has been replayed then
+        // it must also have been flushed to disk.
+        let flush = if walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::is_installed() {
+            let (flush_lsn, _latest_chunk_start, flush_tli) =
+                walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::call();
+            (flush_lsn, flush_tli)
+        } else {
+            // No walreceiver in this boot: flush LSN is invalid, replay wins.
+            (InvalidXLogRecPtr, 0)
+        };
+        let replay = xlogrecovery::GetXLogReplayRecPtr();
+        latest_lsn_from_flush_and_replay(flush, replay)
+    }
+}
+
+// GetLatestLSN's recovery-arm tail (walsummarizer.c:842): the further-ahead
+// of the walreceiver flush position and the replay position.
+fn latest_lsn_from_flush_and_replay(
+    flush: (XLogRecPtr, TimeLineID),
+    replay: (XLogRecPtr, TimeLineID),
+) -> (XLogRecPtr, TimeLineID) {
+    if flush.0 > replay.0 {
+        flush
+    } else {
+        replay
     }
 }
 
