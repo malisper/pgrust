@@ -74,12 +74,6 @@ const XLOG_STANDBY_LOCK: u8 = 0x00;
 const XLOG_RUNNING_XACTS: u8 = 0x10;
 const XLOG_INVALIDATIONS: u8 = 0x20;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported callee reached from decode.c: {what}")
-}
-
 // decode.c:175: the catchable ERROR raised when a standby decoding WAL sees
 // the primary's wal_level drop below logical.
 #[cold]
