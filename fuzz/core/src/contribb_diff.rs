@@ -478,6 +478,22 @@ fn arm_seg_out_on(img: &[u8; 12], ctx: &dyn std::fmt::Debug) {
     assert_eq!(rs, cs, "seg_out text diverged ctx={ctx:?}");
 }
 
+/// Canonicalize every NaN coordinate of a cube varlena image (8-byte
+/// little-endian f64s from offset 8) to the positive quiet-NaN pattern
+/// 0x7FF8000000000000. Two-sided — applied to BOTH images at the
+/// cube_enlarge compare; see the NAN-PAYLOAD CARVE comment there.
+fn canon_cube_nan(img: &[u8]) -> Vec<u8> {
+    let mut out = img.to_vec();
+    if out.len() > 8 {
+        for c in out[8..].chunks_exact_mut(8) {
+            if f64::from_bits(u64::from_le_bytes(c.try_into().unwrap())).is_nan() {
+                c.copy_from_slice(&0x7FF8_0000_0000_0000u64.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
 /// Rewrite every "-nan" to "nan" (Darwin-host canonicalization; see the
 /// carve comment in `arm_seg_out_on`).
 #[cfg(target_os = "macos")]
@@ -864,7 +880,23 @@ fn arm_cube_unops(r: &mut Rdr) {
         }
         let d = *fc.result.as_ref().unwrap();
         match op {
-            7 | 10 | 11 => assert_eq!(
+            // NAN-PAYLOAD CARVE (two-sided): cube_enlarge does coordinate
+            // ARITHMETIC (x - r / x + r / midpoint). With a NaN operand,
+            // IEEE 754 leaves the result NaN's payload and sign unspecified,
+            // and gcc/rustc legally commute the operands, so the two sides
+            // return different NaN BIT PATTERNS for the same NaN-class value
+            // (CI cluster leg pgrust-fuzz-campaign-1785628325-413a-3336: 6,534
+            // unique inputs, every one "cube_enlarge image diverged", every
+            // differing coordinate NaN on both sides). No cube operation
+            // reads NaN payloads, so canonicalize every NaN coordinate in
+            // BOTH images before the byte compare; NaN-vs-value and
+            // value-vs-value differences still diverge.
+            7 => assert_eq!(
+                canon_cube_nan(datum_bytes(d, imgoutlen as usize)),
+                canon_cube_nan(&imgout[..imgoutlen as usize]),
+                "{name} image diverged {ctx:?}"
+            ),
+            10 | 11 => assert_eq!(
                 datum_bytes(d, imgoutlen as usize),
                 &imgout[..imgoutlen as usize],
                 "{name} image diverged {ctx:?}"
@@ -1092,6 +1124,46 @@ mod tests {
         run(1, &body);
         body[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // upper -NaN too
         run(1, &body);
+    }
+
+    #[test]
+    fn cube_enlarge_nan_payload_canon() {
+        // CI cluster regression (job pgrust-fuzz-campaign-1785628325-413a-3336,
+        // 6,534 unique inputs, all one shape): cube_enlarge with NaN r or
+        // NaN coordinates returns NaN coordinates whose payload/sign bits
+        // are operand-order dependent (gcc keeps the coordinate operand's
+        // payload, rustc/LLVM keeps r's). canon_cube_nan must equalize
+        // payload-only NaN differences and NOTHING else.
+        fn img(coords: &[u64]) -> Vec<u8> {
+            let mut v = vec![0u8; 8]; // varlena + dim header, irrelevant here
+            for c in coords {
+                v.extend_from_slice(&c.to_le_bytes());
+            }
+            v
+        }
+        let a = img(&[0xFFFF_FFFF_FFFF_FFFF, 1.5f64.to_bits()]); // -NaN(payload)
+        let b = img(&[0xFFFF_FFFF_002D_6530, 1.5f64.to_bits()]); // NaN(ascii payload)
+        let c = img(&[0x7FF8_0000_0000_0000, 1.5f64.to_bits()]); // canonical qNaN
+        assert_eq!(canon_cube_nan(&a), canon_cube_nan(&b));
+        assert_eq!(canon_cube_nan(&a), canon_cube_nan(&c));
+        // negative controls: the carve must not mask value differences.
+        let d = img(&[2.0f64.to_bits(), 1.5f64.to_bits()]); // NaN vs value
+        assert_ne!(canon_cube_nan(&a), canon_cube_nan(&d));
+        let e = img(&[0xFFFF_FFFF_FFFF_FFFF, 2.5f64.to_bits()]); // other coord
+        assert_ne!(canon_cube_nan(&a), canon_cube_nan(&e));
+        // non-NaN images pass through byte-identical.
+        assert_eq!(canon_cube_nan(&d), d);
+        // CI cluster crash shape end-to-end: cube_enlarge(1-dim point cube with a
+        // payload-NaN coordinate, r = -NaN, n = -1) must agree under the
+        // carve (arm_cube_unops layout: dim, point, coords, n, f1, f2).
+        let mut body = Vec::new();
+        body.push(1); // dim = 1
+        body.push(1); // point
+        body.extend_from_slice(&0xFFFF_FFFF_002D_6530u64.to_le_bytes()); // coord = NaN
+        body.extend_from_slice(&(-1i32).to_le_bytes()); // n = -1
+        body.extend_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes()); // r = -NaN
+        body.extend_from_slice(&0u64.to_le_bytes()); // f2
+        run(8, &body);
     }
 
     #[test]
