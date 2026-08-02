@@ -73,3 +73,45 @@ fn deserialize_round_trips() {
     assert!(deserialize_deflist(mcx, b"k ! v").is_err());
     assert!(deserialize_deflist(mcx, b"k = 'unterminated").is_err());
 }
+
+// ALTER TSDICTIONARY/TSCONFIGURATION "must be owner" gate: superuser bypass
+// (object_ownercheck's superuser_arg fast path) and the C error shape for
+// the non-owner arm (aclcheck_error ACLCHECK_NOT_OWNER, aclchk.c).
+#[test]
+fn ts_ownercheck_superuser_bypass_and_owner_error_shape() {
+    use types_nodes::parsenodes::ObjectType;
+    // Bootstrap superuser + !IsUnderPostmaster: superuser.c's escape hatch
+    // answers without catalog access.
+    miscinit::SetUserIdAndSecContext(types_core::BOOTSTRAP_SUPERUSERID, 0);
+    crate::ownercheck(
+        crate::TSDictionaryRelationId,
+        3765,
+        ObjectType::OBJECT_TSDICTIONARY,
+        "english_stem",
+    )
+    .unwrap();
+    crate::ownercheck(
+        crate::TSConfigRelationId,
+        3748,
+        ObjectType::OBJECT_TSCONFIGURATION,
+        "english",
+    )
+    .unwrap();
+
+    // Non-owner arm raises C's message/sqlstate.
+    let e = aclchk::aclcheck_error(
+        aclchk::ACLCHECK_NOT_OWNER,
+        ObjectType::OBJECT_TSDICTIONARY,
+        "english_stem",
+    )
+    .unwrap_err();
+    assert_eq!(e.message(), "must be owner of text search dictionary english_stem");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+    let e = aclchk::aclcheck_error(
+        aclchk::ACLCHECK_NOT_OWNER,
+        ObjectType::OBJECT_TSCONFIGURATION,
+        "english",
+    )
+    .unwrap_err();
+    assert_eq!(e.message(), "must be owner of text search configuration english");
+}

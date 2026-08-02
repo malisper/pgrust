@@ -221,17 +221,10 @@ fn check_create_in_namespace(mcx: Mcx<'_>, namespaceoid: Oid) -> PgResult<()> {
     Ok(())
 }
 
-// object_ownercheck (aclchk.c): superuser fast path, per typecmds precedent.
-fn ownercheck_or_loud(name: &str) -> PgResult<()> {
-    if !superuser::superuser()? {
-        // unported: object_ownercheck for non-superusers (aclchk lane)
-        let _ = name;
-        return Err(Box::new(
-            types_error::PgError::error(
-                "altering text search objects as a non-superuser is not supported yet",
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+// "must be owner" gate: object_ownercheck (aclchk.c) + aclcheck_error.
+fn ownercheck(classid: Oid, objid: Oid, objtype: ObjectType, name: &str) -> PgResult<()> {
+    if !aclchk::object_ownercheck(classid, objid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, objtype, name)?;
     }
     Ok(())
 }
@@ -695,7 +688,13 @@ pub fn AlterTSDictionary<'mcx>(
             "cache lookup failed for text search dictionary {dictId}"
         ))));
     };
-    ownercheck_or_loud(&name_list_to_string(&stmt.dictname))?;
+    // must be owner
+    ownercheck(
+        TSDictionaryRelationId,
+        dictId,
+        ObjectType::OBJECT_TSDICTIONARY,
+        &name_list_to_string(&stmt.dictname),
+    )?;
 
     let (opt, isnull) = SysCacheGetAttr(TSDICTOID, &tup, Anum_pg_ts_dict_dictinitoption as i32)?;
     let mut dictoptions: PgVec<'mcx, DefItem<'mcx>> = if isnull {
@@ -1163,7 +1162,13 @@ pub fn AlterTSConfiguration<'mcx>(
             .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
         ));
     }
-    ownercheck_or_loud(&name_list_to_string(&stmt.cfgname))?;
+    // must be owner
+    ownercheck(
+        TSConfigRelationId,
+        cfgId,
+        ObjectType::OBJECT_TSCONFIGURATION,
+        &name_list_to_string(&stmt.cfgname),
+    )?;
 
     let Some(tup) = SearchSysCache1(TSCONFIGOID, SysCacheKey::Value(Datum::from_oid(cfgId)))?
     else {
