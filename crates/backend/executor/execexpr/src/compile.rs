@@ -459,7 +459,8 @@ fn build_projection_info_ext<'mcx>(
 }
 
 /// C `ExecBuildAggTrans`, AGG_PLAIN one-set byval slice; unported trans
-/// shapes panic at build. `agg_node` rides every transfn fcinfo's `context`.
+/// shapes raise a clean feature error at build. `agg_node` rides every
+/// transfn fcinfo's `context`.
 pub fn exec_build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
@@ -2444,10 +2445,7 @@ fn init_array_expr<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
-    if arr.multidims {
-        // unported: EEOP_ARRAYEXPR multidimensional leg.
-        return Err(feature_unported("multidimensional ARRAY[] expressions"));
-    }
+    assert!(!arr.multidims, "dispatch routes multidims ArrayExprs to init_array_expr_multidim");
     let nelems = arr.elements.len();
     let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(arr.element_typeid)?;
 

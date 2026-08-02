@@ -2637,8 +2637,10 @@ fn eval_field_select(
     let p = value.as_usize() as *const u8;
     // SAFETY: non-null composite datum per the FieldSelect contract.
     if unsafe { ::types_tuple::varatt::varatt_is_external_expanded(p) } {
-        // unported: ExecEvalFieldSelect (execExprInterp.c) expanded-record
-        // fastpath (the expandeddatum unit is not ported).
+        // unported: ExecEvalFieldSelect's expanded-record fastpath
+        // (expanded_record_get_field without flattening). The primitives
+        // exist in adt_expandedrecord, but that crate depends back on
+        // execexpr (via adt_domains), so the wiring needs a seam.
         return Err(PgError::error(
             "field selection from an expanded record is not yet implemented",
         )
