@@ -40,3 +40,10 @@ rss_limit 8192):
     is unarmed (STACK_BASE_PTR==0 -> always false) and deep patterns
     genuinely overflow. Engine/harness lane (p1-lanew) owns arming the
     guard on BOTH sides (C oracle parity) — flagged to the coordinator.
+CLASSIFICATION of the 6 SIGSEGV units: HARNESS, not a release blocker. The
+engine consults stack_depth_core::stack_is_too_deep(), but that guard reads
+a thread-local STACK_BASE_PTR that only set_stack_base() arms — the server
+does so at backend startup (main_main / launch_backend); the fuzz harness's
+pin() does not, so the guard is inert (base==0 -> always false) and deep
+patterns hit a real native overflow. Server-side these same patterns raise
+ERRCODE_STATEMENT_TOO_COMPLEX as C does.
