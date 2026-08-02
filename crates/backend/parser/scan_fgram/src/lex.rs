@@ -634,7 +634,10 @@ impl<'mcx> Scanner<'mcx> {
     // fast paths inlined; other server encodings run the mbutils
     // conversion-proc lane. C wraps the conversion in
     // setup_scanner_errposition_callback(&scbstate, yyscanner, *(yylloc)),
-    // so its errors carry an error cursor pointing at the escape.
+    // so its errors carry an error cursor pointing at the escape. C expects
+    // pg_unicode_to_server to complain about any unconvertible code point,
+    // so saw_non_ascii is NOT set (no end-of-string pg_verifymbstr pass for
+    // unicode escapes alone).
     fn addunicode(&mut self, c: u32) -> PgResult<()> {
         if !wchar::is_valid_unicode_codepoint(c) {
             return Err(self.yyerr("invalid Unicode escape value"));
@@ -661,7 +664,6 @@ impl<'mcx> Scanner<'mcx> {
             })?;
             self.addlit(&bytes)?;
         }
-        self.saw_non_ascii = true;
         Ok(())
     }
 
