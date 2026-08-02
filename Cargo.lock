@@ -16269,6 +16269,8 @@ dependencies = [
  "types_storage",
  "types_tuple",
  "varlena",
+ "walsender_seams",
+ "walsummarizer",
  "xlogreader",
  "xlogrecovery",
 ]

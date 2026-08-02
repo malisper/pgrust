@@ -33,3 +33,5 @@ xlogreader = { path = "../../access/transam/xlogreader" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 xlogrecovery = { path = "../../access/transam/xlogrecovery" }
 slotsync = { path = "../slotsync" }
+walsender_seams = { path = "../walsender_seams" }
+walsummarizer = { path = "../../postmaster/walsummarizer" }
