@@ -301,6 +301,13 @@ pub fn DefineDomain<'mcx>(
                         default_value_bin = Some(outfuncs::nodeToString(mcx, default_expr)?);
                         default_expr_node = Some(default_expr);
                     }
+                } else {
+                    // No default (can this still happen?) (typecmds.c:933-938):
+                    // a DEFAULT constraint without an expression drops any
+                    // inherited base-type default.
+                    default_expr_node = None;
+                    default_value = None;
+                    default_value_bin = None;
                 }
             }
             ConstrType::CONSTR_NOTNULL => {
