@@ -19,3 +19,24 @@ crate, out of this lane's claim; wrapper layer clean):
 OOM artifacts: multi-GB engine-compile allocations (3.5-15.6 GB mallocs) on
 nested-quantifier patterns — engine memory-limit gap, same regex_core domain.
 Crash input units (raw bytes) banked alongside; repro.txt trimmed to panic lines.
+
+---- 2026-08-01 addendum (task #95 fix lane, main @ 10dd1750a6) ----
+Files renamed crash-* -> banked-crash-*: the CI cluster runner's stray-artifact
+sweep (#89b, run-fuzz-campaign.sh sweep_strays) globs crash-* across the
+whole fuzz tree and was re-classifying these banked evidence files as NEW
+divergences in EVERY CI cluster job since 2b17a6760a (identical cross-target
+REPLAY-RAIL failures in all jobs' verdicts). replay-rail.sh now guards
+against committing raw libFuzzer artifact names outside corpus/.
+Re-replay of the 10 raw units through regexp_diff at 10dd1750a6 (-s none,
+rss_limit 8192):
+  CLEAN (engine REG_ETOOBIG fix landed; carve removed from regexp_diff):
+    banked-crash-3e775e18..., banked-crash-504ca53f... (the 2163 unit),
+    banked-crash-9219f2cc..., banked-crash-abe1e958...
+  STILL CRASH (SIGSEGV, native stack overflow): banked-crash-0a8ae2db...,
+    banked-crash-20ca7595..., banked-crash-596d0334...,
+    banked-crash-69f113d1..., banked-crash-6cdded07...,
+    banked-crash-860becc6... — stack_is_too_deep() is now consulted by the
+    engine but the fuzz harness never calls set_stack_base(), so the guard
+    is unarmed (STACK_BASE_PTR==0 -> always false) and deep patterns
+    genuinely overflow. Engine/harness lane (p1-lanew) owns arming the
+    guard on BOTH sides (C oracle parity) — flagged to the coordinator.

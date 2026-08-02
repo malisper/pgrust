@@ -803,9 +803,13 @@ fn cmp_diff(p: &[u8]) {
     // pgrust = -128. Repro banked: CI cluster crash-b1064764f0b1 (job
     // pgrust-fuzz-campaign-1785480211-3e0c-59729), corpus seed
     // seed-cmp-div-b1064764. Ledger row 926 annotated divergence(candidate).
-    // Only the SIGN is compared below until Michael rules (row-436 pattern).
-    // (fc plane further down still checks wrapper == core EXACTLY — the
-    // carve is only C-vs-Rust magnitude.)
+    // Only the SIGN is compared below: comparator MAGNITUDE is the
+    // established non-surface class (multirange tie-representative ruling
+    // 2026-07-31; pg_qsort/nbtcompare cmp conventions; btree_gin sign-only
+    // plane) — only signum() is SQL-observable, and here C's own value is
+    // libc-dependent. Flagged for explicit confirmation on the row-926
+    // ledger entry. (fc plane further down still checks wrapper == core
+    // EXACTLY — the carve is only C-vs-Rust magnitude.)
     let (cs, rs) = (c.signum(), r.signum());
     assert!(
         cs == rs,

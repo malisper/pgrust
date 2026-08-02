@@ -25,12 +25,38 @@ fi
 #                     1778/1780) — see corpus/formatting_diff/README.md.
 NOT_LIVE="encode_diff formatting_diff"
 rc=0
+# STRAY-ARTIFACT NAME GUARD (task #95, 2026-08-01): the CI cluster runner sweeps
+# the WHOLE fuzz tree for libFuzzer artifact names (crash-*/oom-*/timeout-*/
+# leak-*, pruning only artifacts/ corpus/ target/ coverage/) and classifies
+# every hit as the CURRENT job's divergence.  Committed evidence banks named
+# crash-<sha1> (CI-evidence/, artifacts-triage/) therefore polluted EVERY
+# CI cluster job's verdict with identical cross-target failures.  Banked evidence
+# must use the banked-crash-* prefix; this guard fails the rail loudly if a
+# raw libFuzzer artifact name ever gets committed outside corpus/ again.
+strays=$(git ls-files . 2>/dev/null \
+  | grep -vE '^corpus/' \
+  | grep -E '(^|/)(crash|oom|timeout|leak)-[0-9a-f]' || true)
+if [ -n "$strays" ]; then
+  echo "FAIL: committed libFuzzer-artifact-named file(s) outside corpus/ —"
+  echo "the CI cluster runner's stray sweep will misattribute these to every job."
+  echo "Rename with the banked- prefix:"
+  echo "$strays"
+  rc=1
+fi
 for t in $TARGETS; do
   case " $NOT_LIVE " in *" $t "*) echo "SKIP $t (not live: see replay-rail.sh header)"; continue;; esac
   [ -d "corpus/$t" ] || { echo "SKIP $t (no corpus)"; continue; }
   n=$(find "corpus/$t" -type f | wc -l | tr -d ' ')
   echo "== replay $t over $n inputs"
-  cargo +$NIGHTLY fuzz run "$t" -- -runs=0 "corpus/$t" >/dev/null 2>&1 \
+  # -rss_limit_mb=8192: the replay rail's verdict is the comparator planes,
+  # not libFuzzer's memory heuristic.  cargo-fuzz builds with ASan, whose
+  # shadow/redzones inflate RSS ~10x past the 2048MB default on legitimately
+  # memory-hungry banked units (witnessed 2026-08-01: regexp_diff units
+  # `.(\y|){21,}...` and oom-617cb6e8 `(l*|\y){11,}?...` —
+  # REG_MAX_COMPILE_SPACE-bounded, C-parity, pass all planes, 480MB native
+  # RSS, but >2GiB / >4GiB respectively under ASan).  OOM DISCOVERY stays
+  # owned by the fuzz-mode CI cluster legs at the default limit.
+  cargo +$NIGHTLY fuzz run "$t" -- -runs=0 -rss_limit_mb=8192 "corpus/$t" >/dev/null 2>&1 \
     || { echo "FAIL: $t replay diverged/crashed"; rc=1; }
 done
 [ $rc -eq 0 ] && echo "REPLAY RAIL GREEN"

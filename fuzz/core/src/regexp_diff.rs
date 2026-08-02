@@ -211,26 +211,6 @@ fn pin() {
     });
 }
 
-/// KNOWN-DIVERGENCE (2026-07-31, found by this target's first 200k-exec
-/// smoke; regex_core lane owns the fix): the Rust Spencer port trips
-/// REG_ETOOBIG ("invalid regular expression: regular expression is too
-/// complex") on nested bounded quantifiers that BOTH the vendored 18.3 C
-/// engine and real postgres:18.3 (Docker, byte-exact replay) accept.
-/// Minimized fuzz repro (32 bytes, split arm):
-///   11 6e 43 28 5c 5c 77 28 5c 79 43 28 7c 29 7b 31
-///   36 7d 29 7b 31 36 7d 03 2b 29 7b 31 36 7d 03 2b
-/// i.e. regexp_split_to_array('', E'(\\\\w(\\yC(|){16}){16}\\x03+){16}\\x03+')
-/// -> {""} on PG 18.3, "too complex" on pgrust.  Executable exception: the
-/// (C ok, Rust Err) verdict mismatch is skipped ONLY when the Rust error is
-/// this exact too-complex report; every other divergence stays fatal, and
-/// the opposite direction (Rust ok, C error) is never suppressed.  Witness:
-/// tests::known_etoobig_divergence_repro.  Remove this carve when the
-/// engine lane lands the fix.
-fn known_etoobig_divergence(e: &PgError) -> bool {
-    e.sqlstate == ERRCODE_INVALID_REGULAR_EXPRESSION
-        && e.message.contains("regular expression is too complex")
-}
-
 /// Map a Rust-side PgError sqlstate to the C oracle's errcode class
 /// (csrc/pg_regexp_io.c header).  0 = a sqlstate this family never raises
 /// (always a divergence).
@@ -503,7 +483,6 @@ fn textre_bool_diff(payload: &[u8], arm: BoolArm) {
             );
             Err(code)
         }
-        (0, Err(e)) if known_etoobig_divergence(e) => return,
         _ => panic!(
             "{}: verdict DIVERGENCE pat={pat:?} s={s:?}: C status {cst} vs Rust ok={}",
             name(arm),
@@ -609,7 +588,6 @@ fn compare_text_result(
             );
             Some(Err(code))
         }
-        (Ok(_), Err(e)) if known_etoobig_divergence(&e) => None,
         (c, r) => panic!(
             "{arm}: verdict DIVERGENCE pat={pat:?}: C ok={} Rust ok={}",
             c.is_ok(),
@@ -930,7 +908,6 @@ fn compare_i32_result(
             );
             Some(Err(code))
         }
-        (0, Err(e)) if known_etoobig_divergence(&e) => None,
         (cst, r) => panic!(
             "{arm}: verdict DIVERGENCE pat={pat:?} s={s:?}: C status {cst} vs Rust ok={}",
             r.is_ok()
@@ -1325,7 +1302,6 @@ fn regexp_match_diff(payload: &[u8]) {
             err_class(&e),
             e.sqlstate
         ),
-        (Ok(_), Err(e)) if known_etoobig_divergence(&e) => {}
         (c, r) => panic!(
             "regexp_match: verdict DIVERGENCE pat={pat:?} s={s:?}: C ok={} Rust ok={}",
             c.is_ok(),
@@ -1401,7 +1377,6 @@ fn regexp_split_diff(payload: &[u8]) {
             err_class(&e),
             e.sqlstate
         ),
-        (Ok(_), Err(e)) if known_etoobig_divergence(&e) => {}
         (c, r) => panic!(
             "regexp_split_to_array: verdict DIVERGENCE pat={pat:?} s={s:?}: C ok={} Rust ok={}",
             c.is_ok(),
@@ -1461,7 +1436,6 @@ fn regexp_fixed_prefix_diff(payload: &[u8]) {
             err_class(&e),
             e.sqlstate
         ),
-        (Ok(_), Err(e)) if known_etoobig_divergence(&e) => {}
         (c, r) => panic!(
             "regexp_fixed_prefix: verdict DIVERGENCE pat={pat:?} ci={case_insensitive}: C ok={} Rust ok={}",
             c.is_ok(),
@@ -1814,17 +1788,15 @@ mod tests {
             regexp_diff(&arm(16, &[&[2], &f1(b"a(b)c"), &f2(b"abc"), &f1(fl)]));
         }
     }
-    /// Witness for the KNOWN-DIVERGENCE executable exception (see
-    /// known_etoobig_divergence): the minimized 32-byte fuzz repro — the
-    /// Rust engine reports REG_ETOOBIG on a nested-bounded-quantifier
-    /// pattern that both the vendored 18.3 C engine and real postgres:18.3
-    /// (byte-exact Docker replay, 2026-07-31) accept.  The driver must
-    /// classify it as the known exception (no panic); the direct call must
-    /// keep producing the too-complex error — when the regex_core lane
-    /// fixes the engine, the second assert flips and this carve gets
-    /// removed.  Runs on a big stack: the Rust engine recurses deeply
-    /// enough on this pattern to overflow the 2MB default test stack
-    /// before reporting the error (also engine-lane territory).
+    /// Regression witness for the FIXED REG_ETOOBIG divergence (found
+    /// 2026-07-31 by this target's first 200k-exec smoke: the Rust Spencer
+    /// port reported "regular expression is too complex" on a
+    /// nested-bounded-quantifier pattern that both the vendored 18.3 C
+    /// engine and real postgres:18.3 accept; the engine lane fixed it and
+    /// the known_etoobig_divergence carve was removed 2026-08-01).  The
+    /// minimized 32-byte fuzz unit must replay through the full driver with
+    /// no divergence, and the direct split call must succeed.  Runs on a
+    /// big stack: the engine recurses deeply on this pattern.
     #[test]
     fn known_etoobig_divergence_repro() {
         std::thread::Builder::new()
@@ -1835,24 +1807,19 @@ mod tests {
                     0x7c, 0x29, 0x7b, 0x31, 0x36, 0x7d, 0x29, 0x7b, 0x31, 0x36, 0x7d, 0x03,
                     0x2b, 0x29, 0x7b, 0x31, 0x36, 0x7d, 0x03, 0x2b,
                 ];
-                // exception path: must complete without a divergence panic
+                // full comparator plane: any C-vs-Rust divergence panics
                 regexp_diff(unit);
-                // and the underlying engine asymmetry is still present
+                // and the once-failing direct call now succeeds
                 pin();
-                let pat: &[u8] = br"(\w(\yC(|){16}){16}+){16}+"; // shape; exact bytes below
-                let _ = pat;
                 let exact: Vec<u8> = vec![
                     40, 92, 92, 119, 40, 92, 121, 67, 40, 124, 41, 123, 49, 54, 125, 41,
                     123, 49, 54, 125, 3, 43, 41, 123, 49, 54, 125, 3, 43,
                 ];
                 let cx = mcx::MemoryContext::new("t");
-                let e = match adt_regexp::matches::regexp_split_setup(
+                adt_regexp::matches::regexp_split_setup(
                     cx.mcx(), b"", &exact, None, C, "regexp_split_to_array()",
-                ) {
-                    Err(e) => e,
-                    Ok(_) => panic!("engine fixed? remove the known_etoobig_divergence carve"),
-                };
-                assert!(known_etoobig_divergence(&e), "unexpected error shape: {e:?}");
+                )
+                .expect("REG_ETOOBIG regression: engine rejects the fixed pattern again");
             })
             .unwrap()
             .join()
