@@ -143,6 +143,87 @@ fn replace_vars_rewrites_function_and_group_rtes() {
     assert_eq!(group_rte.groupexprs.nth(0).node_tag(), NodeTag::T_Const);
 }
 
+// map_variable_attnos recurses into SubLink subselects with sublevels_up
+// tracking (C map_variable_attnos_mutator's Query arm over
+// query_tree_mutator).
+#[test]
+fn map_variable_attnos_recurses_into_sublinks() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    // Subselect targetlist holds an outer reference: Var(varno 1, attno 1,
+    // varlevelsup 1). Mapping varno-1 attno 1 -> 3 at sublevels_up 0 must
+    // rewrite it through the SubLink.
+    let outer_var = Node::mk(
+        mcx,
+        Var { varno: 1, varattno: 1, vartype: 23, varlevelsup: 1, ..Default::default() },
+    )
+    .unwrap();
+    let tle = Node::mk_target_entry(mcx, outer_var, 1, None, false).unwrap();
+    let mut q = Node::build::<Query>(mcx).unwrap();
+    q.targetList = NodeList::make1(mcx, tle).unwrap();
+    let sl = Node::mk(
+        mcx,
+        SubLink {
+            subLinkType: SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: q.seal(),
+            location: -1,
+        },
+    )
+    .unwrap();
+
+    let attnums: [i16; 1] = [3];
+    let (mapped, found_whole_row) =
+        crate::map_variable_attnos(mcx, sl, 1, 0, &attnums, 0).unwrap();
+    assert!(!found_whole_row);
+    let sub = mapped.as_sub_link().unwrap().subselect.as_query().unwrap();
+    let v = sub
+        .targetList
+        .nth(0)
+        .as_target_entry()
+        .unwrap()
+        .expr
+        .as_var()
+        .unwrap();
+    assert_eq!((v.varno, v.varattno, v.varlevelsup), (1, 3, 1));
+
+    // A Var of the subselect's own level (varlevelsup 0 inside) is NOT
+    // remapped by an outer-level mapping.
+    let local_var = Node::mk(
+        mcx,
+        Var { varno: 1, varattno: 1, vartype: 23, varlevelsup: 0, ..Default::default() },
+    )
+    .unwrap();
+    let tle = Node::mk_target_entry(mcx, local_var, 1, None, false).unwrap();
+    let mut q = Node::build::<Query>(mcx).unwrap();
+    q.targetList = NodeList::make1(mcx, tle).unwrap();
+    let sl = Node::mk(
+        mcx,
+        SubLink {
+            subLinkType: SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: q.seal(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let (mapped, _) = crate::map_variable_attnos(mcx, sl, 1, 0, &attnums, 0).unwrap();
+    let sub = mapped.as_sub_link().unwrap().subselect.as_query().unwrap();
+    let v = sub
+        .targetList
+        .nth(0)
+        .as_target_entry()
+        .unwrap()
+        .expr
+        .as_var()
+        .unwrap();
+    assert_eq!((v.varno, v.varattno, v.varlevelsup), (1, 1, 0));
+}
+
 #[test]
 fn sublink_recursion_bumps_the_level() {
     let ctx = MemoryContext::new("t");
