@@ -51,3 +51,10 @@ pub const PROGRESS_COPY_TYPE_FILE: i64 = 1;
 pub const PROGRESS_COPY_TYPE_PROGRAM: i64 = 2;
 pub const PROGRESS_COPY_TYPE_PIPE: i64 = 3;
 pub const PROGRESS_COPY_TYPE_CALLBACK: i64 = 4;
+
+// Lock holder wait counts (shared by the CREATE INDEX and CLUSTER views;
+// progress.h reserves params 3-5 of both for "waitfor" metrics). Defined in
+// the seams crate so lmgr's waiters can name them.
+pub use backend_progress_seams::{
+    PROGRESS_WAITFOR_CURRENT_PID, PROGRESS_WAITFOR_DONE, PROGRESS_WAITFOR_TOTAL,
+};

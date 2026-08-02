@@ -58,17 +58,97 @@ pub fn DescribeLockTag(tag: LOCKTAG) -> String {
 }
 
 // WaitForLockersMultiple (lmgr.c:986): wait for current lock holders to
-// finish without acquiring the lock ourselves; progress reporting unported.
+// finish without acquiring the lock ourselves. With `progress`, the waitfor
+// params of the caller's command-progress view are kept current and cleared
+// at the end.
 pub fn WaitForLockersMultiple(
     mcx: mcx::Mcx<'_>,
     locktags: &[LOCKTAG],
     lockmode: LOCKMODE,
+    progress: bool,
 ) -> PgResult<()> {
+    wait_for_lockers_guts(
+        locktags,
+        progress,
+        |locktag| lock::GetLockConflicts(mcx, locktag, lockmode),
+        |procno| {
+            lmgr_proc::ProcNumberGetProc(procno)
+                .map(|holder| holder.pid.load(std::sync::atomic::Ordering::Relaxed))
+        },
+        |vxid| lock::VirtualXactLock(vxid, true).map(|_| ()),
+    )
+}
+
+// The C body, with the three lock-manager effects abstracted so tests can
+// witness the progress protocol without live lock tables.
+fn wait_for_lockers_guts<'m>(
+    locktags: &[LOCKTAG],
+    progress: bool,
+    mut get_conflicts: impl FnMut(
+        &LOCKTAG,
+    )
+        -> PgResult<mcx::PgVec<'m, types_storage::storage::VirtualTransactionId>>,
+    // ProcNumberGetProc(procNumber)->pid: None when the holder's PGPROC is
+    // gone (C's `if (holder)` guard).
+    mut holder_pid: impl FnMut(types_core::ProcNumber) -> Option<i32>,
+    mut wait: impl FnMut(types_storage::storage::VirtualTransactionId) -> PgResult<()>,
+) -> PgResult<()> {
+    use backend_progress_seams::{
+        PROGRESS_WAITFOR_CURRENT_PID, PROGRESS_WAITFOR_DONE, PROGRESS_WAITFOR_TOTAL,
+    };
+    let pgstat_progress_update_param =
+        |index, val| backend_progress_seams::pgstat_progress_update_param::call(index, val);
+
+    // Done if no locks to wait for
+    if locktags.is_empty() {
+        return Ok(());
+    }
+
+    // Collect the transactions we need to wait on
+    let mut holders = Vec::with_capacity(locktags.len());
+    let mut total: i64 = 0;
     for locktag in locktags {
-        let holders = lock::GetLockConflicts(mcx, locktag, lockmode)?;
-        for &vxid in holders.iter() {
-            lock::VirtualXactLock(vxid, true)?;
+        let conflicts = get_conflicts(locktag)?;
+        if progress {
+            total += conflicts.len() as i64;
         }
+        holders.push(conflicts);
+    }
+
+    if progress {
+        pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, total);
+    }
+
+    // Note: GetLockConflicts() never reports our own xid, hence we need not
+    // check for that.  Also, prepared xacts are reported and awaited.
+
+    // Finally wait for each such transaction to complete
+    let mut done: i64 = 0;
+    for lockholders in holders.iter() {
+        for &lockholder in lockholders.iter() {
+            // If requested, publish who we're going to wait for.
+            if progress {
+                if let Some(pid) = holder_pid(lockholder.procNumber) {
+                    pgstat_progress_update_param(PROGRESS_WAITFOR_CURRENT_PID, pid as i64);
+                }
+            }
+            wait(lockholder)?;
+
+            if progress {
+                done += 1;
+                pgstat_progress_update_param(PROGRESS_WAITFOR_DONE, done);
+            }
+        }
+    }
+    if progress {
+        backend_progress_seams::pgstat_progress_update_multi_param::call(
+            &[
+                PROGRESS_WAITFOR_TOTAL,
+                PROGRESS_WAITFOR_DONE,
+                PROGRESS_WAITFOR_CURRENT_PID,
+            ],
+            &[0, 0, 0],
+        );
     }
     Ok(())
 }

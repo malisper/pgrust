@@ -1143,7 +1143,7 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
             init_small::globals::MyDatabaseId(),
             parentrelid,
         );
-        lmgr::WaitForLockersMultiple(mcx, &[tag], AccessExclusiveLock)?;
+        lmgr::WaitForLockersMultiple(mcx, &[tag], AccessExclusiveLock, false)?;
 
         let reopened = relation_seams::try_relation_open::call(
             mcx,

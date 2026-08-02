@@ -8265,9 +8265,14 @@ dependencies = [
 name = "lmgr"
 version = "0.0.0"
 dependencies = [
+ "backend_progress",
+ "backend_progress_seams",
+ "backend_status",
  "catalog_seams",
  "init_small",
  "inval_seams",
+ "ipc_seams",
+ "lmgr_proc",
  "lmgr_seams",
  "lock",
  "lock_seams",
