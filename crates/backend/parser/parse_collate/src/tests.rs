@@ -72,3 +72,33 @@ fn common_collation_merge_rules() {
         NodeList::make2(mcx, collated_var(mcx, 150), collated_var(mcx, 151)).unwrap();
     assert_eq!(select_common_collation(mcx, &pstate, &conflicting, true).unwrap(), InvalidOid);
 }
+
+#[test]
+fn expr_set_collation_covers_c_arms_beyond_the_json_shapes() {
+    // exprSetCollation now carries the full nodeFuncs.c switch: writable
+    // arms outside the coerceJsonFuncExpr coercion shapes (Var, CaseExpr,
+    // SubscriptingRef here) store the collation instead of panicking.
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let var = collated_var(mcx, InvalidOid);
+    // SAFETY: this test exclusively owns the just-built node.
+    unsafe { crate::expr_set_collation(var, DEFAULT_COLLATION_OID) };
+    assert_eq!(var.as_var().unwrap().varcollid, DEFAULT_COLLATION_OID);
+
+    let case = Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseExpr {
+            casetype: TEXTOID,
+            casecollid: InvalidOid,
+            arg: None,
+            args: NodeList::nil(),
+            defresult: None,
+            location: -1,
+        },
+    )
+    .unwrap();
+    // SAFETY: as above.
+    unsafe { crate::expr_set_collation(case, DEFAULT_COLLATION_OID) };
+    assert_eq!(case.as_case_expr().unwrap().casecollid, DEFAULT_COLLATION_OID);
+}

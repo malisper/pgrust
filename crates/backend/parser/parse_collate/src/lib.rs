@@ -403,6 +403,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_SubscriptingRef
         | NodeTag::T_FieldStore
         | NodeTag::T_MergeSupportFunc
+        | NodeTag::T_NextValueExpr
         | NodeTag::T_NamedArgExpr) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -605,6 +606,8 @@ fn assign_collations_walker<'mcx>(
                 }
                 NodeTag::T_SQLValueFunction => {}
                 NodeTag::T_MergeSupportFunc => {}
+                // No expression subnodes (expression_tree_walker).
+                NodeTag::T_NextValueExpr => {}
                 NodeTag::T_NamedArgExpr => {
                     assign_collations_walker(
                         node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"),
@@ -744,12 +747,13 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_FieldStore => {
                         debug_assert!(!OidIsValid(set_coll))
                     }
-                    // exprSetCollation(BoolExpr/NullTest/GroupingFunc/BooleanTest)
-                    // is assert-only in C.
+                    // exprSetCollation(BoolExpr/NullTest/GroupingFunc/
+                    // BooleanTest/NextValueExpr) is assert-only in C.
                     NodeTag::T_BoolExpr
                     | NodeTag::T_NullTest
                     | NodeTag::T_GroupingFunc
-                    | NodeTag::T_BooleanTest => {
+                    | NodeTag::T_BooleanTest
+                    | NodeTag::T_NextValueExpr => {
                         debug_assert!(!OidIsValid(set_coll))
                     }
                     // exprSetCollation(NamedArgExpr) is assert-only in C: the
@@ -872,10 +876,12 @@ fn assign_collations_walker<'mcx>(
                 }
             }
         }
+        // Every expression tag parse analysis can produce is handled above;
+        // anything else would fall out of C's exprSetCollation switch as an
+        // "unrecognized node type" elog, kept loud here.
         other => panic!(
-            "assign_collations_walker (parse_collate.c): general-case arm for {other:?} \
-             unported (needs exprSetCollation/exprSetInputCollation on sealed nodes) — \
-             unit backend-parser-parse-collate"
+            "assign_collations_walker (parse_collate.c): unrecognized node type {other:?} \
+             — exprSetCollation would elog in C"
         ),
     }
 
@@ -889,19 +895,75 @@ fn assign_collations_walker<'mcx>(
     )
 }
 
-// exprSetCollation over the coercion shapes coerceJsonFuncExpr can emit.
+// exprSetCollation (nodeFuncs.c), full C 18.3 arm coverage; arms C guards
+// with bare Asserts stay debug-only, per C.
 // # Safety contract mirrors the surrounding with_mut uses: parse analysis
 // exclusively owns the tree.
 unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
     // SAFETY: caller contract.
     unsafe {
         match node.node_tag() {
+            NodeTag::T_Var => {
+                node.with_mut::<types_nodes::primnodes::Var, _>(|v| v.varcollid = coll).unwrap()
+            }
+            NodeTag::T_Const => {
+                node.with_mut::<types_nodes::Const, _>(|c| c.constcollid = coll).unwrap()
+            }
+            NodeTag::T_Param => node
+                .with_mut::<types_nodes::primnodes::Param, _>(|p| p.paramcollid = coll)
+                .unwrap(),
+            NodeTag::T_Aggref => node
+                .with_mut::<types_nodes::primnodes::Aggref, _>(|a| a.aggcollid = coll)
+                .unwrap(),
+            NodeTag::T_GroupingFunc => debug_assert!(!OidIsValid(coll)),
+            NodeTag::T_WindowFunc => node
+                .with_mut::<types_nodes::primnodes::WindowFunc, _>(|w| w.wincollid = coll)
+                .unwrap(),
+            NodeTag::T_MergeSupportFunc => node
+                .with_mut::<types_nodes::primnodes::MergeSupportFunc, _>(|m| m.msfcollid = coll)
+                .unwrap(),
+            NodeTag::T_SubscriptingRef => node
+                .with_mut::<types_nodes::SubscriptingRef, _>(|s| s.refcollid = coll)
+                .unwrap(),
             NodeTag::T_FuncExpr => {
                 node.with_mut::<types_nodes::FuncExpr, _>(|f| f.funccollid = coll).unwrap()
             }
+            // C: the collation lives on the wrapped argument.
+            NodeTag::T_NamedArgExpr => debug_assert_eq!(coll, expr_collation(node)),
             NodeTag::T_OpExpr => {
                 node.with_mut::<types_nodes::OpExpr, _>(|o| o.opcollid = coll).unwrap()
             }
+            NodeTag::T_DistinctExpr => node
+                .with_mut::<types_nodes::DistinctExpr, _>(|d| d.opcollid = coll)
+                .unwrap(),
+            NodeTag::T_NullIfExpr => {
+                node.with_mut::<types_nodes::NullIfExpr, _>(|n| n.opcollid = coll).unwrap()
+            }
+            // Boolean/composite results never take a collation (C asserts).
+            NodeTag::T_ScalarArrayOpExpr
+            | NodeTag::T_BoolExpr
+            | NodeTag::T_FieldStore
+            | NodeTag::T_ConvertRowtypeExpr
+            | NodeTag::T_RowExpr
+            | NodeTag::T_RowCompareExpr
+            | NodeTag::T_NullTest
+            | NodeTag::T_BooleanTest
+            | NodeTag::T_CurrentOfExpr
+            | NodeTag::T_NextValueExpr => debug_assert!(!OidIsValid(coll)),
+            // C's SubLink arm is entirely USE_ASSERT_CHECKING.
+            NodeTag::T_SubLink => {
+                debug_assert!(
+                    match node.as_sub_link().unwrap().subLinkType {
+                        types_nodes::SubLinkType::EXPR_SUBLINK
+                        | types_nodes::SubLinkType::ARRAY_SUBLINK =>
+                            coll == expr_collation(node),
+                        _ => !OidIsValid(coll),
+                    }
+                );
+            }
+            NodeTag::T_FieldSelect => node
+                .with_mut::<types_nodes::primnodes::FieldSelect, _>(|f| f.resultcollid = coll)
+                .unwrap(),
             NodeTag::T_RelabelType => node
                 .with_mut::<types_nodes::RelabelType, _>(|r| r.resultcollid = coll)
                 .unwrap(),
@@ -911,18 +973,72 @@ unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
             NodeTag::T_ArrayCoerceExpr => node
                 .with_mut::<types_nodes::ArrayCoerceExpr, _>(|a| a.resultcollid = coll)
                 .unwrap(),
+            NodeTag::T_CaseExpr => node
+                .with_mut::<types_nodes::primnodes::CaseExpr, _>(|c| c.casecollid = coll)
+                .unwrap(),
+            NodeTag::T_ArrayExpr => node
+                .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = coll)
+                .unwrap(),
+            NodeTag::T_CoalesceExpr => node
+                .with_mut::<types_nodes::primnodes::CoalesceExpr, _>(|c| {
+                    c.coalescecollid = coll
+                })
+                .unwrap(),
+            NodeTag::T_MinMaxExpr => node
+                .with_mut::<types_nodes::primnodes::MinMaxExpr, _>(|m| m.minmaxcollid = coll)
+                .unwrap(),
+            NodeTag::T_SQLValueFunction => debug_assert!(
+                if node.as_sql_value_function().unwrap().r#type == types_core::catalog::NAMEOID {
+                    coll == types_core::catalog::C_COLLATION_OID
+                } else {
+                    !OidIsValid(coll)
+                }
+            ),
+            NodeTag::T_XmlExpr => debug_assert!(
+                if node.as_xml_expr().unwrap().op == types_nodes::XmlExprOp::IS_XMLSERIALIZE {
+                    coll == types_core::catalog::DEFAULT_COLLATION_OID
+                } else {
+                    !OidIsValid(coll)
+                }
+            ),
+            NodeTag::T_JsonValueExpr => expr_set_collation(
+                node.as_json_value_expr().unwrap().formatted_expr.expect("formatted"),
+                coll,
+            ),
+            NodeTag::T_JsonConstructorExpr => {
+                let c = node.as_json_constructor_expr().unwrap();
+                match c.coercion {
+                    Some(co) => expr_set_collation(co, coll),
+                    // C: the result is always a json[b] type.
+                    None => debug_assert!(!OidIsValid(coll)),
+                }
+            }
+            // C: the result is always boolean.
+            NodeTag::T_JsonIsPredicate => debug_assert!(!OidIsValid(coll)),
+            NodeTag::T_JsonExpr => {
+                node.with_mut::<types_nodes::JsonExpr, _>(|j| j.collation = coll).unwrap()
+            }
+            // C: the behavior expr's collation was already assigned.
+            NodeTag::T_JsonBehavior => debug_assert!(node
+                .as_json_behavior()
+                .unwrap()
+                .expr
+                .is_none_or(|e| expr_collation(e) == coll)),
             NodeTag::T_CoerceToDomain => node
                 .with_mut::<types_nodes::CoerceToDomain, _>(|c| c.resultcollid = coll)
                 .unwrap(),
-            NodeTag::T_Const => {
-                node.with_mut::<types_nodes::Const, _>(|c| c.constcollid = coll).unwrap()
-            }
-            NodeTag::T_MergeSupportFunc => node
-                .with_mut::<types_nodes::primnodes::MergeSupportFunc, _>(|m| m.msfcollid = coll)
+            NodeTag::T_CoerceToDomainValue => node
+                .with_mut::<types_nodes::primnodes::CoerceToDomainValue, _>(|c| {
+                    c.collation = coll
+                })
                 .unwrap(),
+            NodeTag::T_SetToDefault => node
+                .with_mut::<types_nodes::primnodes::SetToDefault, _>(|s| s.collation = coll)
+                .unwrap(),
+            // C's default elogs "unrecognized node type".
             other => panic!(
-                "expr_set_collation (exprSetCollation, nodeFuncs.c): arm for {other:?} \
-                 unported — sqljson-lane"
+                "expr_set_collation (exprSetCollation, nodeFuncs.c): unrecognized node \
+                 type {other:?} — C elogs here too"
             ),
         }
     }
