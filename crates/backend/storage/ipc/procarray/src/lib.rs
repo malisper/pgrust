@@ -236,6 +236,75 @@ pub fn ProcArrayOwnXmin() -> TransactionId {
     }
 }
 
+/// ProcArrayInstallImportedXmin (procarray.c:2532): install an imported xmin
+/// into MyProc->xmin, atomically (under ProcArrayLock) with the check that
+/// the source virtual transaction is still running, so OldestXmin can't go
+/// backwards. False = source xact no longer running.
+pub fn ProcArrayInstallImportedXmin(
+    xmin: TransactionId,
+    sourcevxid: types_core::VirtualTransactionId,
+) -> PgResult<bool> {
+    let mut result = false;
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+
+    debug_assert!(TransactionIdIsNormal(xmin));
+    let my_procno = MyProc().expect("ProcArrayInstallImportedXmin without MyProc");
+    let me = GetPGProcByNumber(my_procno);
+
+    // Get lock so source xact can't end while we're doing this
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+
+    // Find the PGPROC entry of the source transaction. (This could use
+    // GetPGProcByNumber(), unless it's a prepared xact.  But this isn't
+    // performance critical.)
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        let status_flags = hdr.statusFlags[index].load(Relaxed);
+
+        // Ignore procs running LAZY VACUUM
+        if status_flags & PROC_IN_VACUUM != 0 {
+            continue;
+        }
+
+        // We are only interested in the specific virtual transaction.
+        if proc.vxid.procNumber.load(Relaxed) != sourcevxid.procNumber {
+            continue;
+        }
+        if proc.vxid.lxid.load(Relaxed) != sourcevxid.localTransactionId {
+            continue;
+        }
+
+        // We check the transaction's database ID for paranoia's sake: if it's
+        // in another DB then its xmin does not cover us.  Caller should have
+        // detected this already, so we just treat any funny cases as
+        // "transaction not found".
+        if proc.databaseId.load(Relaxed) != init_small::globals::MyDatabaseId() {
+            continue;
+        }
+
+        // Likewise, let's just make real sure its xmin does cover us.
+        let xid = proc.xmin.read();
+        if !TransactionIdIsNormal(xid) || !TransactionIdPrecedesOrEquals(xid, xmin) {
+            continue;
+        }
+
+        // We're good.  Install the new xmin.  As in GetSnapshotData, set
+        // TransactionXmin too.  (Note that because snapmgr.c called
+        // GetSnapshotData first, we'll be overwriting a valid xmin here, so
+        // we don't check that.)
+        me.xmin.value.store(xmin, Relaxed);
+        TRANSACTION_XMIN.set(xmin);
+
+        result = true;
+        break;
+    }
+
+    LWLockRelease(ProcArrayLock())?;
+    Ok(result)
+}
+
 /// ProcArrayInstallRestoredXmin (procarray.c): parallel workers pin their xmin
 /// under the leader's; PROC_XMIN_FLAGS propagate so vacuum's horizon reads the
 /// value the same way. False = source xact no longer running.

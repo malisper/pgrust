@@ -117,6 +117,8 @@ fn setup() {
         lmgr_proc::init_seams();
         lmgr_proc::InitProcGlobal(&CFG);
         crate::engine::PredicateLockShmemInit(CFG.max_prepared_xacts).unwrap();
+        // The snapshot-import test walks the real proc array.
+        procarray::ProcArrayShmemInit();
         crate::init_seams();
     });
 }
@@ -420,4 +422,67 @@ fn twophase_recover_rebuilds_sxact_and_lock_then_finish_releases() {
         e.tag.locktag_field1 == TESTDB && e.tag.locktag_field2 == REL_A && e.tag.locktag_field3 == 5
     });
     assert!(!still, "recovered lock should be gone after ROLLBACK PREPARED finish");
+}
+
+
+// SetSerializableTransactionSnapshot import arm (predicate.c:1722 ->
+// GetSerializableTransactionSnapshotInt's sourcevxid path): the sxact is
+// created and our xmin installed atomically with the source-still-running
+// check (ProcArrayInstallImportedXmin); a vanished source is C's 55000.
+#[test]
+fn snapshot_import_installs_xmin_and_rejects_dead_source() {
+    become_backend();
+    let (_gate, xmin) = exclusive();
+
+    // A running "source" transaction on another backend, present in the
+    // proc array with a known vxid and an xmin covering the import.
+    let (tx, rx) = mpsc::channel::<(types_core::ProcNumber, types_core::VirtualTransactionId)>();
+    std::thread::spawn(move || {
+        become_backend();
+        let procno = lmgr_proc::MyProc().unwrap();
+        let proc = lmgr_proc::GetPGProcByNumber(procno);
+        proc.databaseId.store(TESTDB, std::sync::atomic::Ordering::Relaxed);
+        proc.vxid.lxid.store(4242, std::sync::atomic::Ordering::Relaxed);
+        proc.xmin.value.store(xmin, std::sync::atomic::Ordering::Relaxed);
+        proc.pgxactoff.store(-1, std::sync::atomic::Ordering::Relaxed);
+        procarray::ProcArrayAdd(procno).unwrap();
+        let vxid = types_core::VirtualTransactionId {
+            procNumber: proc.vxid.procNumber.load(std::sync::atomic::Ordering::Relaxed),
+            localTransactionId: 4242,
+        };
+        tx.send((procno, vxid)).unwrap();
+    })
+    .join()
+    .unwrap();
+    let (src_procno, src_vxid) = rx.recv().unwrap();
+
+    // Live source: import succeeds and installs the imported xmin on MyProc.
+    crate::engine::SetSerializableTransactionSnapshot(xmin, Some((src_vxid, 9999))).unwrap();
+    let me = lmgr_proc::GetPGProcByNumber(lmgr_proc::MyProc().unwrap());
+    assert_eq!(me.xmin.read(), xmin, "imported xmin installed on MyProc");
+    crate::engine::ReleasePredicateLocks(false, false).unwrap();
+    me.xmin.value.store(0, std::sync::atomic::Ordering::Relaxed);
+
+    // Dead source (no such lxid): C raises 55000 "could not import the
+    // requested snapshot" with the source PID in the detail, after releasing
+    // the not-yet-initialized sxact.
+    let dead = types_core::VirtualTransactionId {
+        procNumber: src_vxid.procNumber,
+        localTransactionId: 4243,
+    };
+    let err = crate::engine::SetSerializableTransactionSnapshot(xmin, Some((dead, 4321)))
+        .expect_err("import from a vanished source must fail");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("could not import the requested snapshot"), "got: {msg}");
+    assert!(
+        msg.contains("The source process with PID 4321 is not running anymore."),
+        "got: {msg}"
+    );
+
+    // The failed import released its sxact slot: a fresh import still works.
+    crate::engine::SetSerializableTransactionSnapshot(xmin, Some((src_vxid, 9999))).unwrap();
+    crate::engine::ReleasePredicateLocks(false, false).unwrap();
+    me.xmin.value.store(0, std::sync::atomic::Ordering::Relaxed);
+
+    procarray::ProcArrayRemove(src_procno, types_core::InvalidTransactionId).unwrap();
 }
