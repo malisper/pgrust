@@ -843,7 +843,33 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      because the census counter is textual. Non-session on the
     //      substance: per-test scratch, no session identity, nothing an
     //      envelope could capture or restore.
-    assert_eq!(count_tree(crates), 548, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 554, re-pinned at the port-sweep reconciliation (the six port lanes
+    //      below landed crate-disjoint and collided in UNION only here —
+    //      the textual counter is tree-global). All six audited non-session:
+    //      every one is cfg(test)-gated test scratch, absent from every
+    //      shipped profile, counted only because the census counter is
+    //      textual; none is a SESSION_ENVELOPE_MANIFEST member, none touches
+    //      the session_sources tripwire.
+    //   +1 access/gin/gin/src/scanver_tests.rs — META_PAGE (84714b266d3):
+    //      leaked fake-metapage backing for the scan-version tests.
+    //   +1 access/index/genam/src/tests.rs — INDEX_PAGE/HEAP_PAGE/
+    //      HORIZON_PINS (4cce2402b9b): leaked fake-page fixtures + pin
+    //      counter for the index_compute_xid_horizon_for_tuples tests.
+    //   +1 commands/vacuum/src/lib.rs — CAPTURED (3c0bfc1502a): cfg(test)
+    //      ivinfo_tests per-thread PgError capture buffer behind the
+    //      emit-hook double. (The product IN_VACUUM/VACUUM_* block
+    //      pre-existed this pin; unchanged.)
+    //   +1 partitioning/partbounds/src/qual.rs — SEEN (26ceebe1116):
+    //      per-test WARNING capture inside one #[test] fn
+    //      (skipped_foreign_partition_warns_like_c).
+    //   +1 utils/misc/guc/src/tests.rs — HAS_PRIVS (6ce2b9f439f): cfg(test)
+    //      privilege-answer toggle for the GUC_SUPERUSER_ONLY read-gate
+    //      test's has_privs_of_role double.
+    //   +1 pl/plpgsql/src/handler.rs — CHECKED (ff1a71044e0): cfg(test)
+    //      domain_check recording buffer in the handler's tests mod. (The
+    //      product FUNC_CACHE/PL_GUC_VALUES blocks pre-existed this pin;
+    //      unchanged.)
+    assert_eq!(count_tree(crates), 554, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
