@@ -19174,6 +19174,7 @@ dependencies = [
  "crypt",
  "datum",
  "dbcommands_seams",
+ "define",
  "elog",
  "fmgr_seams",
  "genam",

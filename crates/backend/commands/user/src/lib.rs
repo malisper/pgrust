@@ -274,7 +274,7 @@ fn list_arg<'a>(d: &DefElem<'a>) -> &'a NodeList<'a> {
     d.arg.expect("DefElem List arg").as_list().expect("List")
 }
 
-// defGetString (define.c), the arms role options can produce.
+// defGetString (define.c), owned-String shape over all C arms.
 fn def_get_string(def: &DefElem<'_>) -> PgResult<String> {
     let defname = def.defname.unwrap_or("");
     let Some(arg) = def.arg else {
@@ -287,7 +287,17 @@ fn def_get_string(def: &DefElem<'_>) -> PgResult<String> {
             (if arg.as_boolean().unwrap().boolval { "true" } else { "false" }).to_string()
         }
         NodeTag::T_String => arg.as_string().unwrap().sval.to_string(),
-        t => panic!("defGetString (define.c): {t:?} arg arm unported"),
+        NodeTag::T_TypeName => {
+            define::type_name_string(arg.as_type_name().expect("TypeName"))
+        }
+        NodeTag::T_List => define::name_list_string(arg.as_list().expect("List"))?,
+        NodeTag::T_A_Star => "*".to_string(),
+        // C: elog(ERROR, "unrecognized node type: %d") — catchable.
+        t => {
+            return Err(Box::new(PgError::error(format!(
+                "unrecognized node type: {t:?}"
+            ))))
+        }
     })
 }
 
