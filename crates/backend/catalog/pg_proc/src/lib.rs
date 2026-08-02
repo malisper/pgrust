@@ -84,12 +84,6 @@ pub const INTERNALlanguageId: Oid = 12;
 pub const ClanguageId: Oid = 13;
 pub const SQLlanguageId: Oid = 14;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: pg_proc {what}")
-}
-
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -1047,12 +1041,11 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-// CheckFunctionValidatorAccess (fmgr.c), the two catalog gates: validators
-// are called with user-specified OIDs, so a bad OID must be a user-facing
-// error, and a function of another language is rejected against that
-// language's lanvalidator. DIVERGENCE (pre-existing scope): the two
-// object_aclcheck permission gates (language USAGE, function EXECUTE) stay
-// unported; they only bite non-superuser callers.
+// CheckFunctionValidatorAccess (fmgr.c): validators are called with
+// user-specified OIDs, so a bad OID must be a user-facing error; a function
+// of another language is rejected against that language's lanvalidator; and
+// the caller must hold USAGE on the language and EXECUTE on the function
+// (compiling/validation can have no side-effect execution can't).
 fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult<()> {
     let Some(proc_shape) = syscache_seams::lookup_pg_proc_fmgr::call(funcoid)? else {
         return Err(PgError::error(format!("function with OID {funcoid} does not exist"))
@@ -1073,6 +1066,44 @@ fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult
         ))
         .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE)
         .into());
+    }
+
+    // First validate that we have permission to use the language.
+    let aclresult = aclchk::object_aclcheck(
+        LANGUAGE_RELATION_ID,
+        proc_shape.prolang,
+        miscinit::GetUserId(),
+        adt_acl::ACL_USAGE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        // The names are only needed for the error text (C reads them off the
+        // tuples it already holds; the fmgr shapes carry no names).
+        let cx = mcx::MemoryContext::new("CheckFunctionValidatorAccess");
+        let lanname = lsyscache::get_language_name(cx.mcx(), proc_shape.prolang, false)?
+            .expect("!missing_ok returns Some");
+        aclchk::aclcheck_error(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::OBJECT_LANGUAGE,
+            lanname.as_str(),
+        )?;
+    }
+
+    // Check whether we are allowed to execute the function itself.
+    let aclresult = aclchk::object_aclcheck(
+        PROCEDURE_RELATION_ID,
+        funcoid,
+        miscinit::GetUserId(),
+        adt_acl::ACL_EXECUTE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        let cx = mcx::MemoryContext::new("CheckFunctionValidatorAccess");
+        let proname = lsyscache::get_func_name(cx.mcx(), funcoid)?
+            .unwrap_or_else(|| panic!("cache lookup failed for function {funcoid}"));
+        aclchk::aclcheck_error(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
+            proname.as_str(),
+        )?;
     }
     Ok(())
 }
@@ -1172,6 +1203,81 @@ pub fn IsThereFunctionInNamespace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_FUNC: Oid = 77001;
+    const TEST_LANG: Oid = 77002;
+    const TEST_VALIDATOR: Oid = 77003;
+
+    fn install_validator_seams() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::lookup_pg_proc_fmgr::set(|funcid| {
+                Ok((funcid == TEST_FUNC).then_some(syscache_seams::PgProcFmgrShape {
+                    prolang: TEST_LANG,
+                    prorettype: 25,
+                    pronargs: 0,
+                    proisstrict: false,
+                    proretset: false,
+                    prosecdef: false,
+                    proconfig_isnull: true,
+                }))
+            });
+            syscache_seams::lookup_pg_language_fmgr::set(|langoid| {
+                Ok((langoid == TEST_LANG).then_some(syscache_seams::PgLanguageFmgrShape {
+                    lanplcallfoid: InvalidOid,
+                    laninline: InvalidOid,
+                    lanvalidator: TEST_VALIDATOR,
+                }))
+            });
+        });
+    }
+
+    fn as_bootstrap_superuser<T>(f: impl FnOnce() -> T) -> T {
+        use types_core::catalog::BOOTSTRAP_SUPERUSERID;
+        let old = miscinit::ReplaceSessionIdentityState(miscinit::SessionIdentityState {
+            authenticated_user_id: BOOTSTRAP_SUPERUSERID,
+            session_user_id: BOOTSTRAP_SUPERUSERID,
+            outer_user_id: BOOTSTRAP_SUPERUSERID,
+            current_user_id: BOOTSTRAP_SUPERUSERID,
+            system_user: None,
+            session_user_is_superuser: true,
+            security_restriction_context: 0,
+            set_role_is_active: false,
+        });
+        let r = f();
+        miscinit::ReplaceSessionIdentityState(old);
+        r
+    }
+
+    // The previously-fenced object_aclcheck gates: a superuser caller passes
+    // both (language USAGE, function EXECUTE) via superuser_arg's
+    // bootstrap-superuser escape, with no catalog access.
+    #[test]
+    fn validator_access_acl_gates_pass_for_superuser() {
+        install_validator_seams();
+        as_bootstrap_superuser(|| {
+            check_function_validator_access(TEST_VALIDATOR, TEST_FUNC).unwrap();
+        });
+    }
+
+    #[test]
+    fn validator_mismatch_rejected_before_acl_gates() {
+        install_validator_seams();
+        as_bootstrap_superuser(|| {
+            let e = check_function_validator_access(TEST_VALIDATOR + 1, TEST_FUNC).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_INSUFFICIENT_PRIVILEGE);
+        });
+    }
+
+    #[test]
+    fn validator_bad_function_oid_is_user_facing() {
+        install_validator_seams();
+        as_bootstrap_superuser(|| {
+            let e = check_function_validator_access(TEST_VALIDATOR, 999_999).unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+        });
+    }
 
     #[test]
     fn proargdefaults_text_excludes_varlena_header() {

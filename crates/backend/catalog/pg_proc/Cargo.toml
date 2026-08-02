@@ -27,6 +27,8 @@ catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
 aclchk_seams = { path = "../aclchk_seams" }
 aclchk = { path = "../aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+miscinit = { path = "../../utils/init/miscinit" }
 types_nodes = { path = "../../../_support/types/nodes" }
 outfuncs = { path = "../../nodes/outfuncs" }
 dependency_seams = { path = "../dependency_seams" }
