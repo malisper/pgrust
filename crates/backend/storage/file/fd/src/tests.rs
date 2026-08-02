@@ -96,6 +96,7 @@ fn setup() {
         crate::init_seams();
 
         xact_seams::get_current_sub_transaction_id::set(|| 1);
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
         aio_seams::pgaio_closing_fd::set(|_| {});
         aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
@@ -1086,3 +1087,42 @@ fn probe_still_bounds_the_budget() {
 // DST P4 inc-1: crash-recovery property sweep + red battery (sim-only).
 #[cfg(pgrust_sim)]
 mod crash_sweep;
+
+// ---- file_copy_method=clone (copydir.c:236 clone_file) ----
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn clone_file_clones_bytes() {
+    setup();
+    let dir = scratch_dir("clonefile");
+    let src = format!("{dir}/src");
+    let dst = format!("{dir}/dst");
+    let payload = b"cloned payload \x00\x01\x02 with binary bytes".as_slice();
+    vfs_write_file(&src, payload);
+
+    crate::copydir::clone_file(&src, &dst).unwrap();
+    assert_eq!(vfs_read_file(&dst), payload);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn copydir_clone_method_copies_the_tree() {
+    setup();
+    let base = scratch_dir("clonedir");
+    let src = format!("{base}/src");
+    let dst = format!("{base}/dst");
+    vfs_mkdir_p(&src);
+    vfs_mkdir_p(&format!("{src}/sub"));
+    vfs_write_file(&format!("{src}/a"), b"alpha");
+    vfs_write_file(&format!("{src}/sub/b"), b"beta");
+
+    // SET file_copy_method = clone (the GUC option exists on this platform;
+    // the guc crate's file_copy_method_clone test covers acceptance).
+    crate::vfd::set_file_copy_method(1); // FILE_COPY_METHOD_CLONE
+    let res = crate::copydir::copydir(&src, &dst, true);
+    crate::vfd::set_file_copy_method(0);
+    res.unwrap();
+
+    assert_eq!(vfs_read_file(&format!("{dst}/a")), b"alpha");
+    assert_eq!(vfs_read_file(&format!("{dst}/sub/b")), b"beta");
+}
