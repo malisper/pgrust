@@ -16,6 +16,10 @@ fn main() {
         build.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
     build
+        // COMPILE GATE (timeline_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_timeline_io.c is filled
+        // with verbatim vendored C (README-TODO-timeline_diff.md step 1).
+        // .file("csrc/pg_timeline_io.c")
         // guc_file_diff oracle compiles in its OWN cc::Build below
         // (pg_difffuzz_gucfile): family-local csrc/gucfile shim tree.
         // COMPILE GATE (define_diff, scaffold.py): uncomment ONLY after every

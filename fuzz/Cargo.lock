@@ -1929,6 +1929,7 @@ dependencies = [
  "stringinfo",
  "superuser_seams",
  "syscache_seams",
+ "timeline",
  "timestamp_seams",
  "ts_locale",
  "tupdesc",
@@ -5577,6 +5578,23 @@ dependencies = [
  "types_nodes",
  "types_storage",
  "types_tuple",
+]
+
+[[package]]
+name = "timeline"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "fd",
+ "init_small",
+ "libc",
+ "mcx",
+ "timeline_seams",
+ "types_core",
+ "types_error",
+ "waitevent_seams",
+ "xlogarchive_seams",
+ "xlogrecovery_seams",
 ]
 
 [[package]]

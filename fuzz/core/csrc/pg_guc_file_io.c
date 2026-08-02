@@ -470,3 +470,20 @@ pg_gucf_logged_get_last_elevel(void)
 {
 	return gucf_logged_last_elevel;
 }
+
+/*
+ * DeescapeQuotedString driven directly (sibling arm). `buf`/`len` are the raw
+ * token bytes INCLUDING both quotes; C reads them as a NUL-terminated string,
+ * so the copy below terminates them exactly as yytext is terminated.
+ */
+const char *
+pg_gucf_deescape(const unsigned char *buf, size_t len)
+{
+	char	   *tok;
+
+	gucf_arena_reset();
+	tok = gucf_arena_malloc(len + 1);
+	memcpy(tok, buf, len);
+	tok[len] = '\0';
+	return DeescapeQuotedString(tok);
+}

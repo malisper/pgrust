@@ -767,3 +767,7 @@ mod pgcryptofam_sweeps;
 // guc_file_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-guc_file_diff.md.
 pub mod guc_file_diff;
 pub use guc_file_diff::guc_file_diff;
+
+// timeline_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-timeline_diff.md.
+pub mod timeline_diff;
+pub use timeline_diff::timeline_diff;

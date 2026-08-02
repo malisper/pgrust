@@ -61,7 +61,7 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, Once};
+use std::sync::{Mutex, MutexGuard};
 
 use types_error::{DEBUG1, ERROR, LOG};
 
@@ -80,6 +80,7 @@ extern "C" {
     fn pg_gucf_thrown_get_elevel() -> i32;
     fn pg_gucf_thrown_get_msg() -> *const c_char;
     fn pg_gucf_logged_get_count() -> i32;
+    fn pg_gucf_deescape(buf: *const u8, len: usize) -> *const c_char;
 }
 
 /// C `char*` -> Option<String> through the ratified lossy carve.
@@ -115,7 +116,13 @@ fn touches_upstream_deescape_ub(payload: &[u8]) -> bool {
     payload.windows(2).any(|w| w == [b'\'', 0])
 }
 
-static INIT: Once = Once::new();
+thread_local! { static THREAD_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// PG's emit_log_hook contract: clearing `output_to_server` suppresses the
+/// server-log write while every line before the sink still executes.
+fn swallow_log(_e: &types_error::PgError, output_to_server: &mut bool) {
+    *output_to_server = false;
+}
 
 /// The verbatim flex scanner owns plain (non-thread-local) statics
 /// (ConfigFileLineno, GUC_flex_fatal_jmp) and must stay byte-verbatim, so
@@ -129,11 +136,19 @@ fn lock_oracle() -> MutexGuard<'static, ()> {
 }
 
 pub fn guc_file_diff(data: &[u8]) {
-    INIT.call_once(|| {
-        // Silence the Rust server-log emission path (fuzz-process hygiene
-        // only: recording into the ConfigVariable list — the compared
-        // plane — is unconditional in record_or_throw).
-        elog::config::set_log_min_messages(types_error::PANIC);
+    THREAD_INIT.with(|done| {
+        if done.get() {
+            return;
+        }
+        done.set(true);
+        // Let the real reporting path RUN (message_level_is_interesting must
+        // stay true so record_or_throw's emit arm executes and is measured),
+        // but swallow the output at the sink: an emit_log_hook that clears
+        // output_to_server is exactly PG's hook contract, and 10M execs of
+        // stderr would be untenable. The compared planes are unaffected —
+        // recording into the ConfigVariable list is unconditional.
+        elog::config::set_log_min_messages(types_error::DEBUG5);
+        elog::sink::set_emit_log_hook(Some(swallow_log));
     });
 
     let Some((&sel, payload)) = data.split_first() else {
@@ -147,6 +162,15 @@ pub fn guc_file_diff(data: &[u8]) {
 
     if contains_include(payload) || touches_upstream_deescape_ub(payload) {
         return; // census domain restriction / upstream-UB carve
+    }
+
+    // Sibling arm: the exported DeescapeQuotedString entry point driven
+    // DIRECTLY (the bootstrap scanner is its other caller, so it must hold
+    // outside the config grammar too). Selector bit 2 picks it; the payload
+    // is wrapped in quotes so it is a well-formed token on both sides.
+    if sel & 0x04 != 0 {
+        deescape_diff(payload);
+        return;
     }
 
     // ---- C oracle ---- (held until the last accessor read below)
@@ -251,6 +275,49 @@ pub fn guc_file_diff(data: &[u8]) {
             "log-channel pairing broke: C logged {c_logged}, Rust recorded {r_error_records}"
         );
     }
+}
+
+/// Differential over the exported DeescapeQuotedString entry.
+///
+/// C's contract (asserted, not enforced) is a quoted token, so the payload is
+/// wrapped in single quotes. The C side takes raw bytes and returns a C
+/// string; the Rust side is compared modulo the same UTF-8-lossy carve as
+/// the parse arm.
+fn deescape_diff(payload: &[u8]) {
+    if payload.len() > 4096 {
+        return;
+    }
+    let mut tok = Vec::with_capacity(payload.len() + 2);
+    tok.push(b'\'');
+    tok.extend_from_slice(payload);
+    tok.push(b'\'');
+    // Same upstream-UB carve: a NUL right after the opening quote underflows.
+    if tok.get(1) == Some(&0) {
+        return;
+    }
+
+    let _oracle = lock_oracle();
+    let c = c_str_lossy(unsafe { pg_gucf_deescape(tok.as_ptr(), tok.len()) }).unwrap_or_default();
+    let r = String::from_utf8_lossy(nul_trunc_bytes(&guc_file::deescape_quoted_bytes(
+        nul_trunc_bytes(&tok),
+    )))
+    .into_owned();
+    assert_eq!(r, c, "DeescapeQuotedString diverged on {tok:?}");
+
+    // The &str wrapper must agree with the byte core on valid UTF-8 (it is
+    // the shipped entry point the bootstrap scanner calls).
+    if let Ok(utf8) = std::str::from_utf8(&tok) {
+        let via_str = guc_file::DeescapeQuotedString(utf8);
+        let via_bytes =
+            String::from_utf8_lossy(&guc_file::deescape_quoted_bytes(&tok)).into_owned();
+        assert_eq!(via_str, via_bytes, "wrapper vs byte core diverged");
+    }
+}
+
+/// The prefix a C string API would see.
+fn nul_trunc_bytes(b: &[u8]) -> &[u8] {
+    let end = b.iter().position(|&x| x == 0).unwrap_or(b.len());
+    &b[..end]
 }
 
 // ---------------------------------------------------------------------------

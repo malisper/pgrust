@@ -546,3 +546,11 @@ path = "fuzz_targets/guc_file_diff.rs"
 test = false
 doc = false
 bench = false
+
+# timeline_diff: scaffolded by fuzz/scaffold.py — see README-TODO-timeline_diff.md.
+[[bin]]
+name = "timeline_diff"
+path = "fuzz_targets/timeline_diff.rs"
+test = false
+doc = false
+bench = false
