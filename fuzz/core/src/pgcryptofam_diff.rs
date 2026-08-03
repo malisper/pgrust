@@ -1143,6 +1143,7 @@ fn run_hmac(r: &mut Rdr, mode: u8) {
 // ---------------------------------------------------------------------------
 
 pub fn pgcryptofam_diff(data: &[u8]) {
+    let _oracle = crate::oracle_serial(); // one-thread-at-a-time through the C oracles (process-global statics)
     if data.len() < 2 {
         return;
     }

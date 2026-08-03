@@ -5,6 +5,7 @@
  * count encoding. The vendored file is compiled ONLY through this TU.
  */
 #include "vendor/crypt-gensalt.c"
+#include "../pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /*
  * exporter: the 4-char xdes count encoding — the count-dependent slice of
@@ -17,6 +18,7 @@
 void
 pg_diff_pgcryptofam_xdes_count_encode(unsigned long count, char *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	out[0] = _crypt_itoa64[count & 0x3f];
 	out[1] = _crypt_itoa64[(count >> 6) & 0x3f];
 	out[2] = _crypt_itoa64[(count >> 12) & 0x3f];

@@ -191,37 +191,43 @@ extern "C" {
 /// harness sizing bug and panics.
 pub type PgcryptofamResult = Result<usize, Box<PgcryptofamStatus>>;
 
-/// THE ORACLE IS A SINGLE-THREADED RESOURCE. Every `c_*` entry below takes
-/// this lock.
-///
-/// The vendored C is verbatim PostgreSQL, which is process-per-backend, so
-/// it is entitled to process-global state and uses it: `crypt-des.c:662`
-/// returns a `static char output[21]`, the shim's palloc arena and its
-/// ereport/NOTICE capture channel are single-slot, and the entropy hook is a
-/// global. None of that is a defect upstream and none of it may be "fixed" —
-/// the bodies are byte-identical to 18.3 by construction.
-///
-/// Under libFuzzer this lock is uncontended (in-process fuzzing is
-/// single-threaded; fork-mode workers are separate processes), so it costs
-/// nothing on the floor. It exists because `cargo test` runs harnesses on
-/// N threads: without it, a 13-char traditional-DES write interleaves with a
-/// 20-char xdes write into `output[21]` and the sweep reports a torn value as
-/// a divergence.
-///
-/// Serializing here rather than pinning `--test-threads=1` is deliberate: a
-/// suite whose verdict depends on the runner's thread count is a
-/// gate-blindness vector — it passes for the wrong reason and stops being a
-/// gate the moment someone runs it differently.
-///
-/// Poison-tolerant on purpose: a panicking harness (a real divergence
-/// assert) must not convert every subsequent oracle call into a second,
-/// bogus failure. Per-entry state is reset by the shim arena anyway.
-static ORACLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn with_oracle<T>(f: impl FnOnce() -> T) -> T {
-    let _g = ORACLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    f()
-}
+// THE ORACLE IS A SINGLE-THREADED RESOURCE. Every `c_*` entry below takes
+// `crate::oracle_serial()` — the ONE crate-wide oracle lock — as its first
+// statement before touching the extern.
+//
+// HISTORY (task #125 unification): this family originally carried its own
+// private `ORACLE_LOCK` mutex (24aa1c256cb). That serialized pgcryptofam
+// against itself but was FICTION across families — every other oracle TU in
+// the test binary serializes on `oracle_serial()`, so two locks meant two
+// concurrent C-oracle holders. It also sat outside the mechanical
+// enforcement (scripts/lint-oracle-serial.py + the csrc/pg_oracle_guard.c
+// holder check), which keys on the one shared lock. The rationale that
+// lock carried still holds and is kept below.
+//
+// The vendored C is verbatim PostgreSQL, which is process-per-backend, so
+// it is entitled to process-global state and uses it: `crypt-des.c:662`
+// returns a `static char output[21]`, the shim's palloc arena and its
+// ereport/NOTICE capture channel are single-slot, and the entropy hook is a
+// global. None of that is a defect upstream and none of it may be "fixed" —
+// the bodies are byte-identical to 18.3 by construction.
+//
+// Under libFuzzer this lock is uncontended (in-process fuzzing is
+// single-threaded; fork-mode workers are separate processes), so it costs
+// nothing on the floor. It exists because `cargo test` runs harnesses on
+// N threads: without it, a 13-char traditional-DES write interleaves with a
+// 20-char xdes write into `output[21]` and the sweep reports a torn value as
+// a divergence.
+//
+// Serializing here rather than pinning `--test-threads=1` is deliberate: a
+// suite whose verdict depends on the runner's thread count is a
+// gate-blindness vector — it passes for the wrong reason and stops being a
+// gate the moment someone runs it differently.
+//
+// Poison-tolerance and reentrancy (tests hold `c_oracle_serial()` and then
+// call these wrappers) are properties of `oracle_serial()` itself — see
+// fuzz/core/src/lib.rs. A panicking harness (a real divergence assert)
+// must not convert every subsequent oracle call into a second, bogus
+// failure; per-entry state is reset by the shim arena anyway.
 
 fn finish(ret: i64, st: Box<PgcryptofamStatus>, what: &str) -> PgcryptofamResult {
     match ret {
@@ -243,7 +249,8 @@ fn finish(ret: i64, st: Box<PgcryptofamStatus>, what: &str) -> PgcryptofamResult
 /// CALLER MUST cost-bound `setting` via [`cost_probe`] first.
 pub fn c_crypt(pw: &[u8], setting: &[u8], out: &mut [u8]) -> PgcryptofamResult {
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_crypt(
                 pw.as_ptr(),
                 pw.len(),
@@ -253,7 +260,7 @@ pub fn c_crypt(pw: &[u8], setting: &[u8], out: &mut [u8]) -> PgcryptofamResult {
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     finish(ret, st, "crypt")
 }
@@ -268,7 +275,8 @@ pub fn c_crypt_status(
     out: &mut [u8],
 ) -> (Option<usize>, Box<PgcryptofamStatus>) {
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_crypt(
                 pw.as_ptr(),
                 pw.len(),
@@ -278,7 +286,7 @@ pub fn c_crypt_status(
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     (status_split(ret, "crypt"), st)
 }
@@ -292,7 +300,8 @@ pub fn c_gen_salt_status(
     out: &mut [u8],
 ) -> (Option<usize>, Box<PgcryptofamStatus>) {
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_gen_salt(
                 algo.as_ptr(),
                 algo.len(),
@@ -303,7 +312,7 @@ pub fn c_gen_salt_status(
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     (status_split(ret, "gen_salt"), st)
 }
@@ -326,7 +335,8 @@ fn status_split(ret: i64, what: &str) -> Option<usize> {
 /// deterministic prefix + alphabet membership only.
 pub fn c_gen_salt(algo: &[u8], rounds: i32, entropy: &[u8], out: &mut [u8]) -> PgcryptofamResult {
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_gen_salt(
                 algo.as_ptr(),
                 algo.len(),
@@ -337,7 +347,7 @@ pub fn c_gen_salt(algo: &[u8], rounds: i32, entropy: &[u8], out: &mut [u8]) -> P
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     finish(ret, st, "gen_salt")
 }
@@ -354,7 +364,8 @@ pub fn c_armor(
     let vals: Vec<*const u8> = headers.iter().map(|(_, v)| v.as_ptr()).collect();
     let vallens: Vec<usize> = headers.iter().map(|(_, v)| v.len()).collect();
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_armor(
                 data.as_ptr(),
                 data.len(),
@@ -367,7 +378,7 @@ pub fn c_armor(
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     finish(ret, st, "armor")
 }
@@ -376,7 +387,8 @@ pub fn c_armor(
 /// px_THROW_ERROR translation).
 pub fn c_dearmor(text: &[u8], out: &mut [u8]) -> PgcryptofamResult {
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_dearmor(
                 text.as_ptr(),
                 text.len(),
@@ -384,7 +396,7 @@ pub fn c_dearmor(text: &[u8], out: &mut [u8]) -> PgcryptofamResult {
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     finish(ret, st, "dearmor")
 }
@@ -397,7 +409,8 @@ pub fn c_armor_headers(text: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<Pgcry
     let mut out = vec![0u8; text.len() * 2 + 64];
     let mut nheaders: i32 = 0;
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_armor_headers(
                 text.as_ptr(),
                 text.len(),
@@ -406,7 +419,7 @@ pub fn c_armor_headers(text: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<Pgcry
                 &mut nheaders,
                 &mut *st,
             )
-            });
+            };
 
     let used = finish(ret, st, "armor_headers")?;
     let mut pairs = Vec::with_capacity(nheaders as usize);
@@ -427,7 +440,8 @@ pub fn c_armor_headers(text: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<Pgcry
 /// find_provider's verbatim downcase_truncate_identifier name fold.
 pub fn c_digest(name: &[u8], data: &[u8], out: &mut [u8]) -> PgcryptofamResult {
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_digest(
                 name.as_ptr(),
                 name.len(),
@@ -437,7 +451,7 @@ pub fn c_digest(name: &[u8], data: &[u8], out: &mut [u8]) -> PgcryptofamResult {
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     finish(ret, st, "digest")
 }
@@ -446,7 +460,8 @@ pub fn c_digest(name: &[u8], data: &[u8], out: &mut [u8]) -> PgcryptofamResult {
 /// px-hmac.c RFC 2104 engine.
 pub fn c_hmac(name: &[u8], key: &[u8], data: &[u8], out: &mut [u8]) -> PgcryptofamResult {
     let mut st: Box<PgcryptofamStatus> = Box::default();
-    let ret = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let ret = unsafe {
             pg_diff_pgcryptofam_hmac(
                 name.as_ptr(),
                 name.len(),
@@ -458,7 +473,7 @@ pub fn c_hmac(name: &[u8], key: &[u8], data: &[u8], out: &mut [u8]) -> Pgcryptof
                 out.len(),
                 &mut *st,
             )
-            });
+            };
 
     finish(ret, st, "hmac")
 }
@@ -470,9 +485,10 @@ pub fn c_hmac(name: &[u8], key: &[u8], data: &[u8], out: &mut [u8]) -> Pgcryptof
 pub fn cost_probe(setting: &[u8]) -> (PgcryptofamKind, i64) {
     let mut kind: i32 = 0;
     let mut cost: i64 = 0;
-    let rc = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let rc = unsafe {
             pg_diff_pgcryptofam_cost_probe(setting.as_ptr(), setting.len(), &mut kind, &mut cost)
-            });
+            };
 
     assert_eq!(rc, 0, "cost_probe cannot fail");
     let kind = match kind {
@@ -496,15 +512,17 @@ pub fn c_to64(v: u64, n: usize) -> Vec<u8> {
     // macOS aarch64 but `u8` on Linux aarch64, so an i8-typed buffer compiles
     // on the laptop and fails on the CI cluster (this cost one build-failed job).
     let mut buf = vec![0u8; n];
-    with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    unsafe {
         pg_diff_pgcryptofam_to64(buf.as_mut_ptr().cast::<c_char>(), v as c_ulong, n as c_int)
-    });
+    };
     buf
 }
 
 /// Exhaustive-diff helper: crypt-des.c's file-static `ascii_to_bin`.
 pub fn c_ascii_to_bin(ch: u8) -> i32 {
-    with_oracle(|| unsafe { pg_diff_pgcryptofam_ascii_to_bin(ch as c_char) })
+    let _serial = crate::oracle_serial();
+    unsafe { pg_diff_pgcryptofam_ascii_to_bin(ch as c_char) }
 }
 
 /// Exhaustive-diff helper: crypt-blowfish.c's file-static `BF_encode`
@@ -517,13 +535,14 @@ pub fn c_bf_encode(src: &[u8], size: usize) -> Vec<u8> {
     bytes[..size].copy_from_slice(&src[..size]);
     let outlen = (size * 4).div_ceil(3);
     let mut out = vec![0u8; outlen + 4];
-    with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    unsafe {
         pg_diff_pgcryptofam_bf_encode(
             out.as_mut_ptr().cast::<c_char>(),
             words.as_ptr(),
             size as c_int,
         )
-    });
+    };
     out.truncate(outlen);
     out
 }
@@ -536,13 +555,14 @@ pub fn c_bf_decode(src: &[u8], size: usize) -> Option<Vec<u8>> {
     // BF_decode consumes ceil(size*4/3) input chars; caller supplies them
     assert!(src.len() >= (size * 4).div_ceil(3));
     let mut words = [0u32; 6];
-    let rc = with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    let rc = unsafe {
             pg_diff_pgcryptofam_bf_decode(
                 words.as_mut_ptr(),
                 src.as_ptr() as *const c_char,
                 size as c_int,
             )
-            });
+            };
 
     if rc != 0 {
         return None;
@@ -555,9 +575,10 @@ pub fn c_bf_decode(src: &[u8], size: usize) -> Option<Vec<u8>> {
 /// of `_crypt_gensalt_extended_rn` (crypt-gensalt.c's `_crypt_itoa64`).
 pub fn c_xdes_count_encode(count: u32) -> [u8; 4] {
     let mut out = [0u8; 4];
-    with_oracle(|| unsafe {
+    let _serial = crate::oracle_serial();
+    unsafe {
         pg_diff_pgcryptofam_xdes_count_encode(count as c_ulong, out.as_mut_ptr().cast::<c_char>())
-    });
+    };
     out
 }
 

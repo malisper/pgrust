@@ -41,6 +41,7 @@
 #include "vendor/pgp.h"
 #include "common/string.h"
 #include "parser/scansup.h"
+#include "../pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* exporters defined in the wrap_*.c inclusion TUs */
 extern void pg_diff_pgcryptofam_to64(char *s, unsigned long v, int n);
@@ -87,6 +88,7 @@ pg_diff_pgcryptofam_crypt(const unsigned char *pw, size_t pwlen,
 						  unsigned char *out, size_t outcap,
 						  PgcryptofamStatus *st)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	char	   *buf0;
 	char	   *buf1;
 	char	   *resbuf;
@@ -126,6 +128,7 @@ pg_diff_pgcryptofam_gen_salt(const unsigned char *algo, size_t algolen,
 							 unsigned char *out, size_t outcap,
 							 PgcryptofamStatus *st)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	char		buf[PX_MAX_SALT_LEN + 1];
 	size_t		ncopy;
 	int			len;
@@ -166,6 +169,7 @@ pg_diff_pgcryptofam_armor(const unsigned char *data, size_t datalen,
 						  unsigned char *out, size_t outcap,
 						  PgcryptofamStatus *st)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StringInfoData buf;
 	/* volatile: these live across the ENTER sigsetjmp (silences gcc
 	 * -Wclobbered; they are never read on the longjmp path anyway) */
@@ -203,6 +207,7 @@ pg_diff_pgcryptofam_dearmor(const unsigned char *text, size_t textlen,
 							unsigned char *out, size_t outcap,
 							PgcryptofamStatus *st)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StringInfoData buf;
 	int			ret;
 
@@ -230,6 +235,7 @@ pg_diff_pgcryptofam_armor_headers(const unsigned char *text, size_t textlen,
 								  int32_t *nheaders,
 								  PgcryptofamStatus *st)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	int			nh = 0;
 	char	  **keys;
 	char	  **values;
@@ -325,6 +331,7 @@ pg_diff_pgcryptofam_digest(const unsigned char *name, size_t namelen,
 						   unsigned char *out, size_t outcap,
 						   PgcryptofamStatus *st)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PX_MD	   *md;
 	unsigned	hlen;
 	unsigned char *res;
@@ -352,6 +359,7 @@ pg_diff_pgcryptofam_hmac(const unsigned char *name, size_t namelen,
 						 unsigned char *out, size_t outcap,
 						 PgcryptofamStatus *st)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PX_HMAC    *h;
 	unsigned	hlen;
 	unsigned char *res;
@@ -398,6 +406,7 @@ int32_t
 pg_diff_pgcryptofam_cost_probe(const unsigned char *setting, size_t settinglen,
 							   int32_t *out_kind, int64_t *out_cost)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	char	   *s;
 	size_t		n;
 

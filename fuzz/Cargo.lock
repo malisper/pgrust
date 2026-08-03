@@ -3935,6 +3935,7 @@ dependencies = [
  "pg_md5",
  "pg_sha1",
  "pg_sha2",
+ "pg_string",
  "pg_strong_random",
  "postgres_seams",
  "types_core",

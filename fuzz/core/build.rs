@@ -1287,6 +1287,9 @@ fn main() {
         .flag_if_supported("-ffp-contract=off")
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-function")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_pgcryptofam");
     println!("cargo:rerun-if-changed=csrc/pgcryptofam");
 
