@@ -241,12 +241,28 @@ pub fn regex_diff(data: &[u8]) {
                 unsafe { pg_diff_regfree() };
                 return;
             }
+            let c_msg = c_regerror(c_code);
+            if c_code != 0 && (is_etoobig(&f.message) != is_etoobig(&c_msg)) {
+                // BOTH sides failed, exactly one with too-complex: the guard
+                // side gave up mid-parse before reaching the true syntax
+                // error the other side reports — the SAME environmental
+                // stack-band asymmetry as the error-vs-success carve above
+                // (r2/r3 CI cluster class crash-04cf69b5 &c: Rust ETOOBIG at the
+                // 2048kB default vs C "parentheses () not balanced"; at a
+                // 30MiB budget both report the syntax error — see
+                // regex_core/tests/etoobig_error_priority.rs). The exec and
+                // prefix planes below already carve this direction; the
+                // compile plane's hole is closed here. The DETERMINISTIC
+                // too-complex mechanism stays pinned by
+                // tests::etoobig_spaceused_parity.
+                unsafe { pg_diff_regfree() };
+                return;
+            }
             assert_ne!(
                 c_code, 0,
                 "COMPILE DIVERGENCE: C compiled, Rust failed with {:?} (pattern {:x?}, cflags {:o})",
                 f.message, pat, cflags
             );
-            let c_msg = c_regerror(c_code);
             assert_eq!(
                 f.message, c_msg,
                 "COMPILE ERROR-PLANE DIVERGENCE (pattern {:x?}, cflags {:o})",
