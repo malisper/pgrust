@@ -1281,6 +1281,51 @@ mod tests {
         }
     }
 
+    /// ON-DISK FORMAT PIN, ground-truthed against a real server (R1 adoption,
+    /// 2026-08-03). These are the bytes stock PostgreSQL 18.3 actually stores
+    /// in the heap for `'a|b'::lquery`, read out with pageinspect:
+    ///
+    /// ```sql
+    /// CREATE EXTENSION ltree; CREATE EXTENSION pageinspect;
+    /// CREATE TABLE t(q lquery); INSERT INTO t VALUES('a|b');
+    /// SELECT t_data FROM heap_page_items(get_raw_page('t',0));
+    /// ```
+    ///
+    /// The server hands back a 1-byte-header varlena (heap_fill_tuple shortens
+    /// eligible 4B headers), so the comparison is body-to-body. The load-bearing
+    /// bytes are each variant's label: `val`(4) `len`(2) `flag`(1) then the name
+    /// at **+7**, with +8 a zero pad. Reading or writing the name at +8 — which
+    /// is `LVAR_HDRSIZE`, the STRIDE — puts every stored lquery one byte out of
+    /// step with PostgreSQL. This pin is deliberately independent of the
+    /// differential oracle: it catches a mis-shimmed oracle too.
+    #[test]
+    fn lquery_on_disk_bytes_match_stock_pg_18_3() {
+        pin_c_ctype();
+        // t_data from the server, minus its 1-byte varlena header.
+        const SERVER_BODY: &str = "0100000000000000000000003000000002000000\
+                                   000000000000000043beb7e80100006100000000\
+                                   00000000f9efbe71010000620000000000000000";
+        let want: Vec<u8> = SERVER_BODY
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect::<Vec<u8>>()
+            .chunks(2)
+            .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+            .collect();
+        let img = io::parse_lquery(b"a|b").unwrap();
+        assert_eq!(img.len(), 64, "total image size");
+        assert_eq!(repr::varsize(&img), 64, "varlena header");
+        assert_eq!(
+            &img[repr::VARHDRSZ..],
+            &want[..],
+            "stored lquery body must be byte-identical to stock PostgreSQL 18.3"
+        );
+        // spell out the offset the whole finding is about
+        let voff = repr::LQUERY_HDRSIZE + repr::LQL_HDRSIZE;
+        assert_eq!(img[voff + repr::LVAR_OFF_NAME], b'a', "label at +7");
+        assert_eq!(img[voff + repr::LVAR_HDRSIZE], 0, "+8 is pad, not the label");
+    }
+
     /// MaxAllocSize ceiling (task #85 sibling sweep): C's deparse_lquery
     /// pallocs its estimate (~1.25x the stored size for dense multi-variant
     /// levels), so a valid sub-1GB lquery whose estimate crosses MaxAllocSize
