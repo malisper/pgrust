@@ -203,8 +203,13 @@ fn pin() {
     // the other p1 lanes' oracles installing the identical no-op first.
     static SEAMS: std::sync::Once = std::sync::Once::new();
     SEAMS.call_once(|| {
-        adt_regexp::init_seams();
-        regex_core::init_seams();
+        // CROSS-FAMILY DOUBLE INSTALL (the datetime_io_diff 2026-08-03
+        // class): regex_diff's init installs the identical shipped
+        // regex_core impls; first-wins via catch_unwind (the
+        // name_diff/arrayfuncs convention) so the loser's Once is never
+        // poisoned.
+        let _ = std::panic::catch_unwind(adt_regexp::init_seams);
+        let _ = std::panic::catch_unwind(regex_core::init_seams);
         if !postgres_seams::check_for_interrupts::is_installed() {
             postgres_seams::check_for_interrupts::set(|| Ok(()));
         }

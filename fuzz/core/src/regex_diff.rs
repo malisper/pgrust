@@ -125,7 +125,13 @@ fn init() {
         // the crate's real server-startup entry (installs the engine seams);
         // the driver calls the seam impls directly, but the installer IS
         // shipped-crate surface.
-        regex_core::init_seams();
+        // CROSS-FAMILY DOUBLE INSTALL (the datetime_io_diff 2026-08-03
+        // class): regexp_diff's init installs the identical shipped
+        // regex_core seam impls; whoever runs second used to panic
+        // ("seam installed twice") and poison the loser's Once —
+        // first-wins via catch_unwind, the name_diff/arrayfuncs
+        // convention.
+        let _ = std::panic::catch_unwind(regex_core::init_seams);
     });
     // Per-thread (thread_local state in stack_depth): arm the Rust stack
     // guard exactly as a real backend does, at the same 2048kB budget the C
