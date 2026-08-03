@@ -1816,6 +1816,19 @@ fn enforce_sort_symbol_hygiene() {
         "pg_qsort_strcmp", "med3", "qsort_med3", "qsort_arg_med3",
         "pg_qsort_med3", "qsort_swap", "qsort_arg_swap", "pg_qsort_swap",
         "qsort_swapn", "qsort_arg_swapn", "pg_qsort_swapn",
+        // oracle-sort re-sweep (task #98 follow-up): the rest of the
+        // ordering-sensitive libc surface. qsort_r/mergesort/heapsort are
+        // alternate libc sorts (never the backend's); strcoll/strcoll_l/
+        // wcscoll/strxfrm are locale collation (the campaign compares in C
+        // locale and PG backend text compare is varstr_cmp/pg_strcoll, never
+        // a bare oracle-TU strcoll); strcasecmp/strncasecmp: the backend and
+        // src/common call pg_strcasecmp/pg_strncasecmp (hand-rolled, ASCII,
+        // locale-free) — grep of vendor backend+common+contrib shows ZERO
+        // bare strcasecmp call sites, so any reference here is a shim
+        // divergence, not C-parity.
+        "qsort_r", "mergesort", "heapsort",
+        "strcoll", "strcoll_l", "wcscoll", "strxfrm",
+        "strcasecmp", "strncasecmp",
     ];
     const BAN_DEFINED_ONLY: &[&str] = &["bsearch"];
 
