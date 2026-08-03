@@ -33,6 +33,16 @@ fn main() {
         // geo_ops.c point relations + pg_hypot (provenance in
         // csrc/pg_spgquad_io.c header).
         .file("csrc/pg_spgquad_io.c")
+        // tsm_system_time_diff oracle (assembled by csrc/gen/assemble_tsmtime.sh).
+        .file("csrc/pg_tsm_system_time_io.c")
+        // tablesample_diff oracle (assembled by csrc/gen/assemble_tsmpl.sh).
+        .file("csrc/pg_tablesample_io.c")
+        // instrument_diff oracle (assembled by csrc/gen/assemble_instrbe.sh).
+        .file("csrc/pg_instrbe_io.c")
+        // COMPILE GATE (tsm_system_rows_diff, scaffold.py): uncomment ONLY after every
+        // SCAFFOLD-TODO #error paste site in csrc/pg_tsm_system_rows_io.c is filled
+        // with verbatim vendored C (README-TODO-tsm_system_rows_diff.md step 1).
+        .file("csrc/pg_tsm_system_rows_io.c")
         // COMPILE GATE (define_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_define_io.c is filled
         // with verbatim vendored C (README-TODO-define_diff.md step 1).
@@ -563,6 +573,52 @@ fn main() {
         // effective in every build.rs compile of the oracle TUs.
         .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_cryptofam");
+
+    // crypt_be_diff oracle (p1-wavea): verbatim 18.3 backend/libpq/crypt.c
+    // (minus get_role_password, census carve) + the auth-scram.c secret
+    // entry points + whole verbatim saslprep.c/unicode_norm.c, assembled by
+    // csrc/gen/assemble_cryptbe.sh. FRONTEND arms for the common/ files;
+    // crypto/base64/scram primitives are NOT re-vendored — the
+    // CRYPTO_SHARED_SYMS renames below bind this family's references to the
+    // cryptofam_* copies compiled above (single copy per the
+    // duplicate-export rule). Every symbol this family EXPORTS carries the
+    // pg_cryptbe_ prefix so ld.lld never sees a duplicate.
+    let mut cryptbe = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        cryptbe.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    for s in CRYPTO_SHARED_SYMS {
+        // scram_build_secret returns a raw-malloc'd string (FRONTEND arm of
+        // the vendored scram-common.c) that the verbatim crypt.c callers
+        // drop; route this TU's references through the arena-tracking shim
+        // in pg_cryptbe_io.c instead of the bare cryptofam_ symbol.
+        if *s == "scram_build_secret" {
+            cryptbe.define(s, "pg_cryptbe_scram_build_secret");
+            continue;
+        }
+        cryptbe.define(s, format!("cryptofam_{s}").as_str());
+    }
+    for s in [
+        "get_password_type", "encrypt_password", "md5_crypt_verify",
+        "plain_crypt_verify", "parse_scram_secret", "pg_be_scram_build_secret",
+        "scram_verify_plain_password", "pg_saslprep", "unicode_normalize",
+        "unicode_is_normalized_quickcheck", "pg_utf_mblen", "pg_utf8_islegal",
+        "pg_is_ascii",
+    ] {
+        cryptbe.define(s, format!("pg_cryptbe_{s}").as_str());
+    }
+    cryptbe
+        .file("csrc/cryptbe/pg_cryptbe_io.c")
+        .file("csrc/cryptbe/saslprep.c")
+        .file("csrc/cryptbe/unicode_norm.c")
+        .include("csrc/cryptbe/include")
+        .include("csrc/cryptofam/shim_fe")
+        .include("csrc/cryptofam/include")
+        .define("FRONTEND", None)
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-Wno-unused-function")
+        .compile("pg_difffuzz_cryptbe");
 
     // tablesfam_diff oracle (p1-lanef): verbatim 18.3 kwlookup/keywords/
     // unicode_category, FRONTEND arms, own shim include tree.

@@ -6,9 +6,9 @@ C-oracle side, unlocking state-dependent carves:
 
 | facility       | pins                                                        |
 |----------------|-------------------------------------------------------------|
-| `stub:guc`     | GUC scalars: extra_float_digits, DateStyle+DateOrder, IntervalStyle, standard_conforming_strings |
-| `stub:clock`   | GetCurrentTimestamp-shaped reads, to a fuzzed TimestampTz    |
-| `stub:prng`    | the global-prng analog, seeded from the fuzz input           |
+| `stub:guc`     | GUC scalars: extra_float_digits, DateStyle+DateOrder, IntervalStyle, standard_conforming_strings; md5_password_warnings + scram_iterations (`guc::pin_md5_password_warnings`/`guc::pin_scram_iterations`; Rust side = the crypt/auth_scram session cells via their installed GUC accessors, C side = `pg_stub_md5_password_warnings`/`pg_stub_scram_iterations`; first consumer + must-fail controls: crypt_be_diff `control_guc_md5_password_warnings_pin`/`control_guc_scram_iterations_pin`) |
+| `stub:clock`   | GetCurrentTimestamp-shaped reads, to a fuzzed TimestampTz; MONOTONIC half: INSTR_TIME_SET_CURRENT / `pg_clock::mono_ns`-shaped reads, to a fuzz-derived ns sequence (`clock::pin_mono_ns`; Rust side = pg_clock's default-off `fuzz_mono_pin` feature this workspace enables, C side = `pg_stub_get_mono_ns`; first consumer + must-fail control: tsm_system_time_diff `control_clock_mono_pin`) |
+| `stub:prng`    | the global-prng analog, seeded from the fuzz input; SCRAM-salt channel: the 16-byte pg_strong_random read inside pg_be_scram_build_secret (`prng::pin_scram_salt`; Rust side = the shipped `PGRUST_SCRAM_FIXED_SALT_B64` determinism hook, C side = `pg_stub_scram_salt` copied by the oracle's pg_strong_random shim; first consumer + must-fail control: crypt_be_diff `control_prng_scram_salt_pin`) |
 | `stub:workmem` | work_mem / maintenance_work_mem ceilings                     |
 
 Code: Rust half `core/src/stubs.rs`; C half

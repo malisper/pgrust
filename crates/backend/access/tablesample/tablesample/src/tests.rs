@@ -137,3 +137,135 @@ fn extension_states_route_params() {
     let err = Tsm::SystemTime.init_state().begin_sample_scan(&[Datum::from_f64(-1.0)], 0).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_TABLESAMPLE_ARGUMENT);
 }
+
+// ---------------------------------------------------------------------------
+// Exception-row witnesses (phase-1 100%-coverage campaign, lane p1-wavea).
+// The census carves tablesample_diff cannot reach stay EXECUTABLE via these
+// tests (exception rows in proofs/coverage/phase1-exceptions.tsv).
+// ---------------------------------------------------------------------------
+
+/// Witness for the defensive Bernoulli NextSampleBlock panic arm
+/// (lib.rs TsmState::next_sample_block): C encodes the same contract as
+/// NextSampleBlock == NULL in bernoulli.c's vtable — the executor never
+/// calls it when has_next_sample_block() is false (tsmapi.h).
+#[test]
+#[should_panic(expected = "NextSampleBlock called on a TSM without one")]
+fn bernoulli_next_sample_block_panics() {
+    let mut s = Tsm::Bernoulli.init_state();
+    s.next_sample_block(1, 0);
+}
+
+/// Witness for the Tsm::get census carve (GetTsmRoutine syscache/fmgr
+/// seam, tablesample.c 26-40): builtin fast path, extension-symbol hit,
+/// unknown-symbol elog, and no-prosrc elog — all four arms executable.
+#[test]
+fn tsm_get_carve_witness() {
+    syscache_seams::lookup_pg_proc_prosrc::set(|mcx, funcid| {
+        Ok(match funcid {
+            111 => Some(mcx::PgString::from_str_in("tsm_system_rows_handler", mcx)?),
+            222 => Some(mcx::PgString::from_str_in("tsm_system_time_handler", mcx)?),
+            333 => Some(mcx::PgString::from_str_in("not_a_handler", mcx)?),
+            _ => None,
+        })
+    });
+    let cx = mcx::MemoryContext::new("tsm_get_test");
+    let m = cx.mcx();
+    assert_eq!(Tsm::get(m, F_TSM_BERNOULLI_HANDLER).unwrap(), Tsm::Bernoulli);
+    assert_eq!(Tsm::get(m, F_TSM_SYSTEM_HANDLER).unwrap(), Tsm::System);
+    assert_eq!(Tsm::get(m, 111).unwrap(), Tsm::SystemRows);
+    assert_eq!(Tsm::get(m, 222).unwrap(), Tsm::SystemTime);
+    let err = Tsm::get(m, 333).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "tablesample handler function 333 did not return a TsmRoutine struct"
+    );
+    let err = Tsm::get(m, 444).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "tablesample handler function 444 did not return a TsmRoutine struct"
+    );
+}
+
+/// Witness for the sample_scan_get_sample_size census carve (planner fold;
+/// bernoulli.c 85-121 / system.c 88-124 + costsize.c clamp_row_est): every
+/// dispatch arm plus the extract_fraction bogus/default branches and the
+/// clamp_row_est <=1 / round / huge / NaN arms stay executable.
+#[test]
+fn sample_scan_get_sample_size_carve_witness() {
+    use types_core::catalog::FLOAT8OID;
+    let cx = mcx::MemoryContext::new("tsm_size_test");
+    let m = cx.mcx();
+    let f4 = |v: f32| {
+        NodeList::make1(
+            m,
+            Node::mk_const(m, FLOAT4OID, -1, 0, 4, Datum::from_f32(v), false, true).unwrap(),
+        )
+        .unwrap()
+    };
+    // Bernoulli: pages passthrough, tuples = clamp(t * fract).
+    let (pages, tuples) =
+        Tsm::Bernoulli.sample_scan_get_sample_size(m, &f4(50.0), 100, 1000.0, 4.0).unwrap();
+    assert_eq!((pages, tuples), (100, 500.0));
+    // System: pages also scaled.
+    let (pages, tuples) =
+        Tsm::System.sample_scan_get_sample_size(m, &f4(50.0), 100, 1000.0, 4.0).unwrap();
+    assert_eq!((pages, tuples), (50, 500.0));
+    // Bogus percent -> 0.1 default fraction (extract_fraction else arm).
+    let (pages, tuples) =
+        Tsm::Bernoulli.sample_scan_get_sample_size(m, &f4(150.0), 100, 1000.0, 4.0).unwrap();
+    assert_eq!((pages, tuples), (100, 100.0));
+    // NaN percent -> same default.
+    let (_, tuples) = Tsm::Bernoulli
+        .sample_scan_get_sample_size(m, &f4(f32::NAN), 100, 1000.0, 4.0)
+        .unwrap();
+    assert_eq!(tuples, 100.0);
+    // Null Const -> default fraction (non-Const arm of extract_fraction).
+    let nullc = NodeList::make1(
+        m,
+        Node::mk_const(m, FLOAT4OID, -1, 0, 4, Datum::from_f32(0.0), true, true).unwrap(),
+    )
+    .unwrap();
+    let (_, tuples) =
+        Tsm::System.sample_scan_get_sample_size(m, &nullc, 100, 1000.0, 4.0).unwrap();
+    assert_eq!(tuples, 100.0);
+    // clamp_row_est arms: <= 1.0 floor; > 1e100 / NaN cap.
+    let (_, tuples) =
+        Tsm::Bernoulli.sample_scan_get_sample_size(m, &f4(0.0), 100, 1000.0, 4.0).unwrap();
+    assert_eq!(tuples, 1.0);
+    let (_, tuples) =
+        Tsm::Bernoulli.sample_scan_get_sample_size(m, &f4(100.0), 100, 2e100, 4.0).unwrap();
+    assert_eq!(tuples, 1e100);
+    let (_, tuples) = Tsm::Bernoulli
+        .sample_scan_get_sample_size(m, &f4(50.0), 100, f64::NAN, 4.0)
+        .unwrap();
+    assert_eq!(tuples, 1e100);
+    // SystemRows: INT8 Const limit (delegates to the contrib crate).
+    let i8list = NodeList::make1(
+        m,
+        Node::mk_const(m, INT8OID, -1, 0, 8, Datum::from_i64(500), false, true).unwrap(),
+    )
+    .unwrap();
+    let (pages, tuples) =
+        Tsm::SystemRows.sample_scan_get_sample_size(m, &i8list, 64, 1000.0, 4.0).unwrap();
+    assert!(pages > 0 && tuples > 0.0);
+    // SystemRows null Const -> None limit arm.
+    let i8null = NodeList::make1(
+        m,
+        Node::mk_const(m, INT8OID, -1, 0, 8, Datum::from_i64(0), true, true).unwrap(),
+    )
+    .unwrap();
+    Tsm::SystemRows.sample_scan_get_sample_size(m, &i8null, 64, 1000.0, 4.0).unwrap();
+    // SystemTime: FLOAT8 Const limit + null Const arm.
+    let f8list = NodeList::make1(
+        m,
+        Node::mk_const(m, FLOAT8OID, -1, 0, 8, Datum::from_f64(1000.0), false, true).unwrap(),
+    )
+    .unwrap();
+    Tsm::SystemTime.sample_scan_get_sample_size(m, &f8list, 64, 1000.0, 4.0).unwrap();
+    let f8null = NodeList::make1(
+        m,
+        Node::mk_const(m, FLOAT8OID, -1, 0, 8, Datum::from_f64(0.0), true, true).unwrap(),
+    )
+    .unwrap();
+    Tsm::SystemTime.sample_scan_get_sample_size(m, &f8null, 64, 1000.0, 4.0).unwrap();
+}

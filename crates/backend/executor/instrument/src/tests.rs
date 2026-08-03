@@ -28,6 +28,14 @@ fn start_stop_end_loop_accumulates() {
     let mut i = timed();
     for _ in 0..3 {
         instr_start_node(&mut i);
+        // The clock authority can be coarser than one call round-trip
+        // (macOS CLOCK_MONOTONIC advances in ~1us steps) — wait for it to
+        // tick so the accumulated interval is provably nonzero, exactly as
+        // a C test over INSTR_TIME_SET_CURRENT would have to.
+        let t0 = pg_clock::mono_ns();
+        while pg_clock::mono_ns() == t0 {
+            std::hint::spin_loop();
+        }
         instr_stop_node(&mut i, 1.0);
     }
     assert!(i.running);

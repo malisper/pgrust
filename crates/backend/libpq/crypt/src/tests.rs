@@ -169,3 +169,14 @@ fn get_role_password_arms() {
     assert!(get_role_password("future", &mut ld).unwrap().is_some());
     assert!(ld.is_none());
 }
+
+/// Carve witness (coverage-exception ledger): PasswordType::from_guc is
+/// pgrust-only GUC plumbing (guc_tables keeps password_encryption as an int;
+/// crypt.c has no counterpart function) — excluded-state per the census
+/// carve, executable here.
+#[test]
+fn password_type_from_guc_carve_witness() {
+    assert_eq!(PasswordType::from_guc(1), PasswordType::Md5);
+    assert_eq!(PasswordType::from_guc(2), PasswordType::ScramSha256);
+    assert!(std::panic::catch_unwind(|| PasswordType::from_guc(7)).is_err());
+}

@@ -33,11 +33,32 @@ int			pg_stub_get_intervalstyle(void);
 void		pg_stub_set_standard_conforming_strings(int on);
 int			pg_stub_get_standard_conforming_strings(void);
 
+/* stub:guc — cryptbe family channels */
+extern _Thread_local int pg_stub_md5_password_warnings;
+extern _Thread_local int pg_stub_scram_iterations;
+
+void		pg_stub_set_md5_password_warnings(int on);
+int			pg_stub_get_md5_password_warnings(void);
+void		pg_stub_set_scram_iterations(int iters);
+int			pg_stub_get_scram_iterations(void);
+
+/* stub:prng — scram-salt channel (pg_strong_random-shaped entropy read) */
+extern _Thread_local uint8_t pg_stub_scram_salt[16];
+
+void		pg_stub_set_scram_salt(const uint8_t *salt16);
+void		pg_stub_get_scram_salt(uint8_t *out16);
+
 /* stub:clock */
 extern _Thread_local int64_t pg_stub_now_usecs;
 
 void		pg_stub_set_current_timestamp(int64_t usecs);
 int64_t		pg_stub_get_current_timestamp(void);
+
+/* stub:clock monotonic half (INSTR_TIME_SET_CURRENT analog) */
+extern _Thread_local uint64_t pg_stub_mono_ns_val;
+
+void		pg_stub_set_mono_ns(uint64_t ns);
+uint64_t	pg_stub_get_mono_ns(void);
 
 /* stub:prng (verbatim vendored xoroshiro128** engine, global-state analog) */
 void		pg_stub_prng_seed(uint64_t seed);

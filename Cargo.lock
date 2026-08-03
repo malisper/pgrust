@@ -7788,6 +7788,7 @@ version = "0.1.0"
 dependencies = [
  "bufmgr",
  "fd",
+ "pg_clock",
  "transam_xlog_seams",
  "types_core",
 ]

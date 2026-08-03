@@ -783,3 +783,25 @@ pub use guc_units_diff::guc_units_diff;
 // spgbox_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-spgbox_diff.md.
 pub mod spgbox_diff;
 pub use spgbox_diff::spgbox_diff;
+// tsm_system_rows_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-tsm_system_rows_diff.md.
+pub mod tsm_system_rows_diff;
+pub use tsm_system_rows_diff::tsm_system_rows_diff;
+
+// tsm_system_time_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-tsm_system_time_diff.md.
+pub mod tsm_system_time_diff;
+pub use tsm_system_time_diff::tsm_system_time_diff;
+
+// tablesample_diff (p1-wavea): backend/access/tablesample (BERNOULLI/SYSTEM)
+// vs verbatim bernoulli.c/system.c oracle (csrc/pg_tablesample_io.c).
+pub mod tablesample_diff;
+pub use tablesample_diff::tablesample_diff;
+
+// crypt_be_diff (p1-wavea): backend/libpq/crypt vs verbatim crypt.c oracle.
+pub mod cryptbe_diff;
+pub use cryptbe_diff::crypt_be_diff;
+
+// instrument_diff (p1-wavea): backend/executor/instrument vs verbatim
+// instrument.c oracle (csrc/pg_instrbe_io.c, assembled by
+// csrc/gen/assemble_instrbe.sh).
+pub mod instrument_diff;
+pub use instrument_diff::instrument_diff;

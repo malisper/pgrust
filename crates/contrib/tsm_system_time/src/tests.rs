@@ -87,3 +87,16 @@ fn sample_size_estimates_match_c() {
     assert_eq!(sample_scan_get_sample_size(Some(8.0), 0.0, 100, 10000.0), (8, 800.0));
     assert_eq!(sample_scan_get_sample_size(Some(7.0), 4.0, 0, 0.0), (1, 1.0));
 }
+
+/// lib.rs L125 (sampler_random_fract zero-draw retry) — phase-1 residual
+/// witness (p1-wavea): xoroshiro128** with s0 == 0 emits val == 0 on the
+/// first draw regardless of s1, so next_f64() == 0.0 exactly and the
+/// C-parity do-while retry arm executes, then terminates on the mixed state.
+/// Same behavior as C sampling.c sampler_random_fract.
+#[test]
+fn sampler_random_fract_retries_zero_draw() {
+    assert_eq!(PgPrng::from_raw(0, 1).next_f64(), 0.0);
+    let mut r = PgPrng::from_raw(0, 1);
+    let res = sampler_random_fract(&mut r);
+    assert!(res != 0.0 && res > 0.0 && res < 1.0);
+}

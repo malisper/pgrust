@@ -195,6 +195,20 @@ adt_tsrank = { path = "../../crates/backend/utils/adt/tsrank" }  # tsrank_diff (
 adt_network = { path = "../../crates/backend/utils/adt/network" }  # network_diff (scaffold.py)
 guc_file = { path = "../../crates/backend/utils/misc/guc_file" }  # guc_file_diff (scaffold.py)
 timeline = { path = "../../crates/backend/access/transam/timeline" }  # timeline_diff (scaffold.py)
+tsm_system_rows = { path = "../../crates/contrib/tsm_system_rows" }  # tsm_system_rows_diff (scaffold.py)
+tsm_system_time = { path = "../../crates/contrib/tsm_system_time" }  # tsm_system_time_diff (scaffold.py)
+tablesample = { path = "../../crates/backend/access/tablesample/tablesample" }  # tablesample_diff (p1-wavea)
+tableam_vocab = { path = "../../crates/backend/access/table/tableam_vocab" }    # tablesample_diff SampleScanDriver
+# stub:clock monotonic half (tsm_system_time_diff): the default-off pin
+# feature exists FOR this detached fuzz workspace; product builds never
+# enable it (see pg_clock/Cargo.toml).
+pg_clock = { path = "../../crates/port/pg_clock", features = ["fuzz_mono_pin"] }
+crypt = { path = "../../crates/backend/libpq/crypt" }  # crypt_be_diff (p1-wavea)
+# instrument_diff (p1-wavea): crate under test + the wal_usage seam the
+# driver installs to pin the pgWalUsage analog from fuzz input.
+instrument = { path = "../../crates/backend/executor/instrument" }
+transam_xlog_seams = { path = "../../crates/backend/access/transam/transam_xlog_seams" }
+auth_scram = { path = "../../crates/backend/libpq/auth_scram" }  # crypt_be_diff (p1-wavea)
 
 # pgcryptofam_diff (p1-pgcryptofam): contrib/pgcrypto crypt()/gen_salt()/armor
 # family vs the verbatim 18.3 C oracle in csrc/pgcryptofam/.

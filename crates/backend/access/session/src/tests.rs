@@ -869,7 +869,18 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      domain_check recording buffer in the handler's tests mod. (The
     //      product FUNC_CACHE/PL_GUC_VALUES blocks pre-existed this pin;
     //      unchanged.)
-    assert_eq!(count_tree(crates), 554, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 555, re-pinned at the p1-wavea union landing (instrument INSTR_TIME
+    //      C-exactness):
+    //   +1 port/pg_clock/src/lib.rs — PINNED_MONO_NS (fuzz_mono_pin
+    //      module): per-thread pinned CLOCK_MONOTONIC reading behind the
+    //      fuzz-only `fuzz_mono_pin` cargo feature (default-off, enabled
+    //      ONLY by the fuzz workspace so instrument_diff/tsm_system_time_diff
+    //      can drive both sides' timer reads deterministically). Compiled
+    //      out of every product build (#[cfg(feature = "fuzz_mono_pin")]);
+    //      counted only because the census counter is textual. Non-session
+    //      on the substance: per-thread fuzz-harness scratch, no session
+    //      identity, nothing an envelope could capture or restore.
+    assert_eq!(count_tree(crates), 555, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

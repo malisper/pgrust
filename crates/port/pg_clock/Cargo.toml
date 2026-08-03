@@ -16,3 +16,13 @@ libc = "0.2"
 # RUSTFLAGS — never in .cargo/config, any product profile, or CI cluster submit envs.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)', 'cfg(loom)'] }
+
+[features]
+# stub:clock monotonic half (fuzz/STUBS.md) — a fuzz-only ENVIRONMENT pin:
+# a thread-local override consulted by `mono_ns` so a differential fuzz
+# driver can feed BOTH sides (shipped Rust + vendored C oracle) the same
+# fuzz-derived monotonic reading. DEFAULT OFF and never enabled by any
+# product/workspace build; only the detached fuzz workspace
+# (fuzz/core/Cargo.toml) turns it on. Product codegen is unchanged (the
+# override branch is cfg'd out entirely).
+fuzz_mono_pin = []

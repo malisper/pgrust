@@ -112,6 +112,70 @@ pg_stub_get_standard_conforming_strings(void)
 	return pg_stub_standard_conforming_strings;
 }
 
+/*
+ * md5_password_warnings (bool GUC, crypt.c; boot true) — the cryptbe family
+ * oracle #defines the vendored global name onto the getter. Rust side = the
+ * crypt crate's session cell via the installed GUC accessor.
+ */
+_Thread_local int pg_stub_md5_password_warnings = 1;
+
+void
+pg_stub_set_md5_password_warnings(int on)
+{
+	pg_stub_md5_password_warnings = on;
+}
+
+int
+pg_stub_get_md5_password_warnings(void)
+{
+	return pg_stub_md5_password_warnings;
+}
+
+/*
+ * scram_iterations (int GUC, auth-scram.c scram_sha_256_iterations; boot
+ * 4096, legal range [1, INT_MAX]) — same #define-onto-getter consumption.
+ */
+_Thread_local int pg_stub_scram_iterations = 4096;
+
+void
+pg_stub_set_scram_iterations(int iters)
+{
+	pg_stub_scram_iterations = iters;
+}
+
+int
+pg_stub_get_scram_iterations(void)
+{
+	return pg_stub_scram_iterations;
+}
+
+/* ---- stub:prng scram-salt channel ----------------------------------------- */
+
+/*
+ * The pg_strong_random-shaped entropy read inside pg_be_scram_build_secret
+ * (SCRAM_DEFAULT_SALT_LEN = 16 bytes). The oracle TU's pg_strong_random shim
+ * copies from here; the Rust side pins the SAME bytes through the shipped
+ * crate's PGRUST_SCRAM_FIXED_SALT_B64 determinism hook (the real seam the
+ * shipped pg_be_scram_build_secret reads). Default zero salt — a target
+ * using the channel MUST pin per exec; the must-fail control proves the pin
+ * is alive on both sides.
+ */
+_Thread_local uint8_t pg_stub_scram_salt[16];
+
+void
+pg_stub_set_scram_salt(const uint8_t *salt16)
+{
+	for (int i = 0; i < 16; i++)
+		pg_stub_scram_salt[i] = salt16[i];
+}
+
+void
+pg_stub_get_scram_salt(uint8_t *out16)
+{
+	for (int i = 0; i < 16; i++)
+		out16[i] = pg_stub_scram_salt[i];
+}
+
 /* ---- stub:clock — pinned GetCurrentTimestamp ----------------------------- */
 
 _Thread_local int64_t pg_stub_now_usecs = 0;
@@ -132,6 +196,28 @@ pg_stub_get_current_timestamp(void)
 {
 	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_stub_now_usecs;
+}
+
+/*
+ * stub:clock monotonic half — the INSTR_TIME_SET_CURRENT / clock_gettime(
+ * CLOCK_MONOTONIC) analog. An oracle TU #defines its INSTR_TIME_SET_CURRENT
+ * (or equivalent monotonic read) to pg_stub_get_mono_ns(); the Rust half is
+ * pg_clock's fuzz_mono_pin feature. Default 0 like the timestamp channel:
+ * a target using it MUST pin before use.
+ */
+
+_Thread_local uint64_t pg_stub_mono_ns_val = 0;
+
+void
+pg_stub_set_mono_ns(uint64_t ns)
+{
+	pg_stub_mono_ns_val = ns;
+}
+
+uint64_t
+pg_stub_get_mono_ns(void)
+{
+	return pg_stub_mono_ns_val;
 }
 
 /* ---- stub:prng — pinned pg_global_prng_state analog ---------------------- */

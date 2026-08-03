@@ -559,6 +559,10 @@ bench = false
 [[bin]]
 name = "spgquad_diff"
 path = "fuzz_targets/spgquad_diff.rs"
+# tsm_system_rows_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsm_system_rows_diff.md.
+[[bin]]
+name = "tsm_system_rows_diff"
+path = "fuzz_targets/tsm_system_rows_diff.rs"
 test = false
 doc = false
 bench = false
@@ -567,6 +571,10 @@ bench = false
 [[bin]]
 name = "guc_units_diff"
 path = "fuzz_targets/guc_units_diff.rs"
+# tablesample_diff (p1-wavea): backend/access/tablesample BERNOULLI/SYSTEM.
+[[bin]]
+name = "tablesample_diff"
+path = "fuzz_targets/tablesample_diff.rs"
 test = false
 doc = false
 bench = false
@@ -575,6 +583,27 @@ bench = false
 [[bin]]
 name = "spgbox_diff"
 path = "fuzz_targets/spgbox_diff.rs"
+# tsm_system_time_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsm_system_time_diff.md.
+[[bin]]
+name = "tsm_system_time_diff"
+path = "fuzz_targets/tsm_system_time_diff.rs"
+test = false
+doc = false
+bench = false
+
+# crypt_be_diff (p1-wavea): backend/libpq/crypt vs verbatim crypt.c oracle.
+[[bin]]
+name = "crypt_be_diff"
+path = "fuzz_targets/crypt_be_diff.rs"
+test = false
+doc = false
+bench = false
+
+# instrument_diff (p1-wavea): backend/executor/instrument vs verbatim
+# instrument.c oracle.
+[[bin]]
+name = "instrument_diff"
+path = "fuzz_targets/instrument_diff.rs"
 test = false
 doc = false
 bench = false

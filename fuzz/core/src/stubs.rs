@@ -40,8 +40,13 @@ extern "C" {
     fn pg_stub_set_standard_conforming_strings(on: i32);
     // stub:clock
     fn pg_stub_set_current_timestamp(usecs: i64);
+    fn pg_stub_set_mono_ns(ns: u64);
     // stub:prng
     fn pg_stub_prng_seed(seed: u64);
+    fn pg_stub_set_scram_salt(salt16: *const u8);
+    // stub:guc — cryptbe family channels
+    fn pg_stub_set_md5_password_warnings(on: i32);
+    fn pg_stub_set_scram_iterations(iters: i32);
     // stub:workmem
     fn pg_stub_set_work_mem(work_mem_kb: i32, maintenance_work_mem_kb: i32);
 }
@@ -62,6 +67,9 @@ pub(crate) mod craw {
         pub fn pg_stub_set_current_timestamp(usecs: i64);
         pub fn pg_stub_get_current_timestamp() -> i64;
         pub fn pg_stub_prng_seed(seed: u64);
+        pub fn pg_stub_set_scram_salt(salt16: *const u8);
+        pub fn pg_stub_set_md5_password_warnings(on: i32);
+        pub fn pg_stub_set_scram_iterations(iters: i32);
         pub fn pg_stub_set_work_mem(wm: i32, mwm: i32);
         pub fn pg_stub_get_work_mem() -> i32;
         pub fn pg_stub_float8out_guc(num: f64, buf32: *mut c_char) -> i32;
@@ -154,6 +162,40 @@ pub mod guc {
         unsafe { super::pg_stub_set_standard_conforming_strings(v as i32) };
         v
     }
+
+    /// md5_password_warnings (bool, boot true; crypt.c). Rust side = the
+    /// crypt crate's session cell through its installed GUC accessor
+    /// (crypt::init_seams, installed lazily here); C side =
+    /// pg_stub_md5_password_warnings, which the cryptbe oracle's verbatim
+    /// `md5_password_warnings` reads map onto. First consumer + must-fail
+    /// control: crypt_be_diff / `control_guc_md5_password_warnings_pin`.
+    pub fn pin_md5_password_warnings(b: u8) -> bool {
+        if !guc_tables::vars::md5_password_warnings.installed() {
+            let _ = std::panic::catch_unwind(crypt::init_seams);
+        }
+        let v = b & 1 == 1;
+        guc_tables::vars::md5_password_warnings.write(v);
+        unsafe { super::pg_stub_set_md5_password_warnings(v as i32) };
+        v
+    }
+
+    /// scram_iterations (int, boot 4096, legal range [1, i32::MAX];
+    /// auth-scram.c scram_sha_256_iterations). The pin folds the fuzz byte
+    /// into a SMALL subset of the legal range — 1..=64, plus the boot
+    /// default 4096 on 0xFF — a fuzz-domain bound (documented in the
+    /// consuming target header): PBKDF2 cost is linear in the count and
+    /// the iteration-count plumbing, not the loop count, is the compared
+    /// surface. Rust side = the auth_scram session cell via its installed
+    /// GUC accessor; C side = pg_stub_scram_iterations.
+    pub fn pin_scram_iterations(b: u8) -> i32 {
+        if !guc_tables::vars::scram_sha_256_iterations.installed() {
+            let _ = std::panic::catch_unwind(auth_scram::init_seams);
+        }
+        let v = if b == 0xFF { 4096 } else { 1 + (b % 64) as i32 };
+        guc_tables::vars::scram_sha_256_iterations.write(v);
+        unsafe { super::pg_stub_set_scram_iterations(v) };
+        v
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +234,21 @@ pub mod clock {
     /// resolves to).
     pub fn now_usecs() -> i64 {
         NOW_USECS.with(|c| c.get())
+    }
+
+    /// stub:clock MONOTONIC half — pin the monotonic reading on both sides
+    /// from a fuzz-derived nanosecond value: the shipped Rust side through
+    /// `pg_clock::fuzz_mono_pin` (default-off feature this fuzz workspace
+    /// enables; `pg_clock::mono_ns()` returns the pin) and the C side
+    /// through `pg_stub_set_mono_ns` (an oracle TU #defines its
+    /// INSTR_TIME_SET_CURRENT to read `pg_stub_get_mono_ns()`). Every u64
+    /// is legal — the value is an opaque monotonic reading; a target that
+    /// compares elapsed arithmetic must keep its pinned sequence
+    /// NON-DECREASING and bounded below i64 wrap (document the bound in
+    /// the target header). First consumer: tsm_system_time_diff.
+    pub fn pin_mono_ns(ns: u64) {
+        pg_clock::fuzz_mono_pin::set(ns);
+        unsafe { super::pg_stub_set_mono_ns(ns) };
     }
 
     /// Route the shipped `timestamp_seams::get_current_timestamp` seam to
@@ -249,6 +306,33 @@ pub mod prng {
             c.set(st);
             v
         })
+    }
+
+    /// stub:prng scram-salt channel — pin the 16-byte pg_strong_random
+    /// read inside pg_be_scram_build_secret identically on both sides:
+    /// the C oracle through pg_stub_set_scram_salt (the cryptbe TU's
+    /// pg_strong_random shim copies from it) and the shipped Rust side
+    /// through the crypt/auth_scram determinism hook
+    /// PGRUST_SCRAM_FIXED_SALT_B64 — the REAL seam the shipped
+    /// pg_be_scram_build_secret reads (a sanctioned test-only divergence,
+    /// see auth_scram::test_fixed_salt). The entropy read is ENVIRONMENT;
+    /// every byte derived from the salt afterwards is compared verbatim
+    /// computation. First consumer + must-fail control: crypt_be_diff /
+    /// `control_prng_scram_salt_pin`.
+    pub fn pin_scram_salt(salt: [u8; 16]) -> [u8; 16] {
+        let cap = pg_b64::pg_b64_enc_len(16);
+        let mut enc = vec![0u8; cap as usize];
+        let n = pg_b64::pg_b64_encode(&salt, 16, &mut enc, cap);
+        assert!(n > 0, "b64 of a fixed 16-byte salt cannot fail");
+        enc.truncate(n as usize);
+        // One fuzz target per process; the shared cargo test binary only
+        // touches this from the serial control test.
+        std::env::set_var(
+            "PGRUST_SCRAM_FIXED_SALT_B64",
+            std::str::from_utf8(&enc).unwrap(),
+        );
+        unsafe { super::pg_stub_set_scram_salt(salt.as_ptr()) };
+        salt
     }
 }
 

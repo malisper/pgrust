@@ -138,7 +138,10 @@ fn lock_oracle() -> MutexGuard<'static, ()> {
 pub fn guc_file_diff(data: &[u8]) {
     // One thread at a time through the C oracle (pg_guc_file_io.c uses
     // process-global flex state); required by scripts/lint-oracle-serial.py.
-    let _oracle = crate::c_oracle_serial();
+    // (crate::oracle_serial(), NOT the cfg(test)-only c_oracle_serial wrapper:
+    // this is a non-test pub driver, and the wrapper does not exist in lib
+    // builds — `cargo check --lib` failed on it.)
+    let _oracle = crate::oracle_serial();
     THREAD_INIT.with(|done| {
         if done.get() {
             return;

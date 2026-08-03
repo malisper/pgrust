@@ -1055,6 +1055,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth_sasl"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "pqcomm",
+ "pqformat",
+ "stringinfo",
+ "types_error",
+ "types_startup",
+]
+
+[[package]]
+name = "auth_scram"
+version = "0.1.0"
+dependencies = [
+ "auth_sasl",
+ "be_secure_seams",
+ "elog",
+ "guc_tables",
+ "mcx",
+ "pg_b64",
+ "pg_hmac",
+ "pg_sha2",
+ "pg_strong_random",
+ "postgres_seams",
+ "saslprep",
+ "scram_common",
+ "stringinfo",
+ "transam_xlog",
+ "types_error",
+ "types_startup",
+]
+
+[[package]]
 name = "auth_seams"
 version = "0.0.0"
 dependencies = [
@@ -1435,6 +1470,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "clauses"
+version = "0.1.0"
+dependencies = [
+ "aclchk_seams",
+ "adt_json",
+ "adt_jsonb",
+ "adt_jsonpath",
+ "arrayfuncs",
+ "arrayutils",
+ "clauses_seams",
+ "coerce",
+ "copyfuncs",
+ "datum",
+ "fmgr_core",
+ "lsyscache",
+ "mcx",
+ "miscinit_seams",
+ "nodes_core",
+ "readfuncs",
+ "stack_depth",
+ "syscache_seams",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+ "types_portal",
+ "var_seams",
+]
+
+[[package]]
 name = "clauses_seams"
 version = "0.1.0"
 dependencies = [
@@ -1478,6 +1544,32 @@ dependencies = [
  "pgstrcasecmp",
  "types_core",
  "types_portal",
+]
+
+[[package]]
+name = "coerce"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "detoast",
+ "elog",
+ "fmgr_core",
+ "fmgr_seams",
+ "format_type",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "nodes_core",
+ "parse_relation_seams",
+ "parser_small1",
+ "pg_inherits_seams",
+ "syscache_seams",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_tuple",
 ]
 
 [[package]]
@@ -1718,6 +1810,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypt"
+version = "0.0.0"
+dependencies = [
+ "auth_scram",
+ "elog",
+ "guc_tables",
+ "mcx",
+ "pg_md5",
+ "postgres_seams",
+ "syscache_seams",
+ "timestamp_seams",
+ "types_error",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1844,6 +1951,7 @@ dependencies = [
  "array_userfuncs",
  "arrayfuncs",
  "arrayutils",
+ "auth_scram",
  "binaryheap",
  "bloomfilter",
  "bufmask",
@@ -1856,6 +1964,7 @@ dependencies = [
  "conv",
  "copyfuncs",
  "crc32c",
+ "crypt",
  "cryptohashfuncs",
  "datum",
  "define",
@@ -1876,6 +1985,7 @@ dependencies = [
  "hyperloglog",
  "ifaddr",
  "indexcmds_seams",
+ "instrument",
  "integerset",
  "isn",
  "keywords",
@@ -1896,6 +2006,7 @@ dependencies = [
  "pg_b64",
  "pg_bitutils",
  "pg_class",
+ "pg_clock",
  "pg_hmac",
  "pg_locale",
  "pg_locale_seams",
@@ -1931,9 +2042,14 @@ dependencies = [
  "stringinfo",
  "superuser_seams",
  "syscache_seams",
+ "tableam_vocab",
+ "tablesample",
  "timeline",
  "timestamp_seams",
+ "transam_xlog_seams",
  "ts_locale",
+ "tsm_system_rows",
+ "tsm_system_time",
  "tupdesc",
  "typcache",
  "types_core",
@@ -2850,6 +2966,7 @@ version = "0.1.0"
 dependencies = [
  "bufmgr",
  "fd",
+ "pg_clock",
  "transam_xlog_seams",
  "types_core",
 ]
@@ -3709,6 +3826,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_relation_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parser_small1",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "parse_utilcmd_seams"
 version = "0.1.0"
 dependencies = [
@@ -3810,6 +3939,15 @@ name = "pg_hmac"
 version = "0.1.0"
 dependencies = [
  "pg_sha2",
+]
+
+[[package]]
+name = "pg_inherits_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -4858,6 +4996,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "saslprep"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
+ "unicode_norm",
+ "wchar",
+]
+
+[[package]]
 name = "scalar_seams"
 version = "0.0.0"
 dependencies = [
@@ -5570,6 +5718,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tablesample"
+version = "0.1.0"
+dependencies = [
+ "clauses",
+ "datum",
+ "hashfn",
+ "mcx",
+ "syscache_seams",
+ "tableam_vocab",
+ "tsm_system_rows",
+ "tsm_system_time",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_tuple",
+]
+
+[[package]]
 name = "tablespace_seams"
 version = "0.0.0"
 dependencies = [
@@ -5994,6 +6160,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsm_system_rows"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "mcx",
+ "pg_prng",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
+name = "tsm_system_time"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "mcx",
+ "pg_clock",
+ "pg_prng",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
 name = "tstore_receiver"
 version = "0.1.0"
 dependencies = [
@@ -6411,6 +6606,15 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "var_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "varlena"

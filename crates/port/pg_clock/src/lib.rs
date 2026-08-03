@@ -57,9 +57,42 @@ const ACTIVE: ActiveClock = ActiveClock::new();
 // Leaf API — the ONLY surface call sites use. All #[inline], monomorphized.
 // ---------------------------------------------------------------------------
 
+/// stub:clock monotonic half (fuzz/STUBS.md) — fuzz-only environment pin.
+/// Compiled ONLY under the default-off `fuzz_mono_pin` feature (the
+/// detached fuzz workspace enables it; no product build does). When a pin
+/// is set on the current thread, [`mono_ns`] returns it instead of reading
+/// the OS clock, letting a differential fuzz driver feed both the shipped
+/// Rust side and the C oracle the same fuzz-derived monotonic sequence.
+#[cfg(feature = "fuzz_mono_pin")]
+pub mod fuzz_mono_pin {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static PIN: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Pin `mono_ns()` on this thread to `ns` until [`clear`].
+    pub fn set(ns: u64) {
+        PIN.with(|c| c.set(Some(ns)));
+    }
+
+    /// Remove the pin; `mono_ns()` reads the OS clock again.
+    pub fn clear() {
+        PIN.with(|c| c.set(None));
+    }
+
+    pub(crate) fn get() -> Option<u64> {
+        PIN.with(|c| c.get())
+    }
+}
+
 /// Monotonic nanoseconds (the one monotonic authority, law §0.2).
 #[inline]
 pub fn mono_ns() -> u64 {
+    #[cfg(feature = "fuzz_mono_pin")]
+    if let Some(ns) = fuzz_mono_pin::get() {
+        return ns;
+    }
     ACTIVE.mono_ns()
 }
 

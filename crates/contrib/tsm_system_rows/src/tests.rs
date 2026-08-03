@@ -122,3 +122,30 @@ fn sample_size_estimates_match_c() {
     assert_eq!(sample_scan_get_sample_size(Some(50000), 100, 10000.0), (100, 10000.0));
     assert_eq!(sample_scan_get_sample_size(Some(7), 0, 0.0), (1, 1.0));
 }
+
+// Residual-line witnesses for the phase-1 coverage gate (p1-wavea).
+
+/// lib.rs L122 (sampler_random_fract zero-draw retry): xoroshiro128** with
+/// s0 == 0 emits val == 0 on the first draw regardless of s1, so
+/// next_f64() == 0.0 exactly and the C-parity do-while retry arm executes.
+/// The state then mixes to nonzero and the loop terminates — same behavior
+/// as C sampling.c sampler_random_fract.
+#[test]
+fn sampler_random_fract_retries_zero_draw() {
+    let mut r = PgPrng::from_raw(0, 1);
+    // Witness the premise: the first raw f64 draw from (0,1) is exactly 0.0.
+    assert_eq!(PgPrng::from_raw(0, 1).next_f64(), 0.0);
+    let res = sampler_random_fract(&mut r);
+    assert!(res != 0.0 && res > 0.0 && res < 1.0);
+}
+
+/// lib.rs L153 (clamp_row_est MAXIMUM_ROWCOUNT arm): unreachable through the
+/// fuzz driver's documented |tuples| <= 1e18 domain bound (kept to keep the
+/// C oracle's (int64) cast defined), so witnessed directly — C costsize.c
+/// clamp_row_est parity on the > 1e100 and NaN arms.
+#[test]
+fn clamp_row_est_maximum_rowcount_arm() {
+    assert_eq!(clamp_row_est(2e100), 1e100);
+    assert_eq!(clamp_row_est(f64::INFINITY), 1e100);
+    assert_eq!(clamp_row_est(f64::NAN), 1e100);
+}

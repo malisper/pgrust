@@ -8,14 +8,18 @@ use types_core::instrument::{
 #[cfg(test)]
 mod tests;
 
-// INSTR_TIME_SET_CURRENT (instr_time.h): monotonic ns ticks; +1 keeps a live
-// reading distinct from the zero "not started" sentinel, cancels in diffs.
+// INSTR_TIME_SET_CURRENT (instr_time.h): monotonic ns ticks, C-exact —
+// `(t).ticks = pg_clock_gettime_ns()` reads CLOCK_MONOTONIC(_RAW) since
+// boot, and so does `pg_clock::mono_ns` (the process's one monotonic
+// authority, DST P2 contract §0.2). The previous Instant-anchor "+1"
+// existed to keep a process-start-relative reading distinct from the zero
+// "not started" sentinel; a boot-relative reading shares C's (accepted)
+// zero-collision risk profile exactly, so the offset was a ported-in
+// deviation and is gone. Under the fuzz-only `fuzz_mono_pin` feature of
+// pg_clock (never enabled by product builds) this read is pinnable, which
+// is what lets instrument_diff compare the timer paths bit-for-bit.
 pub fn instr_time_current() -> instr_time {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static ANCHOR: OnceLock<Instant> = OnceLock::new();
-    let anchor = *ANCHOR.get_or_init(Instant::now);
-    instr_time { ticks: anchor.elapsed().as_nanos() as i64 + 1 }
+    instr_time { ticks: pg_clock::mono_ns() as i64 }
 }
 
 // pgBufferUsage (instrument.c): shared/local blks tick in bufmgr::counters
