@@ -168,6 +168,9 @@ strftime = { path = "../../crates/backend/timezone/strftime" }
 localtime = { path = "../../crates/backend/timezone/localtime" }
 tzparser = { path = "../../crates/backend/utils/misc/tzparser" }
 ts_locale = { path = "../../crates/backend/tsearch/ts_locale" }
+# spellfam_diff (p1-spell): tsearch/spell loader+normalizer; pg_locale/mbutils/
+# wchar/mcx/types_error/ts_locale already declared above.
+tsearch_spell = { path = "../../crates/backend/tsearch/spell" }
 guc = { path = "../../crates/backend/utils/misc/guc" }
 
 # netfam_diff (p1-mb-netfam); pqformat/mcx/stringinfo/types_error/mbutils/mbutils_seams/datum already above
