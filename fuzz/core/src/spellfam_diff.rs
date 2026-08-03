@@ -38,10 +38,11 @@
 //! DOMAIN CARVES (C caller contract, never pgrust behavior):
 //!   - files capped at MAXFILE bytes, query words at MAXWORD, word count at
 //!     MAXWORDS: the parsers have no length-dependent arm above a few chars,
-//!     and SplitToVariants' recursion is bounded by word length — the cap
-//!     keeps both sides' (no-op on C, live on Rust) stack guards from firing,
-//!     which is the intended equal-behavior region (the guard itself is
-//!     covered by the stack_depth crate's own lane).
+//!     and the caps keep most of the domain below both sides' (live on both:
+//!     harness-constant on the oracle, stack_depth crate on pgrust) stack
+//!     guards, which is the intended equal-behavior region. Where a guard
+//!     DOES fire, the TWO-SIDED 54001 RULE below adjudicates it — depth
+//!     admission floor + cross-side witness — never a silent skip.
 //!   - files/words are made NUL-free before the FILE bytes are written ONLY
 //!     inside a word (a query word cannot carry a NUL — it is the lexize
 //!     token contract); the FILE bytes keep NULs in the domain because
@@ -78,13 +79,155 @@ extern "C" {
     fn pg_spf_lex(i: c_int, nvariant: *mut c_int, flags: *mut c_int) -> *const c_char;
 }
 
-/// PG's ERRCODE_STATEMENT_TOO_COMPLEX ("stack depth limit exceeded"). BOTH sides
-/// guard their compound-split recursion, but their THRESHOLDS differ (PG uses the
-/// max_stack_depth GUC; the oracle uses a harness constant; pgrust uses the
-/// stack_depth crate's own base/limit). The threshold is therefore a documented
-/// NON-SURFACE: any exec where either side reports depth-exceeded is carved
-/// rather than compared. Established campaign practice (the 54001 depth carve).
+/// PG's ERRCODE_STATEMENT_TOO_COMPLEX ("stack depth limit exceeded").
 const ERRCODE_STATEMENT_TOO_COMPLEX: i32 = 16_777_477; // MAKE_SQLSTATE('5','4','0','0','1')
+
+// ---------------------------------------------------------------------------
+// TWO-SIDED 54001 DEPTH RULE (replaces the earlier ONE-SIDED early-return).
+//
+// WHY THE OLD CARVE WAS WRONG. The port carries recursion guards where
+// verbatim spell.c has none: mk_sp_node/mk_a_node (build.rs, landed
+// 28fd39df24d) recurse per character with check_stack_depth() while C's
+// mkSPNode/mkANode recurse UNGUARDED — C either succeeds (deeper native
+// stack, smaller frames) or crashes. So a Rust-side 54001 is NOT
+// self-evidently divergence-free: on any input where it fires, the two sides
+// genuinely disagree, and the old rule ("either side says 54001 -> return")
+// silently removed that slice from comparison without requiring ANYTHING of
+// the C side. It would equally have hidden a Rust guard misconfiguration
+// (unarmed base, garbage limit) that spuriously 54001s shallow inputs — the
+// exact defect class this lane already shipped once (the driver ran with the
+// stack_depth base UNARMED until the jsonpath-precedent fix).
+//
+// THE RULE NOW. C cannot be made to raise 54001 where it has no guard, so a
+// symmetric "both sides must error" assertion is unbuildable. The strongest
+// two-sided statement available is enforced by adjudicate_54001():
+//
+//   (1) DEPTH ADMISSION. A 54001 is only carveable if the input can actually
+//       drive deep recursion: its computed nesting ceiling (frames, see
+//       build_depth_ceiling/word_depth_ceiling) must be >= DEPTH_FLOOR_FRAMES.
+//       Below the floor the guard CANNOT legitimately fire (it would need
+//       >64 kB per frame, see the floor derivation), so the harness PANICS —
+//       a shallow 54001 is a guard/base defect or a real divergence, never a
+//       depth phenomenon.
+//   (2) CROSS-SIDE WITNESS. The other side's outcome on the SAME input is
+//       still inspected, never discarded: it must be success or its own
+//       54001. If the other side failed with any OTHER error, the sides
+//       diverged and the harness PANICS (the old rule silently swallowed
+//       this). If the other side CRASHED, the process dies loudly under the
+//       fuzzer — also witnessed, never a silent pass.
+//   (3) RECORDED CLASS. Every admitted carve is counted and logged
+//       (SPELLFAM-54001-CARVE) so the size of the carved slice is measurable
+//       in every run instead of invisible.
+//
+// The residual, irreducible asymmetry — C succeeding where Rust raises 54001
+// on a genuinely deep input — is exactly the ratified threshold non-surface
+// (PG's own max_stack_depth GUC makes the firing point configuration-
+// dependent even between two C builds); everything else about the old carve
+// is now a hard assertion.
+// ---------------------------------------------------------------------------
+
+/// Minimum recursion-frame ceiling an input must admit before a 54001 from
+/// either side may be carved. DERIVATION: the smaller of the two admission
+/// budgets is the ORACLE's SPF_MAX_STACK_BYTES = 1 MiB (pgrust's harness
+/// limit is 1536 kB); the largest recursion frame ever measured in this
+/// family is ~34 kB — mk_a_node under ASan redzone inflation (246 frames
+/// exhausting the 8 MiB fuzz thread, CI cluster job 1785619577), with
+/// un-instrumented frames two orders smaller. Taking a deliberately generous
+/// 64 kB/frame ceiling (~2x the ASan worst case), a legitimate guard hit
+/// needs at least 1 MiB / 64 kB = 16 frames. Per the stack-guard-bounds-in-
+/// bytes law the floor is derived from BYTE budgets, not tuned to a stack
+/// size, and it is validated by a must-fail control in both directions.
+const DEPTH_FLOOR_FRAMES: usize = 16;
+
+/// Upper bound (in frames) on the recursion either side can perform while
+/// BUILDING from these files. Every build-phase recursion advances one frame
+/// per BYTE of a value that lives inside a single LINE of one of the two
+/// files: mk_sp_node/mkSPNode per byte of a dict word (a word never spans
+/// lines), mk_a_node/mkANode per byte of an affix repl field, regex/regis
+/// compile nesting per byte of a condition mask. The longest line therefore
+/// bounds them all.
+fn build_depth_ceiling(aff: &[u8], dict: &[u8]) -> usize {
+    aff.split(|&b| b == b'\n')
+        .chain(dict.split(|&b| b == b'\n'))
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or(0)
+        + 2
+}
+
+/// Upper bound (in frames) on SplitToVariants recursion for one query word.
+/// NOT linear: spell.c:2444 recurses with startpos advanced by >=1, and
+/// :2499 recurses at the SAME startpos with minpos raised to the current
+/// level (each nested call must then reach level > minpos to recurse again).
+/// Every frame in a chain therefore carries a strictly lexicographically
+/// increasing (startpos, level) pair with both components in [0, len], so
+/// chain length <= (len+1)^2 — quadratic, which is how a 58-byte compound
+/// word really did overflow the unguarded oracle at CI cluster exec 4080.
+fn word_depth_ceiling(word: &[u8]) -> usize {
+    (word.len() + 1).saturating_mul(word.len() + 1) + 2
+}
+
+/// One side's phase outcome, for 54001 adjudication.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SideOutcome {
+    /// The phase completed without error.
+    Ok,
+    /// The side reported ERRCODE_STATEMENT_TOO_COMPLEX (54001).
+    Depth,
+    /// The side failed with a different sqlstate.
+    OtherErr(i32),
+}
+
+/// Carve-class counter + capped log so the carved slice is measurable
+/// (plane (3) of the rule above).
+static CARVE_54001: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Adjudicate an exec (or word) where at least one side reported 54001.
+/// Returns normally iff the carve is ADMISSIBLE (deep input, other side
+/// witnessed success-or-54001); panics otherwise. Pure over its arguments —
+/// unit-tested in both directions (tests::twosided_54001_rule).
+fn adjudicate_54001(
+    phase: &str,
+    rust: SideOutcome,
+    c: SideOutcome,
+    depth_ceiling: usize,
+    dbg: &str,
+) {
+    use SideOutcome::*;
+    assert!(
+        rust == Depth || c == Depth,
+        "adjudicate_54001 called without a 54001 report ({phase}: rust={rust:?} c={c:?})"
+    );
+    // (1) depth admission floor
+    assert!(
+        depth_ceiling >= DEPTH_FLOOR_FRAMES,
+        "SPELLFAM-54001-BELOW-FLOOR ({phase}): a depth guard fired on an input that cannot \
+         recurse {DEPTH_FLOOR_FRAMES} frames (ceiling {depth_ceiling}) — guard/base defect or \
+         real divergence, NOT a depth carve. rust={rust:?} c={c:?} ({dbg})"
+    );
+    // (2) cross-side witness
+    match (rust, c) {
+        (Depth, Ok) | (Ok, Depth) | (Depth, Depth) => {
+            let n = CARVE_54001.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 50 {
+                eprintln!(
+                    "SPELLFAM-54001-CARVE {phase} rust={rust:?} c={c:?} \
+                     depth_ceiling={depth_ceiling} count={} ({dbg})",
+                    n + 1
+                );
+            }
+        }
+        (Depth, OtherErr(s)) => panic!(
+            "54001 WITNESS DIVERGENCE ({phase}): rust hit its depth guard but C failed with \
+             sqlstate {s} — a divergence the one-sided carve used to silence ({dbg})"
+        ),
+        (OtherErr(s), Depth) => panic!(
+            "54001 WITNESS DIVERGENCE ({phase}): C reported depth-exceeded but rust failed with \
+             sqlstate {s} — a divergence the one-sided carve used to silence ({dbg})"
+        ),
+        _ => unreachable!(),
+    }
+}
 
 const MAXFILE: usize = 4096;
 const MAXWORD: usize = 300;
@@ -400,6 +543,10 @@ fn side_fingerprints(aff: &[u8], dict: &[u8], words: &[&[u8]], enc: i32) -> (Str
 }
 
 pub fn spellfam_diff(data: &[u8]) {
+    // One-thread-at-a-time through the C oracle (process-global statics;
+    // verbatim-C-is-single-threaded law). Declared BEFORE the ResetGuard so
+    // the guard's pg_spf_reset still runs under the lock at drop.
+    let _oracle = crate::oracle_serial();
     // Free the C arena at BOTH ends of the exec: at entry (defensive) and, via
     // the guard below, at return — otherwise the current exec's palloc'd
     // dictionary is still live when libFuzzer's recoverable leak check runs
@@ -727,18 +874,6 @@ pub fn spellfam_diff(data: &[u8]) {
 
     let c_rc = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
 
-    // Depth non-surface carve (see ERRCODE_STATEMENT_TOO_COMPLEX): if either
-    // side hit its recursion guard, the thresholds differ by construction, so
-    // there is nothing meaningful to compare.
-    if c_rc != 0 && unsafe { pg_spf_sqlstate() } == ERRCODE_STATEMENT_TOO_COMPLEX {
-        return;
-    }
-    if let Err(e) = &r {
-        if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX {
-            return;
-        }
-    }
-
     let dbg = || {
         format!(
             "enc={encname} aff={:?} dict={:?}",
@@ -746,6 +881,33 @@ pub fn spellfam_diff(data: &[u8]) {
             String::from_utf8_lossy(&parsed.dict[..parsed.dict.len().min(160)]),
         )
     };
+
+    // TWO-SIDED 54001 RULE (adjudicate_54001; replaces the one-sided
+    // early-return): a build-phase depth-guard error is only carved after the
+    // input demonstrably admits >= DEPTH_FLOOR_FRAMES of recursion AND the
+    // other side's witnessed outcome is success-or-54001; anything else
+    // panics as a divergence.
+    {
+        let rust_out = match &r {
+            Ok(_) => SideOutcome::Ok,
+            Err(e) if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX => SideOutcome::Depth,
+            Err(e) => SideOutcome::OtherErr(e.sqlstate().0),
+        };
+        let c_out = if c_rc == 0 {
+            SideOutcome::Ok
+        } else {
+            let s = unsafe { pg_spf_sqlstate() };
+            if s == ERRCODE_STATEMENT_TOO_COMPLEX {
+                SideOutcome::Depth
+            } else {
+                SideOutcome::OtherErr(s)
+            }
+        };
+        if rust_out == SideOutcome::Depth || c_out == SideOutcome::Depth {
+            adjudicate_54001("build", rust_out, c_out, build_depth_ceiling(&aff, &dict), &dbg());
+            return; // admissible, certified carve
+        }
+    }
 
     let obj = match (&r, c_rc) {
         (Ok(o), 0) => o,
@@ -845,18 +1007,36 @@ pub fn spellfam_diff(data: &[u8]) {
         let octx = MemoryContext::new("spellfam-norm");
         let rn = obj.ni_normalize_word(octx.mcx(), word);
         let cn = unsafe { pg_spf_normalize(word.as_ptr().cast(), word.len() as c_int) };
-        // Depth non-surface carve, per word.
-        if cn < 0 && unsafe { pg_spf_sqlstate() } == ERRCODE_STATEMENT_TOO_COMPLEX {
-            continue;
-        }
-        if let Err(e) = &rn {
-            if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX {
-                continue;
-            }
-        }
         let wdbg = || {
             format!("word={:?} {}", String::from_utf8_lossy(word), dbg())
         };
+        // TWO-SIDED 54001 RULE, per word (adjudicate_54001): both sides guard
+        // SplitToVariants (spell.c:2387 / normalize.rs) with differing
+        // thresholds, so agreement-of-class or one-side-success is the carved
+        // non-surface — but only on a word deep enough to admit the recursion
+        // (quadratic ceiling, see word_depth_ceiling), and never over a
+        // witnessed different-error on the other side.
+        {
+            let rust_out = match &rn {
+                Ok(_) => SideOutcome::Ok,
+                Err(e) if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX => SideOutcome::Depth,
+                Err(e) => SideOutcome::OtherErr(e.sqlstate().0),
+            };
+            let c_out = if cn >= 0 {
+                SideOutcome::Ok
+            } else {
+                let s = unsafe { pg_spf_sqlstate() };
+                if s == ERRCODE_STATEMENT_TOO_COMPLEX {
+                    SideOutcome::Depth
+                } else {
+                    SideOutcome::OtherErr(s)
+                }
+            };
+            if rust_out == SideOutcome::Depth || c_out == SideOutcome::Depth {
+                adjudicate_54001("normalize", rust_out, c_out, word_depth_ceiling(word), &wdbg());
+                continue; // admissible, certified carve for THIS word
+            }
+        }
         match &rn {
             Ok(rlex) if cn >= 0 => {
                 assert_eq!(rlex.len() as i32, cn, "normalize lexeme count ({})", wdbg());
@@ -1007,6 +1187,7 @@ mod tests {
     #[test]
     #[ignore = "divergence-of-record: ts_locale interior-NUL truncation (match-or-fix owed)"]
     fn interior_nul_in_affix_line() {
+        let _serial = crate::c_oracle_serial();
         // The driver strips file NULs (domain carve); call the raw path via a
         // hand-staged file to exhibit the divergence.
         unsafe { pg_spf_reset() };
@@ -1015,18 +1196,6 @@ mod tests {
         let ctx = MemoryContext::new("spellfam-nulwitness");
         let r = rust_build(&ctx, ap.as_bytes(), dp.as_bytes());
         let c_rc = unsafe { pg_spf_build(ap.as_ptr(), dp.as_ptr()) };
-
-    // Depth non-surface carve (see ERRCODE_STATEMENT_TOO_COMPLEX): if either
-    // side hit its recursion guard, the thresholds differ by construction, so
-    // there is nothing meaningful to compare.
-    if c_rc != 0 && unsafe { pg_spf_sqlstate() } == ERRCODE_STATEMENT_TOO_COMPLEX {
-        return;
-    }
-    if let Err(e) = &r {
-        if e.sqlstate().0 == ERRCODE_STATEMENT_TOO_COMPLEX {
-            return;
-        }
-    }
         // C builds ok (truncated line); Rust errors 22021 — the divergence.
         assert_eq!(c_rc, 0, "C should truncate at NUL and build");
         assert!(r.is_err(), "pgrust should reject the embedded NUL under UTF8");
@@ -1046,6 +1215,71 @@ mod tests {
         let aff = b"FLAG long\nCOMPOUNDFLAG Aa\nPFX Bb Y 1\nPFX Bb 0 un .\nSFX Cc Y 1\nSFX Cc 0 s .\n";
         let dict = b"4\nfoot/Aa\nball/Aa\nlock/BbCc\ndo/Bb\n";
         run(0, aff, dict, &[b"footballs", b"unlocks", b"undo", b"football", b"unknown"]);
+    }
+
+    /// TWO-SIDED 54001 RULE — both directions of adjudicate_54001, pure (no
+    /// oracle, no globals beyond the carve counter). The E2E MUST-FAIL CONTROL
+    /// (temporary pin_env threshold instrumentation forcing mk_sp_node to
+    /// report 54001 on a shallow input, harness FAILS; same instrumentation on
+    /// a deep-line input, harness carves and logs) was run at commit time and
+    /// the instrumentation reverted — see the lane evidence bank. These tests
+    /// keep the rule's logic pinned permanently and parallel-safe.
+    #[test]
+    fn twosided_54001_rule() {
+        use super::SideOutcome::*;
+        // Admissible carves: deep input, other side witnessed ok / depth.
+        adjudicate_54001("build", Depth, Ok, DEPTH_FLOOR_FRAMES, "unit");
+        adjudicate_54001("build", Ok, Depth, 100, "unit");
+        adjudicate_54001("normalize", Depth, Depth, 100, "unit");
+        // MUST-FAIL, floor direction: a 54001 on an input that cannot recurse
+        // DEPTH_FLOOR_FRAMES frames is a harness failure, not a carve.
+        assert!(
+            std::panic::catch_unwind(|| adjudicate_54001(
+                "build", Depth, Ok, DEPTH_FLOOR_FRAMES - 1, "unit"
+            ))
+            .is_err(),
+            "shallow 54001 must FAIL the harness"
+        );
+        // MUST-FAIL, witness direction: a 54001 opposite a DIFFERENT error on
+        // the witnessed other side is a divergence, not a carve.
+        assert!(
+            std::panic::catch_unwind(|| adjudicate_54001(
+                "build", Depth, OtherErr(123), 100, "unit"
+            ))
+            .is_err(),
+            "rust 54001 over a witnessed C error must FAIL"
+        );
+        assert!(
+            std::panic::catch_unwind(|| adjudicate_54001(
+                "normalize", OtherErr(123), Depth, 100, "unit"
+            ))
+            .is_err(),
+            "C 54001 over a witnessed rust error must FAIL"
+        );
+    }
+
+    /// Depth-ceiling metrics: line-bounded (build) and quadratic (word).
+    #[test]
+    fn depth_ceilings() {
+        // longest line "SFX T 0 s ." = 11 bytes -> ceiling 13, below the floor:
+        // a 54001 on this input MUST fail the harness.
+        assert!(
+            build_depth_ceiling(b"SFX T Y 1\nSFX T 0 s .\n", b"1\nbook/T\n")
+                < DEPTH_FLOOR_FRAMES
+        );
+        // one 200-byte dict line admits ~202 frames of mk_sp_node.
+        let long = [b'a'; 200];
+        let mut dict = b"1\n".to_vec();
+        dict.extend_from_slice(&long);
+        dict.extend_from_slice(b"/T\n");
+        assert!(build_depth_ceiling(b"SFX T Y 1\n", &dict) >= 202);
+        // words: quadratic — the 58-byte CI-exec-4080 shape admits ~3500
+        // frames, which is how it really overflowed the unguarded oracle.
+        assert_eq!(word_depth_ceiling(b"abc"), 18);
+        assert!(word_depth_ceiling(&[b'a'; 58]) > 3400);
+        // and a 3-byte word is the smallest that clears the floor.
+        assert!(word_depth_ceiling(b"abc") >= DEPTH_FLOOR_FRAMES);
+        assert!(word_depth_ceiling(b"ab") < DEPTH_FLOOR_FRAMES);
     }
 }
 
