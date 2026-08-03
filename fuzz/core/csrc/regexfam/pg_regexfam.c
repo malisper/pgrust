@@ -72,6 +72,21 @@ stack_is_too_deep(void)
 	return false;
 }
 
+/* Lazy per-thread base anchor, EXPORTED for sibling families that bind this
+ * pristine-named engine copy across archives (trgm arm 9's oracle: the
+ * build.rs trgmrxfam family — its pg_diff_trgm_* entries never pass through
+ * pg_diff_regcomp's lazy anchor below, so the engine's rstacktoodeep
+ * measured from a NULL base and the guard was INERT: the 2026-08-03 trgm
+ * CONFIRM ASan stack-overflow class, unbounded duptraverse recursion on
+ * quantified-alternation patterns). Same contract as the pg_diff_regcomp
+ * anchor: first call on a thread wins; the 2048kB budget above is shared. */
+void
+pg_diff_regex_stack_arm(void)
+{
+	if (stack_base_ptr == NULL)
+		stack_base_ptr = __builtin_frame_address(0);
+}
+
 #include "regex/regex.h"
 #include "regex/regexport.h"
 

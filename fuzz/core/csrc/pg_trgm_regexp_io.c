@@ -51,10 +51,18 @@
  *    arm 9 with locale_arm 0.
  *  - errcode classes (shared TLS pg_diff_errcode): 1 = 54000 (out of
  *    memory guards -- none in this file), 4 = 2201B
- *    ERRCODE_INVALID_REGULAR_EXPRESSION (RE_compile failure), 6 =
- *    internal elog.  Verdict channel of pg_diff_trgm_regexp: rc 0 =
- *    success, rc -1 = NULL fallback ("regex too complex/trivial"), rc>0 =
- *    errcode class.
+ *    ERRCODE_INVALID_REGULAR_EXPRESSION (RE_compile failure), 5 = the
+ *    REG_ETOOBIG subset of 4 ("regular expression is too complex" -- the
+ *    engine's stack guard / compile-space bound, split out so the driver
+ *    can carve the stack band without widening it to every compile
+ *    failure), 6 = internal elog.  Verdict channel of pg_diff_trgm_regexp:
+ *    rc 0 = success, rc -1 = NULL fallback ("regex too complex/trivial"),
+ *    rc>0 = errcode class.
+ *  - STACK GUARD (2026-08-03 CONFIRM stack-overflow class): every entry
+ *    anchors the engine's per-thread stack-guard base via
+ *    pg_diff_regex_stack_arm() (pg_regexfam.c, 2048kB real-server budget).
+ *    Unanchored, the engine's rstacktoodeep measured from NULL and the
+ *    regc_nfa.c recursion guards were inert.
  *  - Assert -> active abort (matches the regexfam posture: engine/graph
  *    invariants loud in the fuzz build; the shipped Rust side has no
  *    equivalent checks, so a firing Assert is an oracle-side finding, not
@@ -100,10 +108,38 @@ extern int	trgmf_t_isalnum_with_len(const char *ptr, int mblen);
 #define createTrgmNFA trgmrx_createTrgmNFA
 #define trigramsMatchGraph trgmrx_trigramsMatchGraph
 
-/* errcode classes (same channel as pg_trgm_io.c; class 4 is new here) */
+/* errcode classes (same channel as pg_trgm_io.c; classes 4/5 are new here) */
 #define PG_DIFF_TRGM_ERR_LIMIT 1
 #define PG_DIFF_TRGM_ERR_INVALID_RE 4
+/* class 5: REG_ETOOBIG through RE_compile ("regular expression is too
+ * complex" — the engine's byte-based stack guard / compile-space bound).
+ * Split from INVALID_RE so the driver can apply the RATIFIED stack-band
+ * carve (regex_diff is_etoobig precedent) without widening it to every
+ * compile failure. */
+#define PG_DIFF_TRGM_ERR_RE_TOO_COMPLEX 5
 #define PG_DIFF_TRGM_ERR_INTERNAL 6
+
+/* Engine stack guard (the pristine-named engine copy this family binds =
+ * regexcorefam's, whose stack_is_too_deep lives in pg_regexfam.c with a
+ * per-thread lazily-anchored base at the real-server 2048kB budget). The
+ * pg_diff_trgm_* entries never pass through pg_diff_regcomp's lazy anchor,
+ * so before this call existed the base stayed NULL and the guard was INERT
+ * — the 2026-08-03 trgm CONFIRM ASan stack-overflow class. */
+extern void pg_diff_regex_stack_arm(void);
+
+/* Capture pg_regcomp's result code so the driver entries can classify
+ * REG_ETOOBIG separately (class 5 above). Plumbing only: the verbatim
+ * RE_compile body below is unchanged — its pg_regcomp call resolves to
+ * this wrapper via the #define. */
+static _Thread_local int trgmrx_last_regcomp_code;
+static int
+trgmrx_pg_regcomp_capture(regex_t *re, const pg_wchar *w, size_t wlen,
+						  int cflags, Oid collation)
+{
+	trgmrx_last_regcomp_code = pg_regcomp(re, w, wlen, cflags, collation);
+	return trgmrx_last_regcomp_code;
+}
+#define pg_regcomp trgmrx_pg_regcomp_capture
 #define ERRCODE_PROGRAM_LIMIT_EXCEEDED PG_DIFF_TRGM_ERR_LIMIT
 #define ERRCODE_INVALID_REGULAR_EXPRESSION PG_DIFF_TRGM_ERR_INVALID_RE
 static int
@@ -2242,12 +2278,27 @@ static _Thread_local bool trgmrx_live;
 static void
 trgmrx_enter(void)
 {
+	/* Anchor this thread's engine stack-guard base (see the extern's
+	 * comment block above) and clear the per-entry regcomp-code capture. */
+	pg_diff_regex_stack_arm();
+	trgmrx_last_regcomp_code = 0;
 	if (trgmrx_live)
 	{
 		pg_regfree(&trgmrx_live_re);
 		trgmrx_live = false;
 	}
 	pg_diff_trgm_bridge_enter(0);	/* locale arm 0 only (header) */
+}
+
+/* Post-longjmp class refinement: RE_compile maps every compile failure to
+ * INVALID_RE; report REG_ETOOBIG as its own class (see class 5 above). */
+static int
+trgmrx_errclass(void)
+{
+	if (pg_diff_errcode == PG_DIFF_TRGM_ERR_INVALID_RE &&
+		trgmrx_last_regcomp_code == REG_ETOOBIG)
+		return PG_DIFF_TRGM_ERR_RE_TOO_COMPLEX;
+	return pg_diff_errcode;
 }
 
 /*
@@ -2301,7 +2352,7 @@ pg_diff_trgm_regexp(const uint8_t *pat, int len,
 
 	trgmrx_enter();
 	if (setjmp(*pg_diff_trgm_bridge_jmp()) != 0)
-		return pg_diff_errcode;
+		return trgmrx_errclass();
 	rc = trgmrx_extract(pat, len, &trg, &graph);
 	if (rc != 0)
 		return rc;
@@ -2358,7 +2409,7 @@ pg_diff_trgm_regexp_matches(const uint8_t *pat, int len,
 
 	trgmrx_enter();
 	if (setjmp(*pg_diff_trgm_bridge_jmp()) != 0)
-		return pg_diff_errcode;
+		return trgmrx_errclass();
 	rc = trgmrx_extract(pat, len, &trg, &graph);
 	if (rc != 0)
 		return rc;

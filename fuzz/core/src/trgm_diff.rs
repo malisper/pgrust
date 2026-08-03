@@ -666,6 +666,11 @@ fn arm_cmp(payload: &[u8]) {
 //   a. verdict (HARD): error(class) / NULL-fallback / success must match.
 //      Rust maps: Err => error; Ok(None) => fallback; Ok(Some) => success.
 //      C maps: rc>0 error class; rc -1 fallback; rc 0 success.
+//      EXCEPTION (ratified, regex_diff precedent): one-sided "regular
+//      expression is too complex" — the stack-band carve; both sides run
+//      the byte-based stack guard at the real-server 2048kB budget (see
+//      arm_stack_guard), but trip points are per-frame-size functions and
+//      cannot coincide across compilers.
 //   b. trigram MULTISET (HARD): both sides' trigram arrays sorted under one
 //      harness comparator, compared byte-for-byte.
 //   c. graph semantics (HARD): 32 deterministic pseudo-random subsets of
@@ -686,6 +691,16 @@ pub static REGEXP_ORDER_DIFF: AtomicU64 = AtomicU64::new(0);
 pub static REGEXP_SUCCESS: AtomicU64 = AtomicU64::new(0);
 pub static REGEXP_FALLBACK: AtomicU64 = AtomicU64::new(0);
 pub static REGEXP_ERR: AtomicU64 = AtomicU64::new(0);
+/// One-sided "regular expression is too complex" (the ratified stack-band
+/// carve — see arm_regexp): telemetry, never a failure.
+pub static REGEXP_ETOOBIG_CARVE: AtomicU64 = AtomicU64::new(0);
+
+// C error classes on the arm-9 channel (pg_trgm_regexp_io.c header).
+const C_RX_ERR_INVALID_RE: i32 = 4;
+const C_RX_ERR_RE_TOO_COMPLEX: i32 = 5;
+/// pg_regerror's REG_ETOOBIG text; the Rust side surfaces it inside
+/// "invalid regular expression: {}" (create_trgm_nfa), so match by suffix.
+const RE_TOO_COMPLEX_MSG: &str = "regular expression is too complex";
 
 const REGEXP_MAX_PAT: usize = 128; // regexfam recursion-soundness cap
 const RX_TRG_CAP: usize = 3 * 1024;
@@ -766,11 +781,38 @@ fn xorshift64(state: &mut u64) -> u64 {
 /// "too many active hash_seq_search scans" oracle errors.
 static REGEXP_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Arm this thread's Rust-side stack guard at the C oracle's pinned budget
+/// (pg_regexfam.c: 2048kB, the real-server default; regex_diff::init
+/// precedent). Unarmed (base==0), stack_is_too_deep() short-circuits false
+/// and the C-parity guards in regex_core's recursive walks (regc_nfa.c's
+/// duptraverse et al.) are INERT — the 2026-08-03 CI cluster CONFIRM
+/// stack-overflow class (156 ASan crash artifacts, unbounded duptraverse
+/// self-recursion on quantified-alternation patterns; job
+/// pgrust-fuzz-campaign-1785794601-6bab-5889 @ main 5b707bdb597). The real
+/// backend arms every statement-executing thread at spawn
+/// (launch_backend's set_stack_base); this reproduces that contract here.
+/// The C oracle side is anchored symmetrically inside every
+/// pg_diff_trgm_regexp* entry (trgmrx_enter -> pg_diff_regex_stack_arm).
+fn arm_stack_guard() {
+    std::thread_local! {
+        static ARMED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+    ARMED.with(|armed| {
+        if !armed.get() {
+            stack_depth::set_stack_base();
+            stack_depth::set_max_stack_depth(2048);
+            stack_depth::assign_max_stack_depth(2048);
+            armed.set(true);
+        }
+    });
+}
+
 fn arm_regexp(payload: &[u8]) {
     if payload.len() > REGEXP_MAX_PAT || !utf8_ok(payload) {
         return;
     }
     let _serial = REGEXP_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    arm_stack_guard();
     pin_locale_arm(0); // arm 9 is locale-arm-0 only (header)
     let env = pg_trgm::harness_env();
 
@@ -790,12 +832,33 @@ fn arm_regexp(payload: &[u8]) {
         Ok(v) => v,
         Err(e) => std::panic::resume_unwind(e),
     };
+
+    // RATIFIED stack-band carve (regex_diff is_etoobig precedent): "regular
+    // expression is too complex" is the byte-based stack guard's verdict;
+    // its trip point is a function of per-frame sizes, so the rustc and
+    // clang builds of the same recursive walk cannot trip at identical
+    // inputs even at the identical 2048kB budget. Tolerate ONLY the
+    // asymmetric too-complex band; any other one-sided verdict still
+    // panics below, and a matching (both-sided) too-complex flows through
+    // the ordinary both-error arm.
+    let r_etoobig = matches!(&r, Err(re) if re.message().ends_with(RE_TOO_COMPLEX_MSG));
+    let c_etoobig = matches!(&c, Err(cls) if *cls == C_RX_ERR_RE_TOO_COMPLEX);
+    if r_etoobig != c_etoobig {
+        REGEXP_ETOOBIG_CARVE.fetch_add(1, AtOrd::Relaxed);
+        return;
+    }
+
     match (&r, &c) {
         (Err(re), Err(ccls)) => {
             // Both errored. C class 4 = ERRCODE_INVALID_REGULAR_EXPRESSION
-            // (the only ereport in the vendored file); the Rust side's
-            // create_trgm_nfa maps compile failure to the same sqlstate.
-            assert_eq!(*ccls, 4, "unexpected C error class {ccls} pat={payload:02x?}");
+            // (the only ereport in the vendored file); class 5 = its
+            // REG_ETOOBIG subset (both sides too-complex — the carve above
+            // guarantees agreement here). The Rust side's create_trgm_nfa
+            // maps every compile failure to the same sqlstate.
+            assert!(
+                *ccls == C_RX_ERR_INVALID_RE || *ccls == C_RX_ERR_RE_TOO_COMPLEX,
+                "unexpected C error class {ccls} pat={payload:02x?}"
+            );
             assert_eq!(
                 re.sqlstate(),
                 types_error::ERRCODE_INVALID_REGULAR_EXPRESSION,
@@ -1203,17 +1266,22 @@ mod tests {
 
     #[test]
     fn seed_replay_all_arms() {
-        let _serial = crate::c_oracle_serial();
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
-        let mut n = 0;
-        for entry in std::fs::read_dir(dir).expect("corpus dir") {
-            let path = entry.unwrap().path();
-            if path.is_file() && path.file_name().is_some_and(|f| f != ".gitkeep") {
-                trgm_diff(&std::fs::read(&path).unwrap());
-                n += 1;
+        // BIG-STACK thread: the corpus includes the arm-9 stackband seeds,
+        // whose replay legitimately recurses up to the 2048kB guard budget
+        // (see regexp_tests::run_on_big_stack).
+        regexp_tests::run_on_big_stack("trgm-seed-replay-all-arms", || {
+            let _serial = crate::c_oracle_serial();
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
+            let mut n = 0;
+            for entry in std::fs::read_dir(dir).expect("corpus dir") {
+                let path = entry.unwrap().path();
+                if path.is_file() && path.file_name().is_some_and(|f| f != ".gitkeep") {
+                    trgm_diff(&std::fs::read(&path).unwrap());
+                    n += 1;
+                }
             }
-        }
-        assert!(n >= 40, "committed seed corpus shrank: {n} < 40");
+            assert!(n >= 40, "committed seed corpus shrank: {n} < 40");
+        });
     }
 
     /// Truncated exhaustive rail (lengths 0..=2) as a local smoke; the
@@ -1268,6 +1336,20 @@ mod tests {
 #[cfg(test)]
 mod regexp_tests {
     use super::*;
+
+    /// Deep-replay tests run on an explicit 32MB thread: the 2048kB guard
+    /// budget (server parity, pinned on both sides) needs real stack
+    /// under it regardless of the libtest default thread size — the
+    /// byte-based guard bounds DEPTH FROM BASE, not remaining stack.
+    pub(super) fn run_on_big_stack(name: &str, f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn")
+            .join()
+            .expect("big-stack test thread panicked");
+    }
 
     fn rx(pat: &[u8]) {
         let mut input = vec![9u8];
@@ -1395,25 +1477,141 @@ mod regexp_tests {
 
     #[test]
     fn regexp_seed_corpus_replay() {
-        let _serial = crate::c_oracle_serial();
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
-        let mut n = 0;
-        for e in std::fs::read_dir(dir).expect("corpus dir") {
-            let p = e.unwrap().path();
-            if p.file_name().unwrap().to_string_lossy().starts_with("regexp-") {
-                trgm_diff(&std::fs::read(&p).unwrap());
+        // BIG-STACK thread (not the libtest default): the stack guards on
+        // both sides run at the real-server 2048kB budget (arm_stack_guard
+        // header), measured from a base anchored at replay entry — the
+        // stackband seeds legitimately recurse right up to that budget
+        // before the guard trips, which needs budget + entry depth +
+        // >=2048kB headroom of REAL stack (debug frames; stack-guard law).
+        // The fuzz target itself runs on libFuzzer's 8MB main thread.
+        run_on_big_stack("trgm-regexp-corpus-replay", || {
+            let _serial = crate::c_oracle_serial();
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
+            let mut n = 0;
+            for e in std::fs::read_dir(dir).expect("corpus dir") {
+                let p = e.unwrap().path();
+                if p.file_name().unwrap().to_string_lossy().starts_with("regexp-") {
+                    trgm_diff(&std::fs::read(&p).unwrap());
+                    n += 1;
+                }
+            }
+            assert!(n >= 25, "regexp seed corpus went missing (found {n})");
+            eprintln!(
+                "regexp corpus replay: {n} seeds; order witness eq={} diff={} succ={} fb={} err={} carve={}",
+                REGEXP_ORDER_EQ.load(AtOrd::Relaxed),
+                REGEXP_ORDER_DIFF.load(AtOrd::Relaxed),
+                REGEXP_SUCCESS.load(AtOrd::Relaxed),
+                REGEXP_FALLBACK.load(AtOrd::Relaxed),
+                REGEXP_ERR.load(AtOrd::Relaxed),
+                REGEXP_ETOOBIG_CARVE.load(AtOrd::Relaxed),
+            );
+        });
+    }
+
+    /// 2026-08-03 CI cluster CONFIRM stack-overflow class (job
+    /// pgrust-fuzz-campaign-1785794601-6bab-5889 @ main 5b707bdb597, 156
+    /// ASan crash artifacts): quantified-alternation patterns drove
+    /// regex_core::regex_nfa::duptraverse into unbounded self-recursion
+    /// because neither side's stack guard base was armed in this harness
+    /// (product + oracle guards both exist and both short-circuit on
+    /// base==0). Replays the banked artifacts (committed as the
+    /// regexp-stackband-confirm-* corpus seeds) through the FULL driver:
+    /// graceful verdict planes, never a crash. This is also the
+    /// guard-DISABLED must-fail control's counterpart: the pre-fix build
+    /// (base unarmed = guard disabled) demonstrably crashed on exactly
+    /// these bytes — CI cluster artifacts + local macOS replay, banked in the
+    /// lane evidence.
+    #[test]
+    fn regexp_stackband_banked_artifact_replay() {
+        run_on_big_stack("trgm-stackband-banked-replay", || {
+            let _serial = crate::c_oracle_serial();
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
+            let mut n = 0;
+            for name in [
+                "regexp-stackband-confirm-a",
+                "regexp-stackband-confirm-b",
+                "regexp-stackband-confirm-c",
+            ] {
+                let data = std::fs::read(format!("{dir}/{name}")).expect("banked seed");
+                assert_eq!(data[0] & 0x0F, 9, "banked seed is not arm 9: {name}");
+                trgm_diff(&data);
                 n += 1;
             }
-        }
-        assert!(n >= 25, "regexp seed corpus went missing (found {n})");
-        eprintln!(
-            "regexp corpus replay: {n} seeds; order witness eq={} diff={} succ={} fb={} err={}",
-            REGEXP_ORDER_EQ.load(AtOrd::Relaxed),
-            REGEXP_ORDER_DIFF.load(AtOrd::Relaxed),
-            REGEXP_SUCCESS.load(AtOrd::Relaxed),
-            REGEXP_FALLBACK.load(AtOrd::Relaxed),
-            REGEXP_ERR.load(AtOrd::Relaxed),
-        );
+            assert_eq!(n, 3);
+            eprintln!(
+                "stackband replay: succ={} fb={} err={} carve={}",
+                REGEXP_SUCCESS.load(AtOrd::Relaxed),
+                REGEXP_FALLBACK.load(AtOrd::Relaxed),
+                REGEXP_ERR.load(AtOrd::Relaxed),
+                REGEXP_ETOOBIG_CARVE.load(AtOrd::Relaxed),
+            );
+        });
+    }
+
+    /// Stack-guard law must-fail pair (RELEASE-effective: the guard is a
+    /// runtime branch, not a debug_assert). The SAME deep-duplication
+    /// pattern must (a) fail with the guard's "too complex" verdict at a
+    /// 64kB budget and (b) compile cleanly at a 16384kB budget on a 32MB
+    /// thread (>= 2048kB headroom rule) — proving the guard is LIVE and
+    /// BYTE-bounded, and that (b)'s success is the guard abstaining, not
+    /// dead code. Pattern provenance: the pg_regexfam.c header's
+    /// calibration pattern family ((a|bb){N} duplication — the 100kB boot
+    /// default fake-fired on it, real PG at 2048kB compiles it).
+    /// The guard-disabled crash arm cannot run in-process (a blown stack
+    /// aborts, uncatchably); its witness is the pre-fix CI cluster run + local
+    /// pre-fix replay recorded in regexp_stackband_banked_artifact_replay.
+    #[test]
+    fn regexp_stack_guard_must_fail_pair() {
+        run_on_big_stack("trgm-stackguard-mustfail", || {
+                let _serial = crate::c_oracle_serial();
+                init_env();
+                pin_locale_arm(0);
+                stack_depth::set_stack_base();
+                let env = pg_trgm::harness_env();
+                let pat: &[u8] = b"(a|bb){96}";
+
+                // (a) tight budget: the guard MUST fire, as the graceful
+                // too-complex statement error (PG contract: statement
+                // failure, never process death).
+                stack_depth::assign_max_stack_depth(64);
+                let r = pg_trgm::regexp::create_trgm_nfa(
+                    pat,
+                    types_core::C_COLLATION_OID,
+                    &env,
+                    &crc,
+                );
+                match &r {
+                    Err(re) => assert!(
+                        re.message().ends_with(RE_TOO_COMPLEX_MSG),
+                        "64kB-budget failure is not the stack guard's verdict: {re:?}"
+                    ),
+                    Ok(o) => panic!(
+                        "64kB budget did not trip the stack guard: Ok(is_some={})",
+                        o.is_some()
+                    ),
+                }
+
+                // (b) roomy budget, same input, same thread: the guard must
+                // abstain and the compile succeed — the error in (a) came
+                // from the BYTE bound, not from the pattern. (Ok(None) =
+                // the legitimate index-fallback verdict is fine; only an
+                // Err would mean the guard is not byte-bounded.)
+                stack_depth::assign_max_stack_depth(16 * 1024);
+                let r = pg_trgm::regexp::create_trgm_nfa(
+                    pat,
+                    types_core::C_COLLATION_OID,
+                    &env,
+                    &crc,
+                );
+                assert!(
+                    r.is_ok(),
+                    "16384kB budget still failed (guard not byte-bounded?): {:?}",
+                    r.as_ref().err()
+                );
+
+                // restore the harness budget for any later test on this thread
+                stack_depth::assign_max_stack_depth(2048);
+        });
     }
 
     #[test]
