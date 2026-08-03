@@ -67,10 +67,6 @@ pub fn write_u16(buf: &mut [u8], off: usize, v: u16) {
     buf[off..off + 2].copy_from_slice(&v.to_ne_bytes());
 }
 #[inline]
-pub fn write_u32(buf: &mut [u8], off: usize, v: u32) {
-    buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
-}
-#[inline]
 pub fn write_i32(buf: &mut [u8], off: usize, v: i32) {
     buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
 }
@@ -99,6 +95,56 @@ pub const LTREE_HDRSIZE: usize = 8;
 /// `LEVEL_HDRSIZE = offsetof(ltree_level, name)` = 2 (uint16 len).
 pub const LEVEL_HDRSIZE: usize = 2;
 
+// ---------------------------------------------------------------------------
+// Bounds-tolerant packed reads (the "panic vs garbage" decision, RULED with
+// the C-exact on-disk adoption).
+//
+// C walks these images with raw pointer arithmetic and no bound at all. For
+// any image the parsers produce that never matters — the walk is exactly the
+// write. It starts mattering in the uint16 wrap band: C's serializer advances
+// to the next level by MAXALIGN(the STORED uint16 totallen), so once a level's
+// real size passes 65535 the levels overlap and the bytes a reader then walks
+// are whatever the overlap left behind (upstream bug 103a). C reads that
+// garbage, and past the end of the datum it reads out of bounds — UB we do not
+// reproduce. So: read the same garbage C reads, and where C would leave the
+// datum, yield zeroes / an empty label instead of panicking. Well-formed
+// images are bit-identical either way; only the malformed tail differs, and
+// there "garbage" is the C-shaped answer while a panic is a crashed backend.
+#[inline]
+fn read_u16_lax(buf: &[u8], off: usize) -> u16 {
+    if off + 2 <= buf.len() {
+        read_u16(buf, off)
+    } else {
+        0
+    }
+}
+#[inline]
+fn read_i32_lax(buf: &[u8], off: usize) -> i32 {
+    if off + 4 <= buf.len() {
+        read_i32(buf, off)
+    } else {
+        0
+    }
+}
+#[inline]
+fn read_i16_lax(buf: &[u8], off: usize) -> i16 {
+    if off + 2 <= buf.len() {
+        read_i16(buf, off)
+    } else {
+        0
+    }
+}
+#[inline]
+fn byte_lax(buf: &[u8], off: usize) -> u8 {
+    buf.get(off).copied().unwrap_or(0)
+}
+#[inline]
+fn slice_lax(buf: &[u8], off: usize, len: usize) -> &[u8] {
+    let start = off.min(buf.len());
+    let end = off.saturating_add(len).min(buf.len());
+    &buf[start..end]
+}
+
 pub struct Ltree<'a> {
     pub buf: &'a [u8],
 }
@@ -108,7 +154,7 @@ impl<'a> Ltree<'a> {
         Ltree { buf }
     }
     pub fn numlevel(&self) -> usize {
-        read_u16(self.buf, 4) as usize
+        read_u16_lax(self.buf, 4) as usize
     }
     pub fn levels(&self) -> LevelIter<'a> {
         LevelIter {
@@ -135,9 +181,9 @@ impl<'a> Iterator for LevelIter<'a> {
         if self.remaining == 0 {
             return None;
         }
-        let len = read_u16(self.buf, self.off) as usize;
+        let len = read_u16_lax(self.buf, self.off) as usize;
         let name_off = self.off + LEVEL_HDRSIZE;
-        let name = &self.buf[name_off..name_off + len];
+        let name = slice_lax(self.buf, name_off, len);
         self.off += maxalign(len + LEVEL_HDRSIZE);
         self.remaining -= 1;
         Some(LevelView { name })
@@ -178,6 +224,13 @@ const LQL_OFF_HIGH: usize = 8;
 const LVAR_OFF_VAL: usize = 0;
 const LVAR_OFF_LEN: usize = 4;
 const LVAR_OFF_FLAG: usize = 6;
+// C `offsetof(lquery_variant, name)` == 7: {int32 val; uint16 len; uint8
+// flag; char name[]} packs the flexible member immediately after the flag
+// byte. LVAR_HDRSIZE MAXALIGNs that to 8 for the STRIDE only — ltree.h says
+// so in as many words ("these macros contain too many MAXALIGN calls and so
+// will sometimes overestimate the space needed"), and both the C writer and
+// the C reader touch lrptr->name at 7. This offset is on-disk format.
+pub const LVAR_OFF_NAME: usize = 7;
 
 pub struct VariantView<'a> {
     pub val: i32,
@@ -193,19 +246,19 @@ pub struct LqlView<'a> {
 
 impl<'a> LqlView<'a> {
     pub fn totallen(&self) -> usize {
-        read_u16(self.buf, self.off + LQL_OFF_TOTALLEN) as usize
+        read_u16_lax(self.buf, self.off + LQL_OFF_TOTALLEN) as usize
     }
     pub fn flag(&self) -> u16 {
-        read_u16(self.buf, self.off + LQL_OFF_FLAG)
+        read_u16_lax(self.buf, self.off + LQL_OFF_FLAG)
     }
     pub fn numvar(&self) -> usize {
-        read_u16(self.buf, self.off + LQL_OFF_NUMVAR) as usize
+        read_u16_lax(self.buf, self.off + LQL_OFF_NUMVAR) as usize
     }
     pub fn low(&self) -> u16 {
-        read_u16(self.buf, self.off + LQL_OFF_LOW)
+        read_u16_lax(self.buf, self.off + LQL_OFF_LOW)
     }
     pub fn high(&self) -> u16 {
-        read_u16(self.buf, self.off + LQL_OFF_HIGH)
+        read_u16_lax(self.buf, self.off + LQL_OFF_HIGH)
     }
     pub fn variants(&self) -> VariantIter<'a> {
         VariantIter {
@@ -228,11 +281,11 @@ impl<'a> Iterator for VariantIter<'a> {
         if self.remaining == 0 {
             return None;
         }
-        let val = read_i32(self.buf, self.off + LVAR_OFF_VAL);
-        let len = read_u16(self.buf, self.off + LVAR_OFF_LEN) as usize;
-        let flag = self.buf[self.off + LVAR_OFF_FLAG];
-        let name_off = self.off + LVAR_HDRSIZE;
-        let name = &self.buf[name_off..name_off + len];
+        let val = read_i32_lax(self.buf, self.off + LVAR_OFF_VAL);
+        let len = read_u16_lax(self.buf, self.off + LVAR_OFF_LEN) as usize;
+        let flag = byte_lax(self.buf, self.off + LVAR_OFF_FLAG);
+        let name_off = self.off + LVAR_OFF_NAME;
+        let name = slice_lax(self.buf, name_off, len);
         // LVAR_NEXT: MAXALIGN(len) + LVAR_HDRSIZE
         self.off += maxalign(len) + LVAR_HDRSIZE;
         self.remaining -= 1;
@@ -249,13 +302,13 @@ impl<'a> Lquery<'a> {
         Lquery { buf }
     }
     pub fn numlevel(&self) -> usize {
-        read_u16(self.buf, 4) as usize
+        read_u16_lax(self.buf, 4) as usize
     }
     pub fn firstgood(&self) -> u16 {
-        read_u16(self.buf, 6)
+        read_u16_lax(self.buf, 6)
     }
     pub fn flag(&self) -> u16 {
-        read_u16(self.buf, 8)
+        read_u16_lax(self.buf, 8)
     }
     pub fn levels(&self) -> LqlIter<'a> {
         LqlIter {
@@ -328,22 +381,22 @@ impl<'a> Ltxtquery<'a> {
         Ltxtquery { buf }
     }
     pub fn size(&self) -> usize {
-        read_i32(self.buf, 4) as usize
+        read_i32_lax(self.buf, 4) as usize
     }
     pub fn item(&self, i: usize) -> Item {
         let off = HDRSIZEQT + i * ITEM_SIZE;
         Item {
-            typ: read_i16(self.buf, off + ITEM_OFF_TYPE),
-            left: read_i16(self.buf, off + ITEM_OFF_LEFT),
-            val: read_i32(self.buf, off + ITEM_OFF_VAL),
-            flag: self.buf[off + ITEM_OFF_FLAG],
-            length: self.buf[off + ITEM_OFF_LENGTH],
-            distance: read_u16(self.buf, off + ITEM_OFF_DISTANCE),
+            typ: read_i16_lax(self.buf, off + ITEM_OFF_TYPE),
+            left: read_i16_lax(self.buf, off + ITEM_OFF_LEFT),
+            val: read_i32_lax(self.buf, off + ITEM_OFF_VAL),
+            flag: byte_lax(self.buf, off + ITEM_OFF_FLAG),
+            length: byte_lax(self.buf, off + ITEM_OFF_LENGTH),
+            distance: read_u16_lax(self.buf, off + ITEM_OFF_DISTANCE),
         }
     }
     pub fn operand(&self) -> &'a [u8] {
-        let off = HDRSIZEQT + self.size() * ITEM_SIZE;
-        &self.buf[off..]
+        let off = HDRSIZEQT + self.size().saturating_mul(ITEM_SIZE);
+        slice_lax(self.buf, off, self.buf.len())
     }
 }
 

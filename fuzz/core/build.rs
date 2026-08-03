@@ -447,6 +447,40 @@ fn main() {
         .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_jsonbfam");
 
+    // ltree_diff oracle (p1-ltree-t74, task #74): ONE standalone TU that
+    // #includes the banked verbatim 18.3 contrib/ltree family
+    // (csrc/ltreefam/), every extern lt_/pg_lt_-prefixed via in-file
+    // defines (hstorefam precedent; nm census in the lane report). Its
+    // shim include dir provides EMPTY header names only — it must never
+    // be added to the shared builder above (it would shadow other
+    // oracles' real headers, which is exactly what broke libfam when the
+    // first registration attempt did so). mblen resolves against the
+    // verbatim wfam_ copies in pg_wcharfam.c; hash_any against the
+    // pg_mac_io.c hashfn exports; provenance + shims in the TU header.
+    let mut ltreefam = cc::Build::new();
+    ltreefam.file("csrc/pg_ltreefam_io.c");
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        ltreefam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    ltreefam
+        .include("csrc/ltreefam/shim")
+        .include("csrc/ltreefam")
+        .include("csrc")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .flag_if_supported("-ffp-contract=off")
+        .flag_if_supported("-Wno-unused-function")
+        .flag_if_supported("-Wno-unused-value")
+        .flag_if_supported("-Wno-comment")
+        .flag_if_supported("-Wno-sign-compare")
+        .flag_if_supported("-Wno-unused-but-set-parameter")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
+        .compile("pg_difffuzz_ltreefam");
+    println!("cargo:rerun-if-changed=csrc/pg_ltreefam_io.c");
+    println!("cargo:rerun-if-changed=csrc/ltreefam");
+
     // SYMBOL ISOLATION (landing fix, merge/p1-wave1 2026-07-30): three lane
     // oracles (hashenc/p1-lanee, cryptofam/p1-lanef, enc_tables/p1-laneg in
     // the main oracle lib) each vendor the SAME verbatim 18.3 TUs (base64.c,

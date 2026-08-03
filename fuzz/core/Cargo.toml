@@ -230,6 +230,7 @@ spgist_quadtree = { path = "../../crates/backend/access/spgist/spgist_quadtree" 
 types_scan = { path = "../../crates/_support/types/types_scan" }  # spgquad_diff
 types_spgist = { path = "../../crates/_support/types/types_spgist" }  # spgquad_diff
 spgist_box = { path = "../../crates/backend/access/spgist/spgist_box" }  # spgbox_diff (scaffold.py)
+ltree = { path = "../../crates/contrib/ltree" }  # ltree_diff (p1-ltree-t74)
 
 [build-dependencies]
 cc = "1"

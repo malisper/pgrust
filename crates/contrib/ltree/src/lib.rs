@@ -4,7 +4,7 @@
 //! pg_trgm precedent). siglen is read from real opclass options.
 
 mod array;
-mod crc;
+pub mod crc; // pub for the ltree_diff differential rail + exhaustive CRC sweep (jsonb-probe precedent)
 mod gist;
 mod io;
 mod op;
@@ -68,6 +68,28 @@ macro_rules! fc_type_in {
             match $parse(s.to_bytes()) {
                 Ok(img) => ret_image(fcinfo, &img),
                 Err(e) => {
+                    // C softens ONLY its ereturn(escontext, ...) sites, and in
+                    // these three parsers those raise exactly the four codes
+                    // below (syntax; label-count / level-count / ltxtquery
+                    // size; label too long; ltxtquery value-too-big,
+                    // operand-too-long, word-too-long). Everything else
+                    // reaches the client through ereport or elog no matter
+                    // what escontext says: makepol's "stack too short" and the
+                    // two "internal error in ... parser" arms (XX000),
+                    // check_stack_depth (54001), and pg_mblen_cstr's invalid
+                    // byte sequence (22021). Softening those made
+                    // pg_input_is_valid() answer false where PostgreSQL
+                    // raises. A whitelist keeps any new error path hard by
+                    // default, which is C's default too.
+                    const SOFT_ABLE: [types_error::SqlState; 4] = [
+                        types_error::ERRCODE_SYNTAX_ERROR,
+                        types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                        types_error::ERRCODE_NAME_TOO_LONG,
+                        types_error::ERRCODE_INVALID_PARAMETER_VALUE,
+                    ];
+                    if !SOFT_ABLE.contains(&e.sqlstate) {
+                        return Err(Box::new(e));
+                    }
                     // SAFETY: context, if set, rides per the ErrorSaveNode
                     // contract for this call (pg_input_error_info path).
                     let esc = unsafe { fcinfo.soft_error_context() };
@@ -811,7 +833,17 @@ pub fn init_seams() {
 mod tests {
     use super::*;
 
+    /// contrib/ltree's regress environment is the C locale, and crc32.c's
+    /// fold arm is chosen by the default locale's ctype_is_c (see crc::fold).
+    /// Unit tests run without a catalog, so pin it the way the boot path
+    /// would; every test touching an lquery/ltxtquery label CRCs through it.
+    fn pin_c_ctype() {
+        ::pg_locale::set_default_locale_c_for_tests();
+        ::pg_locale::set_database_ctype_is_c(true);
+    }
+
     fn img(s: &str) -> Vec<u8> {
+        pin_c_ctype();
         io::parse_ltree(s.as_bytes()).unwrap()
     }
 
@@ -832,6 +864,7 @@ mod tests {
 
     #[test]
     fn lquery_match() {
+        pin_c_ctype();
         let q = io::parse_lquery(b"*.Astronomy.*").unwrap();
         assert!(op::ltq_regex(&img("Top.Astronomy.Stars"), &q).unwrap());
         assert!(!op::ltq_regex(&img("Top.Science"), &q).unwrap());
@@ -839,6 +872,7 @@ mod tests {
 
     #[test]
     fn ltxtquery_match() {
+        pin_c_ctype();
         let q = io::parse_ltxtquery(b"Astro* & !pictures").unwrap();
         assert!(op::ltxtq_exec(&img("Top.Astronomy.Stars"), &q).unwrap());
         assert!(!op::ltxtq_exec(&img("Top.Astronomy.pictures"), &q).unwrap());
@@ -914,6 +948,7 @@ mod tests {
 
     #[test]
     fn binary_wire_lquery_ltxtquery_version_byte() {
+        pin_c_ctype();
         let ctx = mcx::MemoryContext::new("t");
 
         let q = io::parse_lquery(b"*.Astronomy.*").unwrap();
@@ -954,6 +989,7 @@ mod tests {
     /// dying, this test has stopped proving that the guard is what saves us.
     #[test]
     fn matching_operators_deep_recursion_raise_54001_and_do_not_abort() {
+        pin_c_ctype();
         const STATEMENT_TOO_COMPLEX: u32 = 5 + (4 << 6) + (1 << 24);
         if let Ok(spec) = std::env::var("LTREE_OP_PROBE") {
             let (which, arm) = spec.split_once(':').unwrap();
@@ -969,6 +1005,8 @@ mod tests {
                 .spawn({
                     let which = which.clone();
                     move || {
+                        // thread-local pin (crc::fold reads it per thread)
+                        pin_c_ctype();
                         if which == "check_cond" {
                             (
                                 io::parse_ltree(
@@ -1051,6 +1089,40 @@ mod tests {
         }
     }
 
+    /// p1-ltree frame-budget measurement: how deep a flat `a|b|b|...` chain
+    /// each side accepts at the same max_stack_depth (2048 kB, which is what
+    /// PG's own boot logic caps the GUC at). `LTREE_FRAME_BISECT=1`.
+    /// Not a gate — this quantifies the one remaining seed-corpus difference.
+    #[test]
+    fn frame_budget_bisect() {
+        if std::env::var("LTREE_FRAME_BISECT").is_err() {
+            return;
+        }
+        let try_depth = |n: usize| -> bool {
+            let q = format!("a{}", "|b".repeat(n));
+            std::thread::Builder::new()
+                .stack_size(8 << 20)
+                .spawn(move || {
+                    stack_depth::set_stack_base();
+                    stack_depth::assign_max_stack_depth(2048);
+                    io::parse_ltxtquery(q.as_bytes()).is_ok()
+                })
+                .unwrap()
+                .join()
+                .unwrap_or(false)
+        };
+        let (mut lo, mut hi) = (1usize, 200_000usize);
+        while lo < hi - 1 {
+            let mid = (lo + hi) / 2;
+            if try_depth(mid) {
+                lo = mid
+            } else {
+                hi = mid
+            }
+        }
+        eprintln!("pgrust deepest OK flat-| chain at max_stack_depth=2048kB: {lo}");
+    }
+
     /// p1-ltree docker-differential probe (not a gate; a bug-finding rig).
     /// `LTREE_PROBE=<seeds.tsv>` prints `kind<TAB>hex<TAB>OK:<text>|ERR:<code>`
     /// for each seed so the same seeds can be replayed through
@@ -1092,6 +1164,7 @@ mod tests {
     /// docker postgres:18.3 with the ltree extension installed.
     #[test]
     fn lquery_repeat_count_matches_c_atoi_truncation() {
+        pin_c_ctype();
         // accepted: value truncates by (int) into range
         for (input, want) in [
             ("*{4294967301}", "*{5}"),
@@ -1234,7 +1307,7 @@ mod tests {
         for j in 0..NUMVAR {
             let off = 16 + j * 16;
             repr::write_u16(&mut level, off + 4, 1); // LVAR len
-            level[off + 8] = b'a'; // name
+            level[off + repr::LVAR_OFF_NAME] = b'a'; // name (C offsetof == 7)
         }
 
         let total = repr::LQUERY_HDRSIZE + NLEVEL * repr::maxalign(LVL_TOTALLEN);

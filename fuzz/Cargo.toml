@@ -641,3 +641,12 @@ path = "fuzz_targets/tsqrw_diff.rs"
 test = false
 doc = false
 bench = false
+
+# ltree_diff (p1-ltree-t74): contrib/ltree ltree/lquery/ltxtquery IO + operators
+# vs the verbatim 18.3 C oracle (fuzz/core/csrc/ltreefam/).
+[[bin]]
+name = "ltree_diff"
+path = "fuzz_targets/ltree_diff.rs"
+test = false
+doc = false
+bench = false

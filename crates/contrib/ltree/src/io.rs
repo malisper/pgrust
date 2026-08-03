@@ -11,9 +11,16 @@ use ::types_error::PgError;
 use crate::crc::ltree_crc32_sz;
 use crate::repr::*;
 
+/// C's `pg_mblen_cstr` (mbutils.c): the claimed character length, but the
+/// string's terminator must not fall INSIDE the character — C reports
+/// invalid-byte-sequence when it does. The slice end stands in for the NUL,
+/// which is what `pg_mblen_range` checks. Reading the claimed length
+/// unchecked (`pg_mblen`) and slicing by it panicked the backend on a
+/// truncated multibyte label ('a' || E'\xC3' cast to ltree) where
+/// PostgreSQL raises 22021.
 #[inline]
-fn mblen(s: &[u8]) -> usize {
-    ::mbutils::pg_mblen(s).max(1) as usize
+fn mblen(s: &[u8]) -> Result<usize, PgError> {
+    Ok(::mbutils::pg_mblen_range(s)?.max(1) as usize)
 }
 
 /// C's `isspace((unsigned char) c)` in the C locale, which is what
@@ -26,12 +33,15 @@ fn is_space_c_locale(c: u8) -> bool {
 }
 
 #[inline]
-fn is_label(s: &[u8]) -> bool {
+fn is_label(s: &[u8], charlen: usize) -> bool {
     let c = s[0];
     if c == b'_' || c == b'-' {
         return true;
     }
-    ::ts_locale::t_isalnum(&s[..mblen(s)])
+    // charlen comes from the caller's already-validated mblen() for this
+    // position, exactly as C's ISLABEL -> t_isalnum_cstr recomputes the same
+    // pg_mblen_cstr the scan loop just took.
+    ::ts_locale::t_isalnum(&s[..charlen])
 }
 
 // The regression .out compares sqlstate + message + (sometimes) detail, so we
@@ -116,7 +126,7 @@ pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     {
         let mut i = 0;
         while i < n {
-            let cl = mblen(&buf[i..]);
+            let cl = mblen(&buf[i..])?;
             if buf[i] == b'.' {
                 num += 1;
             }
@@ -146,10 +156,10 @@ pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
 
     let mut i = 0usize;
     while i < n {
-        let cl = mblen(&buf[i..]);
+        let cl = mblen(&buf[i..])?;
         match state {
             LTPRS_WAITNAME => {
-                if is_label(&buf[i..]) {
+                if is_label(&buf[i..], cl) {
                     list[lptr_idx].start = i;
                     list[lptr_idx].wlen = 0;
                     state = LTPRS_WAITDELIM;
@@ -162,7 +172,7 @@ pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                     finish_nodeitem(buf, &mut list[lptr_idx], i, false, pos)?;
                     lptr_idx += 1;
                     state = LTPRS_WAITNAME;
-                } else if !is_label(&buf[i..]) {
+                } else if !is_label(&buf[i..], cl) {
                     return Err(syntax_at("ltree", pos));
                 }
             }
@@ -257,7 +267,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     {
         let mut i = 0;
         while i < n {
-            let cl = mblen(&buf[i..]);
+            let cl = mblen(&buf[i..])?;
             if buf[i] == b'.' {
                 num += 1;
             }
@@ -299,11 +309,11 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
 
     let mut i = 0usize;
     while i < n {
-        let cl = mblen(&buf[i..]);
+        let cl = mblen(&buf[i..])?;
         let c = buf[i];
         match state {
             LQPRS_WAITLEVEL => {
-                if is_label(&buf[i..]) {
+                if is_label(&buf[i..], cl) {
                     levels[cur].variants.push(NodeItem {
                         start: i,
                         len: 0,
@@ -330,7 +340,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                 }
             }
             LQPRS_WAITVAR => {
-                if is_label(&buf[i..]) {
+                if is_label(&buf[i..], cl) {
                     levels[cur].variants.push(NodeItem {
                         start: i,
                         len: 0,
@@ -364,7 +374,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                     finish_variant(buf, &mut levels[cur].variants[lvar], i, pos)?;
                     state = LQPRS_WAITLEVEL;
                     nextlev!();
-                } else if is_label(&buf[i..]) {
+                } else if is_label(&buf[i..], cl) {
                     if levels[cur].variants[lvar].flag != 0 {
                         return Err(syntax_at("lquery", pos));
                     }
@@ -491,10 +501,22 @@ fn serialize_lquery(
     num: u16,
     hasnot: bool,
 ) -> Result<Vec<u8>, PgError> {
+    // C counts a level's variants into `lquery_level.numvar`, a uint16 with no
+    // ceiling check (unlike `num`, which IS checked against
+    // LQUERY_MAX_LEVELS). Past 65535 variants in one level the field WRAPS,
+    // and every later C loop — the size accounting here, the copy loop below,
+    // and every reader — is bounded by the WRAPPED count, so C silently
+    // serializes only `numvar mod 65536` of the variants it parsed.
+    // `SELECT (repeat('a|',100000)||'a')::lquery` is the SQL-reachable shape
+    // (upstream bug 103a's sibling field). Truncating here is what makes the
+    // stored image the one PostgreSQL stores; iterating the full Vec instead
+    // produced a 1,600,048-byte image where PostgreSQL stores 551,472.
+    let stored_numvar = |lvl: &PLevel| (lvl.variants.len() as u16) as usize;
+
     let mut totallen = LQUERY_HDRSIZE;
     for lvl in levels {
         totallen += LQL_HDRSIZE;
-        for v in &lvl.variants {
+        for v in lvl.variants.iter().take(stored_numvar(lvl)) {
             totallen += maxalign(LVAR_HDRSIZE + v.len);
         }
     }
@@ -512,23 +534,40 @@ fn serialize_lquery(
     for lvl in levels {
         let numvar = lvl.variants.len() as u16;
         let lql_off = off;
+        // C's `memcpy(cur, curqlevel, LQL_HDRSIZE)` copies all 16 header
+        // bytes out of a palloc0'd parse-time struct, so the 6 padding bytes
+        // past `high` are written as zeroes. That only matters once a wrapped
+        // totallen makes levels overlap (below) and the bytes underneath are
+        // no longer the allocation's own zeroes — so zero them explicitly
+        // instead of relying on the fresh buffer.
+        out[lql_off..lql_off + LQL_HDRSIZE].fill(0);
         write_u16(&mut out, lql_off + 2, lvl.flag); // flag
         write_u16(&mut out, lql_off + 4, numvar); // numvar
         write_u16(&mut out, lql_off + 6, lvl.low); // low
         write_u16(&mut out, lql_off + 8, lvl.high); // high
         let mut cur_totallen = LQL_HDRSIZE;
         let mut voff = off + LQL_HDRSIZE;
-        for v in &lvl.variants {
+        for v in lvl.variants.iter().take(numvar as usize) {
             cur_totallen += maxalign(LVAR_HDRSIZE + v.len);
             let val = ltree_crc32_sz(&buf[v.start..v.start + v.len]) as i32;
             write_i32(&mut out, voff, val); // val
             write_u16(&mut out, voff + 4, v.len as u16); // len
             out[voff + 6] = v.flag; // flag
-            out[voff + LVAR_HDRSIZE..voff + LVAR_HDRSIZE + v.len]
+            out[voff + LVAR_OFF_NAME..voff + LVAR_OFF_NAME + v.len]
                 .copy_from_slice(&buf[v.start..v.start + v.len]);
             voff += maxalign(LVAR_HDRSIZE + v.len);
         }
-        write_u16(&mut out, lql_off, cur_totallen as u16); // totallen
+        // C stores the level size in a uint16 and then walks to the next
+        // level with LQL_NEXT(cur) == MAXALIGN(cur->totallen), i.e. from the
+        // STORED (possibly wrapped) field, not from the real byte count it
+        // just wrote. Once one level's serialized size passes 65535 the two
+        // disagree and C's next level lands back on top of this one. That
+        // overwrite is part of the image PostgreSQL stores (upstream bug
+        // 103a, docs/upstream/bug-103a-ltree-deparse-lquery-overflow.txt),
+        // and lquery images are on-disk format, so the stride is read back
+        // out of the stored field exactly as C reads it.
+        let stored_totallen = cur_totallen as u16;
+        write_u16(&mut out, lql_off, stored_totallen); // totallen
 
         if numvar > 0 {
             if numvar > 1 || lvl.flag != 0 {
@@ -540,7 +579,7 @@ fn serialize_lquery(
             wasbad = true;
         }
 
-        off += maxalign(cur_totallen);
+        off += maxalign(stored_totallen as usize);
     }
 
     write_u16(&mut out, 6, firstgood);
@@ -669,9 +708,9 @@ impl<'a> QprsState<'a> {
             0
         }
     }
-    fn mblen(&self) -> usize {
+    fn mblen(&self) -> Result<usize, PgError> {
         if self.i >= self.buf.len() {
-            1
+            Ok(1)
         } else {
             mblen(&self.buf[self.i..])
         }
@@ -683,7 +722,7 @@ fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
     let mut strval: usize = 0;
     let mut lenval: i32 = 0;
     loop {
-        let charlen = st.mblen();
+        let charlen = st.mblen()?;
         match st.state {
             WAITOPERAND => {
                 let c = st.cur();
@@ -694,7 +733,7 @@ fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
                     st.count += 1;
                     st.i += 1;
                     return Ok(Tok { kind: OPEN, val: 0, lenval: 0, strval: 0, flag: 0 });
-                } else if !st.at_end() && is_label(&st.buf[st.i..]) {
+                } else if !st.at_end() && is_label(&st.buf[st.i..], charlen) {
                     st.state = INOPERAND;
                     strval = st.i;
                     lenval = charlen as i32;
@@ -713,7 +752,7 @@ fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
                 }
             }
             INOPERAND => {
-                if !st.at_end() && is_label(&st.buf[st.i..]) {
+                if !st.at_end() && is_label(&st.buf[st.i..], charlen) {
                     if flag != 0 {
                         return Err(PgError::error("modifiers syntax error")
                             .with_sqlstate(ERRCODE_SYNTAX_ERROR));

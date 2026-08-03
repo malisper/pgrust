@@ -22,6 +22,7 @@ detoast = { path = "../../backend/access/common/detoast" }
 reloptions = { path = "../../backend/access/common/reloptions" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }
 ts_locale = { path = "../../backend/tsearch/ts_locale" }
+pg_locale = { path = "../../backend/utils/adt/pg_locale" }
 formatting_seams = { path = "../../backend/utils/adt/formatting_seams" }
 crc32c = { path = "../../port/crc32c" }
 stack_depth = { path = "../../backend/utils/misc/stack_depth" }

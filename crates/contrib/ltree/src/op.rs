@@ -23,19 +23,32 @@ pub fn ltree_compare(a: &[u8], b: &[u8]) -> i32 {
         let bl = bi.next().unwrap();
         let minlen = al.name.len().min(bl.name.len());
         let res = al.name[..minlen].cmp(&bl.name[..minlen]);
+        // C ltree_op.c ltree_compare returns `<delta> * 10 * (an + 1)` in
+        // plain int arithmetic, which WRAPS for large trees (numlevel is
+        // uint16, so an+1 reaches 65536 and the product exceeds INT_MAX;
+        // SQL-reachable via ltree_cmp on a >3276-level tree vs a short one).
+        // C's wrapped two's-complement value is the value PG returns, so the
+        // multiplies must be wrapping to be C-exact — a checked `*` here
+        // PANICS in overflow-checked builds (CI cluster fuzz builds; found by
+        // ltree_diff jobs -87980/-88152, both legs, same site). Upstream
+        // match-or-fix decision: MATCH (bug-compat with C's wrap).
         match res {
             core::cmp::Ordering::Equal => {
                 if al.name.len() != bl.name.len() {
-                    return (al.name.len() as i32 - bl.name.len() as i32) * 10 * (an + 1);
+                    return (al.name.len() as i32 - bl.name.len() as i32)
+                        .wrapping_mul(10)
+                        .wrapping_mul(an + 1);
                 }
             }
-            core::cmp::Ordering::Less => return -10 * (an + 1),
-            core::cmp::Ordering::Greater => return 10 * (an + 1),
+            core::cmp::Ordering::Less => return (-10i32).wrapping_mul(an + 1),
+            core::cmp::Ordering::Greater => return 10i32.wrapping_mul(an + 1),
         }
         an -= 1;
         bn -= 1;
     }
-    (ta.numlevel() as i32 - tb.numlevel() as i32) * 10 * (an + 1)
+    (ta.numlevel() as i32 - tb.numlevel() as i32)
+        .wrapping_mul(10)
+        .wrapping_mul(an + 1)
 }
 
 /// `hash_ltree(a)` — `hash_any` per level, combined `result = result*31 + h`.
@@ -92,33 +105,63 @@ pub fn inner_subltree(t: &[u8], startpos: i32, endpos_in: i32) -> Result<Vec<u8>
     }
     let endpos = endpos_in.min(numlevel);
 
-    // Collect level name slices in [startpos, endpos).
-    let labels: Vec<&[u8]> = tt
-        .levels()
-        .skip(startpos as usize)
-        .take((endpos - startpos) as usize)
-        .map(|l| l.name)
-        .collect();
-    Ok(build_ltree(&labels))
+    // C walks POINTERS and copies the raw byte range [start, end), setting
+    // numlevel = endpos - startpos independently. When startpos == endpos > 0
+    // the `i == startpos` arm never fires, so `start` keeps its initial value
+    // (the first level) while `end` advances to level endpos: the result is a
+    // header claiming 0 levels over a payload of `endpos` levels. That image
+    // is what PostgreSQL stores (subltree('a.b.c.d',3,3) is 32 bytes, not 8),
+    // and ltree images are on-disk format, so reproduce the walk exactly
+    // rather than emitting a tidier empty ltree.
+    let lvl_offs: Vec<usize> = {
+        let mut offs = Vec::with_capacity(numlevel as usize + 1);
+        let mut off = 0usize;
+        for l in tt.levels() {
+            offs.push(off);
+            off += maxalign(l.name.len() + LEVEL_HDRSIZE);
+        }
+        offs.push(off);
+        offs
+    };
+    let (mut start, mut end) = (0usize, 0usize);
+    for i in 0..endpos {
+        if i == startpos {
+            start = lvl_offs[i as usize];
+        }
+        if i == endpos - 1 {
+            end = lvl_offs[i as usize + 1];
+            break;
+        }
+    }
+    let body = &t[LTREE_HDRSIZE + start..LTREE_HDRSIZE + end];
+    let total = LTREE_HDRSIZE + body.len();
+    let mut res = vec![0u8; total];
+    set_varsize(&mut res, total);
+    write_u16(&mut res, 4, (endpos - startpos) as u16);
+    res[LTREE_HDRSIZE..].copy_from_slice(body);
+    Ok(res)
 }
 
 pub fn subpath(t: &[u8], start_in: i32, len_opt: Option<i32>) -> Result<Vec<u8>, PgError> {
     let numlevel = Ltree::new(t).numlevel() as i32;
     let len = len_opt.unwrap_or(0);
     let three = len_opt.is_some();
+    // Same -fwrapv arithmetic as ltree_index: subpath('a.b', 1, 2147483647)
+    // and subpath('a.b', -2147483648) are SQL-reachable and overflow every
+    // one of these adds in C, which wraps; a checked add panics the backend.
     let mut start = start_in;
-    let mut end = start + len;
+    let mut end = start.wrapping_add(len);
 
     if start < 0 {
-        start = numlevel + start;
-        end = start + len;
+        start = numlevel.wrapping_add(start);
+        end = start.wrapping_add(len);
     }
     if start < 0 {
-        start = numlevel + start;
-        end = start + len;
+        start = numlevel.wrapping_add(start);
+        end = start.wrapping_add(len);
     }
     if len < 0 {
-        end = numlevel + len;
+        end = numlevel.wrapping_add(len);
     } else if len == 0 {
         end = if three { start } else { 0xffff };
     }
@@ -153,15 +196,20 @@ pub fn ltree_index(a: &[u8], b: &[u8], start_in: Option<i32>) -> i32 {
     let bn = tb.numlevel() as i32;
     let mut start = start_in.unwrap_or(0);
 
+    // C ltree_op.c does this arithmetic in plain `int` and PostgreSQL builds
+    // with -fwrapv, so every step here is a defined two's-complement wrap.
+    // start = INT_MIN is SQL-reachable (ltree_index(a, b, -2147483648)) and
+    // makes both `-start` and `an - start` overflow; a checked negate panics
+    // the backend where C returns -1.
     if start < 0 {
-        if -start >= an {
+        if start.wrapping_neg() >= an {
             start = 0;
         } else {
-            start = an + start;
+            start = an.wrapping_add(start);
         }
     }
 
-    if an - start < bn || an == 0 || bn == 0 {
+    if an.wrapping_sub(start) < bn || an == 0 || bn == 0 {
         return -1;
     }
 

@@ -884,3 +884,8 @@ pub use cryptbe_diff::crypt_be_diff;
 // csrc/gen/assemble_instrbe.sh).
 pub mod instrument_diff;
 pub use instrument_diff::instrument_diff;
+
+// ltree_diff (p1-ltree-t74, task #74): contrib/ltree label-tree IO + operator
+// family vs the whole-TU verbatim 18.3 oracle (csrc/pg_ltreefam_io.c).
+pub mod ltree_diff;
+pub use ltree_diff::ltree_diff;
