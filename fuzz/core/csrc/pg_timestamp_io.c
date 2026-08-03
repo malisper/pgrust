@@ -657,6 +657,55 @@ static TzAbbrevCache tzabbrevcache[MAXDATEFIELDS];
 #define PG_DT_OMIT_ABBREV_BUILDERS 1
 #include "pg_datetime_verbatim.inc"
 
+/* ==== H0 SCRIBBLER detector (task #112) ====
+ * Every legal entry of datecache[]/deltacache[] is NULL or a pointer INTO
+ * datetktbl[]/deltatktbl[] — an exact validity predicate over the caches
+ * (docs/conformance/scribbler-investigation-2026-08-02.md §5 H0). Called
+ * from OracleSerial::drop at depth 0 so a cross-thread scribble is named
+ * by the test whose oracle exit follows the write. On poison, both caches
+ * are cleared (pure memoization — always safe) so one scribble does not
+ * cascade-panic every subsequent oracle exit.
+ * Returns 0 if sane, else 100+i (datecache[i] bad) or 200+i (deltacache[i]
+ * bad) for the first bad slot found. */
+int
+pg_tsdiff_cache_check(void)
+{
+	int			code = 0;
+
+	for (int i = 0; i < MAXDATEFIELDS && code == 0; i++)
+	{
+		const datetkn *dp = datecache[i];
+		const datetkn *tp = deltacache[i];
+
+		if (dp != NULL && (dp < datetktbl || dp >= datetktbl + szdatetktbl))
+			code = 100 + i;
+		else if (tp != NULL && (tp < deltatktbl || tp >= deltatktbl + szdeltatktbl))
+			code = 200 + i;
+	}
+	if (code != 0)
+	{
+		memset(datecache, 0, sizeof(datecache));
+		memset(deltacache, 0, sizeof(deltacache));
+	}
+	return code;
+}
+
+/* Test-only: plant the SCRIBBLER's exact one-byte signature (a valid table
+ * pointer with byte index 2 zeroed) so the detector's must-fail control can
+ * prove the Drop-path wiring fires. */
+void
+pg_tsdiff_cache_poison_for_test(void)
+{
+	uintptr_t	p = (uintptr_t) &deltatktbl[1] & ~((uintptr_t) 0xff << 16);
+
+	/* if byte 2 was already zero the scribbled pointer is still in-table;
+	 * force invalidity so the control always plants real poison */
+	if ((const datetkn *) p >= deltatktbl &&
+		(const datetkn *) p < deltatktbl + szdeltatktbl)
+		p = (uintptr_t) 0x1;
+	deltacache[3] = (const datetkn *) p;
+}
+
 /* ================================================================== *
  *  adt_timestamp additions (lane p1-laney) — shims + verbatim bodies *
  * ================================================================== */

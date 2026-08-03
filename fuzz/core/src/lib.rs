@@ -266,9 +266,48 @@ thread_local! {
 
 pub(crate) struct OracleSerial(#[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>);
 
+extern "C" {
+    /// H0 SCRIBBLER detector (task #112): exact validity predicate over the
+    /// timestamp oracle's `datecache`/`deltacache` statics — every legal
+    /// entry is NULL or points into `datetktbl`/`deltatktbl`. 0 = sane;
+    /// else 100+i / 200+i names the first poisoned slot (and the caches are
+    /// cleared so the poison cannot cascade). Defined in
+    /// csrc/pg_timestamp_io.c; see
+    /// docs/conformance/scribbler-investigation-2026-08-02.md §5 H0.
+    fn pg_tsdiff_cache_check() -> i32;
+}
+
 impl Drop for OracleSerial {
     fn drop(&mut self) {
-        ORACLE_DEPTH.with(|d| d.set(d.get() - 1));
+        let depth = ORACLE_DEPTH.with(|d| {
+            let v = d.get() - 1;
+            d.set(v);
+            v
+        });
+        // H0 detector: on final oracle exit (still holding ORACLE_M — the
+        // guard field drops after this body), verify the timestamp caches
+        // and name the poisoning test at the moment of the corrupting write.
+        // Release-effective by design: no debug_assert, no sanitizer.
+        if depth == 0 {
+            let code = unsafe { pg_tsdiff_cache_check() };
+            if code != 0 {
+                let t = std::thread::current();
+                let msg = format!(
+                    "SCRIBBLER H0: timestamp oracle cache poisoned (code {code}: \
+                     {} slot {}) detected at oracle exit in test thread {:?}",
+                    if code < 200 { "datecache" } else { "deltacache" },
+                    code % 100,
+                    t.name().unwrap_or("<unnamed>"),
+                );
+                if std::thread::panicking() {
+                    // Don't double-panic (abort) while unwinding a test
+                    // failure that held the guard; the report still lands.
+                    eprintln!("{msg}");
+                } else {
+                    panic!("{msg}");
+                }
+            }
+        }
     }
 }
 
@@ -451,6 +490,9 @@ pub use rowtypes_diff::rowtypes_diff;
 pub mod stub_encoding;
 #[cfg(test)]
 mod stub_controls_tests;
+// H0 SCRIBBLER detector controls (task #112): clean-path + must-fail poison.
+#[cfg(test)]
+mod scribbler_h0_tests;
 pub mod stub_nodes;
 pub mod stub_snapshot;
 pub mod stub_syscache;
