@@ -144,3 +144,70 @@ fn tsdicts_bad_pairs_oracle() {
     let err = make_dict(mcx, "hunspell_sample_num", "hunspell_sample_long").err().unwrap();
     assert_eq!(err, "invalid affix alias \"302,301,202,303\"");
 }
+
+/// MUST-FAIL CONTROL for the mk_a_node / mk_sp_node recursion guards
+/// (build.rs). Both builders advance one recursion level per CHARACTER of the
+/// longest affix `repl` (mkANode) or dictionary word (mkSPNode), and verbatim
+/// C spell.c carries no check_stack_depth() at either site -- so the depth is
+/// driven straight from the .aff/.dict bytes. This port's frames are much
+/// larger than the C frames (owning PgVec/Vec locals), so before the guards
+/// were added a long affix drove the recursion into the OS guard page and
+/// SIGSEGV'd the process. That is what killed the spellfam_diff 10M
+/// differential floor four times; CI cluster job
+/// pgrust-fuzz-campaign-1785668253-5ec7-84536 @ fd4029967d died at 6.73M/10M
+/// execs with an ASan stack-overflow whose trace was 246 identical
+/// `tsearch_spell::build::IspellDict::mk_a_node` frames.
+///
+/// WITHOUT the `check_stack_depth()?` calls this test does not "fail" politely
+/// -- it takes the whole test process down with a stack overflow, which is
+/// precisely the defect. WITH them the recursion is admitted against the byte
+/// bound and the build raises 54001 (statement too complex), which the
+/// differential driver already treats as a documented non-surface.
+#[test]
+fn mk_a_node_deep_affix_raises_54001_not_stack_overflow() {
+    let mcx = static_mcx();
+
+    // Arm the guard the way a real backend does (set_stack_base in main() plus
+    // the max_stack_depth GUC). libtest gives each test thread a 2 MiB stack,
+    // and PG's own admission rule is "stack minus STACK_DEPTH_SLOP", so pin
+    // the limit the same way the differential driver does.
+    const MAX_KB: i32 = 2048 - (::stack_depth::STACK_DEPTH_SLOP / 1024) as i32;
+    ::stack_depth::set_max_stack_depth(MAX_KB);
+    ::stack_depth::assign_max_stack_depth(MAX_KB);
+    let _ = ::stack_depth::set_stack_base();
+
+    // Old-ispell-format affix file with ONE suffix entry whose replacement
+    // string is long: `repl` length == mk_a_node recursion depth.
+    let mut aff = Vec::new();
+    aff.extend_from_slice(b"suffixes\nflag Z:\n    . > ");
+    aff.extend_from_slice(&b"A".repeat(60_000));
+    aff.push(b'\n');
+
+    // ni_import_affixes takes a PATH (tsearch_readline opens it), so stage the
+    // fixture as a real file the way the differential driver does.
+    let path = std::env::temp_dir().join("pgrust_spell_deep_affix.aff");
+    std::fs::write(&path, &aff).expect("stage affix fixture");
+    let pathb = path.as_os_str().as_encoded_bytes().to_vec();
+
+    let mut obj = crate::IspellDict::new(mcx);
+    obj.ni_start_build().expect("ni_start_build");
+    // Parsing itself must not blow up; the recursion happens in ni_sort_affixes.
+    if let Err(e) = obj.ni_import_affixes(&pathb) {
+        // A parse-level refusal would be an acceptable bound too -- but then
+        // this control is vacuous, so say so loudly rather than pass silently.
+        panic!(
+            "control is VACUOUS: ni_import_affixes rejected the long-repl affix \
+             ({:?}), so mk_a_node was never reached; reshape the fixture",
+            e.message()
+        );
+    }
+    let err = obj
+        .ni_sort_affixes()
+        .expect_err("deep mk_a_node recursion must be refused, not overflow the stack");
+    assert_eq!(
+        err.sqlstate(),
+        ::types_error::ERRCODE_STATEMENT_TOO_COMPLEX,
+        "expected 54001 statement-too-complex from the recursion guard, got {:?}",
+        err.message()
+    );
+}

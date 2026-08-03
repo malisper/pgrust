@@ -4,7 +4,8 @@ use ::types_core::catalog::DEFAULT_COLLATION_OID;
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
 
 use crate::{
-    atoi, bcmp, bstrchr, bytes_lossy, config_file_error, elog_internal, findchar, findchar2,
+    atoi, bcmp, bstrchr, bytes_lossy, check_stack_depth, config_file_error, elog_internal,
+    findchar, findchar2,
     isdigit, isprint, isspace, new_bytes, pg_mblen_clamped, reserve_one, rs_compile, rs_is_regis,
     str_tolower, strbcmp, strbncmp, strtol, t_isalpha, t_iseq, Affix, AffixNode, AffixNodeData,
     AffixReg, CmpdAffix, CompoundAffixFlag, FlagKey, FlagMode, IspellDict, SpNode, SpNodeData,
@@ -1002,6 +1003,28 @@ impl<'mcx> IspellDict<'mcx> {
     }
 
     fn mk_sp_node(&mut self, low: i32, high: i32, level: i32) -> PgResult<Option<usize>> {
+        // RECURSION GUARD. C's mkSPNode (spell.c:1637) recurses once per
+        // character of the longest word and carries NO check_stack_depth();
+        // upstream relies on caller-side word lengths staying small. This
+        // port's frame is far larger than the C frame (owning PgVec/Vec
+        // locals), so it reaches the OS guard page at a shallower `level`
+        // than C does -- i.e. pgrust OS-crashes on input C survives. Admit
+        // against the BYTE bound, exactly as the sibling recursion in
+        // normalize.rs (SplitToVariants) already does.
+        //
+        // WHERE THIS SITS RELATIVE TO THE DIFFERENTIAL: raising 54001 here is
+        // NOT self-evidently divergence-free. C reaches this input without
+        // erroring, so on any input deep enough to trip our byte bound the two
+        // sides genuinely disagree; the comparison only stays quiet because the
+        // spellfam_diff driver early-returns on a Rust-side 54001 WITHOUT
+        // requiring the C side to have raised too — a ONE-SIDED suppression.
+        // That silently removes a slice of the input domain from comparison,
+        // which is a coverage hole, not a proof of parity. The driver owes a
+        // two-sided assertion (or an explicit, ledgered carve) before this
+        // crate's floor may be accepted; the threshold being a documented
+        // non-surface for this family bounds the blast radius but does not
+        // discharge that debt.
+        check_stack_depth()?;
         let mcx = self.mcx;
         let mut nchar = 0;
         let mut lastchar: u8 = 0;
@@ -1105,6 +1128,13 @@ impl<'mcx> IspellDict<'mcx> {
         level: i32,
         type_: i32,
     ) -> PgResult<Option<usize>> {
+        // RECURSION GUARD -- see mk_sp_node. C's mkANode (spell.c:1828) has no
+        // check_stack_depth() either, and here `level` advances once per
+        // character of the longest affix repl string, which comes straight out
+        // of the .aff file: the depth is input-controlled and unbounded. This
+        // is the frame that killed the spell 10M differential floor four
+        // times (ASan stack-overflow, 246 identical mk_a_node frames).
+        check_stack_depth()?;
         let mcx = self.mcx;
         let mut nchar = 0;
         let mut lastchar: u8 = 0;
