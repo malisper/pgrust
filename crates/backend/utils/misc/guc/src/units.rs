@@ -162,7 +162,9 @@ pub fn get_config_unit_name(flags: i32) -> Option<&'static str> {
         GUC_UNIT_MS => Some("ms"),
         GUC_UNIT_S => Some("s"),
         GUC_UNIT_MIN => Some("min"),
-        _ => None,
+        // C-parity: guc.c elogs ERROR here; returning None would conflate
+        // "invalid units value" with "unitless" (flags==0).
+        other => panic!("unrecognized GUC units value: {other}"),
     }
 }
 
@@ -272,11 +274,15 @@ pub fn fmt_g(v: f64) -> String {
 }
 
 pub fn fmt_g_prec(v: f64, precision: usize) -> String {
+    // PG's own snprintf (port/snprintf.c fmtfloat) prints NaN/Infinity
+    // ITSELF for platform-independent output: "NaN" (never signed),
+    // "[-]Infinity" — the system printf's "nan"/"inf" never reaches the
+    // buffer (fuzz-caught parity fix).
     if v.is_nan() {
-        return "nan".to_string();
+        return "NaN".to_string();
     }
     if v.is_infinite() {
-        return if v < 0.0 { "-inf".to_string() } else { "inf".to_string() };
+        return if v < 0.0 { "-Infinity".to_string() } else { "Infinity".to_string() };
     }
 
     let p = precision.max(1);
@@ -296,11 +302,12 @@ pub fn fmt_g_prec(v: f64, precision: usize) -> String {
 }
 
 pub fn fmt_e(v: f64, precision: usize) -> String {
+    // PG-snprintf NaN/Infinity arms, as in fmt_g_prec.
     if v.is_nan() {
-        return "nan".to_string();
+        return "NaN".to_string();
     }
     if v.is_infinite() {
-        return if v < 0.0 { "-inf".to_string() } else { "inf".to_string() };
+        return if v < 0.0 { "-Infinity".to_string() } else { "Infinity".to_string() };
     }
     normalize_e(&format!("{:.*e}", precision, v))
 }

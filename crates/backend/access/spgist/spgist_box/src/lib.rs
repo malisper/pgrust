@@ -281,6 +281,19 @@ fn fc_spg_box_quad_choose(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::null())
 }
 
+// geo_spgist.c compareDoubles: 0 on ==, 1 on >, else -1. Non-total over
+// NaN (both directions -1) — exactly what C feeds pg_qsort.
+#[inline]
+fn compare_doubles_c(x: f64, y: f64) -> i32 {
+    if x == y {
+        0
+    } else if x > y {
+        1
+    } else {
+        -1
+    }
+}
+
 fn fc_spg_box_quad_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: spgist opclass fmgr protocol.
     let input = unsafe { &*(fcinfo.arg(0).as_usize() as *const spgPickSplitIn) };
@@ -304,13 +317,18 @@ fn fc_spg_box_quad_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
         highYs.push(b.high.y);
     }
 
-    // C qsorts with a non-total comparator (NaNs land arbitrarily); total_cmp
-    // matches it on all non-NaN inputs and only moves the median pick — index
-    // shape, never results — when NaN/-0.0 coordinates are present.
-    lowXs.sort_unstable_by(f64::total_cmp);
-    highXs.sort_unstable_by(f64::total_cmp);
-    lowYs.sort_unstable_by(f64::total_cmp);
-    highYs.sort_unstable_by(f64::total_cmp);
+    // C qsorts with compareDoubles (0 on ==, 1 on >, else -1 — non-total
+    // over NaN, and -0.0 == 0.0 ties keep algorithm order). qsort in the
+    // backend IS pg_qsort (port.h); route through the canonical pg_qsort
+    // crate with the C-exact comparator: same comparator + same input =>
+    // the same permutation as C — including NaN and -0.0/0.0 bit-pattern
+    // ties at the median — so the centroid image matches C byte-for-byte.
+    // (spgist_kdtree precedent, Michael-RULED option a; total_cmp diverged
+    // at the median on NaN and mixed-zero inputs — spgbox_diff plane B4.)
+    ::pg_qsort::pg_qsort(&mut lowXs, |a, b| compare_doubles_c(*a, *b));
+    ::pg_qsort::pg_qsort(&mut highXs, |a, b| compare_doubles_c(*a, *b));
+    ::pg_qsort::pg_qsort(&mut lowYs, |a, b| compare_doubles_c(*a, *b));
+    ::pg_qsort::pg_qsort(&mut highYs, |a, b| compare_doubles_c(*a, *b));
 
     let median = n / 2;
     let centroid = BOX {

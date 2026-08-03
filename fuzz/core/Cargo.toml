@@ -199,6 +199,10 @@ timeline = { path = "../../crates/backend/access/transam/timeline" }  # timeline
 # pgcryptofam_diff (p1-pgcryptofam): contrib/pgcrypto crypt()/gen_salt()/armor
 # family vs the verbatim 18.3 C oracle in csrc/pgcryptofam/.
 pgcrypto = { path = "../../crates/contrib/pgcrypto" }
+spgist_quadtree = { path = "../../crates/backend/access/spgist/spgist_quadtree" }  # spgquad_diff (scaffold.py)
+types_scan = { path = "../../crates/_support/types/types_scan" }  # spgquad_diff
+types_spgist = { path = "../../crates/_support/types/types_spgist" }  # spgquad_diff
+spgist_box = { path = "../../crates/backend/access/spgist/spgist_box" }  # spgbox_diff (scaffold.py)
 
 [build-dependencies]
 cc = "1"

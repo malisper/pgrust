@@ -22,6 +22,17 @@ fn main() {
         // .file("csrc/pg_timeline_io.c")
         // guc_file_diff oracle compiles in its OWN cc::Build below
         // (pg_difffuzz_gucfile): family-local csrc/gucfile shim tree.
+        // spgbox_diff oracle: verbatim geo_spgist.c + spgproc.c + geo_ops.c
+        // box relations + pg_hypot + sort_template pg_qsort instantiation
+        // (provenance in csrc/pg_spgbox_io.c header).
+        .file("csrc/pg_spgbox_io.c")
+        // guc_units_diff oracle: verbatim guc.c unit tables + parse/convert
+        // functions (provenance in csrc/pg_guc_units_io.c header).
+        .file("csrc/pg_guc_units_io.c")
+        // spgquad_diff oracle: verbatim spgquadtreeproc.c + spgproc.c +
+        // geo_ops.c point relations + pg_hypot (provenance in
+        // csrc/pg_spgquad_io.c header).
+        .file("csrc/pg_spgquad_io.c")
         // COMPILE GATE (define_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_define_io.c is filled
         // with verbatim vendored C (README-TODO-define_diff.md step 1).

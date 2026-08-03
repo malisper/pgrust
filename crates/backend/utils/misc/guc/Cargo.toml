@@ -15,6 +15,7 @@ types_guc = { path = "../../../../_support/types/types_guc" }
 types_dest = { path = "../../../../_support/types/types_dest" }
 mcx = { path = "../../../../_support/mcx" }
 guc_tables = { path = "../guc_tables" }
+adt_float = { path = "../../adt/float" }
 guc_seams = { path = "../guc_seams" }
 elog = { path = "../../error/elog" }
 init_small = { path = "../../init/init_small" }

@@ -48,7 +48,10 @@ pub fn c_strtol_base0(s: &[u8]) -> ScanInt {
     }
 
     let digits_start = i;
-    let mut acc: i64 = 0;
+    // i128 magnitude accumulator: i64 cannot hold |i64::MIN| (2^63), and a
+    // wrapped magnitude made `-acc` overflow on "-9223372036854775808"
+    // (debug-panic crash class, fuzz-caught).
+    let mut acc: i128 = 0;
     let mut overflow = false;
     let mut any = false;
 
@@ -65,12 +68,12 @@ pub fn c_strtol_base0(s: &[u8]) -> ScanInt {
         }
         any = true;
         if !overflow {
-            let next = (acc as i128) * (base as i128) + (digit as i128);
+            let next = acc * (base as i128) + (digit as i128);
             let signed = if negative { -next } else { next };
             if signed > i64::MAX as i128 || signed < i64::MIN as i128 {
                 overflow = true;
             } else {
-                acc = next as i64;
+                acc = next;
             }
         }
         i += 1;
@@ -91,50 +94,16 @@ pub fn c_strtol_base0(s: &[u8]) -> ScanInt {
         };
     }
 
-    ScanInt { value: if negative { -acc } else { acc }, consumed: i, erange: false }
+    let value = (if negative { -acc } else { acc }) as i64;
+    ScanInt { value, consumed: i, erange: false }
 }
 
 pub fn c_strtod(s: &[u8]) -> ScanReal {
-    let mut i = 0usize;
-    while i < s.len() && is_c_space(s[i]) {
-        i += 1;
+    // strtod(3) parity is owned by adt_float::io::strtod_c (decimal + hex
+    // floats + inf/nan words, glibc ERANGE semantics including the
+    // subnormal-inexact underflow probe). This shim only adapts the shape.
+    match ::adt_float::io::strtod_c(s) {
+        Some((value, consumed, erange)) => ScanReal { value, consumed, erange },
+        None => ScanReal { value: 0.0, consumed: 0, erange: false },
     }
-
-    let num_start = i;
-    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
-        i += 1;
-    }
-
-    let mut saw_digit = false;
-    while i < s.len() && s[i].is_ascii_digit() {
-        i += 1;
-        saw_digit = true;
-    }
-    if i < s.len() && s[i] == b'.' {
-        i += 1;
-        while i < s.len() && s[i].is_ascii_digit() {
-            i += 1;
-            saw_digit = true;
-        }
-    }
-    if !saw_digit {
-        return ScanReal { value: 0.0, consumed: 0, erange: false };
-    }
-
-    if i < s.len() && (s[i] == b'e' || s[i] == b'E') {
-        let mut j = i + 1;
-        if j < s.len() && (s[j] == b'+' || s[j] == b'-') {
-            j += 1;
-        }
-        if j < s.len() && s[j].is_ascii_digit() {
-            while j < s.len() && s[j].is_ascii_digit() {
-                j += 1;
-            }
-            i = j;
-        }
-    }
-
-    let text = core::str::from_utf8(&s[num_start..i]).unwrap_or("");
-    let value: f64 = text.parse().unwrap_or(0.0);
-    ScanReal { value, consumed: i, erange: value.is_infinite() }
 }

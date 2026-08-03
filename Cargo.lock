@@ -6874,6 +6874,7 @@ version = "0.0.0"
 dependencies = [
  "acl_seams",
  "aclchk_seams",
+ "adt_float",
  "conffiles_seams",
  "elog",
  "guc_file",
@@ -16628,6 +16629,7 @@ dependencies = [
  "adt_geo",
  "datum",
  "mcx",
+ "pg_qsort",
  "spgist_proc",
  "types_core",
  "types_error",

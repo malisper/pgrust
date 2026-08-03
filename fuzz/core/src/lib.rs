@@ -771,3 +771,15 @@ pub use guc_file_diff::guc_file_diff;
 // timeline_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-timeline_diff.md.
 pub mod timeline_diff;
 pub use timeline_diff::timeline_diff;
+
+// spgquad_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-spgquad_diff.md.
+pub mod spgquad_diff;
+pub use spgquad_diff::spgquad_diff;
+
+// guc_units_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-guc_units_diff.md.
+pub mod guc_units_diff;
+pub use guc_units_diff::guc_units_diff;
+
+// spgbox_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-spgbox_diff.md.
+pub mod spgbox_diff;
+pub use spgbox_diff::spgbox_diff;

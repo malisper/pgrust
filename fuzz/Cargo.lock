@@ -1923,6 +1923,8 @@ dependencies = [
  "scalar_seams",
  "scan_fgram",
  "scram_common",
+ "spgist_box",
+ "spgist_quadtree",
  "stack_depth",
  "stack_depth_core",
  "strftime",
@@ -1939,7 +1941,9 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_portal",
+ "types_scan",
  "types_snapshot",
+ "types_spgist",
  "types_storage",
  "types_tuple",
  "tzparser",
@@ -2543,6 +2547,7 @@ version = "0.0.0"
 dependencies = [
  "acl_seams",
  "aclchk_seams",
+ "adt_float",
  "elog",
  "guc_file",
  "guc_seams",
@@ -5198,6 +5203,50 @@ dependencies = [
  "types_core",
  "types_error",
  "types_snapshot",
+]
+
+[[package]]
+name = "spgist_box"
+version = "0.1.0"
+dependencies = [
+ "adt_geo",
+ "datum",
+ "mcx",
+ "pg_qsort",
+ "spgist_proc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_spgist",
+]
+
+[[package]]
+name = "spgist_proc"
+version = "0.1.0"
+dependencies = [
+ "adt_float",
+ "adt_geo",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_scan",
+]
+
+[[package]]
+name = "spgist_quadtree"
+version = "0.1.0"
+dependencies = [
+ "adt_geo",
+ "datum",
+ "mcx",
+ "spgist_proc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_spgist",
 ]
 
 [[package]]

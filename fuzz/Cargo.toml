@@ -554,3 +554,27 @@ path = "fuzz_targets/timeline_diff.rs"
 test = false
 doc = false
 bench = false
+
+# spgquad_diff: scaffolded by fuzz/scaffold.py — see README-TODO-spgquad_diff.md.
+[[bin]]
+name = "spgquad_diff"
+path = "fuzz_targets/spgquad_diff.rs"
+test = false
+doc = false
+bench = false
+
+# guc_units_diff: scaffolded by fuzz/scaffold.py — see README-TODO-guc_units_diff.md.
+[[bin]]
+name = "guc_units_diff"
+path = "fuzz_targets/guc_units_diff.rs"
+test = false
+doc = false
+bench = false
+
+# spgbox_diff: scaffolded by fuzz/scaffold.py — see README-TODO-spgbox_diff.md.
+[[bin]]
+name = "spgbox_diff"
+path = "fuzz_targets/spgbox_diff.rs"
+test = false
+doc = false
+bench = false

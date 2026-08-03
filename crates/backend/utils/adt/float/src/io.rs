@@ -258,7 +258,13 @@ fn round_to_float(token: &[u8], mantissa_bits: u32, exp_bits: u32) -> f64 {
         let shift = (-drop) as u32;
         (mant << shift.min(127), false)
     } else {
-        let drop = drop as u32;
+        // Cap before narrowing: a huge negative binary exponent can push
+        // `drop` past 2^32, and `as u32` truncation (e.g. 2^40 -> 0) made
+        // "0x...p-<huge>" round-trip to a bogus subnormal-scale value
+        // instead of underflowing to 0 (fuzz-caught via guc parse_int;
+        // glibc strtod returns 0 + ERANGE). Any drop > 128 behaves
+        // identically (all bits dropped), so 200 is a faithful cap.
+        let drop = drop.min(200) as u32;
         let kept = if drop >= 128 { 0 } else { mant >> drop };
         let guard = if drop == 0 {
             false
