@@ -693,6 +693,40 @@ pg_tsdiff_cache_check(void)
 	return code;
 }
 
+/* Evidence probe (task #112 follow-up): raw slot value, so a detector fire
+ * can report the poisoned VALUE (the byte-level signature is the evidence),
+ * not just the slot index. which: 0 = datecache, 1 = deltacache. Reads only;
+ * never clears. */
+uintptr_t
+pg_tsdiff_cache_peek(int which, int idx)
+{
+	if (idx < 0 || idx >= MAXDATEFIELDS)
+		return 0;
+	return which == 0 ? (uintptr_t) datecache[idx] : (uintptr_t) deltacache[idx];
+}
+
+/* Table bounds for the evidence report: healthy slot values point into
+ * [base, base+n) of the corresponding table. which as above. */
+uintptr_t
+pg_tsdiff_cache_table_base(int which)
+{
+	return which == 0 ? (uintptr_t) datetktbl : (uintptr_t) deltatktbl;
+}
+
+/* Address of the cache array itself (victim address for watchpoint-based
+ * attribution; the arrays are TU-local statics invisible to nm). */
+uintptr_t
+pg_tsdiff_cache_addr(int which)
+{
+	return which == 0 ? (uintptr_t) datecache : (uintptr_t) deltacache;
+}
+
+int
+pg_tsdiff_cache_table_nel(int which)
+{
+	return which == 0 ? szdatetktbl : szdeltatktbl;
+}
+
 /* Test-only: plant the SCRIBBLER's exact one-byte signature (a valid table
  * pointer with byte index 2 zeroed) so the detector's must-fail control can
  * prove the Drop-path wiring fires. */

@@ -75,6 +75,8 @@
 #include "libpq/pqformat.h"
 #include "common/hashfn.h"
 
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
+
 /* ---------------- error channel + non-local exit ---------------- */
 
 _Thread_local jmp_buf pg_jsonbfam_jmp;
@@ -652,6 +654,7 @@ pg_diff_jsonb_in_full(const char *str,
 					  unsigned char *out, int outcap, int *outlen,
 					  unsigned char *send, int sendcap, int *sendlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	Datum		jb;
 	Datum		txt;
 	Datum		snd;
@@ -687,6 +690,7 @@ int
 pg_diff_jsonb_recv(const unsigned char *wire, int wirelen,
 				   unsigned char *img, int imgcap, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StringInfoData buf;
 	Datum		jb;
 	bool		isnull;
@@ -732,6 +736,7 @@ int
 pg_diff_jsonb_op1(int op, int flag, const char *str,
 				  unsigned char *out, int outcap, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	int			rc = pg_jsonbfam_parse(str);
 	Datum		d;
 	bool		isnull;
@@ -793,6 +798,7 @@ int
 pg_diff_jsonb_cast(int which, const char *str,
 				   unsigned char *out, int outcap, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	static const PGFunction casts[] = {
 		jsonb_bool, jsonb_int2, jsonb_int4, jsonb_int8,
 		jsonb_float4, jsonb_float8, jsonb_numeric,
@@ -867,6 +873,7 @@ int
 pg_diff_jsonb_build_noargs(int isobj,
 						   unsigned char *img, int imgcap, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	LOCAL_FCINFO(fcinfo, 0);
 	Datum		d;
 	struct varlena *v;

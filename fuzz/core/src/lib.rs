@@ -296,6 +296,12 @@ extern "C" {
     /// csrc/pg_timestamp_io.c; see
     /// docs/conformance/scribbler-investigation-2026-08-02.md §5 H0.
     fn pg_tsdiff_cache_check() -> i32;
+    /// H6 detector (task #112, after ATTRIBUTION): guard band + capacity
+    /// invariant over the float-in shim's message buffer — the truncating
+    /// version of that buffer WAS the scribbler's writer (§8). 0 = intact;
+    /// 1 = a truncating shim is back; 2+off = a verbatim body indexed past
+    /// the string it was handed. Defined in csrc/pg_float_io.c.
+    fn pg_diff_msgbuf_check() -> i32;
 }
 
 impl Drop for OracleSerial {
@@ -327,6 +333,31 @@ impl Drop for OracleSerial {
                 if std::thread::panicking() {
                     // Don't double-panic (abort) while unwinding a test
                     // failure that held the guard; the report still lands.
+                    eprintln!("{msg}");
+                } else {
+                    panic!("{msg}");
+                }
+            }
+            // H6 detector: the shim message buffer's guard band. Catches the
+            // ATTRIBUTED scribbler class at the writer's own TU instead of at
+            // a downstream victim — see csrc/pg_float_io.c pstrdup.
+            let code = unsafe { pg_diff_msgbuf_check() };
+            if code != 0 {
+                let t = std::thread::current();
+                let msg = format!(
+                    "SCRIBBLER H6: float-in shim message buffer overrun (code \
+                     {code}: {}) detected at oracle exit in test thread {:?} — \
+                     a verbatim body indexed past the string pstrdup handed it; \
+                     see csrc/pg_float_io.c and docs/conformance/\
+                     scribbler-investigation-2026-08-02.md §8",
+                    if code == 1 {
+                        "capacity < string length (truncating shim is back)".to_string()
+                    } else {
+                        format!("guard byte +{} clobbered", code - 2)
+                    },
+                    t.name().unwrap_or("<unnamed>"),
+                );
+                if std::thread::panicking() {
                     eprintln!("{msg}");
                 } else {
                     panic!("{msg}");
@@ -570,6 +601,9 @@ mod stub_controls_tests;
 // H0 SCRIBBLER detector controls (task #112): clean-path + must-fail poison.
 #[cfg(test)]
 mod scribbler_h0_tests;
+// SCRIBBLER attribution harness: deterministic single-thread seed bisect.
+#[cfg(test)]
+mod scribbler_bisect_tests;
 // must-fail controls for the oracle-serialization holder check
 // (csrc/pg_oracle_guard.c; see oracle_serial() above).
 #[cfg(test)]
