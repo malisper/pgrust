@@ -206,6 +206,20 @@ typedef int64 pg_time_t;
 #define FLEXIBLE_ARRAY_MEMBER	/* empty */
 #define TZ_STRLEN_MAX 255
 
+/*
+ * port.h parity (task #142): the verbatim extracts call strlcpy (datetime.c
+ * DetermineTimeZoneAbbrevOffsetInternal in pg_fmt_deps_18_3.inc; the DCH/NUM
+ * cache fills in pg_formatting_18_3.inc). macOS <string.h> declares it;
+ * glibc only from 2.38, and the CI cluster pods are older — without a declaration
+ * newer gcc rejects the TU (implicit function declaration is an error since
+ * gcc 14). Same guarded declaration real port.h carries (!HAVE_DECL_STRLCPY
+ * arm). The link-time definition is libc's where it exists, else the WEAK
+ * compat copy in csrc/pg_strlcpy_compat.c.
+ */
+#ifndef __APPLE__
+extern size_t strlcpy(char *dst, const char *src, size_t siz);
+#endif
+
 typedef struct Node Node;		/* opaque; every escontext here is NULL */
 typedef void *MemoryContext;
 static MemoryContext TopMemoryContext = NULL;

@@ -1598,6 +1598,24 @@ fn main() {
     nodesfam.opt_level(2);
     nodesfam.file("csrc/pg_nodesfam_io.c");
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    // task #142: the vendored port/strlcpy.c + strlcat.c below (Linux-only
+    // compiles) exported BARE strong strlcpy/strlcat — strlcpy duplicating
+    // the jsonpath family's deliberate WEAK compat copy
+    // (csrc/pg_strlcpy_compat.c) in a second archive. macOS ld64 masks the
+    // class and the macOS census can't even see it (the files are skipped
+    // off-Linux), but on the CI cluster linkers which copy every reference binds
+    // is link-composition dependent. ndf_-rename them like every other
+    // nodesfam export (rename_syms.txt machinery above); the definitions,
+    // the lone call site (strerror.c) and port.h's !HAVE_DECL_STRLCPY
+    // declarations all compile in THIS cc::Build, so the rename is
+    // self-consistent. Linux-gated: on macOS the files are skipped (libc
+    // owns the names) and Apple's fortified <string.h> re-#defines would
+    // clobber a command-line -D anyway (the csrc/portfam precedent).
+    if target_os == "linux" {
+        for s in ["strlcpy", "strlcat"] {
+            nodesfam.define(s, format!("ndf_{s}").as_str());
+        }
+    }
     for f in std::fs::read_dir("csrc/nodesfam/src").expect("csrc/nodesfam/src") {
         let p = f.expect("dirent").path();
         if p.extension().is_some_and(|e| e == "c") {
@@ -1788,6 +1806,7 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/gucfile");
 
     enforce_sort_symbol_hygiene();
+    enforce_cross_archive_definition_uniqueness();
 }
 
 /// Oracle-integrity guard (task #98): FAIL the build when any oracle
@@ -1913,5 +1932,142 @@ fn enforce_sort_symbol_hygiene() {
             .map(|a| a.file_name().unwrap().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ")
+    );
+}
+
+/// Cross-archive duplicate-definition guard (task #142): FAIL the build
+/// when the same global symbol is DEFINED in more than one oracle archive.
+///
+/// macOS ld64 resolves cross-archive duplicates silently (whichever member
+/// the linker pulls first supplies every importer), so local builds always
+/// link; GNU ld / ld.lld on the CI cluster hard-error on the strong-strong case
+/// (blocker #91 class), and the member-pull cases silently bind EVERY
+/// family to ONE copy — the tidbitmap/wave-3 first-definition-wins class
+/// the per-family symbol-prefix renames above exist to prevent. Found live
+/// by task #142: nodesfam's Linux-only vendored port/strlcpy.c exported a
+/// bare strong `strlcpy` beside the jsonpath family's WEAK compat copy
+/// (csrc/pg_strlcpy_compat.c) — invisible to any macOS nm census because
+/// the nodesfam copy only compiles when target_os = linux.
+///
+/// Weak definitions COUNT as definitions here: Mach-O `nm -g` cannot
+/// distinguish them from strong ones anyway, and two weak copies are still
+/// a first-wins race. Anything intentionally defined in more than one
+/// archive must be allowlisted WITH a justification.
+///
+/// Runs on every profile and fails LOUD if it cannot run (no fail-open),
+/// same contract as enforce_sort_symbol_hygiene above.
+fn enforce_cross_archive_definition_uniqueness() {
+    // Intentional cross-archive duplicate definitions: (symbol, why).
+    // EMPTY is the healthy state — every family keeps its own prefixed
+    // copies (CRYPTO_SHARED_SYMS et al.) precisely so that no two archives
+    // export the same name. Cross-archive *imports* (e.g. cryptbe binding
+    // cryptofam_* one-copy primitives, trgmrxfam binding regexcorefam's
+    // pristine engine) are references, not definitions, and never trip
+    // this guard.
+    const ALLOWED_DUPLICATE_DEFS: &[(&str, &str)] = &[];
+
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    let mut archives: Vec<std::path::PathBuf> = std::fs::read_dir(&out_dir)
+        .expect("read OUT_DIR")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "a")
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("libpg_difffuzz_"))
+        })
+        .collect();
+    archives.sort();
+    assert!(
+        !archives.is_empty(),
+        "duplicate-definition guard: no libpg_difffuzz_*.a found in OUT_DIR — guard would be vacuous"
+    );
+
+    let nm = ["nm", "llvm-nm"]
+        .iter()
+        .find(|c| {
+            std::process::Command::new(*c)
+                .arg("--version")
+                .output()
+                .is_ok()
+        })
+        .expect("duplicate-definition guard: neither `nm` nor `llvm-nm` available; refusing to fail open");
+
+    // Mach-O prefixes EVERY C symbol with '_'; ELF prefixes none (though C
+    // identifiers like _crypt_blowfish_rn may legitimately START with one),
+    // so strip exactly one leading underscore only for Apple targets.
+    let apple = std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
+
+    // symbol -> archives defining it (per-archive dedup: a symbol defined
+    // by two objects of the SAME archive is the linker's own intra-archive
+    // problem, not the cross-archive race this guard bans).
+    let mut definers: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for a in &archives {
+        let out = std::process::Command::new(nm)
+            .arg("-g") // external symbols only
+            .arg("-o")
+            .arg(a)
+            .output()
+            .unwrap_or_else(|e| {
+                panic!("duplicate-definition guard: {nm} failed on {}: {e}", a.display())
+            });
+        assert!(
+            out.status.success(),
+            "duplicate-definition guard: {nm} exited nonzero on {}",
+            a.display()
+        );
+        let archive_name = a.file_name().unwrap().to_string_lossy().into_owned();
+        let mut defined = std::collections::BTreeSet::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            // formats: "<archive>:<obj>: <addr> <TYPE> <name>" or
+            //          "<archive>:<obj>:          U <name>"
+            let mut it = line.split_whitespace().rev();
+            let (Some(name), Some(kind)) = (it.next(), it.next()) else { continue };
+            if kind.len() != 1 {
+                continue;
+            }
+            // 'U' = undefined reference; 'w'/'v' = weak UNDEFINED (a weak
+            // reference without a default definition). Everything else nm
+            // -g prints is a global definition (T/D/B/R/S/C/W/V/...).
+            if matches!(kind, "U" | "w" | "v") {
+                continue;
+            }
+            let bare = if apple {
+                name.strip_prefix('_').unwrap_or(name)
+            } else {
+                name
+            };
+            defined.insert(bare.to_owned());
+        }
+        for sym in defined {
+            definers.entry(sym).or_default().push(archive_name.clone());
+        }
+    }
+
+    let violations: Vec<String> = definers
+        .iter()
+        .filter(|(sym, archs)| {
+            archs.len() > 1
+                && !ALLOWED_DUPLICATE_DEFS
+                    .iter()
+                    .any(|(allowed, _why)| *allowed == sym.as_str())
+        })
+        .map(|(sym, archs)| format!("`{}` defined in: {}", sym, archs.join(", ")))
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "\n== cross-archive duplicate-definition violations (task #142 guard) ==\n\
+         A global defined in two oracle archives is a CI cluster link failure\n\
+         (GNU ld/ld.lld duplicate-symbol hard error) or a silent first-\n\
+         definition-wins race that macOS ld64 masks. Give each family its\n\
+         own prefixed copy (the CRYPTO_SHARED_SYMS/-D rename convention) or,\n\
+         if the share is intentional, allowlist it WITH justification in\n\
+         ALLOWED_DUPLICATE_DEFS. Offenders:\n{}\n",
+        violations.join("\n")
+    );
+    // Evidence, not just a verdict (task #141 convention): name the roster.
+    println!(
+        "cargo:warning=duplicate-definition guard: {} archives, no unallowed cross-archive duplicates ({} allowlisted)",
+        archives.len(),
+        ALLOWED_DUPLICATE_DEFS.len()
     );
 }

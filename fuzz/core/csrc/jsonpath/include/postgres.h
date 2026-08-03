@@ -40,6 +40,19 @@
 
 /* ---------------- c.h type layer (LP64) ---------------- */
 
+/*
+ * port.h parity (task #142): pg_formatting_min.c's verbatim DCH/NUM cache
+ * fills call strlcpy. macOS <string.h> declares it; glibc only from 2.38,
+ * and the CI cluster pods are older — without a declaration newer gcc rejects
+ * the TU (implicit function declaration is an error since gcc 14). Same
+ * guarded declaration real port.h carries (!HAVE_DECL_STRLCPY arm). The
+ * link-time definition is libc's where it exists, else this family's WEAK
+ * compat copy (csrc/pg_strlcpy_compat.c, compiled into this archive).
+ */
+#ifndef __APPLE__
+extern size_t strlcpy(char *dst, const char *src, size_t siz);
+#endif
+
 typedef int8_t int8;
 typedef int16_t int16;
 typedef int32_t int32;
