@@ -1,0 +1,42 @@
+# snapio_diff dictionary (scaffolded by fuzz/scaffold.py).
+# TODO(scaffold): add multi-byte tokens the parsers compare against —
+# keywords, unit suffixes, type-name literals, format tokens — harvested
+# mechanically from the vendored regress SQL literals (gen_seeds.sh pattern)
+# plus every past divergence. CmpLog + dictionary is day-one for
+# parser-shaped targets (fuzzuproof-crate skill).
+# arm selectors
+"\x00"
+"\x01"
+"\x02"
+"\x03"
+"\x04"
+"\x05"
+"\x06"
+# pg_snapshot text grammar tokens
+":"
+","
+"::"
+":,"
+",,"
+"1:1:"
+"10:20:"
+# u64 boundary literals (strtou64 saturation, epoch boundaries, xid width)
+"18446744073709551615"
+"18446744073709551616"
+"4294967295"
+"4294967296"
+"8589934593"
+"9223372036854775808"
+"0"
+"3"
+# strtou64 sign/space prefixes (libc strtoull semantics)
+"+"
+"-"
+" "
+"-1"
+# wire nxip words (recv): 0, 1, max-nxip overflow, negative
+"\x00\x00\x00\x00"
+"\x00\x00\x00\x01"
+"\x00\x00\x00\x1f"
+"\x07\xff\xff\xfd"
+"\xff\xff\xff\xff"

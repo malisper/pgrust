@@ -1,0 +1,83 @@
+== eq_dgs_fixedlen [30s]: 
+   TIMEOUT/OTHER: aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs line 353 column 13 function <std::slice::Iter<'_, u8> as std::iter::Iterator>::position::<{closure@<str as std::fmt::Debug>::fmt::{closure#0}}> thread 0
+Unwinding loop _RINvXs2E_NtNtCs2fBbJ0VEDWe_4core5slice4iterINtB7_4IterhENtNtNtNtBb_4iter6traits8iterator8Iterator8positionNCNvXsh_NtBb_3fmteNtB1O_5Debug3fmt0ECs3ZPrPepXWC6_18proof_scalar_datum.0 iteration 207 file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs line 359 column 17 function <std::slice::Iter<'_, u8> as std::iter::Iterator>::position::<{closure@<str as std::fmt::Debug>::fmt::{closure#0}}> thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+== eq_dgs_varlena [4s]: 
+   TIMEOUT/OTHER: Manual Harness Summary:
+Verification failed for - proofs::eq_dgs_varlena
+Complete - 0 successfully verified harnesses, 1 failures, 1 total.
+== eq_dgs_external [4s]: 
+   TIMEOUT/OTHER: 
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== eq_dgs_cstring [5s]: 
+   TIMEOUT/OTHER: 
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== eq_dgs_err_nullptr [8s]: 
+   TIMEOUT/OTHER: 
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== eq_dgs_err_badtyplen [4s]: 
+   TIMEOUT/OTHER: 
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== eq_dcopy_byval [30s]: 
+   TIMEOUT/OTHER: aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs line 394 column 5 function core::panicking::assert_failed::<usize, usize> thread 0
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/macros/mod.rs line 51 column 21 function <mcx::AcctWeak as std::ops::Drop>::drop thread 0
+Unwinding loop _RINvNvMs_NtCs6L0xoU5iSXA_5alloc3vecINtB7_3VecppE10retain_mut12process_loopNCINvMs_B7_IBy_NtCsh5m8nMK6dJn_3mcx8AcctWeakE6retainNCNvMsc_B1r_NtB1r_13MemoryContext12with_backends_0E0B1p_NtNtB9_5alloc6GlobalKb0_ECs3ZPrPepXWC6_18proof_scalar_datum.0 iteration 40 file src/lib.rs line 0 column 0 function std::vec::Vec::<T, A>::retain_mut::process_loop::<{closure@std::vec::Vec<mcx::AcctWeak>::retain<{closure@mcx::MemoryContext::with_backend::{closure#1}}>::{closure#0}}, mcx::AcctWeak, std::alloc::Global, false> thread 0
+== eq_disequal_byval [15s]: 
+   TIMEOUT/OTHER: 
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== eq_disequal_fixedlen [17s]: 
+   TIMEOUT/OTHER: 
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== eq_disequal_varlena [21s]: 
+   TIMEOUT/OTHER: 
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.
+== eq_destimate_scalar [30s]: 
+   TIMEOUT/OTHER: aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani_core/src/models.rs line 176 column 17 function <usize as kani::rustc_intrinsics::ToISize>::to_isize thread 0
+aborting path on assume(false) at file /Users/runner/work/kani/kani/library/kani/src/lib.rs line 57 column 1 function <usize as kani::rustc_intrinsics::ToISize>::to_isize thread 0
+== eq_destimate_varlena [15s]: 
+   TIMEOUT/OTHER: Manual Harness Summary:
+Verification failed for - proofs::eq_destimate_varlena
+Complete - 0 successfully verified harnesses, 1 failures, 1 total.
+== eq_dgs_fixedlen [46s]: TIMEOUT
+== eq_dgs_varlena [8s]: TIMEOUT
+== eq_destimate_scalar [45s]: TIMEOUT
+== eq_destimate_varlena [18s]: TIMEOUT
+== eq_dcopy_byval [45s]: TIMEOUT
+== eq_dgs_fixedlen [61s]: 
+== eq_destimate_scalar [60s]: 
+== eq_destimate_varlena [9s]: VERIFICATION:- SUCCESSFUL
+Verification Time: 3.3430226s
+== eq_dcopy_byval [60s]: 
+== eq_dgs_fixedlen [61s]: TIMEOUT@60
+== eq_destimate_scalar [61s]: TIMEOUT@60
+== eq_dcopy_byval [152s]: TIMEOUT@150
+== eq_dgs_fixedlen [9s]: VERIFICATION:- SUCCESSFUL
+Verification Time: 1.4530829s
+== eq_destimate_scalar [5s]: VERIFICATION:- SUCCESSFUL
+Verification Time: 1.2824305s
+== eq_dcopy_byval [121s]: TIMEOUT@120
+== eq_dcopy_fixedlen [121s]: TIMEOUT@120
+== eq_dcopy_varlena1b [151s]: TIMEOUT@150
+== eq_dcopy_fixedlen default-solver [62s]: VERIFICATION:- SUCCESSFUL
+Verification Time: 56.36703s
+== eq_dcopy_byval default-solver [151s]: TIMEOUT@150
+== eq_dcopy_varlena1b default-solver [244s]: TIMEOUT@240
+== eq_dtransfer_nonexpanded default [152s]: TIMEOUT@150
+== eq_dserialize_null default [5s]: TIMEOUT@150
+== eq_dserialize_byval default [5s]: TIMEOUT@150
+== eq_dserialize_fixedlen default [5s]: TIMEOUT@150
+== eq_dserialize_varlena1b default [5s]: TIMEOUT@150
+== eq_dserialize_null default [151s]: 98 |     fn ok_or_fail<T: Default>(r: types_error::PgResult<T>) -> T {
+== eq_dserialize_byval default [152s]: 98 |     fn ok_or_fail<T: Default>(r: types_error::PgResult<T>) -> T {
+== eq_dserialize_fixedlen default [70s]: 98 |     fn ok_or_fail<T: Default>(r: types_error::PgResult<T>) -> T {
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/alloc.rs line 366 column 5 function std::alloc::handle_alloc_error::rt_error thread 0
+== eq_dserialize_varlena1b default [151s]: 98 |     fn ok_or_fail<T: Default>(r: types_error::PgResult<T>) -> T {
+aborting path on assume(false) at file /Users/runner/.rustup/toolchains/nightly-2025-11-21-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/alloc.rs line 366 column 5 function std::alloc::handle_alloc_error::rt_error thread 0
