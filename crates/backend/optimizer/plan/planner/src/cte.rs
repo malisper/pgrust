@@ -94,7 +94,7 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
             startup_cost: 0.0,
             per_call_cost: 0.0,
         };
-        crate::subselect::cost_subplan(&mut splan, plan);
+        crate::subselect::cost_subplan(&mut splan, plan)?;
         let splan_node = Node::mk(mcx, splan)?;
         let splan_id = run.intern_expr(splan_node);
         run.root.init_plans.push(splan_id);

@@ -97,8 +97,7 @@ pub fn exec_re_scan<'mcx>(
         }
         PlanStateNode::CteScan(cs) => ::nodectescan::exec_rescan_cte_scan(cs, estate),
         PlanStateNode::WorkTableScan(wts) => {
-            ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate);
-            Ok(())
+            ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)
         }
         PlanStateNode::NamedTuplestoreScan(nts) => {
             ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate)
@@ -477,7 +476,7 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             ::nodectescan::exec_rescan_cte_scan_chg(cs, estate, chg)?
         }
         PlanStateNode::WorkTableScan(wts) => {
-            ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)
+            ::nodeworktablescan::exec_rescan_work_table_scan(wts, estate)?
         }
         PlanStateNode::NamedTuplestoreScan(nts) => {
             ::nodenamedtuplestorescan::exec_rescan_named_tuplestore_scan(nts, estate)?;

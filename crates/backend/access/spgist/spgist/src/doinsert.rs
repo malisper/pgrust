@@ -1547,8 +1547,11 @@ pub fn spgdoinsert<'m>(
         } else if current.blkno != parent.blkno {
             current.buffer = bufmgr::read_buffer::call(index, current.blkno)?;
             if !bufmgr::conditional_lock_buffer::call(current.buffer)? {
-                bufmgr::release_buffer::call(current.buffer);
+                // Release both buffers before propagating either failure, so
+                // an error on one doesn't leak the other's pin.
+                let released_current = bufmgr::release_buffer::call(current.buffer);
                 unlock_release(parent.buffer)?;
+                released_current?;
                 return Ok(false);
             }
         } else {
@@ -1563,7 +1566,7 @@ pub fn spgdoinsert<'m>(
             }
         }
 
-        let mut process_inner = false;
+        let process_inner;
 
         if SpGistPageIsLeaf(&page(&current).as_ref()) {
             let mut leaf_tuple = spgFormLeafTuple(

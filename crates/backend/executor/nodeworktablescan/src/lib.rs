@@ -133,14 +133,15 @@ pub fn exec_init_work_table_scan<'mcx>(
 pub fn exec_rescan_work_table_scan<'mcx>(
     node: &mut WorkTableScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) {
+) -> PgResult<()> {
     execscan::exec_scan_rescan(&mut node.ss, estate);
     if node.rustate_resolved {
         let param = node.plan.wtParam as usize;
         if let Some(shared) = estate.worktable_shared_slot(param).as_mut() {
-            shared.working_table.rescan();
+            shared.working_table.rescan()?;
         }
     }
+    Ok(())
 }
 
 mcx::forget_safe_struct!(
