@@ -121,7 +121,11 @@ pub fn is_visible_fxid(value: u64, snap: &SnapView<'_>) -> bool {
 }
 
 // libc strtou64(str, &endp, 10): skip isspace, optional sign (a '-' negates
-// mod 2^64), digits; saturates to u64::MAX on overflow; end == 0 if no digits.
+// mod 2^64), digits; end == 0 if no digits. On overflow libc returns
+// ULLONG_MAX WITHOUT applying the minus sign (glibc strtol_l.c returns on
+// the overflow branch before its negation; POSIX ERANGE clamp) — negating
+// the clamped value gave 1 for ">=2^64-magnitude" negative inputs, a real
+// divergence found by snapio_diff (fuzz/DIVERGENCE-snapio.md, 2026-07-30).
 pub fn strtou64(s: &[u8]) -> (u64, usize) {
     let mut i = 0usize;
     while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
@@ -148,8 +152,7 @@ pub fn strtou64(s: &[u8]) -> (u64, usize) {
     }
     if overflow {
         value = u64::MAX;
-    }
-    if neg {
+    } else if neg {
         value = value.wrapping_neg();
     }
     (value, i)

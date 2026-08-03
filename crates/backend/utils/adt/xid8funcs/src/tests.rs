@@ -20,6 +20,10 @@ fn strtou64_libc_semantics() {
     assert_eq!(strtou64(b"x1"), (0, 0));
     assert_eq!(strtou64(b""), (0, 0));
     assert_eq!(strtou64(b"18446744073709551615"), (u64::MAX, 20));
+    // Overflow clamps to ULLONG_MAX and SKIPS negation (libc ERANGE path;
+    // ground-truthed against host strtoull; snapio_diff divergence repro).
+    assert_eq!(strtou64(b"-18446744073709551616"), (u64::MAX, 21));
+    assert_eq!(strtou64(b"-518446744073709551616"), (u64::MAX, 22));
 }
 
 #[test]
