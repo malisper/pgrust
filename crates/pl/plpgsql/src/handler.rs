@@ -1898,3 +1898,5 @@ mod parse_bool_tests {
         // NO whitespace trimming of any kind.
         assert_eq!(c_parse_bool(" on"), None);
         assert_eq!(c_parse_bool("on "), None);
+    }
+}
