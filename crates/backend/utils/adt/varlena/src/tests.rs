@@ -1368,3 +1368,42 @@ fn varstrfastcmp_c_returns_raw_memcmp_magnitude() {
     assert_eq!(varstrfastcmp_c(b"abcd", b"ab"), 1);
     assert_eq!(varstrfastcmp_c(b"", b""), 0);
 }
+
+// Fuzz-found 2026-07-31 (vlmisc_diff, lane p1-lanes): a trailing separator
+// panicked (index OOB) where C's NUL-sentinel walk falls into the
+// empty-name reject and returns false. Ground-truthed on postgres:18.3:
+// SELECT pg_get_serial_sequence('a.', 'x') → ERROR invalid name syntax.
+#[test]
+fn split_identifier_string_trailing_separator_is_syntax_error_not_panic() {
+    let cx = MemoryContext::new("t");
+    for s in ["a,", "a, ", ",", " , ", "a,b,", "\"q\","] {
+        assert_eq!(
+            split_identifier_string(cx.mcx(), s, b',', wchar::PG_UTF8).unwrap(),
+            None,
+            "{s:?} must be rejected like C (return false), not panic"
+        );
+    }
+    // Non-dangling forms still split.
+    assert_eq!(
+        split_identifier_string(cx.mcx(), "a,b", b',', wchar::PG_UTF8).unwrap(),
+        Some(vec!["a".to_string(), "b".to_string()])
+    );
+}
+
+#[test]
+fn split_guc_list_trailing_separator_is_reject_not_panic() {
+    for s in ["a,", "a, ", ",", "a,b,", "\"q\","] {
+        assert_eq!(split_guc_list(s, b','), None, "{s:?} must reject like C");
+    }
+    assert_eq!(
+        split_guc_list("a,b", b','),
+        Some(vec!["a".to_string(), "b".to_string()])
+    );
+}
+
+#[test]
+fn text_to_qualified_name_list_trailing_dot_errors() {
+    let cx = MemoryContext::new("t");
+    let err = textToQualifiedNameList(cx.mcx(), "a.").unwrap_err();
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INVALID_NAME);
+}

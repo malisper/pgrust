@@ -937,6 +937,16 @@ pub fn split_identifier_string(
     }
 
     loop {
+        // C reads `*nextp` here with the NUL sentinel in reach: a trailing
+        // separator leaves nextp on '\0', which is not '"', so C falls into
+        // the bare-identifier scan, reads zero bytes, and hits the
+        // `curname == nextp` reject (return false). Without the sentinel,
+        // p == s.len() is exactly that state (fuzz-found 2026-07-31,
+        // vlmisc_diff: `split_identifier_string("a,")` panicked where C
+        // returns false; SQL-reachable via textToQualifiedNameList).
+        if p == s.len() {
+            return Ok(None);
+        }
         let mut curname: PgVec<'_, u8>;
         if s[p] == b'"' {
             curname = mcx::vec_with_capacity_in(mcx, 0)?;
@@ -1021,6 +1031,13 @@ pub fn split_guc_list(rawstring: &str, separator: u8) -> Option<Vec<String>> {
     }
 
     loop {
+        // Same NUL-sentinel state as split_identifier_string above: C's
+        // SplitGUCList reads `*nextp` (a trailing separator leaves it on
+        // '\0') and rejects through the empty-name arm; p == s.len() is
+        // that state (fuzz-found 2026-07-31, `split_guc_list("a,")`).
+        if p == s.len() {
+            return None;
+        }
         let mut curname: Vec<u8> = Vec::new();
         if s[p] == b'"' {
             let mut q = p + 1;
