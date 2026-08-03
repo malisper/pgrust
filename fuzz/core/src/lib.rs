@@ -585,6 +585,18 @@ pub mod datetime_io_diff;
 pub mod interval_engine_diff;
 pub use datetime_io_diff::datetime_io_diff;
 
+// vltext_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-vltext_diff.md.
+pub mod vltext_diff;
+pub use vltext_diff::vltext_diff;
+
+// vlbytea_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-vlbytea_diff.md.
+pub mod vlbytea_diff;
+pub use vlbytea_diff::vlbytea_diff;
+
+// vlmisc_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-vlmisc_diff.md.
+pub mod vlmisc_diff;
+pub use vlmisc_diff::vlmisc_diff;
+
 // quote_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-quote_diff.md.
 pub mod quote_diff;
 pub use quote_diff::quote_diff;
@@ -901,3 +913,11 @@ pub use ltree_diff::ltree_diff;
 // trgm_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-trgm_diff.md.
 pub mod trgm_diff;
 pub use trgm_diff::trgm_diff;
+
+// scalarxid_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-scalarxid_diff.md.
+pub mod scalarxid_diff;
+pub use scalarxid_diff::scalarxid_diff;
+
+// snapio_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-snapio_diff.md.
+pub mod snapio_diff;
+pub use snapio_diff::snapio_diff;

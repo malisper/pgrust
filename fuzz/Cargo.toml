@@ -269,10 +269,34 @@ test = false
 doc = false
 bench = false
 
+# vltext_diff: scaffolded by fuzz/scaffold.py — see README-TODO-vltext_diff.md.
+[[bin]]
+name = "vltext_diff"
+path = "fuzz_targets/vltext_diff.rs"
+test = false
+doc = false
+bench = false
+
 # quote_diff: scaffolded by fuzz/scaffold.py — see README-TODO-quote_diff.md.
 [[bin]]
 name = "quote_diff"
 path = "fuzz_targets/quote_diff.rs"
+test = false
+doc = false
+bench = false
+
+# scalarxid_diff: scaffolded by fuzz/scaffold.py — see README-TODO-scalarxid_diff.md.
+[[bin]]
+name = "scalarxid_diff"
+path = "fuzz_targets/scalarxid_diff.rs"
+test = false
+doc = false
+bench = false
+
+# vlbytea_diff: scaffolded by fuzz/scaffold.py — see README-TODO-vlbytea_diff.md.
+[[bin]]
+name = "vlbytea_diff"
+path = "fuzz_targets/vlbytea_diff.rs"
 test = false
 doc = false
 bench = false
@@ -289,6 +313,14 @@ bench = false
 [[bin]]
 name = "fmt_num_diff"
 path = "fuzz_targets/fmt_num_diff.rs"
+test = false
+doc = false
+bench = false
+
+# vlmisc_diff: scaffolded by fuzz/scaffold.py — see README-TODO-vlmisc_diff.md.
+[[bin]]
+name = "vlmisc_diff"
+path = "fuzz_targets/vlmisc_diff.rs"
 test = false
 doc = false
 bench = false
@@ -655,6 +687,14 @@ bench = false
 [[bin]]
 name = "trgm_diff"
 path = "fuzz_targets/trgm_diff.rs"
+test = false
+doc = false
+bench = false
+
+# snapio_diff: scaffolded by fuzz/scaffold.py — see README-TODO-snapio_diff.md.
+[[bin]]
+name = "snapio_diff"
+path = "fuzz_targets/snapio_diff.rs"
 test = false
 doc = false
 bench = false

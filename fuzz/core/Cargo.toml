@@ -39,6 +39,10 @@ scalar_seams = { path = "../../crates/backend/utils/adt/scalar_seams" }
 types_fmgr = { path = "../../crates/_support/types/fmgr" }
 datum = { path = "../../crates/_support/types/datum" }
 varlena = { path = "../../crates/backend/utils/adt/varlena" }
+# vlbytea_diff: shipped bytea_substring/bytea_overlay slice through the
+# detoast_attr_slice seam; installing the production seam makes those value
+# planes live (driver probes and carves them when absent).
+# (detoast dep already declared above)
 adt_pseudotypes = { path = "../../crates/backend/utils/adt/pseudotypes" }
 mbutils_seams = { path = "../../crates/backend/utils/mb/mbutils_seams" }
 adt_pg_lsn = { path = "../../crates/backend/utils/adt/pg_lsn" }
@@ -232,6 +236,10 @@ types_spgist = { path = "../../crates/_support/types/types_spgist" }  # spgquad_
 spgist_box = { path = "../../crates/backend/access/spgist/spgist_box" }  # spgbox_diff (scaffold.py)
 ltree = { path = "../../crates/contrib/ltree" }  # ltree_diff (p1-ltree-t74)
 pg_trgm = { path = "../../crates/contrib/pg_trgm" }  # trgm_diff (scaffold.py)
+
+adt_scalar = { path = "../../crates/backend/utils/adt/scalar" }  # scalarxid_diff (scaffold.py)
+xid8funcs = { path = "../../crates/backend/utils/adt/xid8funcs" }  # snapio_diff (scaffold.py)
+# numutils (scalarxid_diff uint32in_subr plane) already declared above (numutils_diff, p1-laneaj)
 
 [build-dependencies]
 cc = "1"

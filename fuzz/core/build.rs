@@ -207,6 +207,11 @@ fn main() {
         // like_diff oracle (p1-laneag): verbatim 18.3 like.c core with
         // like_match.c pasted once per stamping (see pg_like_io.c header).
         .file("csrc/pg_like_io.c")
+        // varlena campaign oracles (lane p1-lanes, 2026-07-31): all three
+        // scaffold paste sites filled with verbatim 18.3 C — gates open.
+        .file("csrc/pg_vltext_io.c")
+        .file("csrc/pg_vlbytea_io.c")
+        .file("csrc/pg_vlmisc_io.c")
         // quote_diff oracle (p1-laner): verbatim 18.3 quote.c core +
         // ruleutils.c quote_identifier; keyword tables extern'd from
         // pg_enc_tables.c / tablesfam (see pg_quote_io.c header).
@@ -248,6 +253,10 @@ fn main() {
         // the encoding/putmessage seam shims).
         // DEDUPED (single registration above): // DEDUPED (single registration above): .file("csrc/pg_netfam_io.c")
         // DEDUPED (single registration above): .file("csrc/pg_netfam_io.c")
+        // scalarxid_diff + snapio_diff oracles (p1-lanep scalar/xid-tid batch):
+        .file("csrc/pg_snapio_io.c")
+        .file("csrc/pg_scalarxid_io.c")
+        .file("csrc/pg_scalarxid_datum.c")
         // COMPILE GATE (encode_diff, scaffold.py): uncomment ONLY after every
         // SCAFFOLD-TODO #error paste site in csrc/pg_encode_io.c is filled
         // with verbatim vendored C (README-TODO-encode_diff.md step 1).
