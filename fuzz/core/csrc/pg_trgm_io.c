@@ -60,13 +60,15 @@
  *    strlower_libc/PGLOCALE_SUPPORT_ERROR arm of pg_strlower: provider is
  *    pinned BUILTIN whenever pg_strlower is reachable (ctype_is_c=false),
  *    so the libc arm is pin-dead; it aborts loudly if ever taken.
- *  - qsort: libc qsort (not pg_qsort). Sound HERE because comp_trgm ties
- *    are byte-identical 3-byte elements (any permutation of equals is the
- *    same byte sequence, and qunique collapses them) and comp_ptrgm is a
- *    TOTAL order (trgm bytes then pg_cmp_s32 on index) -- no tie order
- *    exists for an unstable sort to expose. (trgm_regexp.c's
- *    penalty-comparator ties are NOT total -- that arm is out of scope of
- *    this TU half and gets its own treatment.)
+ *  - qsort -> trgmrx_pg_qsort (the family's verbatim src/port/qsort.c,
+ *    csrc/trgmrxfam/qsort.c), matching port.h @ 18.3 (#define qsort
+ *    pg_qsort); a bare libc qsort binding is banned by the task #98
+ *    sort-symbol hygiene guard. Tie order is additionally unobservable in
+ *    THIS TU half: comp_trgm equals are byte-identical 3-byte elements
+ *    collapsed by qunique, and comp_ptrgm is a TOTAL order (trgm bytes
+ *    then pg_cmp_s32 on index). (trgm_regexp.c's penalty-comparator ties
+ *    are NOT total -- that arm lives in pg_trgm_regexp_io.c with the same
+ *    trgmrx_pg_qsort binding.)
  *  - Assert -> ((void) 0) (release-C parity), CHECK_FOR_INTERRUPTS ->
  *    no-op, MaxAllocSize = 0x3fffffff (verbatim value).
  *  - All extern definitions #define-renamed trgmf_* (TU isolation in the
@@ -122,6 +124,15 @@ typedef void *Datum;
 #define DatumGetPointer(X) ((void *) (X))
 #define pg_attribute_unused()
 #define unlikely(x) __builtin_expect((x) != 0, 0)
+
+/* port.h @ 18.3: the backend's qsort IS pg_qsort (#define qsort(a,b,c,d)
+ * pg_qsort(a,b,c,d)) -- bind the vendored trgm_op.c body to the family's
+ * verbatim src/port/qsort.c copy (trgmrx_pg_qsort, csrc/trgmrxfam/qsort.c)
+ * instead of libc (task #98 sort-symbol hygiene; see the header note --
+ * tie order is unobservable in this TU half, the binding is C-exactness). */
+extern void trgmrx_pg_qsort(void *base, size_t nel, size_t elsize,
+							int (*cmp) (const void *, const void *));
+#define qsort(a,b,c,d) trgmrx_pg_qsort(a,b,c,d)
 
 /* varlena model: the oracle only ever builds plain 4B-header LE varlenas */
 typedef struct varlena

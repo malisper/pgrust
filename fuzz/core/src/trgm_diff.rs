@@ -1091,6 +1091,7 @@ mod tests {
     // ---- live postgres:18.3 pins, pure-ASCII: both DBs agree ----
     #[test]
     fn pins_ascii_both_arms() {
+        let _serial = crate::c_oracle_serial();
         for arm in 0..=1 {
             assert_eq!(show(arm, b"a b c"), ["  a", "  b", "  c", " a ", " b ", " c "]);
             assert_eq!(
@@ -1122,6 +1123,7 @@ mod tests {
     // ---- C-locale-database pins (arm 0) ----
     #[test]
     fn pins_c_locale_arm0() {
+        let _serial = crate::c_oracle_serial();
         assert_eq!(show(0, "café".as_bytes()), ["  c", " ca", "af ", "caf"]);
         assert_eq!(sim(0, "café".as_bytes(), b"cafe").to_bits(), f4("0.5"));
         // Cyrillic: no word chars at all under ctype C
@@ -1131,6 +1133,7 @@ mod tests {
     // ---- builtin C.UTF-8 pins (arm 1) ----
     #[test]
     fn pins_builtin_utf8_arm1() {
+        let _serial = crate::c_oracle_serial();
         assert_eq!(
             show(1, "café".as_bytes()),
             ["0xef5960", "  c", " ca", "0x544980", "caf"]
@@ -1169,6 +1172,7 @@ mod tests {
 
     #[test]
     fn wildcard_pins() {
+        let _serial = crate::c_oracle_serial();
         init_env();
         for arm in 0..=1 {
             pin_locale_arm(arm);
@@ -1194,6 +1198,7 @@ mod tests {
 
     #[test]
     fn seed_replay_all_arms() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
         let mut n = 0;
         for entry in std::fs::read_dir(dir).expect("corpus dir") {
@@ -1210,6 +1215,7 @@ mod tests {
     /// full 0..=3 sweep is the CI cluster job (#[ignore] below).
     #[test]
     fn exhaustive_short_generate_len2() {
+        let _serial = crate::c_oracle_serial();
         let visited = exhaustive_short_generate_impl(2);
         assert_eq!(visited, utf8_count_upto(2), "domain not fully enumerated");
     }
@@ -1217,6 +1223,7 @@ mod tests {
     #[test]
     #[ignore = "CI-scale: full 0..=3 valid-UTF-8 sweep (~2.4M strings x 2 arms)"]
     fn exhaustive_short_generate_len3() {
+        let _serial = crate::c_oracle_serial();
         let visited = exhaustive_short_generate_impl(3);
         assert_eq!(visited, utf8_count_upto(3), "domain not fully enumerated");
     }
@@ -1224,6 +1231,7 @@ mod tests {
     #[test]
     #[ignore = "CI-scale: full 2^24 trigram sweep"]
     fn exhaustive_trgm2int() {
+        let _serial = crate::c_oracle_serial();
         init_env();
         let mut visited: u64 = 0;
         let mut prev: Option<Trgm> = None;
@@ -1295,6 +1303,7 @@ mod regexp_tests {
 
     #[test]
     fn regexp_explore_dump() {
+        let _serial = crate::c_oracle_serial();
         for pat in [
             &b"abc"[..], b"a", b"", b"a|b", b"(a|b)cd", b".*", b"^abc$",
             b"[a-z]foo", b"ab{2,4}c", b"(abc)+", b"(a|b)(c|d)(e|f)(g|h)(i|j)",
@@ -1312,6 +1321,7 @@ mod regexp_tests {
     /// =256 / WISH_TRGM_PENALTY=16 all live inside this bracket family.)
     #[test]
     fn regexp_limit_boundary_witness() {
+        let _serial = crate::c_oracle_serial();
         let mut verdicts = Vec::new();
         for n in 1..=10 {
             let pat: Vec<u8> = (0..n)
@@ -1355,6 +1365,7 @@ mod regexp_tests {
     /// must contain): regenerate with regexp_explore_dump.
     #[test]
     fn regexp_oracle_pins() {
+        let _serial = crate::c_oracle_serial();
         init_env();
         pin_locale_arm(0);
         let pins: &[(&[u8], &str)] = &[
@@ -1379,6 +1390,7 @@ mod regexp_tests {
 
     #[test]
     fn regexp_seed_corpus_replay() {
+        let _serial = crate::c_oracle_serial();
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/trgm_diff");
         let mut n = 0;
         for e in std::fs::read_dir(dir).expect("corpus dir") {
@@ -1401,6 +1413,7 @@ mod regexp_tests {
 
     #[test]
     fn regexp_smoke_seeds() {
+        let _serial = crate::c_oracle_serial();
         for pat in [
             &b"abc"[..], b"a", b"", b"a|b", b"(a|b)cd", b".*", b"^abc$",
             b"[a-z]foo", b"ab{2,4}c", b"(abc)+", b"(a|b)(c|d)(e|f)(g|h)(i|j)",
@@ -1437,6 +1450,7 @@ mod arm2_tests {
     /// show_trgm('abc\xc3\x9f') = {"  a"," ab",abc,"bc "}.
     #[test]
     fn pins_sqlascii_arm2() {
+        let _serial = crate::c_oracle_serial();
         init_env();
         pin_locale_arm(2);
         let show = |s: &[u8]| -> Vec<Vec<u8>> { pg_trgm::show_trgm_elements(s) };
@@ -1480,6 +1494,7 @@ mod arm2_tests {
     /// witnesses the branch fired.
     #[test]
     fn wildcard_mb_line101_witness() {
+        let _serial = crate::c_oracle_serial();
         init_env();
         pin_locale_arm(1);
         let env = pg_trgm::harness_env();
@@ -1549,6 +1564,7 @@ mod repro_tests {
     /// behavior drifts, this fires first.
     #[test]
     fn resolved_penalty_tie_order_regression() {
+        let _serial = crate::c_oracle_serial();
         let pat = format!("({}a|b)(c|d)(e|f)(g|h)(i|j)", "\x16".repeat(31));
         let pat = pat.replace("\\x16", "\x16");
         let (r, c) = dump_both(pat.as_bytes());
@@ -1558,6 +1574,7 @@ mod repro_tests {
 
     #[test]
     fn minimize_crash_70ab9f26() {
+        let _serial = crate::c_oracle_serial();
         // original: (\x16{31}a|b)(c|d)(e|f)(g|h)(i|j)
         for (name, pat) in [
             ("orig-shape", format!("({}a|b)(c|d)(e|f)(g|h)(i|j)", "\x16".repeat(31))),

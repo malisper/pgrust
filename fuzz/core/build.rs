@@ -1213,8 +1213,11 @@ fn main() {
         "pg_popcount_masked_slow", "pg_popcount32", "pg_popcount64",
         "pg_popcount_optimized", "pg_popcount_masked_optimized",
         // qsort.c (strlcpy is renamed at source level in the shim
-        // postgres.h -- Apple's fortified string.h owns the bare name)
-        "pg_qsort",
+        // postgres.h -- Apple's fortified string.h owns the bare name).
+        // pg_qsort_strcmp: defined directly by the vendored qsort.c (not
+        // derived from the pg_qsort token), so it needs its own rename —
+        // an unprefixed export is a link race (task #98 guard).
+        "pg_qsort", "pg_qsort_strcmp",
     ];
     for s in TRGMRX_SHARED_SYMS {
         trgmrxfam.define(s, format!("trgmrx_{s}").as_str());

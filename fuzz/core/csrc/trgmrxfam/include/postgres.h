@@ -206,4 +206,13 @@ trgmrx_swallow(const char *fmt,...)
 #define DEBUG1 14
 #endif
 
+/* port.h @ 18.3: the backend's qsort IS pg_qsort (#define qsort(a,b,c,d)
+ * pg_qsort(a,b,c,d)) — route every vendored TU in this family (list.c's
+ * list_sort is the live caller) to the family's verbatim src/port/qsort.c
+ * copy, renamed trgmrx_pg_qsort by build.rs. A bare `U qsort` would bind
+ * LIBC and silently change tie order (task #98 sort-symbol hygiene). */
+extern void trgmrx_pg_qsort(void *base, size_t nel, size_t elsize,
+							int (*cmp) (const void *, const void *));
+#define qsort(a,b,c,d) trgmrx_pg_qsort(a,b,c,d)
+
 #endif							/* PG_TRGMRXFAM_POSTGRES_H */
