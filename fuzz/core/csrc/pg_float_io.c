@@ -69,17 +69,113 @@ pg_diff_errcode_get(void)
 
 struct Node;					/* opaque; escontext is always NULL here */
 
-static char pg_diff_msgbuf[256];
+/*
+ * pstrdup — THE SCRIBBLER's writer lived here (task #112; see
+ * docs/conformance/scribbler-investigation-2026-08-02.md §8).
+ *
+ * PG's pstrdup returns a buffer of exactly strlen(s)+1 bytes, and the
+ * verbatim bodies below RELY on that size:
+ *
+ *     char *errnumber = pstrdup(num);
+ *     errnumber[endptr - num] = '\0';
+ *
+ * `endptr` is strtod's stop pointer, so the index runs up to strlen(num).
+ * The previous shim returned a fixed 256-byte static and silently TRUNCATED,
+ * which left that store in-bounds only for short inputs: for a longer `num`
+ * it wrote one NUL byte at `buf + (endptr - num)`, i.e. arbitrarily far past
+ * the buffer, into whatever static followed in .bss. Measured instance:
+ * numeric_out(6E-1600) is a 1602-char string, so the store landed 1346 bytes
+ * past the 256-byte buffer, exactly on byte index 2 of another TU's
+ * `datecache[4]` — one byte of an otherwise-intact pointer zeroed, the banked
+ * crash signature.
+ *
+ * The ALLOCATION SIZE is therefore load-bearing even though the message text
+ * is out of scope for every comparator. Track the input exactly. Thread-local
+ * (the suite drives oracles from parallel threads), grown by realloc and
+ * never shrunk, so the error path still allocates nothing in steady state and
+ * cannot leak per call.
+ */
+static _Thread_local char *pg_diff_msgbuf;
+static _Thread_local size_t pg_diff_msgbuf_cap;
+static _Thread_local size_t pg_diff_msgbuf_len;
+
+/*
+ * H6 DETECTOR (task #112): guard band + capacity invariant over the shim
+ * message buffer, so a RE-INTRODUCED bounded/truncating shim — or any new
+ * verbatim body that indexes past the string it was handed — is named at the
+ * next oracle exit instead of silently scribbling on another TU's statics.
+ *
+ * The band is 64 bytes of 0xA5 past the NUL. `pg_diff_msgbuf_check()` is
+ * called from OracleSerial::drop at depth 0, next to the H0 cache canary
+ * (fuzz/core/src/lib.rs) — release-effective, no debug_assert, no sanitizer
+ * (the debug-assert masking law).
+ */
+#define PG_DIFF_MSGBUF_GUARD 64
+#define PG_DIFF_MSGBUF_FILL 0xA5
+
 static char *
 pstrdup(const char *s)
 {
 	size_t		n = strlen(s);
+	size_t		want = n + 1 + PG_DIFF_MSGBUF_GUARD;
 
-	if (n >= sizeof(pg_diff_msgbuf))
-		n = sizeof(pg_diff_msgbuf) - 1;
+	if (want > pg_diff_msgbuf_cap)
+	{
+		char	   *p = realloc(pg_diff_msgbuf, want);
+
+		if (p == NULL)
+			abort();			/* OOM in a shim: loud, never silent */
+		pg_diff_msgbuf = p;
+		pg_diff_msgbuf_cap = want;
+	}
 	memcpy(pg_diff_msgbuf, s, n);
 	pg_diff_msgbuf[n] = '\0';
+	pg_diff_msgbuf_len = n;
+	memset(pg_diff_msgbuf + n + 1, PG_DIFF_MSGBUF_FILL, PG_DIFF_MSGBUF_GUARD);
 	return pg_diff_msgbuf;
+}
+
+/*
+ * 0 = intact. Else 1 = capacity smaller than the string it holds (a
+ * truncating shim is back), or 2 + byte offset into the guard band of the
+ * first clobbered byte (a body indexed past the string).
+ */
+int
+pg_diff_msgbuf_check(void)
+{
+	if (pg_diff_msgbuf == NULL)
+		return 0;				/* no error path taken on this thread yet */
+	if (pg_diff_msgbuf_len + 1 + PG_DIFF_MSGBUF_GUARD > pg_diff_msgbuf_cap)
+		return 1;
+	for (size_t i = 0; i < PG_DIFF_MSGBUF_GUARD; i++)
+	{
+		if ((unsigned char) pg_diff_msgbuf[pg_diff_msgbuf_len + 1 + i]
+			!= PG_DIFF_MSGBUF_FILL)
+		{
+			/* self-heal: re-arm the band so one hit cannot cascade */
+			memset(pg_diff_msgbuf + pg_diff_msgbuf_len + 1,
+				   PG_DIFF_MSGBUF_FILL, PG_DIFF_MSGBUF_GUARD);
+			return 2 + (int) i;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Must-fail control (fuzz/core/src/scribbler_bisect_tests.rs): drive a real
+ * error path so the buffer exists, then clobber one guard byte exactly the
+ * way an over-index would. Returns the guard offset poisoned, or -1 if the
+ * buffer is not armed.
+ */
+int
+pg_diff_msgbuf_poison_for_test(int off)
+{
+	if (pg_diff_msgbuf == NULL)
+		return -1;
+	if (off < 0 || off >= PG_DIFF_MSGBUF_GUARD)
+		off = 0;
+	pg_diff_msgbuf[pg_diff_msgbuf_len + 1 + off] = '\0';
+	return off;
 }
 
 #define palloc(n) malloc(n)
