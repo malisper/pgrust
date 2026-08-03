@@ -9,11 +9,10 @@ name = "pg_trgm"
 path = "src/lib.rs"
 
 [dependencies]
-# pg_qsort shared port (src/port/qsort.c parity) — lives in gistproc until the
-# chartered qsort-consolidation lane lands a shared _support crate; swap the
-# path then. Needed by regexp.rs (order-exact penalty-tie eviction, ruling
-# 2026-08-01).
-gistproc = { path = "../../backend/access/gist/gistproc" }
+# canonical pg_qsort shared port (src/port/qsort.c parity, tie-order exact;
+# GL-PGQSORT-PERF consolidation). Needed by regexp.rs (order-exact
+# penalty-tie eviction, ruling 2026-08-01).
+pg_qsort = { path = "../../_support/pg_qsort" }
 datum = { path = "../../_support/types/datum" }
 mcx = { path = "../../_support/mcx" }
 types_core = { path = "../../_support/types/types_core" }

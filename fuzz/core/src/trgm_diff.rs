@@ -1541,8 +1541,10 @@ mod repro_tests {
     /// precedent). RESOLVED by the order-exact-port ruling (Michael,
     /// 2026-08-01): regexp.rs now uses colorTrgmInfoCmp's memcmp byte order
     /// for every ctrgm sort/bsearch and evicts equal-penalty color trigrams
-    /// in the exact pg_qsort permutation C produces (shared gistproc
-    /// pg_qsort port over (penalty, index) proxies). The historical repro is
+    /// in the exact pg_qsort permutation C produces (canonical
+    /// crates/_support/pg_qsort port over (penalty, index) proxies; swapped
+    /// from the retired gistproc copy at GL-PGQSORT-PERF consolidation).
+    /// The historical repro is
     /// kept as a REGRESSION equality assertion — if either side's tie
     /// behavior drifts, this fires first.
     #[test]

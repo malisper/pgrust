@@ -509,9 +509,9 @@ impl Nfa<'_> {
         // comparator, so the relative order of equal-penalty entries — which
         // decides WHICH of them is evicted first when the budget is met
         // mid-tie — is pg_qsort's deterministic permutation of the
-        // memcmp-ascending input. Reproduce it exactly: pg_qsort (the shared
-        // gistproc port of src/port/qsort.c, pending the qsort consolidation
-        // crate) over Copy (penalty, index) proxies — the comparator sees the
+        // memcmp-ascending input. Reproduce it exactly: pg_qsort (the
+        // canonical crates/_support/pg_qsort port of src/port/qsort.c)
+        // over Copy (penalty, index) proxies — the comparator sees the
         // same penalty sequence C's sees, so the output permutation is
         // identical — then apply the permutation. Common no-tie path pays one
         // O(n) permute over a Vec move; the comparator stays monomorphized.
@@ -521,7 +521,7 @@ impl Nfa<'_> {
                 .enumerate()
                 .map(|(i, c)| (c.penalty, i as u32))
                 .collect();
-            gistproc::qsort::pg_qsort(&mut proxy, |a, b| penalty_cmp(a.0, b.0));
+            ::pg_qsort::pg_qsort(&mut proxy, |a, b| penalty_cmp(a.0, b.0));
             let mut permuted: Vec<ColorTrgmInfo> = Vec::with_capacity(ctrgms.len());
             let mut slots: Vec<Option<ColorTrgmInfo>> = ctrgms.drain(..).map(Some).collect();
             for &(_, idx) in &proxy {
