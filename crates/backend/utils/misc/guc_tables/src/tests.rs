@@ -258,6 +258,26 @@ fn m5_probe_requires_a_live_pool() {
 }
 
 #[test]
+fn file_copy_method_options_match_platform_clone_support() {
+    let opts = find("file_copy_method").options().unwrap().entries();
+    let copy = opts.iter().find(|o| o.name == "copy").unwrap();
+    assert_eq!(copy.val, consts::FILE_COPY_METHOD_COPY);
+    assert!(!copy.hidden);
+    #[cfg(not(pgrust_sim))]
+    {
+        let clone = opts.iter().find(|o| o.name == "clone").unwrap();
+        assert_eq!(clone.val, consts::FILE_COPY_METHOD_CLONE);
+        assert!(!clone.hidden);
+    }
+    #[cfg(pgrust_sim)]
+    assert!(!opts.iter().any(|o| o.name == "clone"));
+    assert_eq!(
+        find("file_copy_method").default_value(),
+        GucDefaultValue::Enum(consts::FILE_COPY_METHOD_COPY)
+    );
+}
+
+#[test]
 fn lz4_build_config_is_reflected_in_option_sets() {
     let opts = find("default_toast_compression").options().unwrap().entries();
     assert!(!opts.iter().any(|o| o.name == "lz4"));

@@ -89,6 +89,18 @@ fn vfs_path_exists(path: &str) -> bool {
     vfs::stat(&cpath(path), &mut info) == 0
 }
 
+// Per-thread CHECK_FOR_INTERRUPTS() count (each #[test] runs on its own
+// thread, and nothing here crosses threads): lets tests witness which copy
+// engine actually ran — copy_file checks once per 64KiB chunk, clone_file at
+// most once per 1MiB chunk.
+thread_local! {
+    static INTERRUPT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn interrupt_checks() -> u64 {
+    INTERRUPT_CHECKS.with(std::cell::Cell::get)
+}
+
 fn setup() {
     SETUP.call_once(|| {
         guc_tables::init_seams();
@@ -96,6 +108,10 @@ fn setup() {
         crate::init_seams();
 
         xact_seams::get_current_sub_transaction_id::set(|| 1);
+        postgres_seams::check_for_interrupts::set(|| {
+            INTERRUPT_CHECKS.with(|c| c.set(c.get() + 1));
+            Ok(())
+        });
         aio_seams::pgaio_closing_fd::set(|_| {});
         aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
@@ -1081,6 +1097,129 @@ fn probe_still_bounds_the_budget() {
         vfd::compute_max_safe_fds(200, 1000, Some(1_048_576), 4, 2),
         200 - ::types_storage::NUM_RESERVED_FDS
     );
+}
+
+// ---------------------------------------------------------------------------
+// copydir / clone_file (copydir.c)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn file_copy_method_boot_default_is_copy() {
+    setup();
+    assert_eq!(vfd::file_copy_method(), crate::copydir::FILE_COPY_METHOD_COPY);
+}
+
+/// Recursively collect `dir`-relative (path, is_dir) entries through the
+/// active vfs, sorted for comparison.
+#[cfg(not(pgrust_sim))]
+fn vfs_tree_entries(dir: &str, prefix: &str, out: &mut Vec<(String, bool)>) {
+    let mut names = Vec::new();
+    crate::desc::with_allocated_dir(dir, &mut |name| {
+        if name != "." && name != ".." {
+            names.push(name.to_owned());
+        }
+        Ok(false)
+    })
+    .unwrap();
+    names.sort();
+    for name in names {
+        let full = format!("{dir}/{name}");
+        let rel = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        let mut md = vfs::FileInfo::zeroed();
+        assert_eq!(vfs::lstat(&cpath(&full), &mut md), 0, "{full}");
+        out.push((rel.clone(), md.is_dir()));
+        if md.is_dir() {
+            vfs_tree_entries(&full, &rel, out);
+        }
+    }
+}
+
+/// Byte-compare two directory trees through the active vfs.
+#[cfg(not(pgrust_sim))]
+fn assert_tree_equal(a: &str, b: &str) {
+    let mut ea = Vec::new();
+    let mut eb = Vec::new();
+    vfs_tree_entries(a, "", &mut ea);
+    vfs_tree_entries(b, "", &mut eb);
+    assert_eq!(ea, eb, "tree shapes differ: {a} vs {b}");
+    for (rel, is_dir) in ea {
+        if !is_dir {
+            assert_eq!(
+                vfs_read_file(&format!("{a}/{rel}")),
+                vfs_read_file(&format!("{b}/{rel}")),
+                "{rel}"
+            );
+        }
+    }
+}
+
+/// A source tree with a multi-block binary file past clone_file's 1MiB
+/// chunk (so the copy_file_range loop iterates), an empty file, and a
+/// subdirectory for the recurse arm.
+#[cfg(not(pgrust_sim))]
+fn build_copydir_fixture(src: &str) {
+    vfs_mkdir_p(src);
+    let big: Vec<u8> = (0..(1024 * 1024 + 4096)).map(|i| (i * 31 % 251) as u8).collect();
+    vfs_write_file(&format!("{src}/big"), &big);
+    vfs_write_file(&format!("{src}/empty"), b"");
+    vfs_mkdir_p(&format!("{src}/sub"));
+    vfs_write_file(&format!("{src}/sub/inner"), b"inner payload");
+}
+
+#[test]
+#[cfg(not(pgrust_sim))]
+fn copydir_copies_tree_and_refuses_existing_destination() {
+    setup();
+    let dir = scratch_dir("copydir_copy");
+    let src = format!("{dir}/src");
+    build_copydir_fixture(&src);
+
+    let saved = vfd::file_copy_method();
+    vfd::set_file_copy_method(crate::copydir::FILE_COPY_METHOD_COPY);
+    let dst = format!("{dir}/dst");
+    crate::copydir::copydir(&src, &dst, true).unwrap();
+    assert_tree_equal(&src, &dst);
+    // Destination already exists: MakePGDirectory fails (EEXIST) => ERROR.
+    assert!(crate::copydir::copydir(&src, &dst, true).is_err());
+    vfd::set_file_copy_method(saved);
+}
+
+#[test]
+#[cfg(not(pgrust_sim))]
+fn copydir_clone_matches_copy() {
+    setup();
+    let dir = scratch_dir("copydir_clone");
+    let src = format!("{dir}/src");
+    build_copydir_fixture(&src);
+
+    let saved = vfd::file_copy_method();
+    vfd::set_file_copy_method(crate::copydir::FILE_COPY_METHOD_CLONE);
+    let cloned = format!("{dir}/cloned");
+    let before = interrupt_checks();
+    crate::copydir::copydir(&src, &cloned, true).unwrap();
+    let clone_checks = interrupt_checks() - before;
+    assert_tree_equal(&src, &cloned);
+    // Destination already exists: MakePGDirectory fails (EEXIST) => ERROR.
+    assert!(crate::copydir::copydir(&src, &cloned, true).is_err());
+
+    // The same tree through the copy arm must land byte-identical.
+    vfd::set_file_copy_method(crate::copydir::FILE_COPY_METHOD_COPY);
+    let copied = format!("{dir}/copied");
+    let before = interrupt_checks();
+    crate::copydir::copydir(&src, &copied, true).unwrap();
+    let copy_checks = interrupt_checks() - before;
+    assert_tree_equal(&src, &copied);
+    assert_tree_equal(&cloned, &copied);
+    // Byte-equality alone cannot tell the arms apart; the interrupt-check
+    // cadence can. copy_file checks once per 64KiB chunk of the >1MiB
+    // fixture; clone_file checks at most once per 1MiB chunk (Linux) and
+    // never in-file (macOS). Equal counts would mean the CLONE dispatch
+    // fell through to copy_file.
+    assert!(
+        clone_checks < copy_checks,
+        "clone arm did not run: {clone_checks} interrupt checks vs {copy_checks} for copy"
+    );
+    vfd::set_file_copy_method(saved);
 }
 
 // DST P4 inc-1: crash-recovery property sweep + red battery (sim-only).

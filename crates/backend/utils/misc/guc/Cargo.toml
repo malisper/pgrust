@@ -33,3 +33,9 @@ pgtz = { path = "../../../timezone/pgtz" }
 
 [dev-dependencies]
 conffiles_seams = { path = "../conffiles_seams" }
+
+# `pgrust_sim` mirrors vfs's declaration (contract §1.2): non-default cfg set
+# only by the sim harness's RUSTFLAGS; gates the file_copy_method=clone
+# SET-time tests to match guc_tables' pruned option list.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

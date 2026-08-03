@@ -5,7 +5,12 @@ use crate::desc::{CloseTransientFile, OpenTransientFile, TransientFileRawFd};
 use crate::sync::{fsync_fname, pg_flush_data};
 use crate::vfd::{cpath, get_errno, loc, set_errno, MakePGDirectory};
 
-const FILE_COPY_METHOD_COPY: i32 = 0;
+// FileCopyMethod (storage/copydir.h) — one C enum. guc_tables' consts carry
+// their own copy of the values; pin the two together at compile time so the
+// GUC-assigned value and this dispatch can never drift apart.
+pub use ::types_storage::{FILE_COPY_METHOD_CLONE, FILE_COPY_METHOD_COPY};
+const _: () = assert!(FILE_COPY_METHOD_COPY == ::guc_tables::consts::FILE_COPY_METHOD_COPY);
+const _: () = assert!(FILE_COPY_METHOD_CLONE == ::guc_tables::consts::FILE_COPY_METHOD_CLONE);
 
 const COPY_BUF_SIZE: usize = 8 * 8192;
 #[cfg(target_os = "macos")]
@@ -34,13 +39,6 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
             .unwrap_err());
     }
 
-    // Invariant, not a live arm: "clone" is absent from file_copy_method's
-    // GUC options until clone_file (copydir.c) ports, so no accepted setting
-    // reaches here non-copy.
-    if crate::vfd::file_copy_method() != FILE_COPY_METHOD_COPY {
-        panic!("file_copy_method=clone not ported: land clone_file (copydir.c)");
-    }
-
     for name in entry_names(fromdir)? {
         postgres_seams::check_for_interrupts::call()?;
         let fromfile = format!("{fromdir}/{name}");
@@ -60,7 +58,11 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
                 copydir(&fromfile, &tofile, true)?;
             }
         } else if md.is_file() {
-            copy_file(&fromfile, &tofile)?;
+            if crate::vfd::file_copy_method() == FILE_COPY_METHOD_CLONE {
+                clone_file(&fromfile, &tofile)?;
+            } else {
+                copy_file(&fromfile, &tofile)?;
+            }
         }
     }
 
@@ -177,6 +179,122 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
             .errcode_for_file_access()
             .errmsg(format!("could not close file \"{fromfile}\": %m"))
             .finish(loc("copy_file"))
+            .unwrap_err());
+    }
+    Ok(())
+}
+
+// clone_file (copydir.c), pg_unreachable() arm: sim fds are foreign to the
+// kernel syscalls the live arms make, so "clone" is gated out of
+// file_copy_method's GUC options under pgrust_sim (guc_tables) — no accepted
+// setting reaches here.
+#[cfg(pgrust_sim)]
+fn clone_file(_fromfile: &str, _tofile: &str) -> PgResult<()> {
+    panic!("clone_file unreachable: file_copy_method=clone is not an accepted setting under pgrust_sim");
+}
+
+// clone_file (copydir.c), HAVE_COPYFILE arm: clone or fail, never a silent
+// fallback byte-copy. The two live arms below cover both product targets;
+// any other non-sim target is a compile error here where C's #else arm is
+// pg_unreachable().
+#[cfg(all(not(pgrust_sim), target_os = "macos"))]
+fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
+    let from = cpath(fromfile);
+    let to = cpath(tofile);
+    // SAFETY: copyfile(3) on two NUL-terminated paths; NULL clone state.
+    let rc = unsafe {
+        libc::copyfile(
+            from.as_ptr(),
+            to.as_ptr(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_CLONE_FORCE,
+        )
+    };
+    if rc < 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!(
+                "could not clone file \"{fromfile}\" to \"{tofile}\": %m"
+            ))
+            .finish(loc("clone_file"))
+            .unwrap_err());
+    }
+    Ok(())
+}
+
+// clone_file (copydir.c), HAVE_COPY_FILE_RANGE arm.
+#[cfg(all(not(pgrust_sim), target_os = "linux"))]
+fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
+    let srcfd = OpenTransientFile(fromfile, libc::O_RDONLY)?;
+    if srcfd < 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not open file \"{fromfile}\": %m"))
+            .finish(loc("clone_file"))
+            .unwrap_err());
+    }
+    let dstfd = OpenTransientFile(tofile, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+    if dstfd < 0 {
+        let en = get_errno();
+        let _ = CloseTransientFile(srcfd);
+        return Err(ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not create file \"{tofile}\": %m"))
+            .finish(loc("clone_file"))
+            .unwrap_err());
+    }
+
+    let src_raw = TransientFileRawFd(srcfd).expect("live transient fd");
+    let dst_raw = TransientFileRawFd(dstfd).expect("live transient fd");
+
+    loop {
+        // Don't copy too much at once, so we can check for interrupts from
+        // time to time if it falls back to a slow copy.
+        postgres_seams::check_for_interrupts::call()?;
+        // SAFETY: copy_file_range(2) on two live transient kernel fds; NULL
+        // offsets advance both file positions.
+        let nbytes = unsafe {
+            libc::copy_file_range(
+                src_raw,
+                std::ptr::null_mut(),
+                dst_raw,
+                std::ptr::null_mut(),
+                1024 * 1024,
+                0,
+            )
+        };
+        if nbytes < 0 && get_errno() != libc::EINTR {
+            return Err(ereport(ERROR)
+                .with_saved_errno(get_errno())
+                .errcode_for_file_access()
+                .errmsg(format!(
+                    "could not clone file \"{fromfile}\" to \"{tofile}\": %m"
+                ))
+                .finish(loc("clone_file"))
+                .unwrap_err());
+        }
+        if nbytes == 0 {
+            break;
+        }
+    }
+
+    if CloseTransientFile(dstfd) != 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{tofile}\": %m"))
+            .finish(loc("clone_file"))
+            .unwrap_err());
+    }
+    if CloseTransientFile(srcfd) != 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{fromfile}\": %m"))
+            .finish(loc("clone_file"))
             .unwrap_err());
     }
     Ok(())
