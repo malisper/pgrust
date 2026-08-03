@@ -11,6 +11,25 @@ every committed `fuzz/corpus/ltree_diff` input through the driver. CAUGHT =
 the rail goes red with the defect applied. Driver: scratchpad/inject2.py
 (round 1: inject.py).
 
+## Round 4 — R1 on-disk adoption controls (branch `final/ltree-cexact`, 2026-08-03)
+
+Three plants, one per piece of the C-exact on-disk adoption, each disarmed
+ALONE and re-armed. Instrument here is the dedicated witness test
+`ltree_diff::tests::r1_cexact_ondisk_wrap_band_image` plus `smoke_arms` /
+`fixed_defect_shapes`, all through `cargo test -p decoder_fuzz --release --lib
+ltree`. 3 planted / 3 CAUGHT / 0 missed.
+
+| plane | planted defect (disarm) | verdict |
+|---|---|---|
+| value/image | `LVAR_OFF_NAME` 7 → 8 (re-verified independently of round 3) | CAUGHT — `smoke_arms` + `fixed_defect_shapes` both red; C `1,0,0,97` vs port `1,0,0,0,97` on `a\|b` |
+| value/image | serialize the FULL variant Vec instead of the wrapped `numvar` | CAUGHT — only by the 65,536-variant expander seed; the 4k-variant shapes pass, so this plant is what proved the numvar seed load-bearing |
+| value/image | level stride `MAXALIGN(real totallen)` instead of the STORED uint16 | CAUGHT — only by the MULTI-level wrap seeds (`…\|a.b.c\|d`); single-level shapes pass, which is what forced the second seed family |
+
+Both misses-by-construction above are the useful part of this round: the first
+version of the witness test used only single-level 4k-variant shapes and BOTH
+plants passed it. The seeds were widened until each plant fails, so the test now
+witnesses all three pieces rather than one.
+
 ## Round 3 — final, 14 planted / 14 CAUGHT / 0 missed
 
 | plane | planted defect | verdict |
