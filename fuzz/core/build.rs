@@ -754,7 +754,15 @@ fn main() {
         .define("pq_sendint32", "tsq_pq_sendint32")
         .define("reset_tsvector_parser", "tsq_reset_tsvector_parser")
         .define("tsCompareString", "tsq_tsCompareString")
-        .define("pg_strncasecmp", "tsq_pg_strncasecmp");
+        .define("pg_strncasecmp", "tsq_pg_strncasecmp")
+        // task #141: DATA symbol isolation. The shim's arena sentinel
+        // (pg_tsq_shim.c `MemoryContext CurrentMemoryContext = NULL`) was
+        // the LAST unprefixed CurrentMemoryContext definition beside the
+        // trgm oracle's non-NULL copy — which one every importer bound
+        // was link-composition dependent (the trgm landing gate caught
+        // the NULL copy winning inside trgmrxfam's dynahash). Def and all
+        // uses compile in this cc::Build, so the rename is self-contained.
+        .define("CurrentMemoryContext", "tsq_CurrentMemoryContext");
     tsq.file("csrc/tsq/tsquery.c")
         // verbatim pg_qsort instantiation (tie-order parity: port.h maps
         // qsort -> pg_qsort in every backend TU; libc qsort tie order is
@@ -1218,6 +1226,38 @@ fn main() {
         // derived from the pg_qsort token), so it needs its own rename —
         // an unprefixed export is a link race (task #98 guard).
         "pg_qsort", "pg_qsort_strcmp",
+        // ---- task #141 (CI cluster blocker): DATA symbols + residual escapes.
+        // The #98 sweep renamed only functions; these two shim GLOBALS
+        // stayed unprefixed. pg_trgm_regexp_io.c defines them non-NULL
+        // (&trgmrx_cxt_token) while the tsq shim defines an unprefixed
+        // NULL CurrentMemoryContext — which definition dynahash.o binds
+        // became LINK-COMPOSITION dependent, and beside main's archives
+        // the NULL copy won: MemoryContextIsValid(CurrentDynaHashCxt)
+        // SIGABRT in dynahash.c:293 before any family init ran.
+        "CurrentMemoryContext", "TopMemoryContext",
+        // shim stubs + shmem/size helpers (dynahash deps) + list.c
+        // exports the #98 function sweep missed.
+        "GetCurrentTransactionNestLevel", "copyObjectImpl", "equal",
+        "add_size", "mul_size", "my_log2", "ShmemAllocNoError",
+        "list_truncate", "list_int_cmp", "list_oid_cmp",
+        // regexport.c introspection set: this family's vendored copy
+        // collides with the regexcorefam archive's PRISTINE-named copy
+        // (csrc/regexfam/vendor/ owns the pristine names — see the
+        // jsonpath family comment above). Duplicate definitions across
+        // archives are the ld.lld hard-error class (blocker #91): macOS
+        // ld64 tolerates them, the CI cluster linker does not. Def and all
+        // call sites compile in THIS cc::Build, so the -D rename stays
+        // self-consistent; the family keeps its OWN vendored copy per
+        // campaign doctrine.
+        "pg_reg_getnumstates", "pg_reg_getinitialstate",
+        "pg_reg_getfinalstate", "pg_reg_getnumoutarcs", "pg_reg_getoutarcs",
+        "pg_reg_getnumcolors", "pg_reg_colorisbegin", "pg_reg_colorisend",
+        "pg_reg_getnumcharacters", "pg_reg_getcharacters",
+        // NOT renamed, deliberately: pg_regcomp/pg_regerror/pg_regfree
+        // (single definer = regexcorefam's pristine engine, the intended
+        // cross-archive binding — "the engine OBJECTS come from the
+        // regexfam build"), the pg_diff_trgm_* driver API (Rust-facing,
+        // already family-namespaced), and libc/bsearch (C-parity).
     ];
     for s in TRGMRX_SHARED_SYMS {
         trgmrxfam.define(s, format!("trgmrx_{s}").as_str());
@@ -1849,8 +1889,16 @@ fn enforce_sort_symbol_hygiene() {
          pg_qsort (spgkdtree class). Offenders:\n{}\n",
         violations.join("\n")
     );
+    // Evidence, not just a verdict (task #141): NAME the archives scanned
+    // so a green line proves WHAT it covered — "30 archives clean" with no
+    // roster cannot show that a given family was ever audited.
     println!(
-        "cargo:warning=sort-symbol guard: {} archives clean",
-        archives.len()
+        "cargo:warning=sort-symbol guard: {} archives clean: {}",
+        archives.len(),
+        archives
+            .iter()
+            .map(|a| a.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
     );
 }
