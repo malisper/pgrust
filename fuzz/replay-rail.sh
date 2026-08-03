@@ -10,6 +10,14 @@
 #
 # Needs nightly-2026-07-17 (libFuzzer). PGRUST_FUZZ_CSANCOV optional here —
 # replay compares planes either way.
+#
+# Failure classification (task #151): per-target replay output is persisted
+# to target/replay-rail/<target>.log (gitignored). A nonzero replay whose
+# log carries an "ERROR: AddressSanitizer"/"ERROR: LeakSanitizer" report is
+# printed as "ASAN-FINDING: <target>" — a sanitizer side channel per the
+# standing ruling, distinguishable from a genuine "FAIL: <target> replay
+# diverged/crashed" — but it still fails the rail (rc=1): a sanitizer hit
+# during replay must never silently pass.
 set -eu
 cd "$(dirname "$0")"
 NIGHTLY=nightly-2026-07-17
@@ -43,6 +51,11 @@ if [ -n "$strays" ]; then
   echo "$strays"
   rc=1
 fi
+# Replay logs: NOT discarded (task #151 — a FAIL with the output thrown away
+# is untriageable). target/ is gitignored and pruned by the CI cluster stray
+# sweep; the .log names never match the libFuzzer artifact-name guard above.
+LOGDIR="target/replay-rail"
+mkdir -p "$LOGDIR"
 for t in $TARGETS; do
   case " $NOT_LIVE " in *" $t "*) echo "SKIP $t (not live: see replay-rail.sh header)"; continue;; esac
   [ -d "corpus/$t" ] || { echo "SKIP $t (no corpus)"; continue; }
@@ -56,8 +69,18 @@ for t in $TARGETS; do
   # REG_MAX_COMPILE_SPACE-bounded, C-parity, pass all planes, 480MB native
   # RSS, but >2GiB / >4GiB respectively under ASan).  OOM DISCOVERY stays
   # owned by the fuzz-mode CI cluster legs at the default limit.
-  cargo +$NIGHTLY fuzz run "$t" -- -runs=0 -rss_limit_mb=8192 "corpus/$t" >/dev/null 2>&1 \
-    || { echo "FAIL: $t replay diverged/crashed"; rc=1; }
+  log="$LOGDIR/$t.log"
+  if ! cargo +$NIGHTLY fuzz run "$t" -- -runs=0 -rss_limit_mb=8192 "corpus/$t" >"$log" 2>&1; then
+    if grep -qE 'ERROR: (AddressSanitizer|LeakSanitizer)' "$log"; then
+      # Sanitizer report during replay: side channel (never a differential
+      # verdict), reported distinctly — but still fails the rail.
+      echo "ASAN-FINDING: $t replay hit a sanitizer report (side channel, still red) — log: $(pwd)/$log"
+    else
+      echo "FAIL: $t replay diverged/crashed — log: $(pwd)/$log"
+    fi
+    tail -n 15 "$log" | sed 's/^/  | /'
+    rc=1
+  fi
 done
 [ $rc -eq 0 ] && echo "REPLAY RAIL GREEN"
 exit $rc
