@@ -41,7 +41,13 @@
 //! 2048kB), so in the gap band ONE side raises 54001 where the other
 //! succeeds. Any exec where either side raises 54001 skips the value
 //! comparison; everything else about the exec still asserts. Counted in
-//! CAPACITY_CARVES for the campaign report.
+//! CAPACITY_CARVES.
+//!
+//! Every carve below keeps a counter, and `tests::carve_counters_are_not_dead`
+//! READS them: it drives one input per carve and fails if the counter did not
+//! move. Until that test existed the counters were incremented into the void,
+//! which is the dead-counter class — a carve nobody can observe is how a bound
+//! silently widens until it swallows the band it was meant to trim.
 //!
 //! DOMAIN CARVES (C caller contract, never pgrust behavior):
 //!   - arms 0-2/4-6: parser inputs are NUL-free (cstring contract).
@@ -1393,6 +1399,82 @@ mod tests {
             assert_eq!(unsafe { pg_lt_crc(buf.as_ptr(), 2, &mut cc) }, 0);
             assert_eq!(ltree::crc::ltree_crc32_sz(&buf), cc, "crc mismatch at word {w:#x}");
         }
+    }
+
+    /// CARVE VACUITY CHECK (dead-counter class). Every carve in this driver
+    /// keeps a counter, and until this test existed NOTHING READ ANY OF THEM —
+    /// the module doc says they are "counted for the campaign report" and they
+    /// were incremented into the void. A carve nobody can observe is exactly
+    /// how a bound silently widens until it swallows the band it was supposed
+    /// to trim, and here the band in question is the one the R1 adoption just
+    /// opened up for comparison.
+    ///
+    /// So: drive one input per carve and assert the counter MOVED, and — the
+    /// load-bearing half — assert the wrap band is NOT skipped wholesale, i.e.
+    /// a wrap-band input still reaches the `in` comparison. If someone widens
+    /// `lquery_level_u16_wraps` or tightens `lquery_amplification_ok` far
+    /// enough to skip the whole exec again, this fails.
+    #[test]
+    fn carve_counters_are_not_dead() {
+        let wrap0 = U16_WRAP_CARVES.load(Ordering::Relaxed);
+        let amp0 = AMPLIFICATION_CARVES.load(Ordering::Relaxed);
+        let idx0 = INDEX_COST_CARVES.load(Ordering::Relaxed);
+
+        // (a) wrap band: 4,096 one-byte variants -> per-level size > 65535.
+        // The out/send plane is withheld, so the counter moves; the `in` plane
+        // still compares (that is R1), which the witness test above proves.
+        let mut wrapin = vec![1u8, 0];
+        wrapin.extend_from_slice(("a".to_string() + &"|a".repeat(4095)).as_bytes());
+        run_on_worker(wrapin);
+        assert!(
+            U16_WRAP_CARVES.load(Ordering::Relaxed) > wrap0,
+            "the uint16 wrap carve never fired — either the predicate stopped \
+             recognising the band or the band stopped being reachable"
+        );
+
+        // (b) amplification bound: expander-built '.'-heavy text (levels above
+        // the alloc cap but at or below LQUERY_MAX_LEVELS) — the shape that
+        // killed the v6 floor.
+        let amp: Vec<u8> = vec![1u8, 0, 0xFE, 0x00, 0x40, 0x02, b'a', b'.', b'a'];
+        run_on_worker(amp);
+        assert!(
+            AMPLIFICATION_CARVES.load(Ordering::Relaxed) > amp0,
+            "the upstream-amplification bound never fired — the v6 OOM shape is \
+             unbounded again"
+        );
+
+        // (c) ltree_index cost bound: two expander-built ~32k-level trees, the
+        // shape that produced the v6 slow-units.
+        let mut ops = vec![4u8, 0];
+        ops.extend_from_slice(&0u64.to_le_bytes()); // seed
+        ops.extend_from_slice(&0i32.to_le_bytes()); // s0
+        ops.extend_from_slice(&0i32.to_le_bytes()); // s1
+        // NOTE the trailing label: the expander emits unit x n THEN the tail,
+        // and "a." x n ends on a dot, which ltree rejects as a syntax error —
+        // diff_in would return None and the arm would never reach the operator.
+        // (Caught by this very assertion on the first attempt.)
+        let a: Vec<u8> = vec![0xFE, 0xFF, 0x7F, 0x02, b'a', b'.', b'a'];
+        let b: Vec<u8> = vec![0xFE, 0xFF, 0x7F, 0x02, b'b', b'.', b'b'];
+        ops.extend_from_slice(&(a.len() as u16).to_le_bytes()); // split
+        ops.extend_from_slice(&a);
+        ops.extend_from_slice(&b);
+        run_on_worker(ops);
+        assert!(
+            INDEX_COST_CARVES.load(Ordering::Relaxed) > idx0,
+            "the ltree_index cost bound never fired — the v6 slow-unit shape is \
+             unbounded again"
+        );
+    }
+
+    /// Production stack pairing (the lane's durable lesson): 8 MiB worker vs a
+    /// 2048 kB max_stack_depth, so the guard can fire before exhaustion.
+    fn run_on_worker(data: Vec<u8>) {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || ltree_diff(&data))
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// R1 ADOPTION WITNESS (RULED 2026-08-03): the stored lquery image must be
