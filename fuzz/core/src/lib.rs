@@ -593,6 +593,15 @@ pub use fmt_num_diff::fmt_num_diff;
 pub mod geo_io_diff;
 pub use geo_io_diff::geo_io_diff;
 
+// tsquery_core_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-tsquery_core_diff.md.
+pub mod tsquery_core_diff;
+pub use tsquery_core_diff::tsquery_core_diff;
+
+// tsqrw_diff: scaffolded by fuzz/scaffold.py (p1-lanef handoff, taken over by
+// p1-laneaf, rewritten by task #135) — see ../../README-TODO-tsqrw_diff.md.
+pub mod tsqrw_diff;
+pub use tsqrw_diff::tsqrw_diff;
+
 // json_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-json_diff.md.
 pub mod json_diff;
 pub use json_diff::json_diff;

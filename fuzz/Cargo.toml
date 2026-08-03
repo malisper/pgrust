@@ -614,3 +614,21 @@ path = "fuzz_targets/instrument_diff.rs"
 test = false
 doc = false
 bench = false
+
+# tsquery_core_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsquery_core_diff.md.
+[[bin]]
+name = "tsquery_core_diff"
+path = "fuzz_targets/tsquery_core_diff.rs"
+test = false
+doc = false
+bench = false
+
+# tsqrw_diff: scaffolded by fuzz/scaffold.py — see README-TODO-tsqrw_diff.md
+# (p1-lanef handoff, taken over by p1-laneaf, rewritten by task #135
+# final/laneaf-indexproxy).
+[[bin]]
+name = "tsqrw_diff"
+path = "fuzz_targets/tsqrw_diff.rs"
+test = false
+doc = false
+bench = false

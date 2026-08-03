@@ -668,6 +668,70 @@ fn main() {
         .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_tablesfam");
 
+    // tsq family (p1-laneaf, rewritten by task #135): tsquery_core_diff +
+    // tsqrw_diff oracles. Verbatim backend TUs (csrc/tsq/*.c +
+    // csrc/tsqrw/*.c, PostgreSQL 18.3 @ 62d6c7d3df) over the csrc/tsq/shim
+    // environment; tsquery_util.c compiles EXACTLY ONCE here for both
+    // targets. pg_crc32_table comes from the hashenc unit; pg_diff_errcode
+    // from the main unit.
+    let mut tsq = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        tsq.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // FAMILY SYMBOL ISOLATION (same convention as the tsvec unit below):
+    // the tsq shim/TUs export upstream-named helpers that the tsvec family
+    // (and pg_strncasecmp, the main oracle unit) also define. Apple ld64
+    // silently binds to whichever archive it searches first, so WITHOUT
+    // these renames tsqueryrecv's pq_getmsgstring resolved into the TSVEC
+    // unit and its error path longjmp'd through the tsvec jmp_buf that was
+    // never armed on this thread (SIGSEGV in _longjmp, found by the corpus
+    // replay gate on macOS; ld.lld would have hard-errored instead).
+    tsq.define("appendBinaryStringInfo", "tsq_appendBinaryStringInfo")
+        .define("close_tsvector_parser", "tsq_close_tsvector_parser")
+        .define("cstring_to_text_with_len", "tsq_cstring_to_text_with_len")
+        .define("gettoken_tsvector", "tsq_gettoken_tsvector")
+        .define("init_tsvector_parser", "tsq_init_tsvector_parser")
+        .define("initStringInfo", "tsq_initStringInfo")
+        .define("pq_begintypsend", "tsq_pq_begintypsend")
+        .define("pq_endtypsend", "tsq_pq_endtypsend")
+        .define("pq_getmsgstring", "tsq_pq_getmsgstring")
+        .define("pq_sendint16", "tsq_pq_sendint16")
+        .define("pq_sendint32", "tsq_pq_sendint32")
+        .define("reset_tsvector_parser", "tsq_reset_tsvector_parser")
+        .define("tsCompareString", "tsq_tsCompareString")
+        .define("pg_strncasecmp", "tsq_pg_strncasecmp");
+    tsq.file("csrc/tsq/tsquery.c")
+        // verbatim pg_qsort instantiation (tie-order parity: port.h maps
+        // qsort -> pg_qsort in every backend TU; libc qsort tie order is
+        // scalar-visible through QTNSort — see csrc/tsq/qsort.c header)
+        .file("csrc/tsq/qsort.c")
+        .file("csrc/tsq/tsquery_op.c")
+        .file("csrc/tsq/tsquery_cleanup.c")
+        .file("csrc/tsq/tsvector_parser.c")
+        .file("csrc/tsq/ts_locale_excerpt.c")
+        .file("csrc/tsq/tsvector_op_excerpt.c")
+        .file("csrc/tsq/shim/pg_tsq_shim.c")
+        .file("csrc/tsqrw/tsquery_util.c")
+        .file("csrc/tsqrw/tsquery_rewrite.c")
+        .file("csrc/pg_tsquery_core_io.c")
+        .file("csrc/pg_tsqrw_io.c")
+        // legacy-CRC table (pushValue valcrc / tsqueryrecv): the hashenc
+        // unit's copy is symbol-prefixed (hashenc_impl_*), so this unit
+        // carries the verbatim table under its upstream name (shim TU
+        // header documents the extraction).
+        .file("csrc/tsq/shim/pg_crc_table.c")
+        .include("csrc/tsq/shim")
+        .include("csrc/tsq/include")
+        .include("csrc/tsqrw/include")
+        // the guard header lives at csrc/ root (entry files are in csrc/).
+        .include("csrc")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
+        .compile("pg_difffuzz_tsq");
+
     // json_diff oracle (p1-laneab): whole-TU verbatim 18.3 common/jsonapi.c +
     // common/stringinfo.c plus the json.c/jsonfuncs.c extraction in
     // pg_json_io.c, compiled against its OWN shim include tree

@@ -82,6 +82,10 @@ adt_quote = { path = "../../crates/backend/utils/adt/quote" }  # quote_diff (sca
 # mbconv_diff (p1-lanez encoding-conversion family):
 conv = { path = "../../crates/backend/utils/mb/conv" }
 guc_tables = { path = "../../crates/backend/utils/misc/guc_tables" }  # quote_diff: quote_all_identifiers input plane
+adt_tsquery_core = { path = "../../crates/backend/utils/adt/tsquery_core" }  # tsquery_core_diff (scaffold.py)
+adt_tsquery_rewrite = { path = "../../crates/backend/utils/adt/tsquery_rewrite" }  # tsqrw_diff (scaffold.py, p1-lanef handoff)
+# adt_tsvector_core (tsquery image types TsQueryRef/Item for tsquery_core_diff
+# + tsqrw_diff) — already declared below for tsvector_core_diff
 scan_fgram = { path = "../../crates/backend/parser/scan_fgram" }  # stubs: standard_conforming_strings session cell
 adt_formatting = { path = "../../crates/backend/utils/adt/formatting" }  # fmt_dch_diff + fmt_num_diff (p1-lanek)
 adt_json = { path = "../../crates/backend/utils/adt/json" }  # json_diff (scaffold.py)
