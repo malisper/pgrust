@@ -27,7 +27,9 @@
 use super::{crypt, gen_salt, CryptError};
 
 fn crypt_ok(pw: &str, salt: &str) -> Result<String, String> {
-    crypt(pw, salt).map_err(|e| match e {
+    crypt(pw.as_bytes(), salt.as_bytes())
+        .map(|v| String::from_utf8(v).expect("this witness row's hash is ASCII"))
+        .map_err(|e| match e {
         CryptError::Unsupported(w) => format!("unsupported:{w}"),
         CryptError::Message(m) => m,
         CryptError::Pg(e) => e.message.clone(),
@@ -37,7 +39,7 @@ fn crypt_ok(pw: &str, salt: &str) -> Result<String, String> {
 /// Like `crypt_ok` but returns (message, sqlstate) for the error rows whose
 /// SQLSTATE was captured from 18.3 (`\set VERBOSITY verbose`).
 fn crypt_err_state(pw: &str, salt: &str) -> (String, types_error::SqlState) {
-    match crypt(pw, salt) {
+    match crypt(pw.as_bytes(), salt.as_bytes()) {
         Ok(h) => panic!("expected an error, got hash {h:?}"),
         Err(CryptError::Pg(e)) => (e.message.clone(), e.sqlstate),
         Err(CryptError::Message(m)) => panic!("plain message (no sqlstate): {m:?}"),
@@ -648,4 +650,92 @@ fn par_gen_salt_shapes() {
         );
         assert!(s[want_prefix.len()..].bytes().all(|b| ITOA64.contains(&b)));
     }
+}
+
+// ---------------------------------------------------------------------------
+// D21 — crypt() output is RAW BYTES: C copies setting-prefix bytes VERBATIM
+// into the result (crypt-des.c traditional `output[0..2] = setting[0..2]`,
+// xdes `strlcpy(output, setting, 10)`, crypt-md5.c raw salt re-emission), so
+// a setting whose copied prefix truncates a multibyte character yields a
+// NON-UTF-8 hash even in a UTF-8 database (PG does not encoding-validate a
+// function's text result). The pre-fix pgrust laundered those bytes through
+// `String::from_utf8_lossy`, substituting U+FFFD — a different hash that,
+// unlike C's, does not even round-trip through its own verification.
+//
+// EXECUTED against stock PostgreSQL 18.3 (pg-stock183, 2026-08-02), byte
+// values read via ::bytea:
+//   crypt('password', E'\u{20AC}A')          -> \xe282555a6f49796a2f48792f63
+//   crypt('password', E'$1$aaaaaaa\u{20AC}') -> \x24312461616161616161e224
+//                                                 4e5a72746e754c3351363165
+//                                                 436e75436f56762e552e
+//   crypt('password', E'_J9..j2z\u{20AC}')   -> \x5f4a392e2e6a327a
+//                                                 e26f6a595965614871456c55
+// and all three round-trip: crypt(pw, hash) = hash returned true live.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn div_d21_des_verbatim_salt_echo_and_roundtrip() {
+    arm();
+    // '€' = E2 82 AC; traditional DES copies setting[0..2] = E2 82 verbatim.
+    let setting = "€A".as_bytes();
+    let h = crypt(b"password", setting).expect("C hashes this");
+    assert_eq!(
+        h,
+        b"\xe2\x82\x55\x5a\x6f\x49\x79\x6a\x2f\x48\x79\x2f\x63".to_vec(),
+        "C 18.3 result bytes (captured live 2026-08-02)"
+    );
+    // C's crypt(pw, hash) == hash held live; the lossy port broke it.
+    assert_eq!(crypt(b"password", &h).expect("re-crypt"), h);
+}
+
+#[test]
+fn div_d21_md5_verbatim_salt_echo_and_roundtrip() {
+    arm();
+    // 8-byte salt cap slices the '€' after its first byte: salt run ends E2.
+    let setting = "$1$aaaaaaa€".as_bytes();
+    let h = crypt(b"password", setting).expect("C hashes this");
+    assert_eq!(
+        h,
+        b"\x24\x31\x24\x61\x61\x61\x61\x61\x61\x61\xe2\x24\x4e\x5a\x72\x74\
+          \x6e\x75\x4c\x33\x51\x36\x31\x65\x43\x6e\x75\x43\x6f\x56\x76\x2e\
+          \x55\x2e"
+            .to_vec(),
+        "C 18.3 result bytes (captured live 2026-08-02)"
+    );
+    assert_eq!(crypt(b"password", &h).expect("re-crypt"), h);
+}
+
+#[test]
+fn div_d21_xdes_verbatim_setting_echo_and_roundtrip() {
+    arm();
+    // strlcpy(output, setting, 10) copies 9 bytes: "_J9..j2z" + lone E2.
+    let setting = "_J9..j2z€".as_bytes();
+    let h = crypt(b"password", setting).expect("C hashes this");
+    assert_eq!(
+        h,
+        b"\x5f\x4a\x39\x2e\x2e\x6a\x32\x7a\xe2\x6f\x6a\x59\x59\x65\x61\x48\
+          \x71\x45\x6c\x55"
+            .to_vec(),
+        "C 18.3 result bytes (captured live 2026-08-02)"
+    );
+    assert_eq!(crypt(b"password", &h).expect("re-crypt"), h);
+}
+
+// D21's input plane: pw/salt enter as raw bytes. Distinct non-UTF-8 password
+// byte strings must hash DISTINCTLY (the lossy port collapsed both onto
+// U+FFFD — a port-introduced password collision in non-UTF-8 databases).
+// Stock 18.3 cannot execute this from SQL in a UTF-8 database (invalid bytes
+// are rejected at input), so the expectation here is INEQUALITY +
+// determinism, not a captured C value.
+#[test]
+fn div_d21_non_utf8_passwords_do_not_collide() {
+    arm();
+    let h_e9 = crypt(b"\xe9", b"$1$saltsalt").expect("md5-crypt of raw byte");
+    let h_e8 = crypt(b"\xe8", b"$1$saltsalt").expect("md5-crypt of raw byte");
+    assert_ne!(h_e9, h_e8, "distinct password bytes must not collide");
+    // And neither equals the hash of the literal replacement character the
+    // lossy port substituted.
+    let h_fffd = crypt("\u{FFFD}".as_bytes(), b"$1$saltsalt").unwrap();
+    assert_ne!(h_e9, h_fffd);
+    assert_ne!(h_e8, h_fffd);
 }

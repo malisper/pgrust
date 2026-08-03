@@ -11,19 +11,20 @@ use super::CryptError;
 
 /// `crypt_des(key, setting)` — traditional 13-char DES crypt. `setting` must
 /// carry a 2-char salt (C errors `invalid salt` otherwise).
-pub fn crypt_des(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
+pub fn crypt_des(pw: &[u8], setting: &[u8]) -> Result<Vec<u8>, CryptError> {
     if setting.len() < 2 {
         return Err(CryptError::Message("invalid salt".to_string()));
     }
-    let out = px_crypt_des(pw, setting)?;
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    // D21: C copies setting[0..2] VERBATIM into the result (crypt-des.c), so
+    // the hash is raw bytes — never re-encode it as UTF-8.
+    px_crypt_des(pw, setting)
 }
 
 /// `run_crypt_des` (px-crypt.c:37) — the handler BOTH the `"_"` and the
 /// zero-length catch-all rows of `px_crypt_list` point at. `px_crypt_des`
 /// picks the xdes or the traditional branch off `setting[0] == '_'`
 /// (crypt-des.c:681), and each branch carries its own length check.
-pub fn run_crypt_des(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
+pub fn run_crypt_des(pw: &[u8], setting: &[u8]) -> Result<Vec<u8>, CryptError> {
     if setting.first() == Some(&b'_') {
         crypt_xdes(pw, setting)
     } else {
@@ -32,13 +33,13 @@ pub fn run_crypt_des(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
 }
 
 /// BSDI extended DES (`_`, xdes). `setting` is `_<4 rounds><4 salt>...`.
-pub fn crypt_xdes(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
+pub fn crypt_xdes(pw: &[u8], setting: &[u8]) -> Result<Vec<u8>, CryptError> {
     // C requires at least the `_` + 4 round chars + 4 salt chars.
     if setting.len() < 9 {
         return Err(CryptError::Message("invalid salt".to_string()));
     }
-    let out = px_crypt_des(pw, setting)?;
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    // D21: C strlcpy's up to 9 setting bytes VERBATIM into the result.
+    px_crypt_des(pw, setting)
 }
 
 #[cfg(test)]
@@ -57,27 +58,18 @@ mod tests {
     #[test]
     fn desc_xdes_known_vectors() {
         arm_cfi(u64::MAX);
-        assert_eq!(
-            crypt_xdes(b"", b"_J9..j2zz").unwrap(),
-            "_J9..j2zzR/nIRDK3pPc"
-        );
-        assert_eq!(
-            crypt_xdes(b"foox", b"_J9..j2zz").unwrap(),
-            "_J9..j2zzAYKMvO2BYRY"
-        );
+        assert_eq!(crypt_xdes(b"", b"_J9..j2zz").unwrap(), b"_J9..j2zzR/nIRDK3pPc");
+        assert_eq!(crypt_xdes(b"foox", b"_J9..j2zz").unwrap(), b"_J9..j2zzAYKMvO2BYRY");
         assert_eq!(
             crypt_xdes(b"longlongpassword", b"_J9..j2zz").unwrap(),
-            "_J9..j2zz4BeseiQNwUg"
+            b"_J9..j2zz4BeseiQNwUg"
         );
     }
 
     #[test]
     fn desc_xdes_adversarial_bang_salt() {
         arm_cfi(u64::MAX);
-        assert_eq!(
-            crypt_xdes(b"password", b"_/!!!!!!!").unwrap(),
-            "_/!!!!!!!zqM49hRzxko"
-        );
+        assert_eq!(crypt_xdes(b"password", b"_/!!!!!!!").unwrap(), b"_/!!!!!!!zqM49hRzxko");
     }
 
     #[test]
@@ -102,7 +94,7 @@ mod tests {
     fn desc_traditional_known_vector() {
         arm_cfi(u64::MAX);
         // Traditional DES crypt: 2-char salt, classic crypt(3) vector.
-        assert_eq!(crypt_des(b"foob", b"rl").unwrap(), "rlK6kmJqyMjZM");
+        assert_eq!(crypt_des(b"foob", b"rl").unwrap(), b"rlK6kmJqyMjZM");
         // C runs CHECK_FOR_INTERRUPTS once per count iteration; traditional
         // DES uses count=25.
         assert_eq!(cfi_calls(), 25);

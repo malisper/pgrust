@@ -214,20 +214,32 @@ pub fn gen_salt(salt_type: &str, mut rounds: i32) -> Result<String, CryptError> 
 
 // px-crypt.c:37-78 run_crypt_des / run_crypt_md5 / run_crypt_bf /
 // run_crypt_sha — the four handlers px_crypt_list points at.
-fn run_crypt_des(psw: &str, salt: &str) -> Result<String, CryptError> {
-    desc::run_crypt_des(psw.as_bytes(), salt.as_bytes())
+//
+// D21: the whole crypt cone carries RAW BYTES end to end, as C does.
+// C's px_crypt copies setting-prefix bytes VERBATIM into the result
+// (crypt-des.c: `output[0..2] = setting[0..2]` / xdes `strlcpy(output,
+// setting, 10)`; crypt-md5.c re-emits the raw salt run), so the result is
+// not guaranteed UTF-8 even when the setting is (a multibyte char truncated
+// at the copy boundary). Password and salt likewise enter as bytes —
+// `text` in a non-UTF-8 database can carry arbitrary bytes, and laundering
+// them through `from_utf8_lossy` collapsed distinct passwords onto U+FFFD.
+// sha-crypt and bcrypt outputs are structurally ASCII (their salts are
+// ITOA64/BF64-validated before echo), so crypt_sha's `String` return is
+// exact and converts losslessly.
+fn run_crypt_des(psw: &[u8], salt: &[u8]) -> Result<Vec<u8>, CryptError> {
+    desc::run_crypt_des(psw, salt)
 }
-fn run_crypt_md5(psw: &str, salt: &str) -> Result<String, CryptError> {
-    crypt_md5(psw.as_bytes(), salt.as_bytes()).map_err(CryptError::Message)
+fn run_crypt_md5(psw: &[u8], salt: &[u8]) -> Result<Vec<u8>, CryptError> {
+    crypt_md5(psw, salt).map_err(CryptError::Message)
 }
-fn run_crypt_bf(psw: &str, salt: &str) -> Result<String, CryptError> {
-    bcrypt::crypt_bf(psw.as_bytes(), salt.as_bytes())
+fn run_crypt_bf(psw: &[u8], salt: &[u8]) -> Result<Vec<u8>, CryptError> {
+    bcrypt::crypt_bf(psw, salt)
 }
-fn run_crypt_sha(psw: &str, salt: &str) -> Result<String, CryptError> {
-    shacrypt::crypt_sha(psw, salt)
+fn run_crypt_sha(psw: &[u8], salt: &[u8]) -> Result<Vec<u8>, CryptError> {
+    shacrypt::crypt_sha(psw, salt).map(String::into_bytes)
 }
 
-type CryptFn = fn(&str, &str) -> Result<String, CryptError>;
+type CryptFn = fn(&[u8], &[u8]) -> Result<Vec<u8>, CryptError>;
 
 /// `px_crypt_list` (px-crypt.c:88-99), in C's exact order. Two rows carry
 /// behavior that is easy to lose by hand-writing the dispatch as an if-chain:
@@ -252,12 +264,12 @@ static PX_CRYPT_LIST: &[(&[u8], Option<CryptFn>)] = &[
 
 /// `px_crypt` (px-crypt.c:101). C walks the table until either the zero-length
 /// catch-all id or a `strncmp` hit, then returns NULL when the matched row has
-/// no handler.
-pub fn crypt(password: &str, salt: &str) -> Result<String, CryptError> {
-    let s = salt.as_bytes();
+/// no handler. D21: password, salt, and result are raw bytes end to end — see
+/// the handler-block comment above.
+pub fn crypt(password: &[u8], salt: &[u8]) -> Result<Vec<u8>, CryptError> {
     let (_, handler) = PX_CRYPT_LIST
         .iter()
-        .find(|(id, _)| id.is_empty() || s.starts_with(id))
+        .find(|(id, _)| id.is_empty() || salt.starts_with(id))
         .expect("px_crypt_list ends with the zero-length catch-all row");
     match handler {
         None => Err(CryptError::Message("crypt(3) returned NULL".to_string())),
@@ -272,7 +284,7 @@ fn to64(out: &mut Vec<u8>, mut v: u32, n: usize) {
     }
 }
 
-fn crypt_md5(pw: &[u8], salt: &[u8]) -> Result<String, String> {
+fn crypt_md5(pw: &[u8], salt: &[u8]) -> Result<Vec<u8>, String> {
     const MAGIC: &[u8] = b"$1$";
     let after = &salt[MAGIC.len()..];
     let mut sl = 0usize;
@@ -338,11 +350,14 @@ fn crypt_md5(pw: &[u8], salt: &[u8]) -> Result<String, String> {
     to64(&mut enc, ((d[4] as u32) << 16) | ((d[10] as u32) << 8) | (d[5] as u32), 4);
     to64(&mut enc, d[11] as u32, 2);
 
-    Ok(format!(
-        "$1${}${}",
-        String::from_utf8_lossy(salt_bytes),
-        String::from_utf8_lossy(&enc)
-    ))
+    // C emits MAGIC + the RAW salt bytes + '$' + itoa64 hash; the salt run is
+    // echoed verbatim (crypt-md5.c), so the result stays bytes.
+    let mut out = Vec::with_capacity(MAGIC.len() + salt_bytes.len() + 1 + enc.len());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(salt_bytes);
+    out.push(b'$');
+    out.extend_from_slice(&enc);
+    Ok(out)
 }
 
 // CHECK_FOR_INTERRUPTS test double, shared by the crypt/bcrypt/shacrypt/des
@@ -394,9 +409,11 @@ mod tests {
     use super::cfi_test_support::{arm_cfi, cfi_calls};
     use super::*;
 
-    fn ok(r: Result<String, CryptError>) -> String {
+    fn ok(r: Result<Vec<u8>, CryptError>) -> String {
         match r {
-            Ok(s) => s,
+            // Every vector in these tests is ASCII; non-UTF-8 outputs are the
+            // divergence_witness module's domain.
+            Ok(s) => String::from_utf8(s).expect("test vectors are ASCII"),
             Err(CryptError::Message(m)) => panic!("crypt errored: {m}"),
             Err(CryptError::Unsupported(m)) => panic!("crypt unsupported: {m}"),
             Err(CryptError::Pg(e)) => panic!("crypt raised: {}", e.message),
@@ -428,7 +445,7 @@ mod tests {
             // regresses to a huge round count: a broken clamp trips the
             // budget on round 2001 and errors fast instead of grinding.
             arm_cfi(2000);
-            let h = ok(crypt("pw", &format!("$5$rounds={r}$abcdefgh")));
+            let h = ok(crypt(b"pw", format!("$5$rounds={r}$abcdefgh").as_bytes()));
             assert_eq!(h, C_ORACLE_CLAMPED_MIN, "rounds={r}");
             // The rounds ACTUALLY RUN equal C's clamped 1000 (one
             // CHECK_FOR_INTERRUPTS per round).
@@ -440,7 +457,7 @@ mod tests {
     fn shacrypt_rounds_strtol_sign_and_space_like_c() {
         for r in ["7000", "+7000", " 7000"] {
             arm_cfi(8000); // bounded witness, same rationale as above
-            let h = ok(crypt("pw", &format!("$5$rounds={r}$abcdefgh")));
+            let h = ok(crypt(b"pw", format!("$5$rounds={r}$abcdefgh").as_bytes()));
             assert_eq!(h, C_ORACLE_7000, "rounds={r}");
             assert_eq!(cfi_calls(), 7000, "rounds={r}");
         }
@@ -452,7 +469,7 @@ mod tests {
     fn shacrypt_rounds_garbage_errors_like_c() {
         arm_cfi(u64::MAX);
         for r in ["abc", "7000abc", "-$x"] {
-            match crypt("pw", &format!("$5$rounds={r}$abcdefgh")) {
+            match crypt(b"pw", format!("$5$rounds={r}$abcdefgh").as_bytes()) {
                 Err(CryptError::Pg(e)) => {
                     assert_eq!(e.message, "could not parse salt options", "rounds={r}");
                     assert_eq!(e.sqlstate, types_error::ERRCODE_SYNTAX_ERROR, "rounds={r}");
@@ -472,7 +489,7 @@ mod tests {
     #[test]
     fn shacrypt_loop_is_cancellable() {
         arm_cfi(5);
-        match crypt("pw", "$6$rounds=200000$abcdefgh") {
+        match crypt(b"pw", b"$6$rounds=200000$abcdefgh") {
             Err(CryptError::Pg(e)) => {
                 assert_eq!(e.sqlstate, types_error::ERRCODE_QUERY_CANCELED);
             }
@@ -486,7 +503,7 @@ mod tests {
     #[test]
     fn bcrypt_loop_is_cancellable() {
         arm_cfi(5);
-        match crypt("pw", "$2a$14$......................") {
+        match crypt(b"pw", b"$2a$14$......................") {
             Err(CryptError::Pg(e)) => {
                 assert_eq!(e.sqlstate, types_error::ERRCODE_QUERY_CANCELED);
             }
@@ -499,41 +516,38 @@ mod tests {
     #[test]
     fn md5_crypt_shape_and_roundtrip() {
         arm_cfi(u64::MAX);
-        let h = crypt("foox", "$1$Szzz0yzz").map_err(|_| ()).unwrap();
+        let h = ok(crypt(b"foox", b"$1$Szzz0yzz"));
         assert!(h.starts_with("$1$Szzz0yzz$"));
         assert_eq!(h.len(), "$1$Szzz0yzz$".len() + 22);
-        assert_eq!(crypt("foox", &h).map_err(|_| ()).unwrap(), h);
+        assert_eq!(ok(crypt(b"foox", h.as_bytes())), h);
     }
 
     // Traditional/xdes DES known vectors (crypt-des.c), incl. adversarial salt.
     #[test]
     fn des_known_vectors() {
-        assert_eq!(crypt("foob", "rl").map_err(|_| ()).unwrap(), "rlK6kmJqyMjZM");
-        assert_eq!(
-            crypt("password", "_/!!!!!!!").map_err(|_| ()).unwrap(),
-            "_/!!!!!!!zqM49hRzxko"
-        );
+        assert_eq!(ok(crypt(b"foob", b"rl")), "rlK6kmJqyMjZM");
+        assert_eq!(ok(crypt(b"password", b"_/!!!!!!!")), "_/!!!!!!!zqM49hRzxko");
     }
 
     // bcrypt $2a$ roundtrip: crypt(pw, hash) reproduces the hash.
     #[test]
     fn bcrypt_roundtrip() {
         arm_cfi(u64::MAX);
-        let setting = "$2a$06$......................";
-        let h = crypt("foox", setting).map_err(|_| ()).unwrap();
+        let setting = b"$2a$06$......................";
+        let h = ok(crypt(b"foox", setting));
         assert!(h.starts_with("$2a$06$"));
-        assert_eq!(crypt("foox", &h).map_err(|_| ()).unwrap(), h);
+        assert_eq!(ok(crypt(b"foox", h.as_bytes())), h);
     }
 
     // sha-crypt $5$/$6$ roundtrip.
     #[test]
     fn shacrypt_roundtrip() {
         arm_cfi(u64::MAX);
-        let h5 = crypt("foox", "$5$Szzz0yzz").map_err(|_| ()).unwrap();
+        let h5 = ok(crypt(b"foox", b"$5$Szzz0yzz"));
         assert!(h5.starts_with("$5$Szzz0yzz$"));
-        assert_eq!(crypt("foox", &h5).map_err(|_| ()).unwrap(), h5);
-        let h6 = crypt("foox", "$6$Szzz0yzz").map_err(|_| ()).unwrap();
+        assert_eq!(ok(crypt(b"foox", h5.as_bytes())), h5);
+        let h6 = ok(crypt(b"foox", b"$6$Szzz0yzz"));
         assert!(h6.starts_with("$6$Szzz0yzz$"));
-        assert_eq!(crypt("foox", &h6).map_err(|_| ()).unwrap(), h6);
+        assert_eq!(ok(crypt(b"foox", h6.as_bytes())), h6);
     }
 }

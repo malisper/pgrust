@@ -95,10 +95,13 @@ fn fc_pg_crypt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     check_builtin_crypto()?;
     // SAFETY: strict fn — arg0 password text, arg1 salt text.
     let (pw, salt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    let pw = String::from_utf8_lossy(pw.data()).into_owned();
-    let salt = String::from_utf8_lossy(salt.data()).into_owned();
-    let s = crypt::crypt(&pw, &salt).map_err(crypt_err)?;
-    bytea_result(fcinfo, s.as_bytes())
+    // D21: C's pg_crypt goes text_to_cstring -> px_crypt -> cstring_to_text
+    // with NO encoding validation anywhere — password, salt, and result are
+    // raw bytes (the result even echoes setting-prefix bytes verbatim).
+    // Laundering through from_utf8_lossy collapsed distinct non-UTF-8
+    // passwords onto U+FFFD and rewrote C's result bytes.
+    let s = crypt::crypt(pw.data(), salt.data()).map_err(crypt_err)?;
+    bytea_result(fcinfo, &s)
 }
 
 fn cipher_err(op: &str, e: cipher::CipherError) -> Box<PgError> {

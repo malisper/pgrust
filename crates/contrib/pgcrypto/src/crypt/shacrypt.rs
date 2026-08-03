@@ -350,8 +350,8 @@ fn sha2_crypt<C: ShaCtx>(
 /// Native `px_crypt_shacrypt` (crypt-sha.c:68). The dispatcher only routes
 /// `$5$`/`$6$`-prefixed settings here, but the C entry checks are ported for
 /// direct callers.
-pub fn crypt_sha(pw: &str, setting: &str) -> Result<String, CryptError> {
-    let full = setting.as_bytes();
+pub fn crypt_sha(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
+    let full = setting;
     // C sees a NUL-terminated string: strlen/strstr stop at the first NUL.
     // SQL `text` cannot carry NUL; this matters only for direct Rust callers.
     let s = &full[..full.iter().position(|&b| b == 0).unwrap_or(full.len())];
@@ -448,9 +448,9 @@ pub fn crypt_sha(pw: &str, setting: &str) -> Result<String, CryptError> {
     let salt_raw = &rest[..salt_len];
 
     let raw = if is_512 {
-        sha2_crypt::<Ctx512>(pw.as_bytes(), &decoded, salt_raw, rounds, SHA512_TRANSPOSE)?
+        sha2_crypt::<Ctx512>(pw, &decoded, salt_raw, rounds, SHA512_TRANSPOSE)?
     } else {
-        sha2_crypt::<Ctx256>(pw.as_bytes(), &decoded, salt_raw, rounds, SHA256_TRANSPOSE)?
+        sha2_crypt::<Ctx256>(pw, &decoded, salt_raw, rounds, SHA256_TRANSPOSE)?
     };
     let magic = if is_512 { "$6$" } else { "$5$" };
     let encoded = hash64_encode(&raw);

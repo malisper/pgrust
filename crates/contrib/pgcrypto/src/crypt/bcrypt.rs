@@ -133,7 +133,7 @@ pub fn encode_salt64(raw: &[u8; 16]) -> String {
 }
 
 /// `crypt_bf(key, setting)` — bcrypt. `setting` is `$2<minor>$NN$<22-char salt>`.
-pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
+pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<Vec<u8>, CryptError> {
     // Validate the setting prefix exactly as crypt-blowfish.c's _crypt_blowfish_rn.
     if setting.len() < 7 + 22
         || setting[0] != b'$'
@@ -207,5 +207,7 @@ pub fn crypt_bf(pw: &[u8], setting: &[u8]) -> Result<String, CryptError> {
         result[last] = BF64[(v & 0x30) as usize];
     }
     result.extend_from_slice(&enc);
-    Ok(String::from_utf8_lossy(&result).into_owned())
+    // All bytes are BF64/prefix-validated ASCII; returned as bytes for D21
+    // uniformity across the crypt cone.
+    Ok(result)
 }
