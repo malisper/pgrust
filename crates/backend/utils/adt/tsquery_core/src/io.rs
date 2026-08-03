@@ -344,6 +344,10 @@ pub fn collect_values<'mcx>(
             vals.push(v);
         }
     }
+    // C (tsquery_op.c:322-326) pg_qsorts char* by strcmp then quniques.
+    // Ties are byte-identical strings and only string CONTENT is ever
+    // observed downstream (strcmp at :339), so unstable-vs-stable tie
+    // order is a non-surface here; a stable sort is C-equivalent.
     vals.sort_by(|a, b| a.as_slice().cmp(b.as_slice()));
     vals.dedup_by(|a, b| a.as_slice() == b.as_slice());
     Ok(vals)

@@ -293,3 +293,183 @@ fn tsquery_out_over_ceiling_raises_c_repalloc_error() {
         .expect_err("over-ceiling tsquery output must raise C's repalloc refusal");
     assert_eq!(err.message(), "invalid memory alloc request size 1073741824");
 }
+
+// ---------------------------------------------------------------------------
+// qtn_sort tie re-witness (laneaf closeout, task #135).
+//
+// C QTNSort (tsquery_util.c:163) sorts the QTNode* child array with qsort ==
+// pg_qsort (port.h), and its equal-key output order is USER-VISIBLE:
+// QTNodeCompare ignores operand weight/prefix, so same-lexeme different-
+// payload children tie while being image-distinct, and ts_rewrite emits them
+// in pg_qsort's tie order (fuzz/divergences/tsqrw_diff/FINDINGS-qsort-tie.md,
+// docker-18.3 adjudicated). qtn_sort therefore runs the canonical
+// pg_qsort_arg over an index proxy (util.rs). Witness structure per
+// GL-PARMERGE-1: within-tie ORDER is the ratified non-surface for equal
+// elements — the multiset gate is the always-true witness — and where the
+// order IS observable (>= 7 tie-carrying children through ts_rewrite's sort)
+// the gate is byte-exact against adjudicated PostgreSQL 18.3 output.
+// ---------------------------------------------------------------------------
+
+use ::adt_tsvector_core::query::Item as QItem;
+
+use crate::util::{qt2qtn, qtn2qt, qtn_binary, qtn_sort, qtn_ternary, qtnode_compare, QtNode};
+
+/// The QTNSort-visible slice of the ts_rewrite pipeline (fc_tsquery_rewrite
+/// with a never-matching pattern): parse -> QT2QTN -> QTNTernary -> QTNSort ->
+/// QTNBinary -> QTN2QT -> out. findsubquery is identity when nothing matches,
+/// so this reproduces exactly what PostgreSQL prints for
+/// ts_rewrite(q, 'q'::tsquery, 'r'::tsquery) with 'q' absent from the input.
+fn sortview(input: &str) -> String {
+    let ctx = MemoryContext::new("t135");
+    let mcx = ctx.mcx();
+    let img = tsquery_in_core(mcx, input.as_bytes(), None)
+        .expect("parse ok")
+        .expect("no soft error");
+    let mut tree = qt2qtn(mcx, TsQueryRef { payload: &img[4..] }, 0).expect("qt2qtn");
+    qtn_ternary(&mut tree).expect("ternary");
+    qtn_sort(&mut tree).expect("sort");
+    qtn_binary(mcx, &mut tree).expect("binary");
+    let out_img = qtn2qt(mcx, &tree).expect("qtn2qt");
+    let out = tsquery_out_core(mcx, TsQueryRef { payload: &out_img[4..] }).expect("out ok");
+    String::from_utf8(out[..out.len() - 1].to_vec()).expect("utf8")
+}
+
+/// Top-level OR term multiset of a printed tsquery (flat OR inputs only).
+fn term_multiset(printed: &str) -> std::vec::Vec<String> {
+    let mut v: std::vec::Vec<String> = printed.split(" | ").map(|s| s.to_string()).collect();
+    v.sort();
+    v
+}
+
+/// OBSERVABLE-ORDER GATE (byte-exact, adjudicated): the two FINDINGS-qsort-tie
+/// witnesses, docker postgres:18.3-adjudicated on 2026-07-31. Both carry a
+/// same-lexeme different-weight tie pair in a 7-child OR node — exactly the
+/// regime (nchild >= 7, not presorted) where pg_qsort's tie order departs
+/// from a stable sort. Swapping the pair in the input swaps the output pair;
+/// a stable sort emits 'a':A first in the first case (the shipped pre-fix
+/// divergence) and fails this test.
+#[test]
+fn qtn_sort_tie_order_matches_adjudicated_pg() {
+    assert_eq!(
+        sortview("b | c | d | a:A | e | f | a:B"),
+        "'a':B | 'e' | 'c' | 'b' | 'f' | 'a':A | 'd'"
+    );
+    assert_eq!(
+        sortview("b | c | d | a:B | e | f | a:A"),
+        "'a':A | 'e' | 'c' | 'b' | 'f' | 'a':B | 'd'"
+    );
+}
+
+/// Snapshot of the payload bits qtnode_compare IGNORES but the image keeps:
+/// (word bytes, weight, prefix). Equal-compare children differing here are
+/// the tie class whose placement the index proxy must get C-exact.
+fn val_descriptor(n: &QtNode<'_>) -> (std::vec::Vec<u8>, u8, bool) {
+    match n.item {
+        QItem::Val(op) => (n.word.to_vec(), op.weight, op.prefix),
+        _ => panic!("fixture children must be operands"),
+    }
+}
+
+/// FULL-TIE + MIXED-TIE FIXTURES across the sort_template regimes (n < 7
+/// insertion sort, 7 <= n <= 40 med-of-3, n > 40 med-of-9) — two gates:
+///
+///   (a) sorted-multiset equality (the ratified non-surface witness): the
+///       sorted output is a permutation of the input terms;
+///   (b) permutation-application exactness: qtn_sort's placed order equals
+///       the canonical pg_qsort_arg permutation of the pre-sort children
+///       under qtnode_compare — i.e. the index proxy's invert-and-scatter
+///       step is the identity transform on what pg_qsort decided. (C-order
+///       exactness itself is anchored by the adjudicated witnesses above and
+///       by the tsqrw_diff C oracle, which vendors PG's own sort_template
+///       instantiation.)
+#[test]
+fn qtn_sort_tie_fixtures_multiset_and_proxy_exact() {
+    let tie_pool = ["a:A", "a:B", "a:C", "a:D", "a", "a:*", "a:AB", "a:CD", "a:ABCD"];
+    let word_pool = ["b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"];
+    let mut fixtures: std::vec::Vec<String> = std::vec::Vec::new();
+    // All-equal keys: every child ties with every other.
+    for n in [2usize, 5, 6, 7, 8, 13, 40, 41, 45] {
+        let terms: std::vec::Vec<&str> = (0..n).map(|i| tie_pool[i % tie_pool.len()]).collect();
+        fixtures.push(terms.join(" | "));
+    }
+    // Mixed-tie groups: distinct lexemes interleaved with two tie families.
+    for n in [6usize, 7, 9, 13, 41] {
+        let mut terms: std::vec::Vec<String> = std::vec::Vec::new();
+        for i in 0..n {
+            terms.push(match i % 3 {
+                0 => tie_pool[(i / 3) % tie_pool.len()].to_string(),
+                1 => word_pool[i % word_pool.len()].to_string(),
+                _ => format!("{}:{}", word_pool[i % word_pool.len()], ["A", "B"][(i / 3) % 2]),
+            });
+        }
+        fixtures.push(terms.join(" | "));
+    }
+
+    for input in &fixtures {
+        // Gate (a): multiset equality, order-insensitive (non-surface).
+        assert_eq!(
+            term_multiset(&sortview(input)),
+            term_multiset(&roundtrip(input)),
+            "multiset gate: {input}"
+        );
+
+        // Gate (b): proxy-applied order == canonical pg_qsort_arg order.
+        let ctx = MemoryContext::new("t135b");
+        let mcx = ctx.mcx();
+        let img = tsquery_in_core(mcx, input.as_bytes(), None).unwrap().unwrap();
+        let mut tree = qt2qtn(mcx, TsQueryRef { payload: &img[4..] }, 0).unwrap();
+        qtn_ternary(&mut tree).unwrap();
+        let pre: std::vec::Vec<_> = tree.children.iter().map(val_descriptor).collect();
+        let mut idx: std::vec::Vec<u32> = (0..tree.children.len() as u32).collect();
+        {
+            let children = &tree.children;
+            ::pg_qsort::pg_qsort_arg(&mut idx, |&a, &b| {
+                qtnode_compare(&children[a as usize], &children[b as usize])
+            })
+            .unwrap();
+        }
+        qtn_sort(&mut tree).unwrap();
+        let got: std::vec::Vec<_> = tree.children.iter().map(val_descriptor).collect();
+        let expect: std::vec::Vec<_> =
+            idx.iter().map(|&k| pre[k as usize].clone()).collect();
+        assert_eq!(got, expect, "proxy-exactness gate: {input}");
+    }
+}
+
+/// qtn_sort's PgResult contract: a stack-depth error raised below it (its own
+/// per-level entry guard, matching C QTNSort's check_stack_depth) surfaces as
+/// Err(54001), never a panic or an abort, and the tree stays a valid
+/// permutation. Frame-pad recursion makes the trip deterministic under a
+/// floor-level max_stack_depth regardless of profile frame sizes.
+#[test]
+fn qtn_sort_stack_error_propagates_as_54001() {
+    // ERRCODE_STATEMENT_TOO_COMPLEX == MAKE_SQLSTATE("54001").
+    const STATEMENT_TOO_COMPLEX: i32 = 5 + (4 << 6) + (1 << 24);
+    #[inline(never)]
+    fn descend(depth: usize, tree: &mut QtNode<'_>) -> ::types_error::PgResult<()> {
+        let pad = [0u8; 512];
+        std::hint::black_box(&pad);
+        if depth == 0 { qtn_sort(tree) } else { descend(depth - 1, tree) }
+    }
+    let h = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(|| {
+            let ctx = MemoryContext::new("t135c");
+            let mcx = ctx.mcx();
+            let img = tsquery_in_core(mcx, b"b | c | a:A | a:B | d | e | f", None)
+                .unwrap()
+                .unwrap();
+            let mut tree = qt2qtn(mcx, TsQueryRef { payload: &img[4..] }, 0).unwrap();
+            qtn_ternary(&mut tree).unwrap();
+            // Base at THIS frame; 1kB limit; 32 padded frames (> 16kB) below.
+            ::stack_depth::set_stack_base();
+            ::stack_depth::assign_max_stack_depth(1);
+            let err = descend(32, &mut tree).expect_err("guard must trip");
+            ::stack_depth::assign_max_stack_depth(2048);
+            assert_eq!(err.sqlstate().0, STATEMENT_TOO_COMPLEX);
+            // Untouched-on-error: still the 7 original children, all operands.
+            assert_eq!(tree.children.len(), 7);
+        })
+        .unwrap();
+    h.join().expect("qtn_sort must return Err, not unwind");
+}

@@ -115,23 +115,40 @@ pub fn qtn_sort(n: &mut QtNode<'_>) -> PgResult<()> {
         qtn_sort(c)?;
     }
     if n.children.len() > 1 && opr.oper != OP_PHRASE {
-        // sort_by cannot fail, so the comparator's own recursion guard is
-        // pre-charged: the deepest comparison recursion is bounded by the
-        // subtree depth, which qtnode_compare re-checks per level below.
-        let mut err = None;
-        n.children.sort_by(|a, b| match qtnode_compare(a, b) {
-            Ok(x) if x < 0 => core::cmp::Ordering::Less,
-            Ok(0) => core::cmp::Ordering::Equal,
-            Ok(_) => core::cmp::Ordering::Greater,
-            Err(e) => {
-                if err.is_none() {
-                    err = Some(e);
-                }
-                core::cmp::Ordering::Equal
+        // C QTNSort sorts the QTNode* child array with qsort == pg_qsort
+        // (port.h), whose tie decisions at nchild >= 7 are user-visible:
+        // QTNodeCompare ignores operand weight/prefix, so same-lexeme
+        // different-weight children compare equal while being image-
+        // distinct, and ts_rewrite emits them in pg_qsort's tie order
+        // (fuzz/divergences/tsqrw_diff/FINDINGS-qsort-tie.md, docker-18.3
+        // adjudicated). A stable std sort diverges there.
+        //
+        // QtNode is non-Copy and qtnode_compare is fallible (stack-depth
+        // guard), so run the canonical pg_qsort_arg over an INDEX PROXY:
+        // C permutes an array of pointers, this permutes the same sequence
+        // of handles under the same comparator decisions, so the final
+        // child order is C's exactly. A comparator error aborts the sort
+        // (C's ereport longjmps out of qsort the same way) and propagates
+        // before the permutation is applied, leaving the tree valid.
+        let children = &n.children;
+        let mut idx: Vec<u32> = (0..children.len() as u32).collect();
+        pg_qsort::pg_qsort_arg(&mut idx, |&a, &b| {
+            qtnode_compare(&children[a as usize], &children[b as usize])
+        })?;
+        // Apply the permutation: new[k] = old[idx[k]]. Invert it so the
+        // cycle-swap walk below can scatter in place with slice::swap
+        // (no Copy/clone of QtNode, no second node buffer).
+        let mut inv = vec![0u32; idx.len()];
+        for (k, &v) in idx.iter().enumerate() {
+            inv[v as usize] = k as u32;
+        }
+        let children = &mut n.children;
+        for i in 0..inv.len() {
+            while inv[i] as usize != i {
+                let j = inv[i] as usize;
+                children.swap(i, j);
+                inv.swap(i, j);
             }
-        });
-        if let Some(e) = err {
-            return Err(e);
         }
     }
     Ok(())
