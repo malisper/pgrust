@@ -2,7 +2,52 @@
 // targets (csrc/README-style provenance headers in each file). Same cc
 // pattern as proofs/brin-minmax/build.rs — plain native compile; there is
 // no Kani arm here (the fuzz workspace never builds under cargo-kani).
+// ORACLE-ASAN OPT-IN (task #143, Michael-approved, 2026-08-03): arm
+// -fsanitize=address (+ frame pointers + debug info for symbolized reports)
+// on selected C ORACLE cc::Builds. Without instrumenting the C TUs, ASan
+// only intercepts malloc, so OOB/UAF performed BY the vendored C surfaces
+// (if at all) as value divergences or garbage-PC faults — the spellfam
+// rationale, extended family-by-family (wcharfam + regexfam first; the
+// tree-wide csrc/ pass is task #84). STRICTLY OPT-IN via PGRUST_ORACLE_ASAN=1
+// AND a cargo-fuzz build (CARGO_CFG_FUZZING): the ASan RUNTIME comes from
+// cargo-fuzz's Rust-side -Zsanitizer=address link, so a plain `cargo test`
+// build must never gain objects whose __asan_* references nothing resolves.
+// With the env unset the default campaign build is UNCHANGED.
+// SIDE-CHANNEL DISCIPLINE (asan-is-side-channel ruling): an ASan abort is a
+// C-oracle memory FINDING — the CI cluster runner counts sanitizer artifacts
+// separately from divergences; it never becomes a differential verdict.
+fn oracle_asan_armed() -> bool {
+    std::env::var_os("PGRUST_ORACLE_ASAN").is_some_and(|v| v == "1")
+        && std::env::var_os("CARGO_CFG_FUZZING").is_some()
+}
+
+// -fsanitize=address for a C oracle TU that will link against the ASan
+// runtime cargo-fuzz's Rust side brings (-Zsanitizer=address ->
+// librustc_rt.asan). macOS quirk (task #143, observed Apple clang 17.0.0 /
+// clang-1700 vs rustc nightly-2026-07-17): Apple clang's ASan module ctor
+// references ___asan_version_mismatch_check_apple_clang_1700, which rustc's
+// bundled UPSTREAM-LLVM runtime does not export (it has ..._v8 only), so the
+// mixed link dies with undefined symbols — this broke EVERY macOS cargo-fuzz
+// link of decoder_fuzz once the wcharfam/spellfam TUs were armed. Dropping
+// the guard (-mllvm -asan-guard-against-version-mismatch=0) makes the mix
+// link; the instrumentation<->runtime interface is version-stable in
+// practice, and the lane's must-fail control (planted heap OOB caught with a
+// full report) is the proof it actually catches. Linux/CI cluster builds (clang
+// proper) are unaffected: their objects reference ..._v8 directly.
+fn asan_c_flags(b: &mut cc::Build) {
+    b.flag("-fsanitize=address");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        b.flag("-mllvm").flag("-asan-guard-against-version-mismatch=0");
+    }
+}
+
+fn arm_oracle_asan(b: &mut cc::Build) {
+    asan_c_flags(b);
+    b.flag("-fno-omit-frame-pointer").flag("-g");
+}
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=PGRUST_ORACLE_ASAN");
     let mut build = cc::Build::new();
     // SANCOV ON THE C ORACLE (NEZHA union-coverage, campaign 2026-07-30):
     // instrument the vendored csrc objects so libFuzzer's retention feedback
@@ -386,7 +431,13 @@ fn main() {
     // rebuilt with ASan too and may surface their OWN latent C-side memory bugs.
     // Their corpora are deliberately NOT replayed here (that is task #84).
     if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
-        wcharfam.flag("-fsanitize=address");
+        asan_c_flags(&mut wcharfam);
+    }
+    // ORACLE-ASAN OPT-IN (task #143): frame pointers + debug info so the
+    // (already-armed-under-fuzzing) ASan reports on this TU symbolize to
+    // file:line. See the gate above main().
+    if oracle_asan_armed() {
+        arm_oracle_asan(&mut wcharfam);
     }
     wcharfam
         .file("csrc/pg_wcharfam.c")
@@ -1022,7 +1073,7 @@ fn main() {
     // Only under cargo-fuzz (which links the ASan runtime); a plain
     // `cargo test` build must not gain a sanitizer the harness cannot resolve.
     if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
-        spellfam.flag("-fsanitize=address");
+        asan_c_flags(&mut spellfam);
     }
     spellfam
         .file("csrc/pg_spellfam_io.c")
@@ -1033,6 +1084,10 @@ fn main() {
     let mut regexfam = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         regexfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // ORACLE-ASAN OPT-IN (task #143): see the gate above main().
+    if oracle_asan_armed() {
+        arm_oracle_asan(&mut regexfam);
     }
     // TWO ENGINE COPIES, ISOLATED (p1-regexcore merge): the regex_diff
     // oracle below links the byte-identical vendored engine under
@@ -1108,6 +1163,10 @@ fn main() {
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         regexcorefam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
+    // ORACLE-ASAN OPT-IN (task #143): see the gate above main().
+    if oracle_asan_armed() {
+        arm_oracle_asan(&mut regexcorefam);
+    }
     regexcorefam
         // oracle-integrity sweep (task #98): the backend's qsort IS
         // pg_qsort (port.h line 478); the verbatim engine bodies
@@ -1136,6 +1195,11 @@ fn main() {
     // lprobe_ prefix so tablesfam's unprefixed copy keeps its own object;
     // unicode_case.c is unique to this lib). See pg_regexfam_locale.c.
     let mut regexlocale = cc::Build::new();
+    // ORACLE-ASAN OPT-IN (task #143): csrc/regexfam family member (the
+    // engine's locale probe); see the gate above main().
+    if oracle_asan_armed() {
+        arm_oracle_asan(&mut regexlocale);
+    }
     for s in [
         "pg_set_regex_collation",
         // pg_wchar_utf8.c export (also linked unprefixed in the tsvec
