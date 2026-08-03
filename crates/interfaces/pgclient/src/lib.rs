@@ -22,6 +22,13 @@ mod auth;
 pub const PG_PROTOCOL_3_0: u32 = 3 << 16;
 const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
 
+// Largest message length we accept from the server (the wire length is a
+// SIGNED i32 that includes its own 4 bytes). PostgreSQL never sends a
+// message anywhere near 2^30 (values are capped at 1GB), so anything
+// larger — and anything below the 4-byte self-inclusive minimum, negative
+// values included — is framing loss, not a big row.
+const MAX_MESSAGE_LEN: i32 = 0x3FFF_FFFF;
+
 #[derive(Clone, Copy)]
 pub struct WaitEvents {
     pub connect: u32,
@@ -170,6 +177,10 @@ pub(crate) fn be_i32(b: &[u8]) -> i32 {
 }
 
 pub(crate) fn cstr_at(b: &[u8], pos: usize) -> (String, usize) {
+    // Server-controlled offsets: a body whose previous field ran to the end
+    // without a NUL hands us pos == b.len() + 1; clamp instead of slicing
+    // out of range.
+    let pos = pos.min(b.len());
     let end = b[pos..].iter().position(|&c| c == 0).map(|e| pos + e).unwrap_or(b.len());
     (String::from_utf8_lossy(&b[pos..end]).into_owned(), end + 1)
 }
@@ -689,17 +700,32 @@ impl PgConn {
         }
     }
 
-    pub(crate) fn next_message(&mut self) -> Option<(u8, Vec<u8>)> {
+    // Ok(None) = need more bytes; Err = the frame header is malformed. The
+    // wire length is a SIGNED i32 the server controls: validate it BEFORE
+    // it becomes a usize, or a negative/short value turns into an enormous
+    // index and a panic. Once framing is lost there is no way to find the
+    // next message boundary, so the connection is marked dead (libpq's
+    // handleSyncLoss discipline).
+    pub(crate) fn next_message(&mut self) -> Result<Option<(u8, Vec<u8>)>, String> {
         let avail = self.inbuf.len() - self.inpos;
         if avail < 5 {
-            return None;
+            return Ok(None);
         }
         let p = self.inpos;
-        let len = be_i32(&self.inbuf[p + 1..p + 5]) as usize;
-        if avail < 1 + len {
-            return None;
-        }
         let t = self.inbuf[p];
+        let wire_len = be_i32(&self.inbuf[p + 1..p + 5]);
+        if !(4..=MAX_MESSAGE_LEN).contains(&wire_len) {
+            self.conn_ok = false;
+            self.err = format!(
+                "lost synchronization with server: got message type \"{}\", length {wire_len}",
+                t as char
+            );
+            return Err(self.err.clone());
+        }
+        let len = wire_len as usize;
+        if avail < 1 + len {
+            return Ok(None);
+        }
         let body = self.inbuf[p + 5..p + 1 + len].to_vec();
         self.inpos = p + 1 + len;
         if self.inpos == self.inbuf.len() {
@@ -709,7 +735,7 @@ impl PgConn {
             self.inbuf.drain(..self.inpos);
             self.inpos = 0;
         }
-        Some((t, body))
+        Ok(Some((t, body)))
     }
 
     pub(crate) fn read_message(
@@ -717,14 +743,25 @@ impl PgConn {
         wait_event_info: u32,
     ) -> PgResult<Result<(u8, Vec<u8>), String>> {
         loop {
-            if let Some(m) = self.next_message() {
-                return Ok(Ok(m));
+            match self.next_message() {
+                Ok(Some(m)) => return Ok(Ok(m)),
+                Ok(None) => {}
+                Err(e) => return Ok(Err(e)),
             }
             wait_socket(self.fd, WL_SOCKET_READABLE, wait_event_info)?;
             if !self.consume_input() {
                 return Ok(Err(self.err.clone()));
             }
         }
+    }
+
+    // A malformed body (bad DataRow, short RowDescription) poisons the
+    // connection and comes back as the crate's usual connection-error
+    // result: after it, nothing on the wire can be trusted.
+    fn proto_error(&mut self, e: String) -> QueryResult {
+        self.conn_ok = false;
+        self.err = e.clone();
+        QueryResult::error(e)
     }
 
     // Async-message bookkeeping shared by every read loop.
@@ -748,13 +785,24 @@ impl PgConn {
                 }
             }
             b'A' => {
-                let be_pid = be_i32(&body[0..4]);
+                // NotificationResponse needs at least the 4-byte pid; a
+                // shorter body is malformed — drop it rather than index
+                // past the frame (losing a corrupt notify is harmless).
+                let Some(pid_bytes) = body.get(0..4) else {
+                    return;
+                };
+                let be_pid = be_i32(pid_bytes);
                 let (channel, next) = cstr_at(body, 4);
                 let (extra, _) = cstr_at(body, next);
                 self.notifies.push_back(Notify { channel, be_pid, extra });
             }
             b'K' => {
-                self.be_pid = be_i32(&body[0..4]);
+                // BackendKeyData shorter than its 4-byte pid is malformed;
+                // keep the zero pid/key (cancel then simply can't target).
+                let Some(pid_bytes) = body.get(0..4) else {
+                    return;
+                };
+                self.be_pid = be_i32(pid_bytes);
                 self.be_key = body[4..].to_vec();
             }
             _ => {}
@@ -787,10 +835,16 @@ impl PgConn {
             };
             match t {
                 b'T' => {
-                    nfields = u16::from_be_bytes([mbody[0], mbody[1]]) as usize;
+                    nfields = match row_desc_nfields(&mbody) {
+                        Ok(n) => n,
+                        Err(e) => return Ok(self.proto_error(e)),
+                    };
                     rows.clear();
                 }
-                b'D' => rows.push(parse_data_row(&mbody)),
+                b'D' => match parse_data_row(&mbody) {
+                    Ok(r) => rows.push(r),
+                    Err(e) => return Ok(self.proto_error(e)),
+                },
                 b'C' => {
                     let (tag, _) = cstr_at(&mbody, 0);
                     result = QueryResult {
@@ -983,10 +1037,16 @@ impl PgConn {
             };
             match t {
                 b'T' => {
-                    nfields = u16::from_be_bytes([mbody[0], mbody[1]]) as usize;
+                    nfields = match row_desc_nfields(&mbody) {
+                        Ok(n) => n,
+                        Err(e) => return Ok(self.proto_error(e)),
+                    };
                     rows.clear();
                 }
-                b'D' => rows.push(parse_data_row(&mbody)),
+                b'D' => match parse_data_row(&mbody) {
+                    Ok(r) => rows.push(r),
+                    Err(e) => return Ok(self.proto_error(e)),
+                },
                 b'C' | b's' => {
                     let tag =
                         if t == b'C' { cstr_at(&mbody, 0).0 } else { String::new() };
@@ -1079,7 +1139,13 @@ impl PgConn {
             if self.inbuf.len() - p < 5 {
                 return true;
             }
-            let len = be_i32(&self.inbuf[p + 1..p + 5]) as usize;
+            let wire_len = be_i32(&self.inbuf[p + 1..p + 5]);
+            if !(4..=MAX_MESSAGE_LEN).contains(&wire_len) {
+                // Framing loss: report not-busy so the caller's get_result
+                // runs and surfaces the connection error.
+                return false;
+            }
+            let len = wire_len as usize;
             if self.inbuf.len() - p < 1 + len {
                 return true;
             }
@@ -1100,8 +1166,10 @@ impl PgConn {
     // PQgetCopyData(async=true).
     pub fn get_copy_data(&mut self) -> Result<CopyData, String> {
         loop {
-            let Some((t, body)) = self.next_message() else {
-                return Ok(CopyData::Block);
+            let (t, body) = match self.next_message() {
+                Ok(Some(m)) => m,
+                Ok(None) => return Ok(CopyData::Block),
+                Err(e) => return Err(e),
             };
             match t {
                 b'd' => return Ok(CopyData::Msg(body)),
@@ -1143,10 +1211,16 @@ impl PgConn {
             };
             match t {
                 b'T' => {
-                    nfields = u16::from_be_bytes([body[0], body[1]]) as usize;
+                    nfields = match row_desc_nfields(&body) {
+                        Ok(n) => n,
+                        Err(e) => return Ok(Some(self.proto_error(e))),
+                    };
                     rows.clear();
                 }
-                b'D' => rows.push(parse_data_row(&body)),
+                b'D' => match parse_data_row(&body) {
+                    Ok(r) => rows.push(r),
+                    Err(e) => return Ok(Some(self.proto_error(e))),
+                },
                 b'C' | b's' => {
                     let tag = if t == b'C' { cstr_at(&body, 0).0 } else { String::new() };
                     let status =
@@ -1217,17 +1291,24 @@ impl PgConn {
             };
             match t {
                 b'T' => {
-                    nfields = u16::from_be_bytes([body[0], body[1]]) as usize;
+                    nfields = match row_desc_nfields(&body) {
+                        Ok(n) => n,
+                        Err(e) => return Ok(self.proto_error(e)),
+                    };
                     started = false;
                 }
                 b'D' => {
                     postgres_seams::check_for_interrupts::call()?;
+                    let mut cols: Vec<Option<&[u8]>> = Vec::new();
+                    // Validate the row BEFORE result_start: a malformed row
+                    // must not reach the sink at all.
+                    if let Err(e) = parse_data_row_borrowed(&body, &mut cols) {
+                        return Ok(self.proto_error(e));
+                    }
                     if !started {
                         sink.result_start(&*self, nfields)?;
                         started = true;
                     }
-                    let mut cols: Vec<Option<&[u8]>> = Vec::new();
-                    parse_data_row_borrowed(&body, &mut cols);
                     sink.row(&cols)?;
                 }
                 b'C' => {
@@ -1483,36 +1564,62 @@ fn execute_body(portal: &str, maxrows: u32) -> Vec<u8> {
     b
 }
 
-pub(crate) fn parse_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
-    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let mut cols = Vec::with_capacity(ncols);
-    let mut p = 2;
-    for _ in 0..ncols {
-        let len = be_i32(&body[p..p + 4]);
-        p += 4;
-        if len < 0 {
-            cols.push(None);
-        } else {
-            cols.push(Some(body[p..p + len as usize].to_vec()));
-            p += len as usize;
-        }
+// RowDescription ('T') field count. A body shorter than its 2-byte count
+// header is malformed.
+fn row_desc_nfields(body: &[u8]) -> Result<usize, String> {
+    if body.len() < 2 {
+        return Err("insufficient data in \"T\" message".to_string());
     }
-    cols
+    Ok(u16::from_be_bytes([body[0], body[1]]) as usize)
 }
 
-fn parse_data_row_borrowed<'a>(body: &'a [u8], cols: &mut Vec<Option<&'a [u8]>>) {
-    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let mut p = 2;
-    for _ in 0..ncols {
-        let len = be_i32(&body[p..p + 4]);
-        p += 4;
-        if len < 0 {
-            cols.push(None);
-        } else {
-            cols.push(Some(&body[p..p + len as usize]));
-            p += len as usize;
-        }
+// DataRow ('D') body: every count and length in it is server-controlled.
+// Enforced here: the 2-byte column-count header is present; each column has
+// its 4-byte length; a negative length is the NULL marker -1 and nothing
+// else; a column never runs past the frame; and the frame has no trailing
+// bytes after the last declared column (leftover data means we and the
+// server disagree about the row shape — reject, don't guess).
+pub(crate) fn parse_data_row(body: &[u8]) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut cols = Vec::new();
+    parse_data_row_borrowed(body, &mut cols)?;
+    Ok(cols.into_iter().map(|c| c.map(|s| s.to_vec())).collect())
+}
+
+fn parse_data_row_borrowed<'a>(
+    body: &'a [u8],
+    cols: &mut Vec<Option<&'a [u8]>>,
+) -> Result<(), String> {
+    const MALFORMED: &str = "insufficient data in \"D\" message";
+    if body.len() < 2 {
+        return Err(MALFORMED.to_string());
     }
+    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
+    cols.reserve(ncols.min((body.len() - 2) / 4 + 1));
+    let mut p = 2usize;
+    for _ in 0..ncols {
+        let Some(hdr) = body.get(p..p + 4) else {
+            return Err(MALFORMED.to_string());
+        };
+        let len = be_i32(hdr);
+        p += 4;
+        if len == -1 {
+            cols.push(None);
+            continue;
+        }
+        if len < 0 {
+            return Err(format!("invalid column length {len} in \"D\" message"));
+        }
+        // len <= i32::MAX and p <= body.len(): p + len cannot overflow usize.
+        let Some(val) = body.get(p..p + len as usize) else {
+            return Err(MALFORMED.to_string());
+        };
+        cols.push(Some(val));
+        p += len as usize;
+    }
+    if p != body.len() {
+        return Err("extraneous data in \"D\" message".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1656,6 +1763,300 @@ mod tests {
         assert_eq!(opt(&opts, "host"), Some("h1"));
         assert_eq!(opt(&opts, "port"), Some("1111"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- hostile-server framing / DataRow decoding ----
+    //
+    // Every byte below is something a broken or malicious server could put
+    // on the wire; none may panic, all must surface as connection errors
+    // (or be safely dropped where the message is advisory).
+
+    // A PgConn over a real localhost socketpair, with the server end kept
+    // alive so sends succeed. Tests preload `inbuf` directly; as long as a
+    // complete (or provably invalid) message is buffered, the read loops
+    // never touch the socket.
+    fn test_conn() -> (PgConn, std::net::TcpStream) {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let fd = client.as_raw_fd();
+        let conn = PgConn {
+            _stream: Stream::Tcp(client),
+            fd,
+            target: DialTarget::Tcp("127.0.0.1".into(), addr.port()),
+            inbuf: Vec::new(),
+            inpos: 0,
+            conn_ok: true,
+            in_copy: false,
+            copy_server_done: false,
+            copy_client_done: false,
+            pending_results: false,
+            txn_status: b'I',
+            err: String::new(),
+            opts: Vec::new(),
+            display_host: "127.0.0.1".into(),
+            display_port: addr.port() as i32,
+            be_pid: 0,
+            be_key: Vec::new(),
+            server_version: 0,
+            used_password: false,
+            params: Vec::new(),
+            notifies: std::collections::VecDeque::new(),
+            we: WaitEvents { connect: 0, receive: 0 },
+        };
+        (conn, server)
+    }
+
+    fn frame(t: u8, wire_len: i32, body: &[u8]) -> Vec<u8> {
+        let mut f = vec![t];
+        f.extend_from_slice(&wire_len.to_be_bytes());
+        f.extend_from_slice(body);
+        f
+    }
+
+    #[test]
+    fn frame_negative_length_is_connection_error() {
+        let (mut conn, _srv) = test_conn();
+        conn.inbuf = frame(b'Z', -1, b"");
+        let err = conn.next_message().unwrap_err();
+        assert!(err.contains("lost synchronization"), "{err}");
+        assert!(err.contains("length -1"), "{err}");
+        assert!(conn.connection_bad());
+    }
+
+    #[test]
+    fn frame_length_below_protocol_minimum_is_connection_error() {
+        // The wire length includes its own 4 bytes; 0 and 3 are both
+        // impossible and previously became huge usizes.
+        for bad in [0i32, 3] {
+            let (mut conn, _srv) = test_conn();
+            conn.inbuf = frame(b'D', bad, b"xxxx");
+            assert!(conn.next_message().is_err());
+            assert!(conn.connection_bad());
+        }
+    }
+
+    #[test]
+    fn frame_absurdly_large_length_is_connection_error() {
+        let (mut conn, _srv) = test_conn();
+        conn.inbuf = frame(b'D', i32::MAX, b"");
+        assert!(conn.next_message().is_err());
+        assert!(conn.connection_bad());
+    }
+
+    #[test]
+    fn frame_incomplete_blocks_without_error() {
+        let (mut conn, _srv) = test_conn();
+        // Header claims 10 more body bytes than buffered: not an error,
+        // just not there yet.
+        conn.inbuf = frame(b'D', 14, b"abc");
+        assert!(matches!(conn.next_message(), Ok(None)));
+        assert!(!conn.connection_bad());
+        // Short of even a full header: same.
+        conn.inbuf = vec![b'D', 0, 0];
+        conn.inpos = 0;
+        assert!(matches!(conn.next_message(), Ok(None)));
+    }
+
+    #[test]
+    fn frame_valid_roundtrip_still_works() {
+        let (mut conn, _srv) = test_conn();
+        conn.inbuf = msg(b'C', b"SELECT 1\0");
+        let (t, body) = conn.next_message().unwrap().unwrap();
+        assert_eq!(t, b'C');
+        assert_eq!(body, b"SELECT 1\0");
+        assert!(matches!(conn.next_message(), Ok(None)));
+    }
+
+    #[test]
+    fn datarow_valid_values_and_null() {
+        let mut body = 2u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&2i32.to_be_bytes());
+        body.extend_from_slice(b"42");
+        body.extend_from_slice(&(-1i32).to_be_bytes());
+        let cols = parse_data_row(&body).unwrap();
+        assert_eq!(cols, vec![Some(b"42".to_vec()), None]);
+    }
+
+    #[test]
+    fn datarow_short_count_header_rejected() {
+        assert!(parse_data_row(b"").is_err());
+        assert!(parse_data_row(&[0]).is_err());
+    }
+
+    #[test]
+    fn datarow_missing_column_length_rejected() {
+        // Declares 1 column but has no 4-byte length word.
+        let body = 1u16.to_be_bytes().to_vec();
+        assert!(parse_data_row(&body).unwrap_err().contains("insufficient data"));
+        // Only half a length word.
+        let mut body = 1u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0, 0]);
+        assert!(parse_data_row(&body).is_err());
+    }
+
+    #[test]
+    fn datarow_truncated_column_rejected() {
+        // Column claims 5 bytes, frame carries 2.
+        let mut body = 1u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&5i32.to_be_bytes());
+        body.extend_from_slice(b"ab");
+        assert!(parse_data_row(&body).unwrap_err().contains("insufficient data"));
+    }
+
+    #[test]
+    fn datarow_negative_length_other_than_null_marker_rejected() {
+        for bad in [-2i32, i32::MIN] {
+            let mut body = 1u16.to_be_bytes().to_vec();
+            body.extend_from_slice(&bad.to_be_bytes());
+            let err = parse_data_row(&body).unwrap_err();
+            assert!(err.contains("invalid column length"), "{err}");
+        }
+    }
+
+    #[test]
+    fn datarow_trailing_bytes_rejected() {
+        let mut body = 1u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&1i32.to_be_bytes());
+        body.extend_from_slice(b"x");
+        body.push(0xEE); // leftover byte after the declared columns
+        assert!(parse_data_row(&body).unwrap_err().contains("extraneous data"));
+        // Same via the borrowed (streaming) parser.
+        let mut cols = Vec::new();
+        assert!(parse_data_row_borrowed(&body, &mut cols).is_err());
+    }
+
+    #[test]
+    fn datarow_trailing_null_marker_exact_fit_ok() {
+        let mut body = 1u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&(-1i32).to_be_bytes());
+        assert_eq!(parse_data_row(&body).unwrap(), vec![None]);
+    }
+
+    #[test]
+    fn row_desc_short_body_rejected() {
+        assert!(row_desc_nfields(&[]).is_err());
+        assert!(row_desc_nfields(&[1]).is_err());
+        assert_eq!(row_desc_nfields(&[0, 3, 9, 9]).unwrap(), 3);
+    }
+
+    #[test]
+    fn get_result_buffered_path_reports_malformed_datarow_as_conn_error() {
+        let (mut conn, _srv) = test_conn();
+        conn.pending_results = true;
+        // RowDescription announcing 1 field, then a DataRow whose column
+        // runs past its frame.
+        let mut wire = msg(b'T', &1u16.to_be_bytes());
+        let mut dbody = 1u16.to_be_bytes().to_vec();
+        dbody.extend_from_slice(&100i32.to_be_bytes());
+        dbody.extend_from_slice(b"short");
+        wire.extend_from_slice(&msg(b'D', &dbody));
+        conn.inbuf = wire;
+        let r = conn.get_result().unwrap().unwrap();
+        assert_eq!(r.status, ExecStatus::Error);
+        assert!(r.err.contains("insufficient data"), "{}", r.err);
+        assert!(conn.connection_bad());
+    }
+
+    #[test]
+    fn get_result_buffered_path_reports_short_rowdesc_as_conn_error() {
+        let (mut conn, _srv) = test_conn();
+        conn.pending_results = true;
+        conn.inbuf = msg(b'T', &[7]); // 1-byte RowDescription body
+        let r = conn.get_result().unwrap().unwrap();
+        assert_eq!(r.status, ExecStatus::Error);
+        assert!(conn.connection_bad());
+    }
+
+    #[test]
+    fn streaming_path_reports_malformed_datarow_before_sink_sees_it() {
+        struct CountSink {
+            starts: usize,
+            rows: usize,
+        }
+        impl RowSink for CountSink {
+            fn result_start(&mut self, _c: &PgConn, _n: usize) -> PgResult<()> {
+                self.starts += 1;
+                Ok(())
+            }
+            fn row(&mut self, _cols: &[Option<&[u8]>]) -> PgResult<()> {
+                self.rows += 1;
+                Ok(())
+            }
+        }
+        // exec_streaming runs CHECK_FOR_INTERRUPTS per row; give the seam a
+        // no-op body for this test binary (set-once, race-safe via Once).
+        static SEAM: std::sync::Once = std::sync::Once::new();
+        SEAM.call_once(|| {
+            if !postgres_seams::check_for_interrupts::is_installed() {
+                postgres_seams::check_for_interrupts::set(|| Ok(()));
+            }
+        });
+        let (mut conn, _srv) = test_conn();
+        // Preload the whole hostile conversation; exec_streaming's send of
+        // the Query message goes to the live socketpair.
+        let mut wire = msg(b'T', &1u16.to_be_bytes());
+        let mut dbody = 1u16.to_be_bytes().to_vec();
+        dbody.extend_from_slice(&1i32.to_be_bytes());
+        dbody.extend_from_slice(b"x");
+        dbody.push(0xEE); // trailing byte
+        wire.extend_from_slice(&msg(b'D', &dbody));
+        conn.inbuf = wire;
+        let mut sink = CountSink { starts: 0, rows: 0 };
+        let r = conn.exec_streaming("SELECT hostile", &mut sink).unwrap();
+        assert_eq!(r.status, ExecStatus::Error);
+        assert!(r.err.contains("extraneous data"), "{}", r.err);
+        assert_eq!(sink.starts, 0);
+        assert_eq!(sink.rows, 0);
+        assert!(conn.connection_bad());
+    }
+
+    #[test]
+    fn is_busy_survives_hostile_length() {
+        let (mut conn, _srv) = test_conn();
+        conn.pending_results = true;
+        conn.inbuf = frame(b'D', -1, b"");
+        // Framing loss: report not-busy so get_result runs and errors.
+        assert!(!conn.is_busy());
+        // Incomplete-but-valid frame: genuinely busy.
+        conn.inbuf = frame(b'D', 100, b"partial");
+        assert!(conn.is_busy());
+        // Complete terminator: not busy.
+        conn.inbuf = msg(b'Z', b"I");
+        assert!(!conn.is_busy());
+    }
+
+    #[test]
+    fn get_copy_data_reports_bad_frame() {
+        let (mut conn, _srv) = test_conn();
+        conn.in_copy = true;
+        conn.inbuf = frame(b'd', -5, b"");
+        assert!(conn.get_copy_data().is_err());
+        assert!(conn.connection_bad());
+    }
+
+    #[test]
+    fn note_async_tolerates_short_bodies() {
+        let (mut conn, _srv) = test_conn();
+        conn.note_async(b'A', b"\x01"); // NotificationResponse, 1 byte
+        assert!(conn.next_notify().is_none());
+        conn.note_async(b'K', b"\x01\x02"); // BackendKeyData, 2 bytes
+        assert_eq!(conn.backend_pid(), 0);
+        // ParameterStatus with no NUL terminators anywhere.
+        conn.note_async(b'S', b"no_nul_here");
+        // NotificationResponse whose channel runs to the end un-terminated.
+        conn.note_async(b'A', b"\0\0\0\x07chan");
+        assert!(conn.next_notify().is_some());
+    }
+
+    #[test]
+    fn cstr_at_clamps_out_of_range_pos() {
+        let (s, next) = cstr_at(b"ab", 5);
+        assert_eq!(s, "");
+        assert_eq!(next, 3);
     }
 
     #[test]
