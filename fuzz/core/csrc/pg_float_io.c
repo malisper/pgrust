@@ -119,7 +119,17 @@ pstrdup(const char *s)
 	size_t		n = strlen(s);
 	size_t		want = n + 1 + PG_DIFF_MSGBUF_GUARD;
 
-	if (want > pg_diff_msgbuf_cap)
+	/*
+	 * EXACT, not grow-never-shrink. Sizing up only would leave slack from an
+	 * earlier long call: after one 1602-byte pstrdup a subsequent 10-byte one
+	 * would hand back ~1590 usable bytes, so the very overrun this shim exists
+	 * to expose (an input-derived store past strlen) would land in slack and
+	 * go UNSEEN by the guard band below. Real mcxt.c hands out a fresh chunk
+	 * of exactly strlen+1 per call, and under this family's own doctrine the
+	 * allocation SIZE is the load-bearing part of the contract. So realloc
+	 * DOWN as well as up and keep the band immediately after the NUL.
+	 */
+	if (want != pg_diff_msgbuf_cap)
 	{
 		char	   *p = realloc(pg_diff_msgbuf, want);
 
@@ -140,6 +150,20 @@ pstrdup(const char *s)
  * truncating shim is back), or 2 + byte offset into the guard band of the
  * first clobbered byte (a body indexed past the string).
  */
+/*
+ * Slack probe for the EXACT-SIZING control: how many bytes the allocation
+ * carries beyond strlen+1+GUARD. Exact sizing keeps this at 0 on every call; a
+ * grow-never-shrink policy leaves the previous (longer) call's slack behind,
+ * which is where an input-derived overrun would hide from the guard band.
+ */
+int
+pg_diff_msgbuf_slack(void)
+{
+	if (pg_diff_msgbuf == NULL)
+		return -1;
+	return (int) (pg_diff_msgbuf_cap - (pg_diff_msgbuf_len + 1 + PG_DIFF_MSGBUF_GUARD));
+}
+
 int
 pg_diff_msgbuf_check(void)
 {

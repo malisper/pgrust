@@ -50,6 +50,7 @@ extern "C" {
     // H6 detector (csrc/pg_float_io.c): guard band over the shim message
     // buffer that the attributed writer overran.
     fn pg_diff_msgbuf_check() -> i32;
+    fn pg_diff_msgbuf_slack() -> i32;
     fn pg_diff_msgbuf_poison_for_test(off: i32) -> i32;
     // A real float8 error path, to arm the message buffer.
     fn pg_diff_float8in(num: *const std::ffi::c_char) -> f64;
@@ -190,4 +191,39 @@ fn scribbler_bisect_jsonbio_seeds() {
         }
     }
     assert_eq!(hits, 0, "scribbler localized: {hits} poisoning seed(s) named above");
+}
+
+/// EXACT-SIZING CONTROL. The first cut of this shim sized the buffer up only
+/// ("grow, never shrink"), which is memory-SAFE but detection-BLIND: after one
+/// long call the buffer keeps the larger capacity, so a later short call leaves
+/// hundreds of bytes of slack and an input-derived store past `strlen` lands
+/// inside the allocation instead of in the guard band — invisible to H6 and to
+/// the allocator both. Real `mcxt.c` hands out a fresh chunk of exactly
+/// strlen+1 per call, and this family's doctrine is that the allocation SIZE is
+/// the load-bearing half of the contract.
+///
+/// So: assert capacity tracks the CURRENT string, having first driven a much
+/// longer one. Under grow-never-shrink this fails (cap stays at the long
+/// string's size); under exact sizing it passes.
+#[test]
+fn h6_msgbuf_capacity_is_exact_after_a_longer_call() {
+    let _guard = c_oracle_serial();
+
+    // A long over-range literal first, so any grow-only policy inflates cap.
+    let long = format!("1e{}", "9".repeat(600));
+    let cs = std::ffi::CString::new(long.clone()).unwrap();
+    unsafe { pg_diff_float8in(cs.as_ptr()) };
+    let long_slack = unsafe { pg_diff_msgbuf_slack() };
+    assert_eq!(long_slack, 0, "the long call itself must be exactly sized");
+
+    // Now a short one. Exact sizing must SHRINK the allocation back.
+    arm_msgbuf();
+    let short_slack = unsafe { pg_diff_msgbuf_slack() };
+    assert_eq!(
+        short_slack, 0,
+        "GROW-NEVER-SHRINK REGRESSION: {short_slack} bytes of slack after a \
+         short message following a ~600-byte one. Slack past the guard band \
+         hides exactly the overrun this shim exists to expose."
+    );
+    assert_eq!(unsafe { pg_diff_msgbuf_check() }, 0, "band not intact");
 }
