@@ -117,6 +117,7 @@ adt_datetime = { path = "../../crates/backend/utils/adt/adt_datetime" }  # times
 adt_date = { path = "../../crates/backend/utils/adt/adt_date" }  # timestamp_diff fc plane (owed fc_timestamp_mi)
 pgtz = { path = "../../crates/backend/timezone/pgtz" }  # timestamp_diff env pin
 elog = { path = "../../crates/backend/utils/error/elog" }  # timestamp_diff env pin
+elog_seams = { path = "../../crates/backend/utils/error/elog_seams" }  # is_installed() sentinel for the shared ereport seam
 fd = { path = "../../crates/backend/storage/file/fd" }  # timestamp_diff env pin
 xact_seams = { path = "../../crates/backend/access/transam/xact_seams" }  # timestamp_diff env pin
 timestamp_seams = { path = "../../crates/backend/utils/adt/timestamp_seams" }  # timestamp_diff env pin

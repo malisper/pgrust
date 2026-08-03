@@ -169,7 +169,32 @@ fn init_env() {
         };
         pgtz::init_seams();
         guc_tables::init_seams();
-        elog::init_seams();
+        // CROSS-FAMILY DOUBLE INSTALL (fixed 2026-08-03). elog::init_seams()
+        // does an unconditional elog_seams::ereport::set(), and cryptbe_diff
+        // (fuzz/core/src/cryptbe_diff.rs:162) plus contriba_diff (:194) also
+        // call it. Whoever runs second panics "seam installed twice:
+        // elog_seams::ereport" -- and because this call sits INSIDE the Once
+        // below, that panic POISONS the Once, so every later datetime/timestamp
+        // test dies with "Once instance has previously been poisoned". That is
+        // the 30-test cascade whose appearance depends only on test ORDERING,
+        // which is why the same tree read 450/2 on one whole-lib run and 419/33
+        // on the next. Deterministic reproducer (0.46s):
+        //     cargo test -p decoder_fuzz --lib -- cryptbe_diff datetime_closeout_diff
+        //
+        // Guard on the sentinel rather than swallowing the panic with
+        // catch_unwind (what the two sibling families do): re-installing the
+        // same implementation is a no-op, while a genuinely CONFLICTING install
+        // should still be loud. ereport is the sentinel for the trio
+        // init_seams() sets together.
+        //
+        // RESIDUAL, not fixed here: if a sibling's catch_unwind swallowed a
+        // PARTIAL install (ereport set, ereport_msg not), this guard would skip
+        // the rest. Pre-existing and equally true of the catch_unwind siblings;
+        // the real cure is making elog::init_seams() idempotent per-seam, which
+        // is product code and a separate change.
+        if !::elog_seams::ereport::is_installed() {
+            elog::init_seams();
+        }
         fd::init_seams();
         xact_seams::get_current_sub_transaction_id::set(|| 1);
         xact_seams::get_current_transaction_start_timestamp::set(|| PINNED_NOW_USECS);
