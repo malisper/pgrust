@@ -12,6 +12,14 @@ use std::io::{Read, Write};
 
 pub const PG_PROTOCOL_3_0: u32 = 3 << 16;
 
+// Largest message length we accept from the server (the wire length is a
+// SIGNED i32 that includes its own 4 bytes). PostgreSQL never sends a
+// message anywhere near 2^30 (values are capped at 1GB), so anything
+// larger — and anything below the 4-byte self-inclusive minimum, negative
+// values included — is framing loss, not a big row. Mirrors the pgclient
+// crate's hardening (fix/pgclient-frame-hardening).
+const MAX_MESSAGE_LEN: i32 = 0x3FFF_FFFF;
+
 // ---------------------------------------------------------------- transport
 
 /// Blocking byte transport carrying the wire protocol. Implementations:
@@ -114,6 +122,10 @@ pub(crate) fn be_i16(b: &[u8]) -> i16 {
 }
 
 pub(crate) fn cstr_at(b: &[u8], pos: usize) -> (String, usize) {
+    // Server-controlled offsets: a body whose previous field ran to the end
+    // without a NUL hands us pos == b.len() + 1; clamp instead of slicing
+    // out of range.
+    let pos = pos.min(b.len());
     let end = b[pos..].iter().position(|&c| c == 0).map(|e| pos + e).unwrap_or(b.len());
     (String::from_utf8_lossy(&b[pos..end]).into_owned(), end + 1)
 }
@@ -304,17 +316,31 @@ impl Conn {
         Ok(())
     }
 
-    fn next_buffered(&mut self) -> Option<(u8, Vec<u8>)> {
+    // Ok(None) = need more bytes; Err = the frame header is malformed. The
+    // wire length is a SIGNED i32 the server controls: validate it BEFORE
+    // it becomes a usize, or a negative/short value turns into an enormous
+    // index and a panic. Once framing is lost there is no way to find the
+    // next message boundary, so the connection is marked dead (libpq's
+    // handleSyncLoss discipline).
+    fn next_buffered(&mut self) -> Result<Option<(u8, Vec<u8>)>, String> {
         let avail = self.inbuf.len() - self.inpos;
         if avail < 5 {
-            return None;
+            return Ok(None);
         }
         let p = self.inpos;
-        let len = be_i32(&self.inbuf[p + 1..p + 5]) as usize;
-        if avail < 1 + len {
-            return None;
-        }
         let t = self.inbuf[p];
+        let wire_len = be_i32(&self.inbuf[p + 1..p + 5]);
+        if !(4..=MAX_MESSAGE_LEN).contains(&wire_len) {
+            self.dead = true;
+            return Err(format!(
+                "lost synchronization with server: got message type \"{}\", length {wire_len}",
+                t as char
+            ));
+        }
+        let len = wire_len as usize;
+        if avail < 1 + len {
+            return Ok(None);
+        }
         let body = self.inbuf[p + 5..p + 1 + len].to_vec();
         self.inpos = p + 1 + len;
         if self.inpos == self.inbuf.len() {
@@ -324,16 +350,23 @@ impl Conn {
             self.inbuf.drain(..self.inpos);
             self.inpos = 0;
         }
-        Some((t, body))
+        Ok(Some((t, body)))
     }
 
     pub(crate) fn read_message(&mut self) -> Result<(u8, Vec<u8>), String> {
         loop {
-            if let Some(m) = self.next_buffered() {
+            if let Some(m) = self.next_buffered()? {
                 return Ok(m);
             }
             self.fill()?;
         }
+    }
+
+    /// A malformed message body (bad DataRow, short RowDescription) poisons
+    /// the connection: after it, nothing on the wire can be trusted.
+    fn proto_error(&mut self, e: String) -> String {
+        self.dead = true;
+        e
     }
 
     /// Async-message bookkeeping shared by every read loop.
@@ -349,13 +382,24 @@ impl Conn {
                 }
             }
             b'A' => {
-                let be_pid = be_i32(&body[0..4]);
+                // NotificationResponse needs at least the 4-byte pid; a
+                // shorter body is malformed — drop it rather than index
+                // past the frame (losing a corrupt notify is harmless).
+                let Some(pid_bytes) = body.get(0..4) else {
+                    return;
+                };
+                let be_pid = be_i32(pid_bytes);
                 let (channel, next) = cstr_at(body, 4);
                 let (extra, _) = cstr_at(body, next);
                 self.notifies.push_back(Notify { channel, be_pid, extra });
             }
             b'K' => {
-                self.be_pid = be_i32(&body[0..4]);
+                // BackendKeyData shorter than its 4-byte pid is malformed;
+                // keep the zero pid/key (cancel then simply can't target).
+                let Some(pid_bytes) = body.get(0..4) else {
+                    return;
+                };
+                self.be_pid = be_i32(pid_bytes);
                 self.be_key = body[4..].to_vec();
             }
             b'N' => {
@@ -416,11 +460,17 @@ impl Conn {
             let (t, body) = self.read_message()?;
             match t {
                 b'T' => {
-                    fields = parse_row_description(&body);
+                    fields = match parse_row_description(&body) {
+                        Ok(f) => f,
+                        Err(e) => return Err(self.proto_error(e)),
+                    };
                     got_desc = true;
                     rows.clear();
                 }
-                b'D' => rows.push(parse_data_row(&body)),
+                b'D' => match parse_data_row(&body) {
+                    Ok(r) => rows.push(r),
+                    Err(e) => return Err(self.proto_error(e)),
+                },
                 b'C' | b's' => {
                     let tag = if t == b'C' { cstr_at(&body, 0).0 } else { String::new() };
                     // A zero-column SELECT is still a tuples result: key off
@@ -568,40 +618,76 @@ impl Conn {
     }
 }
 
-fn parse_row_description(body: &[u8]) -> Vec<Field> {
+// RowDescription ('T') body: the 2-byte field-count header and every
+// per-field fixed block are server-controlled — bounds-check them all.
+fn parse_row_description(body: &[u8]) -> Result<Vec<Field>, String> {
+    const MALFORMED: &str = "insufficient data in \"T\" message";
+    if body.len() < 2 {
+        return Err(MALFORMED.to_string());
+    }
     let nfields = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let mut fields = Vec::with_capacity(nfields);
+    let mut fields = Vec::with_capacity(nfields.min((body.len() - 2) / 19 + 1));
     let mut p = 2;
     for _ in 0..nfields {
+        if p >= body.len() {
+            return Err(MALFORMED.to_string());
+        }
         let (name, next) = cstr_at(body, p);
         p = next;
-        let _table_oid = be_i32(&body[p..p + 4]);
-        let _col = be_i16(&body[p + 4..p + 6]);
-        let type_oid = be_i32(&body[p + 6..p + 10]) as u32;
-        let _typlen = be_i16(&body[p + 10..p + 12]);
-        let typmod = be_i32(&body[p + 12..p + 16]);
-        let format = be_i16(&body[p + 16..p + 18]);
+        let Some(fixed) = body.get(p..p + 18) else {
+            return Err(MALFORMED.to_string());
+        };
+        let _table_oid = be_i32(&fixed[0..4]);
+        let _col = be_i16(&fixed[4..6]);
+        let type_oid = be_i32(&fixed[6..10]) as u32;
+        let _typlen = be_i16(&fixed[10..12]);
+        let typmod = be_i32(&fixed[12..16]);
+        let format = be_i16(&fixed[16..18]);
         p += 18;
         fields.push(Field { name, type_oid, typmod, format });
     }
-    fields
+    Ok(fields)
 }
 
-pub(crate) fn parse_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
-    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let mut cols = Vec::with_capacity(ncols);
-    let mut p = 2;
-    for _ in 0..ncols {
-        let len = be_i32(&body[p..p + 4]);
-        p += 4;
-        if len < 0 {
-            cols.push(None);
-        } else {
-            cols.push(Some(body[p..p + len as usize].to_vec()));
-            p += len as usize;
-        }
+// DataRow ('D') body: every count and length in it is server-controlled.
+// Enforced here (matching the pgclient crate's hardening): the 2-byte
+// column-count header is present; each column has its 4-byte length; a
+// negative length is the NULL marker -1 and nothing else; a column never
+// runs past the frame; and the frame has no trailing bytes after the last
+// declared column (leftover data means we and the server disagree about
+// the row shape — reject, don't guess).
+pub(crate) fn parse_data_row(body: &[u8]) -> Result<Vec<Option<Vec<u8>>>, String> {
+    const MALFORMED: &str = "insufficient data in \"D\" message";
+    if body.len() < 2 {
+        return Err(MALFORMED.to_string());
     }
-    cols
+    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
+    let mut cols = Vec::with_capacity(ncols.min((body.len() - 2) / 4 + 1));
+    let mut p = 2usize;
+    for _ in 0..ncols {
+        let Some(hdr) = body.get(p..p + 4) else {
+            return Err(MALFORMED.to_string());
+        };
+        let len = be_i32(hdr);
+        p += 4;
+        if len == -1 {
+            cols.push(None);
+            continue;
+        }
+        if len < 0 {
+            return Err(format!("invalid column length {len} in \"D\" message"));
+        }
+        // len <= i32::MAX and p <= body.len(): p + len cannot overflow usize.
+        let Some(val) = body.get(p..p + len as usize) else {
+            return Err(MALFORMED.to_string());
+        };
+        cols.push(Some(val.to_vec()));
+        p += len as usize;
+    }
+    if p != body.len() {
+        return Err("extraneous data in \"D\" message".to_string());
+    }
+    Ok(cols)
 }
 
 // Parse ('P') body: unnamed statement, no explicit param types (server infers).
@@ -646,4 +732,309 @@ fn execute_body(portal: &str, maxrows: u32) -> Vec<u8> {
     b.push(0);
     b.extend_from_slice(&maxrows.to_be_bytes());
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- hostile-server framing / DataRow decoding ----
+    //
+    // Every byte below is something a broken or malicious server could put
+    // on the wire; none may panic, all must surface as connection errors
+    // (or be safely dropped where the message is advisory).
+
+    /// In-memory transport: serves a canned server byte stream, then EOF.
+    struct MockTransport {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl Transport for MockTransport {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (self.data.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+        fn write_all(&mut self, _buf: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn conn_with(stream: Vec<u8>) -> Conn {
+        Conn::new(Box::new(MockTransport { data: stream, pos: 0 }))
+    }
+
+    /// Wire message: type byte + self-inclusive length + body.
+    fn wire(t: u8, body: &[u8]) -> Vec<u8> {
+        msg(t, body)
+    }
+
+    // -------------------------------------------------- parse_data_row unit
+
+    #[test]
+    fn data_row_valid_roundtrip() {
+        // 3 cols: "ab", NULL, "" (empty non-null).
+        let mut body = vec![0, 3];
+        body.extend_from_slice(&2i32.to_be_bytes());
+        body.extend_from_slice(b"ab");
+        body.extend_from_slice(&(-1i32).to_be_bytes());
+        body.extend_from_slice(&0i32.to_be_bytes());
+        let cols = parse_data_row(&body).unwrap();
+        assert_eq!(cols, vec![Some(b"ab".to_vec()), None, Some(Vec::new())]);
+    }
+
+    #[test]
+    fn data_row_zero_columns() {
+        assert_eq!(parse_data_row(&[0, 0]).unwrap(), Vec::<Option<Vec<u8>>>::new());
+    }
+
+    #[test]
+    fn data_row_missing_count_header() {
+        for body in [&[][..], &[0][..]] {
+            let e = parse_data_row(body).unwrap_err();
+            assert!(e.contains("insufficient data"), "{e}");
+        }
+    }
+
+    #[test]
+    fn data_row_column_count_lies() {
+        // Claims 3 columns, carries 1.
+        let mut body = vec![0, 3];
+        body.extend_from_slice(&1i32.to_be_bytes());
+        body.push(b'x');
+        let e = parse_data_row(&body).unwrap_err();
+        assert!(e.contains("insufficient data"), "{e}");
+    }
+
+    #[test]
+    fn data_row_column_length_exceeds_remaining() {
+        // 1 column claiming 100 bytes; only 2 present.
+        let mut body = vec![0, 1];
+        body.extend_from_slice(&100i32.to_be_bytes());
+        body.extend_from_slice(b"hi");
+        let e = parse_data_row(&body).unwrap_err();
+        assert!(e.contains("insufficient data"), "{e}");
+    }
+
+    #[test]
+    fn data_row_huge_column_length_no_panic() {
+        // i32::MAX length must not panic on the slice math or overflow.
+        let mut body = vec![0, 1];
+        body.extend_from_slice(&i32::MAX.to_be_bytes());
+        let e = parse_data_row(&body).unwrap_err();
+        assert!(e.contains("insufficient data"), "{e}");
+    }
+
+    #[test]
+    fn data_row_negative_length_other_than_null_marker() {
+        // -1 is NULL; any other negative is malformed, not a huge usize.
+        let mut body = vec![0, 1];
+        body.extend_from_slice(&(-2i32).to_be_bytes());
+        let e = parse_data_row(&body).unwrap_err();
+        assert!(e.contains("invalid column length"), "{e}");
+    }
+
+    #[test]
+    fn data_row_truncated_length_word() {
+        // Second column's 4-byte length word is cut short.
+        let mut body = vec![0, 2];
+        body.extend_from_slice(&1i32.to_be_bytes());
+        body.push(b'x');
+        body.extend_from_slice(&[0, 0]); // half a length word
+        let e = parse_data_row(&body).unwrap_err();
+        assert!(e.contains("insufficient data"), "{e}");
+    }
+
+    #[test]
+    fn data_row_trailing_garbage() {
+        // Correct single column followed by extra bytes.
+        let mut body = vec![0, 1];
+        body.extend_from_slice(&1i32.to_be_bytes());
+        body.push(b'x');
+        body.extend_from_slice(b"junk");
+        let e = parse_data_row(&body).unwrap_err();
+        assert!(e.contains("extraneous data"), "{e}");
+    }
+
+    // ------------------------------------------- parse_row_description unit
+
+    #[test]
+    fn row_description_short_header() {
+        for body in [&[][..], &[0][..]] {
+            let e = parse_row_description(body).err().expect("expected error");
+            assert!(e.contains("insufficient data"), "{e}");
+        }
+    }
+
+    #[test]
+    fn row_description_truncated_fixed_block() {
+        // One field: name + only 4 of the 18 fixed bytes.
+        let mut body = vec![0, 1];
+        body.extend_from_slice(b"col\0");
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        let e = parse_row_description(&body).err().expect("expected error");
+        assert!(e.contains("insufficient data"), "{e}");
+    }
+
+    #[test]
+    fn row_description_field_count_lies() {
+        // Claims 2 fields, carries 0 bytes of them.
+        let e = parse_row_description(&[0, 2]).err().expect("expected error");
+        assert!(e.contains("insufficient data"), "{e}");
+    }
+
+    #[test]
+    fn row_description_valid() {
+        let mut body = vec![0, 1];
+        body.extend_from_slice(b"a\0");
+        body.extend_from_slice(&0i32.to_be_bytes()); // table oid
+        body.extend_from_slice(&0i16.to_be_bytes()); // col
+        body.extend_from_slice(&25i32.to_be_bytes()); // type oid (text)
+        body.extend_from_slice(&(-1i16).to_be_bytes()); // typlen
+        body.extend_from_slice(&(-1i32).to_be_bytes()); // typmod
+        body.extend_from_slice(&0i16.to_be_bytes()); // format
+        let f = parse_row_description(&body).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].name, "a");
+        assert_eq!(f[0].type_oid, 25);
+    }
+
+    // ----------------------------------------------------- framing (Conn)
+
+    #[test]
+    fn framing_negative_length_is_sync_loss() {
+        let mut stream = vec![b'D'];
+        stream.extend_from_slice(&(-5i32).to_be_bytes());
+        let mut c = conn_with(stream);
+        let e = c.read_message().unwrap_err();
+        assert!(e.contains("lost synchronization"), "{e}");
+        assert!(c.is_dead());
+    }
+
+    #[test]
+    fn framing_below_minimum_length_is_sync_loss() {
+        // Wire length 3 < the 4-byte self-inclusive minimum.
+        let mut stream = vec![b'Z'];
+        stream.extend_from_slice(&3i32.to_be_bytes());
+        let mut c = conn_with(stream);
+        let e = c.read_message().unwrap_err();
+        assert!(e.contains("lost synchronization"), "{e}");
+        assert!(c.is_dead());
+    }
+
+    #[test]
+    fn framing_huge_length_is_sync_loss() {
+        let mut stream = vec![b'D'];
+        stream.extend_from_slice(&i32::MAX.to_be_bytes());
+        let mut c = conn_with(stream);
+        let e = c.read_message().unwrap_err();
+        assert!(e.contains("lost synchronization"), "{e}");
+        assert!(c.is_dead());
+    }
+
+    #[test]
+    fn framing_truncated_stream_is_connection_error() {
+        // Valid header claiming 100 bytes; stream ends first (EOF).
+        let mut stream = vec![b'D'];
+        stream.extend_from_slice(&104i32.to_be_bytes());
+        stream.extend_from_slice(b"partial");
+        let mut c = conn_with(stream);
+        let e = c.read_message().unwrap_err();
+        assert!(e.contains("server closed the connection"), "{e}");
+        assert!(c.is_dead());
+    }
+
+    // --------------------------------------------- get_result end-to-end
+
+    /// RowDescription body with `n` text columns named c0..cn.
+    fn row_desc_body(n: u16) -> Vec<u8> {
+        let mut body = (n).to_be_bytes().to_vec();
+        for i in 0..n {
+            body.extend_from_slice(format!("c{i}\0").as_bytes());
+            body.extend_from_slice(&0i32.to_be_bytes());
+            body.extend_from_slice(&0i16.to_be_bytes());
+            body.extend_from_slice(&25i32.to_be_bytes());
+            body.extend_from_slice(&(-1i16).to_be_bytes());
+            body.extend_from_slice(&(-1i32).to_be_bytes());
+            body.extend_from_slice(&0i16.to_be_bytes());
+        }
+        body
+    }
+
+    #[test]
+    fn get_result_malformed_data_row_is_error_not_panic() {
+        // T (1 col) then a D whose column length lies past the frame.
+        let mut bad_row = vec![0, 1];
+        bad_row.extend_from_slice(&1000i32.to_be_bytes());
+        bad_row.extend_from_slice(b"tiny");
+        let mut stream = wire(b'T', &row_desc_body(1));
+        stream.extend_from_slice(&wire(b'D', &bad_row));
+        let mut c = conn_with(stream);
+        c.send_query("SELECT 1").unwrap();
+        let e = c.get_result().err().expect("expected error");
+        assert!(e.contains("insufficient data in \"D\" message"), "{e}");
+        assert!(c.is_dead());
+    }
+
+    #[test]
+    fn get_result_short_row_description_is_error_not_panic() {
+        let stream = wire(b'T', &[7]); // 1-byte body: no field count
+        let mut c = conn_with(stream);
+        c.send_query("SELECT 1").unwrap();
+        let e = c.get_result().err().expect("expected error");
+        assert!(e.contains("insufficient data in \"T\" message"), "{e}");
+        assert!(c.is_dead());
+    }
+
+    #[test]
+    fn get_result_well_formed_rows_still_parse() {
+        let mut row = vec![0, 1];
+        row.extend_from_slice(&2i32.to_be_bytes());
+        row.extend_from_slice(b"42");
+        let mut stream = wire(b'T', &row_desc_body(1));
+        stream.extend_from_slice(&wire(b'D', &row));
+        stream.extend_from_slice(&wire(b'C', b"SELECT 1\0"));
+        stream.extend_from_slice(&wire(b'Z', b"I"));
+        let mut c = conn_with(stream);
+        c.send_query("SELECT 1").unwrap();
+        let r = c.get_result().unwrap().unwrap();
+        assert_eq!(r.status, ExecStatus::TuplesOk);
+        assert_eq!(r.rows, vec![vec![Some(b"42".to_vec())]]);
+        assert!(c.get_result().unwrap().is_none());
+        assert!(!c.is_dead());
+    }
+
+    // -------------------------------------------------- async-message guards
+
+    #[test]
+    fn short_async_bodies_are_dropped_not_panicking() {
+        let mut c = conn_with(Vec::new());
+        c.note_async(b'A', &[1, 2]); // NotificationResponse: pid cut short
+        assert!(c.notifies.is_empty());
+        c.note_async(b'K', &[9]); // BackendKeyData: pid cut short
+        assert_eq!(c.be_pid, 0);
+        c.note_async(b'A', &[0, 0, 0, 7]); // pid only, no channel/extra
+        assert_eq!(c.notifies.len(), 1);
+        assert_eq!(c.notifies[0].be_pid, 7);
+        assert_eq!(c.notifies[0].channel, "");
+    }
+
+    #[test]
+    fn cstr_at_out_of_range_offset_clamps() {
+        let b = b"abc"; // no NUL: cstr_at reports end + 1 == len + 1
+        let (s, next) = cstr_at(b, 0);
+        assert_eq!(s, "abc");
+        let (s2, _) = cstr_at(b, next); // next == 4 > len: must not panic
+        assert_eq!(s2, "");
+    }
+
+    #[test]
+    fn parse_diag_truncated_field_no_panic() {
+        // 'M' code then text with no NUL terminator, then EOF.
+        let f = parse_diag(b"Mboom");
+        assert_eq!(f.primary, "boom");
+        assert_eq!(f.severity, "ERROR");
+    }
 }
