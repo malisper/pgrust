@@ -1050,6 +1050,7 @@ dependencies = [
  "mcx",
  "pg_qsort",
  "postgres_seams",
+ "stack_depth",
  "types_core",
  "types_error",
  "types_fmgr",

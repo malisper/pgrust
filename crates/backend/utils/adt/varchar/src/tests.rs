@@ -435,3 +435,110 @@ fn varchar_clip_extreme_typmods_ok() {
     assert_eq!(varchar_clip(b"abc", -1, None).unwrap(), Some(3));
 }
 
+/// End-to-end C-parity check on the COMPOSED clip+fc path: `bpcharin` at an
+/// atttypmod near INT32_MAX raises a catchable "invalid memory alloc request
+/// size" instead of reserving ~2GiB, and `varcharin` succeeds there because
+/// `varchar_clip` only truncates. Docker postgres:18.3 raises the same error,
+/// so the bar is a C-parity comparison and it is release-effective (a real
+/// error return, not a debug assert).
+///
+/// SCOPE — this test does NOT witness the fc-level `check_alloc_size` calls in
+/// `fc_bpcharin`/`fc_varcharin`. It is satisfied by `bpchar_clip`'s pad-arm
+/// ceiling (landed separately), which fires first with an identical message:
+/// removing both fc-level checks leaves this test passing. The fc-level checks
+/// are witnessed by `fc_ceiling_fires_on_huge_input_arm` below, which is
+/// `#[ignore]`d because reaching them needs a >1GiB input.
+#[test]
+fn bpcharin_varcharin_refuse_over_ceiling_typmod() {
+    use ::datum::Datum;
+    use ::types_fmgr::{FmgrInfo, LocalFcinfo};
+
+    // atttypmod is INT32_MAX: maxchars = INT32_MAX - VARHDRSZ, and bpchar pads
+    // the 1-byte input out to it, so the result would be ~2GiB.
+    for (f, oid, name) in [
+        (crate::builtins::fc_bpcharin as ::types_fmgr::PGFunction, 1044u32, "bpcharin"),
+        (crate::builtins::fc_varcharin as ::types_fmgr::PGFunction, 1046u32, "varcharin"),
+    ] {
+        let cs = b"a\0";
+        let mut flinfo = FmgrInfo::new(f, oid, 3, true, false);
+        let mut fci = LocalFcinfo::<3>::new(0);
+        fci.set_arg(0, Datum::from_usize(cs.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_i32(0));
+        fci.set_arg(2, Datum::from_i32(i32::MAX));
+        let got = f(Some(&mut flinfo), &mut fci);
+
+        // varchar_clip only truncates, so varcharin's length stays 1 and it
+        // legitimately succeeds; only bpchar's padding can reach the ceiling.
+        if name == "bpcharin" {
+            let e = got.expect_err("bpcharin must not reserve past MaxAllocSize");
+            assert_eq!(
+                e.message(),
+                format!("invalid memory alloc request size {}", i32::MAX),
+                "C wording (palloc's ceiling error)"
+            );
+        } else {
+            got.expect("varcharin truncates, so the ceiling is never reached");
+        }
+    }
+}
+
+/// REAL witness for the fc-level `MaxAllocSize` ceilings in `fc_bpcharin` and
+/// `fc_varcharin`, and the reason they are not redundant with the clip-level
+/// guard: `bpchar_clip` bounds ONLY its blank-padding arm. Its
+/// `atttypmod < VARHDRSZ` arm and its truncating arm both return `total`
+/// unbounded, and `varchar_clip` never bounds `len` at all. So the only way to
+/// reach these two checks is an INPUT larger than `MAX_ALLOC_SIZE`, with
+/// atttypmod out of the way.
+///
+/// `#[ignore]`d on purpose: it allocates ~1GiB, and a 1GiB unit test must not
+/// run in CI or on the CI cluster (mutants-audit jobs have already been OOMKilled).
+/// Run it deliberately:
+///     cargo test -p adt_varchar --lib -- --ignored fc_ceiling
+///
+/// MUST-FAIL CONTROL (run 2026-08-03): with the two `::mcx::check_alloc_size`
+/// calls in builtins.rs deleted, this test FAILS — the bpcharin arm panics
+/// inside `set_varsize_4b` (datum/src/varlena.rs) on the varlena size assert
+/// before any error can be returned, so the run aborts there rather than
+/// reaching the varcharin arm. That is the defect these guards prevent, and it
+/// is the debug-assert-masking shape: in a release build the assert is gone and
+/// the same input stamps a length that does not fit varlena's 30-bit size
+/// field. Re-run the control if you ever touch either call site — a guard whose
+/// only witness is another guard is not witnessed.
+#[test]
+#[ignore = "allocates ~1GiB; run with --ignored to witness the fc-level ceiling"]
+fn fc_ceiling_fires_on_huge_input_arm() {
+    use ::datum::Datum;
+    use ::types_fmgr::{FmgrInfo, LocalFcinfo};
+
+    // VARHDRSZ + len must exceed MAX_ALLOC_SIZE by exactly one byte, so the
+    // request in the error message is MAX_ALLOC_SIZE + 1 and the allocation
+    // stays as small as the geometry allows.
+    let len = ::mcx::MAX_ALLOC_SIZE - VARHDRSZ + 1;
+    let request = VARHDRSZ + len;
+    assert_eq!(request, ::mcx::MAX_ALLOC_SIZE + 1);
+
+    let mut cs = vec![b'a'; len + 1];
+    *cs.last_mut().unwrap() = 0;
+
+    for (f, oid, name) in [
+        (crate::builtins::fc_bpcharin as ::types_fmgr::PGFunction, 1044u32, "bpcharin"),
+        (crate::builtins::fc_varcharin as ::types_fmgr::PGFunction, 1046u32, "varcharin"),
+    ] {
+        // atttypmod = 0 is below VARHDRSZ, so both clip helpers take their
+        // pass-through arm and neither bounds the length — the fc-level check
+        // is the only thing standing between this input and the reserve.
+        let mut flinfo = FmgrInfo::new(f, oid, 3, true, false);
+        let mut fci = LocalFcinfo::<3>::new(0);
+        fci.set_arg(0, Datum::from_usize(cs.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_i32(0));
+        fci.set_arg(2, Datum::from_i32(0));
+
+        let e = f(Some(&mut flinfo), &mut fci)
+            .expect_err(&format!("{name} must refuse a request past MaxAllocSize"));
+        assert_eq!(
+            e.message(),
+            format!("invalid memory alloc request size {request}"),
+            "{name}: C wording (palloc's ceiling error)"
+        );
+    }
+}

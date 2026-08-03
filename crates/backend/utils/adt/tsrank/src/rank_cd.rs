@@ -99,7 +99,11 @@ fn cover(
     qr: &mut QueryRep<'_, '_>,
     ext: &mut CoverExt,
 ) -> PgResult<bool> {
+    // C tsrank.c:661 Cover: check_stack_depth(). C recurses per cover
+    // attempt; this port loops, so the guard sits at the loop head.
     loop {
+        ::stack_depth::check_stack_depth()?;
+
         let mut lastpos = ext.pos;
         let mut found = false;
 

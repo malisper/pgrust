@@ -44,6 +44,13 @@ pub fn fc_bpcharin(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     };
     let buf = out_scratch(flinfo, "bpcharin");
     buf.clear();
+    // C varchar.c:181 sizes this with palloc(maxlen + VARHDRSZ), so the
+    // MaxAllocSize ceiling is what rejects a padded-out atttypmod before any
+    // allocation. The retained std-Vec scratch has no such ceiling of its own
+    // (mcx's checked helpers hold it, and this path bypasses them), so charge
+    // it explicitly: without this, atttypmod near INT32_MAX reserves ~2GiB and
+    // then stamps a length that does not fit varlena's 30-bit size field.
+    ::mcx::check_alloc_size(VARHDRSZ + clip.total)?;
     buf.reserve(VARHDRSZ + clip.total);
     buf.extend_from_slice(&datum::varlena::set_varsize_4b(VARHDRSZ + clip.total));
     buf.extend_from_slice(&s[..clip.copy]);
@@ -66,6 +73,11 @@ pub fn fc_varcharin(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     };
     let buf = out_scratch(flinfo, "varcharin");
     buf.clear();
+    // C varchar.c:335 palloc(maxlen + VARHDRSZ); same ceiling as bpcharin
+    // above. varchar_clip only truncates, so this cannot be amplified by
+    // atttypmod the way bpchar's space-padding can — the guard is here for
+    // parity with C's error on a ~1GiB input rather than an infallible abort.
+    ::mcx::check_alloc_size(VARHDRSZ + len)?;
     buf.reserve(VARHDRSZ + len);
     buf.extend_from_slice(&datum::varlena::set_varsize_4b(VARHDRSZ + len));
     buf.extend_from_slice(&s[..len]);

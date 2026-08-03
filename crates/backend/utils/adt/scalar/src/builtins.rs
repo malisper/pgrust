@@ -417,16 +417,18 @@ pub fn fc_hashtidextended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
 
 
 pub fn fc_oidvectoreq(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // SAFETY: strict catalog args are non-null plain-storage oidvectors;
-    // dim1 Oids follow the 24-byte header (buildoidvector shape).
-    let read = |d: Datum| unsafe {
-        let p = d.as_usize() as *const ::array::oidvector;
-        let v = &*p;
-        debug_assert!(v.ndim == 1 && v.dataoffset == 0);
-        core::slice::from_raw_parts(p.add(1) as *const Oid, v.dim1.max(0) as usize)
-    };
+    // C oidvectoreq goes through btoidvectorcmp (nbtcompare.c), which calls
+    // check_valid_oidvector on BOTH arguments and ereports on a value that is
+    // not a 1-D, 0-based, null-free oidvector. A debug_assert here left
+    // release builds reading a 24-byte header out of a 16-byte empty-array
+    // datum and then building a slice from whatever dim1 landed on — the same
+    // release-effective gate the hash siblings below already owed and paid.
+    // SAFETY: layout is checked before the values slice is formed.
     let [a, b] = fcinfo.args_n::<2>();
-    Ok(Datum::from_bool(read(a.value) == read(b.value)))
+    let (_, av) = unsafe { arg_oidvector_checked(fcinfo, 0) }?;
+    let (_, bv) = unsafe { arg_oidvector_checked(fcinfo, 1) }?;
+    let _ = (a, b);
+    Ok(Datum::from_bool(av == bv))
 }
 
 // SAFETY: strict catalog arg is a non-null plain-storage oidvector (the

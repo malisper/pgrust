@@ -13,6 +13,7 @@ datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 arrayfuncs = { path = "../arrayfuncs" }
 adt_tsvector_core = { path = "../tsvector_core" }
+stack_depth = { path = "../../misc/stack_depth" }
 
 [dev-dependencies]
 adt_tsquery_core = { path = "../tsquery_core" }
