@@ -140,12 +140,18 @@ fn path_bound_box(p: &PathRef<'_>) -> BOX {
     b
 }
 
-// path_add's 32-bit overflow guard (C computes size_t but tests int wraparound
-// via the same base_size/size relations as path_in).
+// path_add's 32-bit overflow guard (geo_ops.c:4356-4366): C declares
+// base_size/size as int, so the guard tests the 32-bit-truncated relations —
+// `base_size / sizeof(pt) != npts` divides the int reconverted to size_t
+// (sign-extended), and `size <= base_size` compares ints. The previous usize
+// arithmetic here never wrapped on 64-bit, so the guard could not fire at
+// all (found by geo_ops_diff's path_add_ovf kernel, INC-3); mirror the int32
+// wraparound exactly, as io::check_points_overflow does for the *_in family.
 pub fn path_add_checks(total: usize) -> PgResult<()> {
-    let base_size = POINT_SIZE.wrapping_mul(total);
-    let size = PATH_HEADER_SIZE.wrapping_add(base_size);
-    if base_size / POINT_SIZE != total || size <= base_size {
+    let npts = total as i64;
+    let base_size = (POINT_SIZE as i64).wrapping_mul(npts) as i32;
+    let size = (PATH_HEADER_SIZE as i64 + base_size as i64) as i32;
+    if (base_size as i64 as u64) / (POINT_SIZE as u64) != npts as u64 || size <= base_size {
         return Err(Box::new(
             PgError::error("too many points requested")
                 .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),

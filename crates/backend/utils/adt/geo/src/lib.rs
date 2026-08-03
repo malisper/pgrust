@@ -493,6 +493,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn path_add_checks_mirrors_c_int32_guard() {
+        // Small legal sums pass.
+        path::path_add_checks(0).unwrap();
+        path::path_add_checks(128).unwrap();
+        // Even the maximum PG-legal sum (two MaxAllocSize-capped paths)
+        // stays just under the int wrap, exactly as C.
+        path::path_add_checks(2 * 67_108_862).unwrap();
+        // 2^27 points: base_size = 2^31 wraps negative in C's int — the
+        // guard fires (54000). The old usize arithmetic never wrapped, so
+        // this returned Ok (geo_ops_diff path_add_ovf kernel, INC-3).
+        let e = path::path_add_checks(1 << 27).unwrap_err();
+        assert_eq!(e.sqlstate, ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        // Deep in the wrap region: quotient mismatch fires.
+        assert!(path::path_add_checks(1 << 28).is_err());
+    }
+
+    #[test]
     fn box_io_roundtrip() {
         for s in ["((1,2),(3,4))", "(1,2),(3,4)", "1,2,3,4", " ( (1, 2) , (3 ,4) ) "] {
             let b = box_in(s).unwrap();
