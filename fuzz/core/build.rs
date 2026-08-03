@@ -9,16 +9,22 @@
 // (if at all) as value divergences or garbage-PC faults — the spellfam
 // rationale, extended family-by-family (wcharfam + regexfam first; the
 // tree-wide csrc/ pass is task #84). STRICTLY OPT-IN via PGRUST_ORACLE_ASAN=1
-// AND a cargo-fuzz build (CARGO_CFG_FUZZING): the ASan RUNTIME comes from
+// — or its CI cluster alias PGRUST_FUZZ_CASAN=1, the name the CI cluster runner's
+// --casan path exports (run-fuzz-campaign.sh; the runner has no generic env
+// passthrough, so the enablement accepts the established CI cluster interface
+// rather than forking 8 CI cluster branches; task #143 addendum) — AND a
+// cargo-fuzz build (CARGO_CFG_FUZZING): the ASan RUNTIME comes from
 // cargo-fuzz's Rust-side -Zsanitizer=address link, so a plain `cargo test`
 // build must never gain objects whose __asan_* references nothing resolves.
-// With the env unset the default campaign build is UNCHANGED.
+// With both envs unset the default campaign build is UNCHANGED.
 // SIDE-CHANNEL DISCIPLINE (asan-is-side-channel ruling): an ASan abort is a
 // C-oracle memory FINDING — the CI cluster runner counts sanitizer artifacts
 // separately from divergences; it never becomes a differential verdict.
 fn oracle_asan_armed() -> bool {
-    std::env::var_os("PGRUST_ORACLE_ASAN").is_some_and(|v| v == "1")
-        && std::env::var_os("CARGO_CFG_FUZZING").is_some()
+    let opted_in = ["PGRUST_ORACLE_ASAN", "PGRUST_FUZZ_CASAN"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|v| v == "1"));
+    opted_in && std::env::var_os("CARGO_CFG_FUZZING").is_some()
 }
 
 // -fsanitize=address for a C oracle TU that will link against the ASan
@@ -48,6 +54,7 @@ fn arm_oracle_asan(b: &mut cc::Build) {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PGRUST_ORACLE_ASAN");
+    println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CASAN");
     let mut build = cc::Build::new();
     // SANCOV ON THE C ORACLE (NEZHA union-coverage, campaign 2026-07-30):
     // instrument the vendored csrc objects so libFuzzer's retention feedback
@@ -2031,13 +2038,28 @@ fn enforce_sort_symbol_hygiene() {
 /// same contract as enforce_sort_symbol_hygiene above.
 fn enforce_cross_archive_definition_uniqueness() {
     // Intentional cross-archive duplicate definitions: (symbol, why).
-    // EMPTY is the healthy state — every family keeps its own prefixed
+    // NEAR-EMPTY is the healthy state — every family keeps its own prefixed
     // copies (CRYPTO_SHARED_SYMS et al.) precisely so that no two archives
     // export the same name. Cross-archive *imports* (e.g. cryptbe binding
     // cryptofam_* one-copy primitives, trgmrxfam binding regexcorefam's
     // pristine engine) are references, not definitions, and never trip
     // this guard.
-    const ALLOWED_DUPLICATE_DEFS: &[(&str, &str)] = &[];
+    const ALLOWED_DUPLICATE_DEFS: &[(&str, &str)] = &[(
+        // (task #143 addendum, 2026-08-03) COMPILER-EMITTED, Mach-O only:
+        // LLVM's ASan pass (InstrumentGlobalsMachO) plants a COMMON-linkage
+        // `__asan_globals_registered` bookkeeping global in EVERY
+        // -fsanitize=address TU; nm reports it `C` and the linker merges
+        // tentative definitions by design — identical runtime bookkeeping in
+        // each copy, no first-definition-wins race. Every ASan-armed oracle
+        // archive therefore defines it on macOS: wcharfam + spellfam on any
+        // cargo-fuzz build (their standing CARGO_CFG_FUZZING arming — this
+        // entry is what keeps plain macOS `cargo fuzz build` green), plus
+        // the regexfam family under PGRUST_ORACLE_ASAN/PGRUST_FUZZ_CASAN.
+        // The ELF path (CI cluster) uses start/stop section symbols instead and
+        // never emits it, so this allowlists nothing on the CI cluster linker.
+        "___asan_globals_registered",
+        "ASan Mach-O common-linkage bookkeeping global, one per instrumented TU",
+    )];
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let mut archives: Vec<std::path::PathBuf> = std::fs::read_dir(&out_dir)
