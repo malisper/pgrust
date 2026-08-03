@@ -922,6 +922,11 @@ fn utf8_ok(s: &[u8]) -> bool {
 }
 
 pub fn trgm_diff(data: &[u8]) {
+    // one-thread-at-a-time through the C oracles (process-global statics);
+    // EVERY pg_diff_trgm_* entry is holder-checked via its per-exec
+    // wfam_x_set_db_encoding pin, so the fuzz TARGET dies vacuous without
+    // this frame (trgmrx arm-9 CONFIRM, task #144 addendum).
+    let _oracle = crate::oracle_serial();
     let Some((&sel, payload)) = data.split_first() else {
         return;
     };

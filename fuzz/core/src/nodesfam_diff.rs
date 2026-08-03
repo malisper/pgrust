@@ -1483,6 +1483,11 @@ pub fn run_value_nodes(data: &[u8]) -> bool {
 
 /// libFuzzer entry: selector byte routes text vs value-builder arm.
 pub fn fuzz_entry(data: &[u8]) {
+    // one-thread-at-a-time through the C oracles (process-global statics);
+    // pg_ndf_init/pg_ndf_exec are holder-checked oracle entries, and this
+    // driver is the fuzz TARGET's whole frame stack (task #144 addendum —
+    // in-crate tests guard themselves, the target could not).
+    let _oracle = crate::oracle_serial();
     let Some((&sel, rest)) = data.split_first() else { return };
     match sel % 4 {
         // text arm gets 3/4 of the budget: it is the read-side surface
