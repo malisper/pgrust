@@ -62,6 +62,23 @@ fn in_sscanf_quirks_match_c() {
     );
 }
 
+// Task #75 witness for the scan_hex wrapping_neg arms (lib.rs 147/170):
+// sscanf's %x accumulates with unsigned wraparound and applies '-' as a
+// two's-complement wrap. Sixteen hex digits "-8000000000000000" accumulate
+// to exactly i64::MIN, the one value whose strict negation panics under the
+// overflow-checked profiles `cargo test` builds with (the mac_diff fuzz
+// finding of 2026-07-30). With wrapping_neg the value survives to the octet
+// range check and errors like C; without it, this test aborts on the panic.
+#[test]
+fn in_hex_accumulator_i64_min_negation_wraps_like_c() {
+    // Plain wide-scan arm (lib.rs 170).
+    let err = macaddr_in("-8000000000000000:0:0:0:0:0", None).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+    // 0x-prefixed wide-scan arm (lib.rs 147).
+    let err = macaddr_in("-0x8000000000000000:0:0:0:0:0", None).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+}
+
 #[test]
 fn in_rejects_garbage() {
     for s in [

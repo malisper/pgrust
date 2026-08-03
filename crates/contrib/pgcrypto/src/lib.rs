@@ -713,6 +713,41 @@ mod armor_header_tests {
         assert!(s.contains("Comment: pgcrypto\n"), "{s}");
     }
 
+    // Task #105 witness for the short-varlena re-expansion arm of
+    // array_image: a small text[] stored in a heap tuple arrives packed
+    // (1-byte header) — the packed form is reproduced here by re-headering
+    // the canonical image exactly the way heap storage does for
+    // VARATT_CAN_MAKE_SHORT values — and C's PG_GETARG_ARRAYTYPE_P delivers
+    // the re-expanded 4B form whose ndim/dims sit at the fixed offsets
+    // arrayfuncs reads. Both arms of array_image must return that image
+    // byte-for-byte.
+    #[test]
+    fn short_varlena_array_arg_reexpands_to_4b_image() {
+        let ctx = mcx::MemoryContext::new("armor test");
+        let img4 = text_array(ctx.mcx(), &[Some(b"k")], 1, &[1]);
+        // Heap packed form: little-endian 1B header (len << 1) | 1, then the
+        // identical payload bytes.
+        let payload = &img4[4..];
+        let short_total = 1 + payload.len();
+        assert!(short_total <= 0x7F, "fixture must stay short-form eligible");
+        let mut short = Vec::with_capacity(short_total);
+        short.push(((short_total as u8) << 1) | 1);
+        short.extend_from_slice(payload);
+
+        let mut fci = types_fmgr::LocalFcinfo::<2>::fresh(0);
+        fci.set_arg(0, Datum::from_usize(short.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_usize(img4.as_ptr() as usize));
+        // SAFETY: both args are live, non-null varlena images owned by this
+        // frame (the strict-fn contract array_image forwards).
+        let re = unsafe { array_image(&fci, 0) }.unwrap();
+        let pass = unsafe { array_image(&fci, 1) }.unwrap();
+        assert_eq!(re, img4, "short arg must re-expand to the 4B image");
+        assert_eq!(pass, img4, "4B arg is a passthrough");
+        // The fixed-offset reads parse_key_value_arrays depends on.
+        assert_eq!(arrayfuncs::foundation::arr_ndim(&re), 1);
+        assert_eq!(arrayfuncs::foundation::arr_dim(&re, 0), 1);
+    }
+
     // D15 (crypt SQLSTATE map): C's genuine-NULL path (pgcrypto.c:234) is
     // 39000, NOT the 22023 px_err stamps on everything else. EXECUTED on
     // stock 18.3 twice (2026-08-01): crypt('foox','$2$') => ERROR 39000
