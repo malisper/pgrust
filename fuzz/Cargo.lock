@@ -3910,6 +3910,7 @@ dependencies = [
  "pqformat",
  "radixtree",
  "readfuncs",
+ "regex",
  "regex_core",
  "regexp_alt",
  "relpath",

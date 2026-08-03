@@ -756,6 +756,12 @@ pub use like_diff::like_diff;
 
 // regexp_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-regexp_diff.md.
 pub mod regexp_diff;
+// regex_diff (p1-regexcore): Spencer ENGINE differential — shipped
+// regex_core vs the verbatim 18.3 engine under csrc/regexfam/vendor/
+// (second, pristine-symbol engine copy; the regexp_diff family's copy is
+// rxo_-renamed — see build.rs).
+pub mod regex_diff;
+pub use regex_diff::regex_diff;
 // miscfam_diff (p1-mb-miscfam): cmdtag/pg_class/earthdistance/pg_rusage/
 // xlogstats/stringinfo six-crate family.
 pub mod miscfam_diff;

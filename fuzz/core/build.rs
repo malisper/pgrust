@@ -847,12 +847,15 @@ fn main() {
         "RE_compile_and_cache", "RE_compile_and_execute",
         // p1-microbatch CI-build fix (2026-07-31): the jsonpath family's
         // vendored Spencer engine (csrc/jsonpath/regex/) exports the same
-        // five entry points as the regexp family's engine (csrc/regexfam/,
-        // which must keep the unprefixed names — pg_regexp_io.c calls them
-        // directly). Linux ld hard-errors on the duplicate definitions and
+        // five entry points as the regexp family's engine (csrc/regexfam/).
+        // Linux ld hard-errors on the duplicate definitions and
         // every CI cluster fuzz build at the tip died (`cargo fuzz build` builds
         // ALL targets); macOS ld tolerated it, which is why local builds
         // passed. Same nm-sweep remedy as the wave-3 train sweep below.
+        // (p1-regexcore merge: the regexfam wrapper copy is now rxo_-renamed
+        // — pg_regexp_io.c compiles in that same cc::Build so its calls
+        // rename consistently; the PRISTINE names now belong to the
+        // regex_diff engine copy under csrc/regexfam/vendor/.)
         "pg_regcomp", "pg_regexec", "pg_regerror", "pg_regfree",
         "pg_reg_getcolor",
         "construct_array_builtin", "ArrayGetIntegerTypmods",
@@ -966,6 +969,36 @@ fn main() {
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         regexfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
     }
+    // TWO ENGINE COPIES, ISOLATED (p1-regexcore merge): the regex_diff
+    // oracle below links the byte-identical vendored engine under
+    // csrc/regexfam/vendor/ with DIFFERENT shims (armed stack guard in
+    // pg_regexfam.c vs this tree's static-inline `return false` in
+    // include/miscadmin.h; real builtin-locale provider vs glue's aborting
+    // stubs). Without renames the linker satisfies BOTH drivers from
+    // whichever archive it opens first — regex_diff would silently run on
+    // THIS unarmed copy (the shallow-plane class covcap-CI cluster documents) or
+    // lld hard-errors on the duplicate (CI cluster job -1785599452 died on
+    // pg_reg_getcolor after a hand-listed subset; macOS ld64's archive-pull
+    // semantics mask it locally). So this family's copy of every
+    // cross-archive-colliding symbol is renamed rxo_* (command-line defines
+    // only; vendored files stay byte-identical). Colliding sets: the engine
+    // publics (both engine copies; the jsonpath family's third copy is
+    // jporcl_-renamed), and pg_newlocale_from_collation /
+    // unicode_{upper,lower}case_simple (glue stubs vs
+    // pg_difffuzz_regexlocale real definitions).
+    for s in [
+        // engine publics (also defined by the vendor/ copy below) — the
+        // COMPLETE exported-global set of the shared engine TUs, verified
+        // by nm-intersecting the built archives.
+        "pg_regcomp", "pg_regexec", "pg_regerror", "pg_regfree", "pg_regprefix",
+        "pg_reg_getcolor",
+        "pg_set_regex_collation",
+        // glue stubs (also defined for real by pg_difffuzz_regexlocale)
+        "pg_newlocale_from_collation",
+        "unicode_uppercase_simple", "unicode_lowercase_simple",
+    ] {
+        regexfam.define(s, format!("rxo_{s}").as_str());
+    }
     regexfam
         // glibc gates locale_t and the isw*_l family behind _GNU_SOURCE
         // (regc_pg_locale.c references them in branches dead under the
@@ -994,6 +1027,79 @@ fn main() {
         // effective in every build.rs compile of the oracle TUs.
         .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_regexfam");
+
+    // regex_diff oracle (p1-regexcore): verbatim REL_18_3 Spencer engine, a
+    // byte-for-byte copy of bench/cref/regex_vendor plus regprefix.c /
+    // regexport.c (fetched verbatim at the Stamp-18.3 upstream sha, see
+    // csrc/regexfam/pg_regexfam.c header). Upstream TU structure kept:
+    // regcomp.c (+regc_* includes), regexec.c (+rege_dfa.c), regfree.c,
+    // regerror.c, regprefix.c, regexport.c each compile separately — the
+    // compile and exec sides both define a `struct vars`. C collation only;
+    // BUILTIN/LIBC/ICU locale arms compile against aborting vendor stubs.
+    // This copy KEEPS the pristine pg_* symbol names (regexlocale's probe
+    // and pg_regexfam.c's armed stack guard bind to them); the regexp_diff
+    // family's copy above is the rxo_-renamed one, jsonpath's is jporcl_.
+    let mut regexcorefam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        regexcorefam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    regexcorefam
+        // oracle-integrity sweep (task #98): the backend's qsort IS
+        // pg_qsort (port.h line 478); the verbatim engine bodies
+        // (regc_nfa.c sortins/sortouts via regcomp.c) must bind the
+        // verbatim sort, not libc's. rxocore_pg_qsort = verbatim
+        // sort_template instantiation in pg_regexfam_vendor_qsort.c.
+        .define("qsort", "rxocore_pg_qsort")
+        .file("csrc/regexfam/pg_regexfam_vendor_qsort.c")
+        .file("csrc/regexfam/vendor/regcomp.c")
+        .file("csrc/regexfam/vendor/regexec.c")
+        .file("csrc/regexfam/vendor/regfree.c")
+        .file("csrc/regexfam/vendor/regerror.c")
+        .file("csrc/regexfam/vendor/regprefix.c")
+        .file("csrc/regexfam/vendor/regexport.c")
+        .file("csrc/regexfam/pg_regexfam.c")
+        .include("csrc/regexfam/vendor")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
+        .compile("pg_difffuzz_regexcorefam");
+
+    // regex locale probe (p1-regexcore): standalone verbatim regc_pg_locale.c
+    // with REAL builtin tables (recompiled unicode_category.c under the
+    // lprobe_ prefix so tablesfam's unprefixed copy keeps its own object;
+    // unicode_case.c is unique to this lib). See pg_regexfam_locale.c.
+    let mut regexlocale = cc::Build::new();
+    for s in [
+        "pg_set_regex_collation",
+        // pg_wchar_utf8.c export (also linked unprefixed in the tsvec
+        // family archive — nm-sweep hit, ld.lld duplicate-hard-error class)
+        "pg_utf_mblen",
+        // unicode_category.c externs (also linked unprefixed in tablesfam)
+        "unicode_category", "unicode_category_string", "unicode_category_abbrev",
+        "pg_u_prop_alphabetic", "pg_u_prop_lowercase", "pg_u_prop_uppercase",
+        "pg_u_prop_cased", "pg_u_prop_case_ignorable", "pg_u_prop_white_space",
+        "pg_u_prop_hex_digit", "pg_u_prop_join_control",
+        "pg_u_isdigit", "pg_u_isalpha", "pg_u_isalnum", "pg_u_isword",
+        "pg_u_isupper", "pg_u_islower", "pg_u_isgraph", "pg_u_isprint",
+        "pg_u_ispunct", "pg_u_isspace", "pg_u_isxdigit", "pg_u_isblank",
+        "pg_u_iscntrl",
+    ] {
+        regexlocale.define(s, format!("lprobe_{s}").as_str());
+    }
+    regexlocale
+        .file("csrc/regexfam/pg_regexfam_locale.c")
+        .file("csrc/regexfam/localereal/unicode_case.c")
+        .file("csrc/regexfam/localereal/pg_wchar_utf8.c")
+        .file("csrc/tablesfam/unicode_category.c")
+        .include("csrc/regexfam/localereal")
+        .include("csrc/tablesfam/include")
+        .include("csrc/regexfam/vendor")
+        .flag_if_supported("-fno-strict-aliasing")
+        .flag_if_supported("-fwrapv")
+        .define("PG_ORACLE_GUARD_CHECKS", None)
+        .compile("pg_difffuzz_regexlocale");
 
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=PGRUST_FUZZ_CSANCOV");

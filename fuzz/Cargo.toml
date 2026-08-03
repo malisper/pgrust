@@ -425,6 +425,15 @@ test = false
 doc = false
 bench = false
 
+# regex_diff (p1-regexcore): Spencer ENGINE differential (regex_core vs
+# verbatim 18.3 engine copy under core/csrc/regexfam/vendor/).
+[[bin]]
+name = "regex_diff"
+path = "fuzz_targets/regex_diff.rs"
+test = false
+doc = false
+bench = false
+
 # libfam_diff: scaffolded by fuzz/scaffold.py — see README-TODO-libfam_diff.md.
 [[bin]]
 name = "libfam_diff"
