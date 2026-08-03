@@ -285,7 +285,9 @@ extern "C" {
     fn pg_oracle_guard_exit();
 }
 
-pub(crate) struct OracleSerial(#[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>);
+// pub (not pub(crate)): integration-test crates under fuzz/core/tests/ hold
+// this guard too, via `decoder_fuzz::c_oracle_serial()` (task #144).
+pub struct OracleSerial(#[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>);
 
 extern "C" {
     /// H0 SCRIBBLER detector (task #112): exact validity predicate over the
@@ -460,8 +462,14 @@ pub(crate) fn oracle_guard_trap_disarm() -> Vec<String> {
     ORACLE_GUARD_TRAP.lock().unwrap().take().unwrap_or_default()
 }
 
-#[cfg(test)]
-pub(crate) fn c_oracle_serial() -> OracleSerial {
+/// Test-side spelling of [`oracle_serial`]. In-crate tests take
+/// `crate::c_oracle_serial()`; integration-test crates under
+/// fuzz/core/tests/ (their own crates — `crate::` is not decoder_fuzz there,
+/// and `#[cfg(test)]` items don't exist in the library they link) take
+/// `decoder_fuzz::c_oracle_serial()`. That is why this is `pub` and not
+/// cfg(test)-gated: wcharfam_exhaustive.rs shipped 11 unguarded tests while
+/// the guard was unreachable from outside the crate (task #144).
+pub fn c_oracle_serial() -> OracleSerial {
     oracle_serial()
 }
 

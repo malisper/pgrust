@@ -11,6 +11,13 @@
 //!   0=SQL_ASCII 1=EUC_JP 3=EUC_KR(=EUC_CN verifier) 4=EUC_TW
 //!   5=EUC_JIS_2004(=EUC_JP fns) 6=UTF8 7=MULE 8=LATIN1(single-byte row)
 //!   35=SJIS(=SJIS2004) 36=BIG5 37=GBK 38=UHC 39=GB18030 40=JOHAB
+//!
+//! ORACLE SERIALIZATION (task #144): the verbatim C oracle is
+//! single-threaded process-global state; every test here holds
+//! `decoder_fuzz::c_oracle_serial()` for its whole body (the d58db26ba80
+//! idiom — reentrant, so guarded drivers like wcharfam_diff still nest).
+//! This is an integration-test crate: `crate::c_oracle_serial()` from the
+//! panic-message idiom spells `decoder_fuzz::c_oracle_serial()` here.
 
 use decoder_fuzz::wcharfam::*;
 
@@ -33,6 +40,7 @@ fn pad8(bytes: &[u8]) -> [u8; 8] {
 /// 2 bytes; UTF8 dsplen's full 4-byte domain is x_utf8_dsplen_full).
 #[test]
 fn q_mblen_dsplen_verifychar_2byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in ALL_ENCS {
         for w in 0..=0xFFFFu16 {
             let b = w.to_be_bytes();
@@ -48,6 +56,7 @@ fn q_mblen_dsplen_verifychar_2byte_full() {
 /// verifystr, ALL encodings x full 0..2-byte domain.
 #[test]
 fn q_verifystr_2byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in ALL_ENCS {
         cmp_verifystr(enc, &[]);
         for b0 in 0..=0xFFu8 {
@@ -62,6 +71,7 @@ fn q_verifystr_2byte_full() {
 /// utf8/eucjp incrementers, full 1..=3-byte domains (len 4 is x-tier).
 #[test]
 fn q_increments_len123_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for b0 in 0..=0xFFu8 {
         cmp_utf8_increment(&[b0]);
         cmp_eucjp_increment(&[b0]);
@@ -81,6 +91,7 @@ fn q_increments_len123_full() {
 /// generic charinc: every BE encoding x full 1..=2-byte domain.
 #[test]
 fn q_generic_charinc_full_2byte() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in 0..35 {
         set_db_encoding_pub(enc);
         for b0 in 0..=0xFFu8 {
@@ -96,6 +107,7 @@ fn q_generic_charinc_full_2byte() {
 /// pg_enc2name spelling, plus junk shapes.
 #[test]
 fn q_encnames_table_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     let names: &[&str] = &[
         "abc", "alt", "big5", "euccn", "eucjis2004", "eucjp", "euckr", "euctw",
         "gb18030", "gbk", "iso88591", "iso885910", "iso885913", "iso885914",
@@ -144,6 +156,7 @@ fn q_encnames_table_full() {
 /// sides of every comparison in the gate plus i32 extremes).
 #[test]
 fn q_encoding_to_char_and_max_length_band() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in -1000..1000 {
         cmp_encoding_to_char(enc);
     }
@@ -163,6 +176,7 @@ fn q_encoding_to_char_and_max_length_band() {
 /// check_encoding_conversion_args: full verdict grid.
 #[test]
 fn q_check_args_grid() {
+    let _g = decoder_fuzz::c_oracle_serial();
     let encs = [-2, -1, 0, 1, 6, 34, 41, 42, 100];
     let exps = [-1, 0, 6, 34];
     for a in encs {
@@ -181,6 +195,7 @@ fn q_check_args_grid() {
 /// report_untranslatable_char sqlstate plane over encoding pairs x lead bytes.
 #[test]
 fn q_untranslatable_grid() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for src in REPS {
         for dst in [0, 6, 8] {
             for b0 in [0x41u8, 0x8d, 0xc3, 0xf0] {
@@ -195,6 +210,7 @@ fn q_untranslatable_grid() {
 /// surrogate, 2^20) + out-of-contract band grid.
 #[test]
 fn q_surrogate_pair_full_contract() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for first in 0xD800u32..=0xDBFF {
         for second in 0xDC00u32..=0xDFFF {
             cmp_surrogate_pair(first, second);
@@ -211,6 +227,7 @@ fn q_surrogate_pair_full_contract() {
 /// campaign owns long/adversarial streams; this pins the grid corners).
 #[test]
 fn q_dbwalk_grid() {
+    let _g = decoder_fuzz::c_oracle_serial();
     let pats: &[&[u8]] = &[
         b"", b"a", b"abc", b"\x80", b"\xa1\xa1", b"\x8e\xa1", b"\x8f\xa1\xa1",
         b"\xc3\xa9", b"\xe6\xbc\xa2", b"\xf0\x9f\x8e\x88", b"\xff\xff\xff",
@@ -234,6 +251,7 @@ fn q_dbwalk_grid() {
 #[test]
 #[ignore = "x-tier exhaustive: ~minutes, run explicitly in release"]
 fn x_verifychar_3byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in REPS {
         for w in 0..=0xFF_FFFFu32 {
             let b = [(w >> 16) as u8, (w >> 8) as u8, w as u8];
@@ -249,6 +267,7 @@ fn x_verifychar_3byte_full() {
 #[test]
 #[ignore = "x-tier exhaustive: full 2^32 x 4 kernels"]
 fn x_verifychar_4byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in [4i32, 6, 7, 39] {
         for w in 0..=u32::MAX {
             let b = w.to_be_bytes();
@@ -265,6 +284,7 @@ fn x_verifychar_4byte_full() {
 #[test]
 #[ignore = "x-tier exhaustive: full 2^32"]
 fn x_utf8_dsplen_4byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for w in 0..=u32::MAX {
         let mut p = [0u8; 8];
         p[..4].copy_from_slice(&w.to_be_bytes());
@@ -278,6 +298,7 @@ fn x_utf8_dsplen_4byte_full() {
 #[test]
 #[ignore = "x-tier exhaustive: full 2^32 x 4 kernels"]
 fn x_mblen_4byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in [4i32, 6, 7, 39] {
         for w in 0..=u32::MAX {
             let mut p = [0u8; 8];
@@ -292,6 +313,7 @@ fn x_mblen_4byte_full() {
 #[test]
 #[ignore = "x-tier exhaustive: full 2^32"]
 fn x_codepoint_full_u32() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for cp in 0..=u32::MAX {
         cmp_codepoint(cp);
     }
@@ -303,6 +325,7 @@ fn x_codepoint_full_u32() {
 #[test]
 #[ignore = "x-tier exhaustive: full 2^32"]
 fn x_utf8_bytes_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for w in 0..=u32::MAX {
         cmp_utf8_bytes(&w.to_be_bytes());
     }
@@ -313,6 +336,7 @@ fn x_utf8_bytes_full() {
 #[test]
 #[ignore = "x-tier exhaustive: full 2^32"]
 fn x_utf8_increment_4byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for w in 0..=u32::MAX {
         cmp_utf8_increment(&w.to_be_bytes());
     }
@@ -323,6 +347,7 @@ fn x_utf8_increment_4byte_full() {
 #[test]
 #[ignore = "x-tier exhaustive: 2^24 x 14 kernels"]
 fn x_verifystr_3byte_full() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in REPS {
         for w in 0..=0xFF_FFFFu32 {
             let b = [(w >> 16) as u8, (w >> 8) as u8, w as u8];
@@ -344,6 +369,7 @@ fn _keep(b: &[u8]) -> [u8; 8] {
 #[test]
 #[ignore = "x-tier exhaustive: full 2^32 fcinfo calls (~minutes)"]
 fn x_fc_max_length_full_i32() {
+    let _g = decoder_fuzz::c_oracle_serial();
     let cx = mcx::MemoryContext::new("wcharfam_x_fc");
     let mut enc = i32::MIN;
     loop {
@@ -361,6 +387,7 @@ fn x_fc_max_length_full_i32() {
 /// SetDatabaseEncoding error arm.
 #[test]
 fn q_stragglers() {
+    let _g = decoder_fuzz::c_oracle_serial();
     for enc in -100..100 {
         check_encoding_predicates(enc);
     }
