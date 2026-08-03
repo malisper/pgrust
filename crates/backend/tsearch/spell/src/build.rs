@@ -696,6 +696,19 @@ impl<'mcx> IspellDict<'mcx> {
                         .into());
                     }
                     naffix += 1;
+                    // C: Conf->AffixData = palloc0(naffix * sizeof(char *)).
+                    // palloc0 enforces AllocSizeIsValid, so an oversized alias
+                    // count raises "invalid memory alloc request size" BEFORE
+                    // any allocation is attempted. Reproduce C's exact
+                    // condition (naffix * sizeof(char *), i.e. 8 bytes per
+                    // slot on LP64 — NOT this port's element size) so the
+                    // threshold and the error match C. Without this the port
+                    // handed a ~39 GB request straight to try_reserve, which C
+                    // refuses outright (found by spellfam_diff: an `AF` line
+                    // whose count atoi-truncates to 1215752191).
+                    ::mcx::check_alloc_size(
+                        (naffix as usize).saturating_mul(core::mem::size_of::<*const u8>()),
+                    )?;
                     self.affix_data
                         .try_reserve(naffix as usize)
                         .map_err(|_| mcx.oom(naffix as usize))?;
@@ -1015,15 +1028,16 @@ impl<'mcx> IspellDict<'mcx> {
         // WHERE THIS SITS RELATIVE TO THE DIFFERENTIAL: raising 54001 here is
         // NOT self-evidently divergence-free. C reaches this input without
         // erroring, so on any input deep enough to trip our byte bound the two
-        // sides genuinely disagree; the comparison only stays quiet because the
-        // spellfam_diff driver early-returns on a Rust-side 54001 WITHOUT
-        // requiring the C side to have raised too — a ONE-SIDED suppression.
-        // That silently removes a slice of the input domain from comparison,
-        // which is a coverage hole, not a proof of parity. The driver owes a
-        // two-sided assertion (or an explicit, ledgered carve) before this
-        // crate's floor may be accepted; the threshold being a documented
-        // non-surface for this family bounds the blast radius but does not
-        // discharge that debt.
+        // sides genuinely disagree. That debt is DISCHARGED by the TWO-SIDED
+        // 54001 RULE in the spellfam_diff driver (adjudicate_54001): a 54001
+        // is only carved when the input's computed nesting ceiling clears a
+        // byte-derived depth floor AND the C side's witnessed outcome on the
+        // same input is success-or-54001; a shallow 54001 or one opposite a
+        // different C error fails the harness, and every admitted carve is
+        // counted and logged. The residual asymmetry (C succeeding where this
+        // guard fires on a genuinely deep input) is the ratified threshold
+        // non-surface — C's firing point is configuration-dependent even
+        // between two C builds via the max_stack_depth GUC.
         check_stack_depth()?;
         let mcx = self.mcx;
         let mut nchar = 0;

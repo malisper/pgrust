@@ -105,6 +105,10 @@ fn main() {
         // wfam_ copies in pg_wcharfam.c (see the file header for
         // provenance, shims and the ts_headline carve).
         .file("csrc/pg_wparserfam_io.c")
+        // spellfam_diff oracle (p1-spell) compiles in its OWN cc::Build below
+        // (pg_difffuzz_spellfam): it is built WITH -fsanitize=address so the
+        // vendored spell.c's memory-safety defects are ATTRIBUTED instead of
+        // surfacing as garbage-PC BUS faults (see that build for the rationale).
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         // RESTORED (p1-mb-contribc, 2026-08-01): dropped by the same union
@@ -362,6 +366,21 @@ fn main() {
     let mut wcharfam = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         wcharfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // ASan ON THIS SHARED TU (Michael's ruling 2026-08-01, blocker-TUs only —
+    // NOT the deferred tree-wide pass, task #84). p1-spell's 10M floor dies on a
+    // C-side wild control transfer (ASan SEGV, pc AND sp garbage, no artifact
+    // writable); instrumenting p1-spell's own TU did not attribute it, which
+    // localizes the offending write to a shared TU that spell.c calls — this
+    // one first (every spell.c parser walk goes through wfam_pg_mblen* /
+    // wfam_pg_mb2wchar_with_len). Gated on CARGO_CFG_FUZZING so only cargo-fuzz
+    // builds (which link an ASan runtime) are affected; plain `cargo test` is
+    // unchanged. SHARED-TU NOTICE: this TU is also linked by tzfam_diff,
+    // wparser_diff, hstore_diff and the wcharfam target, so those oracles get
+    // rebuilt with ASan too and may surface their OWN latent C-side memory bugs.
+    // Their corpora are deliberately NOT replayed here (that is task #84).
+    if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
+        wcharfam.flag("-fsanitize=address");
     }
     wcharfam
         .file("csrc/pg_wcharfam.c")
@@ -851,6 +870,34 @@ fn main() {
     // the main oracle lib's csrc/shim headers (and vice versa). Cross-family
     // mb-helper symbols carry a pg_regexfam_ prefix (see the shim headers) —
     // the same isolation the CRYPTO_SHARED_SYMS renames provide above.
+    // spellfam_diff oracle (p1-spell): its OWN cc::Build so it can be
+    // ASan-INSTRUMENTED. The rest of csrc/ is compiled without
+    // -fsanitize=address, which means ASan cannot see out-of-bounds or
+    // uninitialized accesses performed BY the vendored C — it only intercepts
+    // malloc, so C-side memory-safety bugs show up (if at all) as value
+    // divergences or as unattributable garbage-PC BUS faults. This lane hit
+    // exactly that: verbatim spell.c carries three memory-safety defects
+    // (upstream tasks #80 NULL AffixData slot, #81 uninitialized
+    // char flag[BUFSIZ], #83 CompoundAffix terminator OOB write), and a 10M
+    // floor run died with `ASan BUS, nested bug in the same thread` and no
+    // artifact. Instrumenting this TU turns those into precise reports at their
+    // true site. Rationale + campaign-wide implication:
+    // scratchpad/needs-decode/TASK-83-SEVERITY.md (Q1).
+    let mut spellfam = cc::Build::new();
+    if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
+        spellfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
+    }
+    // Only under cargo-fuzz (which links the ASan runtime); a plain
+    // `cargo test` build must not gain a sanitizer the harness cannot resolve.
+    if std::env::var_os("CARGO_CFG_FUZZING").is_some() {
+        spellfam.flag("-fsanitize=address");
+    }
+    spellfam
+        .file("csrc/pg_spellfam_io.c")
+        .include("csrc")
+        .warnings(false)
+        .compile("pg_difffuzz_spellfam");
+
     let mut regexfam = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {
         regexfam.flag("-fsanitize-coverage=inline-8bit-counters,pc-table");
