@@ -35,10 +35,12 @@
  *     the CI cluster (aarch64-linux) and this dev host (aarch64-darwin).
  *   - palloc family -> bump ARENA below, reset per exec (node trees are
  *     never freed piecemeal by these walkers; C context reset parity).
- *   - ereport/elog -> errstart records, errcode captures the packed
- *     sqlstate, errfinish longjmps to the armed driver entry (PG's error
- *     longjmp, exactly the miscfam pattern). Message text never crosses
- *     the comparison seam.
+ *   - ereport/elog -> errstart records elevel + default sqlstate, errcode
+ *     captures the packed sqlstate, errfinish longjmps to the armed driver
+ *     entry for elevel >= ERROR (PG's error longjmp) and RETURNS for
+ *     WARNING and below so C continues, exactly like the backend (task
+ *     #137; sub-ERROR reports land on a side-channel counter, never a
+ *     compared plane). Message text never crosses the comparison seam.
  *   - extensible-node registry EMPTY: GetExtensibleNodeMethods /
  *     GetCustomScanMethods raise exactly what extensible.c raises on a
  *     lookup miss — real behavior of a backend with no extensions loaded
@@ -189,14 +191,31 @@ GetMemoryChunkContext(void *pointer)
 static jmp_buf ndf_jmp;
 static int	ndf_jmp_armed;
 static int	ndf_errcode_val;		/* packed sqlstate from errcode() */
+static int	ndf_cur_elevel;			/* elevel of the report being assembled */
+static int	ndf_notice_count;		/* sub-ERROR reports emitted since the
+									 * last driver-entry reset. SIDE CHANNEL
+									 * ONLY, never a compared plane: real PG
+									 * prints these and continues, and the
+									 * Rust ports carry no warning surface. */
 
 bool
 errstart(int elevel, const char *domain)
 {
 	(void) domain;
-	/* elog.c: ERROR-level reports default to XX000 unless errcode() runs */
-	ndf_errcode_val = (elevel >= 20 /* ERROR */ ) ?
-		MAKE_SQLSTATE('X', 'X', '0', '0', '0') : 0;
+	ndf_cur_elevel = elevel;
+
+	/*
+	 * elog.c errstart: default sqlstate unless errcode() runs — XX000
+	 * (internal error) for >= ERROR, 01000 for WARNING/WARNING_CLIENT_ONLY,
+	 * successful completion below that. (The old `elevel >= 20` cutoff
+	 * predated WARNING_CLIENT_ONLY == 20 in this tree; ERROR is 21.)
+	 */
+	if (elevel >= ERROR)
+		ndf_errcode_val = MAKE_SQLSTATE('X', 'X', '0', '0', '0');
+	else if (elevel >= WARNING)
+		ndf_errcode_val = MAKE_SQLSTATE('0', '1', '0', '0', '0');
+	else
+		ndf_errcode_val = 0;
 	return true;
 }
 
@@ -212,6 +231,20 @@ errfinish(const char *filename, int lineno, const char *funcname)
 	(void) filename;
 	(void) lineno;
 	(void) funcname;
+
+	/*
+	 * PG's errfinish performs the error non-local exit ONLY for elevel >=
+	 * ERROR; WARNING and below are emitted to log/client and control
+	 * RETURNS so the reporting C code continues (outfuncs.c:766 is this
+	 * family's live warn-and-continue site). Task #137: this shim used to
+	 * longjmp at ANY elevel, converting sub-ERROR paths into false oracle
+	 * errors. Sub-ERROR reports land on the side-channel counter only.
+	 */
+	if (ndf_cur_elevel < ERROR)
+	{
+		ndf_notice_count++;
+		return;
+	}
 	if (!ndf_jmp_armed)
 		abort();
 	longjmp(ndf_jmp, 1);
@@ -448,6 +481,7 @@ pg_ndf_exec(const char *input)
 	void	   *reread;
 
 	ndf_arena_used = 0;
+	ndf_notice_count = 0;
 	ndf_result.verdict = NDF_ERROR;
 	ndf_result.errcode = 0;
 	ndf_result.out_text = NULL;
@@ -476,6 +510,64 @@ pg_ndf_exec(const char *input)
 	reread = stringToNode(out1);
 	out3 = nodeToString(reread);
 	ndf_result.reread_ok = strcmp(out1, out3) == 0;
+
+	ndf_jmp_armed = 0;
+	ndf_result.verdict = NDF_OK;
+	return &ndf_result;
+}
+
+/* Side channel for the tests: sub-ERROR reports since the last entry. */
+int
+pg_ndf_notice_count(void)
+{
+	return ndf_notice_count;
+}
+
+/*
+ * Shim-contract control (task #137), fuzz plumbing, NOT Postgres code.
+ *
+ * Drives the ONE sub-ERROR report the vendored family contains —
+ * outfuncs.c outNode's default arm, elog(WARNING, "could not dump
+ * unrecognized node type: %d") — through the real ereport plumbing, by
+ * handing nodeToString a fabricated node whose tag is nodetags.h-valid but
+ * has no out function (T_InlineCodeBlock, an executor node). The tag census
+ * (nodesfam_diff_tests.rs) proves stringToNode can never build such a node,
+ * so the arm is unreachable through pg_ndf_exec and needs this direct entry.
+ *
+ * The backend emits that WARNING and outNode CONTINUES, producing "{}".
+ * Contract under test: errfinish longjmps ONLY for elevel >= ERROR;
+ * WARNING/NOTICE record-and-return (real errfinish, elog.c). Reports like
+ * pg_ndf_exec: verdict OK + out_text "{}" when the contract holds, verdict
+ * ERROR if the WARNING was misreported as an oracle error.
+ */
+const NdfOut *
+pg_ndf_warning_control(void)
+{
+	PG_ORACLE_GUARD_CHECK(__func__);
+	struct
+	{
+		NodeTag		type;
+	}			stub;
+
+	ndf_arena_used = 0;
+	ndf_notice_count = 0;
+	ndf_result.verdict = NDF_ERROR;
+	ndf_result.errcode = 0;
+	ndf_result.out_text = NULL;
+	ndf_result.copy_text = NULL;
+	ndf_result.equal_ok = -1;
+	ndf_result.reread_ok = -1;
+
+	ndf_jmp_armed = 1;
+	if (setjmp(ndf_jmp) != 0)
+	{
+		ndf_jmp_armed = 0;
+		ndf_result.errcode = ndf_errcode_val;
+		return &ndf_result;
+	}
+
+	stub.type = T_InlineCodeBlock;
+	ndf_result.out_text = nodeToString(&stub);
 
 	ndf_jmp_armed = 0;
 	ndf_result.verdict = NDF_OK;

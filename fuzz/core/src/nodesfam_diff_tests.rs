@@ -1300,3 +1300,109 @@ fn float_fields_use_shortest_decimal() {
         let _ = run_text(t.as_bytes());
     }
 }
+
+// ================== shim-contract controls (task #137) ==================
+//
+// PG's errfinish performs the error non-local exit ONLY for elevel >= ERROR;
+// WARNING/NOTICE are emitted and the reporting C code CONTINUES. The oracle
+// shim's errfinish used to longjmp at ANY elevel, misreporting C
+// warn-and-continue paths as oracle errors. Both directions are pinned here.
+
+extern "C" {
+    fn pg_ndf_warning_control() -> *const NdfOut;
+    fn pg_ndf_notice_count() -> std::os::raw::c_int;
+}
+
+/// Must-fail control (a): a C path that emits a WARNING and then returns a
+/// value — outfuncs.c:766, outNode's default arm over a node tag with no out
+/// function — must come back verdict-OK with the out text, the WARNING
+/// recorded only on the side channel. Pre-#137-fix this asserted red with
+/// verdict == 1 (errcode 0: the WARNING longjmped before any errcode() ran).
+#[test]
+fn shim_warning_level_report_returns_value() {
+    let _serial = crate::c_oracle_serial();
+    rearm_stack_bases();
+    unsafe {
+        let r = &*pg_ndf_warning_control();
+        assert_eq!(
+            r.verdict, 0,
+            "WARNING misreported as an oracle ERROR (task #137 hole), errcode={:#x}",
+            r.errcode
+        );
+        let out = std::ffi::CStr::from_ptr(r.out_text).to_bytes();
+        assert_eq!(
+            out, b"{}",
+            "outNode must continue past the WARNING and close the braces"
+        );
+        assert_eq!(
+            pg_ndf_notice_count(),
+            1,
+            "exactly one sub-ERROR report on the side channel"
+        );
+    }
+}
+
+/// Must-fail control (b), the other direction: an ERROR-level report still
+/// longjmps and reports as an oracle error — the error plane is not
+/// weakened. parseNodeString's elog(ERROR, "badly formatted node string...")
+/// carries elog's XX000 internal default, so this also pins the
+/// default-sqlstate assignment (which errfinish-side changes must not
+/// disturb).
+#[test]
+fn shim_error_level_report_still_longjmps() {
+    let _serial = crate::c_oracle_serial();
+    rearm_stack_bases();
+    const SQLSTATE_XX000: i32 = types_error::make_sqlstate(*b"XX000").0;
+    match c_exec(b"{FOOBARBAZ}") {
+        COut::Err { errcode } => assert_eq!(
+            errcode, SQLSTATE_XX000,
+            "elog(ERROR) must keep the XX000 internal default, got {errcode:#x}"
+        ),
+        COut::Ok { .. } => panic!("unknown node label must still be an oracle ERROR"),
+    }
+    unsafe {
+        assert_eq!(
+            pg_ndf_notice_count(),
+            0,
+            "no sub-ERROR report is involved on this path"
+        );
+    }
+}
+
+/// DIFFERENTIAL-CONSEQUENCE WITNESS for the #137 fix: how many committed
+/// seeds actually change verdict now that a WARNING no longer errors?
+///
+/// ZERO, and this test is the mechanical reason rather than a claim: the
+/// family's only sub-ERROR site is outNode's no-out-function default arm,
+/// and the tag census proves every label `stringToNode` dispatches HAS an
+/// out function — so the arm is unreachable through the driver entry. The
+/// side-channel counter is asserted 0 across the whole committed corpus,
+/// which means the fix moved no seed between the error and success planes
+/// (nothing to re-triage), and this goes RED the day a re-vendor or a new
+/// seed makes a sub-ERROR path reachable through `pg_ndf_exec` — at which
+/// point the verdict planes genuinely need re-reading.
+#[test]
+fn corpus_reaches_no_sub_error_report() {
+    let _serial = crate::c_oracle_serial();
+    rearm_stack_bases();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/nodesfam_diff");
+    let mut n = 0;
+    for e in std::fs::read_dir(&dir).expect("corpus/nodesfam_diff missing") {
+        let p = e.expect("dirent").path();
+        if !p.is_file() {
+            continue;
+        }
+        let data = std::fs::read(&p).expect("seed");
+        // driver only — never c_exec on un-gated text (see the gate test)
+        let _ = run_text(if data.first() == Some(&0) { &data[1..] } else { &data[..] });
+        let notices = unsafe { pg_ndf_notice_count() };
+        assert_eq!(
+            notices, 0,
+            "seed {p:?} drove {notices} sub-ERROR C report(s) — pre-#137 these \
+             were false oracle ERRORs, so this seed's verdict plane changed and \
+             needs re-triage as a possible real divergence"
+        );
+        n += 1;
+    }
+    assert!(n >= 80, "corpus shrank to {n} seeds");
+}

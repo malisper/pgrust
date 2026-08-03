@@ -184,7 +184,12 @@ palloc_extended(size_t size, int flags)
 #define MCXT_ALLOC_NO_OOM 0x02
 #define MCXT_ALLOC_ZERO 0x04
 
-/* ereport/elog -> class + longjmp (all arms here are internal class 6) */
+/* ereport/elog -> class + longjmp for elevel >= ERROR (all raise arms here
+ * are internal class 6). Sub-ERROR reports return so C continues, as the
+ * backend's errfinish does (task #137): the family's only sub-ERROR sites
+ * are dynahash.c's leaked-hash_seq_search elog(WARNING)s in the AtEOXact
+ * cleanup paths — uncalled by this harness today, but a WARNING must never
+ * be misreported as an oracle error if they ever become reachable. */
 #ifndef TRGMRX_NO_EREPORT_MACROS		/* pg_trgm_regexp_io.c defines its own */
 static inline int
 trgmrx_swallow(const char *fmt,...)
@@ -196,8 +201,8 @@ trgmrx_swallow(const char *fmt,...)
 #define errmsg trgmrx_swallow
 #define errdetail trgmrx_swallow
 #define errhint trgmrx_swallow
-#define ereport(level, rest) do { ((void) (rest)); pg_diff_trgm_bridge_raise(6); } while (0)
-#define elog(level, ...) do { trgmrx_swallow(__VA_ARGS__); pg_diff_trgm_bridge_raise(6); } while (0)
+#define ereport(level, rest) do { ((void) (rest)); if ((level) >= 21 /* ERROR */) pg_diff_trgm_bridge_raise(6); } while (0)
+#define elog(level, ...) do { trgmrx_swallow(__VA_ARGS__); if ((level) >= 21 /* ERROR */) pg_diff_trgm_bridge_raise(6); } while (0)
 #define ERROR 21
 #define WARNING 19
 #define FATAL 22
