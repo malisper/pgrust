@@ -56,7 +56,6 @@ impl<'mcx> DestReceiver<'mcx> {
             }
             DestReceiver::ExplainSerialize(dr) => dr.receive_slot(slot),
             DestReceiver::TupleQueue(dr) => dr.receive_slot(slot),
-            other => other.unported("receiveSlot"),
         }
     }
 
@@ -81,7 +80,6 @@ impl<'mcx> DestReceiver<'mcx> {
                 dr.startup(operation, typeinfo);
                 Ok(())
             }
-            other => other.unported("rStartup"),
         }
     }
 
@@ -137,14 +135,6 @@ impl<'mcx> DestReceiver<'mcx> {
         }
     }
 
-    #[cold]
-    fn unported(&self, method: &str) -> ! {
-        panic!(
-            "DestReceiver {:?}.{method}: owner callbacks not ported yet \
-             (printtup.c/printsimple.c/spi.c)",
-            self.mydest()
-        )
-    }
 }
 
 // SetRemoteDestReceiverParams (printtup.c) at the enum boundary: C downcasts

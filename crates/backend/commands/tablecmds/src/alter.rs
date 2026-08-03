@@ -166,8 +166,6 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_SetAccessMethod
             | AlterTableType::AT_ChangeOwner
             | AlterTableType::AT_GenericOptions => AccessExclusiveLock,
-            AlterTableType::AT_AddColumnToView
-            | AlterTableType::AT_ReplaceRelOptions => AccessExclusiveLock,
             other => panic!("unrecognized alter table type: {}", other as i32),
         };
         if cmd_lockmode > lockmode {

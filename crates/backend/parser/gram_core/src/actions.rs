@@ -4595,18 +4595,18 @@ impl<'mcx> Parser<'mcx> {
                 let list = view.v(2).list();
                 *yyval = YYSTYPE::Node(Some(Node::mk_list(mcx, list)?));
             }
-            // copy_generic_opt_arg_list (+ _item) and columnList / columnElem.
-            452 | 556 => {
+            // copy_generic_opt_arg_list (+ _item).
+            452 => {
                 let n = view.v(1).node().expect("list item");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
             }
-            453 | 557 => {
+            453 => {
                 let mut list = view.v(1).list();
                 let n = view.v(3).node().expect("list item");
                 list.lappend(mcx, n)?;
                 *yyval = YYSTYPE::List(list);
             }
-            454 | 562 => {
+            454 => {
                 let s = view.v(1).str_val();
                 *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
             }
@@ -7720,13 +7720,13 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
                 *yyval = YYSTYPE::List(list);
             }
-            // func_args_list / function_with_argtypes_list / aggr_args_list /
+            // func_args_list / function_with_argtypes_list /
             // aggregate_with_argtypes_list: `el | list ',' el`.
-            1134 | 1136 | 1169 | 1172 => {
+            1134 | 1136 | 1172 => {
                 let el = view.v(1).node().expect("list element");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
             }
-            1135 | 1137 | 1170 | 1173 => {
+            1135 | 1137 | 1173 => {
                 let mut list = view.v(1).list();
                 list.lappend(mcx, view.v(3).node().expect("list element"))?;
                 *yyval = YYSTYPE::List(list);

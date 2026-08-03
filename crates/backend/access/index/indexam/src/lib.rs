@@ -276,6 +276,8 @@ pub fn index_bulk_delete_collect<'mcx>(
         // brinbulkdelete never invokes the callback: BRIN has no
         // per-heap-tuple entries to report.
         IndexAmKind::Brin => Ok(IndexBulkDeleteResult::default()),
+        // Reachable only with the mock feature (IndexAmKind::Mock); dead otherwise.
+        #[allow(unreachable_patterns)]
         _ => panic!("unported: ambulkdelete TID-collect beyond btree/hash/gin/gist/spgist/brin (validate_index)"),
     }
 }

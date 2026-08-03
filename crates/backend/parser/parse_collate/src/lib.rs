@@ -231,6 +231,8 @@ fn assign_collations_walker<'mcx>(
             }
             return Ok(());
         }
+        // COLLATE sets an explicitly derived collation regardless of the
+        // child state; still recurse to set up collation info below.
         NodeTag::T_CollateExpr => {
             let c = node.as_collate_expr().unwrap();
             assign_collations_walker(c.arg, &mut loccontext)?;
@@ -357,16 +359,6 @@ fn assign_collations_walker<'mcx>(
             };
             location = expr_location(node);
         }
-        // COLLATE sets an explicitly derived collation regardless of the
-        // child state; still recurse to set up collation info below.
-        NodeTag::T_CollateExpr => {
-            let ce = node.as_collate_expr().unwrap();
-            assign_collations_walker(ce.arg, &mut loccontext)?;
-            collation = ce.collOid;
-            debug_assert!(OidIsValid(collation));
-            strength = CollateStrength::Explicit;
-            location = ce.location;
-        }
         // C's default arm over the closed set this lane can produce.
         // SubLink: children walked (T_Query arm supplies the EXPR sublink's
         // first-column collation); exprSetCollation on SubLink is a C no-op.
@@ -390,9 +382,6 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
-        | NodeTag::T_ScalarArrayOpExpr
-        | NodeTag::T_ArrayExpr
-        | NodeTag::T_SQLValueFunction
         | NodeTag::T_JsonValueExpr
         | NodeTag::T_JsonConstructorExpr
         | NodeTag::T_JsonIsPredicate
@@ -403,8 +392,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_SubscriptingRef
         | NodeTag::T_FieldStore
         | NodeTag::T_MergeSupportFunc
-        | NodeTag::T_NextValueExpr
-        | NodeTag::T_NamedArgExpr) => {
+        | NodeTag::T_NextValueExpr) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
                 // collation-marked in transformCaseExpr and doesn't affect
@@ -594,26 +582,9 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(e, &mut loccontext)?;
                     }
                 }
-                NodeTag::T_ScalarArrayOpExpr => {
-                    for arg in &node.as_scalar_array_op_expr().unwrap().args {
-                        assign_collations_walker(arg, &mut loccontext)?;
-                    }
-                }
-                NodeTag::T_ArrayExpr => {
-                    for el in &node.as_array_expr().unwrap().elements {
-                        assign_collations_walker(el, &mut loccontext)?;
-                    }
-                }
-                NodeTag::T_SQLValueFunction => {}
                 NodeTag::T_MergeSupportFunc => {}
                 // No expression subnodes (expression_tree_walker).
                 NodeTag::T_NextValueExpr => {}
-                NodeTag::T_NamedArgExpr => {
-                    assign_collations_walker(
-                        node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"),
-                        &mut loccontext,
-                    )?;
-                }
                 NodeTag::T_JsonValueExpr => {
                     let j = node.as_json_value_expr().unwrap();
                     if let Some(e) = j.raw_expr {
@@ -797,25 +768,8 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     // exprSetCollation(SubLink) is assert-only in C.
                     NodeTag::T_SubLink => {}
-                    // exprSetCollation(NamedArgExpr) is assert-only in C
-                    // (collation == exprCollation(arg)).
-                    NodeTag::T_NamedArgExpr => {
-                        debug_assert_eq!(set_coll, expr_collation(node));
-                    }
                     NodeTag::T_SubscriptingRef => node
                         .with_mut::<types_nodes::SubscriptingRef, _>(|s| s.refcollid = set_coll)
-                        .unwrap(),
-                    // exprSetCollation(ScalarArrayOpExpr) is assert-only
-                    // (boolean result); only inputcollid is written.
-                    NodeTag::T_ScalarArrayOpExpr => {
-                        debug_assert!(!OidIsValid(set_coll));
-                        node.with_mut::<types_nodes::ScalarArrayOpExpr, _>(|s| {
-                            s.inputcollid = input_coll;
-                        })
-                        .unwrap()
-                    }
-                    NodeTag::T_ArrayExpr => node
-                        .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
                         .unwrap(),
                     // exprSetCollation(XmlExpr) is assert-only: the text
                     // result (IS_XMLSERIALIZE) carries DEFAULT_COLLATION_OID,
@@ -826,17 +780,6 @@ fn assign_collations_walker<'mcx>(
                                 == types_nodes::XmlExprOp::IS_XMLSERIALIZE
                             {
                                 set_coll == types_core::catalog::DEFAULT_COLLATION_OID
-                            } else {
-                                !OidIsValid(set_coll)
-                            }
-                        );
-                    }
-                    NodeTag::T_SQLValueFunction => {
-                        debug_assert!(
-                            if node.as_sql_value_function().unwrap().r#type
-                                == types_core::catalog::NAMEOID
-                            {
-                                set_coll == types_core::catalog::C_COLLATION_OID
                             } else {
                                 !OidIsValid(set_coll)
                             }
