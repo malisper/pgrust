@@ -1971,6 +1971,24 @@ cmpaffix(const void *s1, const void *s2)
 					   (const unsigned char *) a2->repl);
 }
 
+/* ==== pg_qsort (task #98 sort-symbol hygiene; spgbox/hstorefam pattern).
+ * VERBATIM lib/sort_template.h instantiated exactly as port/qsort.c does
+ * (ST_SORT/ST_ELEMENT_TYPE_VOID/ST_COMPARE_RUNTIME_POINTER), ST_SCOPE
+ * static and family-prefixed so this archive neither exports an unprefixed
+ * sort symbol (link race) nor binds LIBC qsort where the backend means
+ * pg_qsort (port.h maps qsort -> pg_qsort), keeping spell.c's qsort TIE
+ * ORDER the backend's own. ==== */
+#define pg_noinline __attribute__((noinline))
+#define CppConcat(x, y) x##y
+#define ST_SORT spf_pg_qsort
+#define ST_ELEMENT_TYPE_VOID
+#define ST_COMPARE_RUNTIME_POINTER
+#define ST_SCOPE static
+#define ST_DECLARE
+#define ST_DEFINE
+#include "sort_template.h"
+#define qsort(a,b,c,d) spf_pg_qsort(a,b,c,d)
+
 /*
  * Gets an affix flag from the set of affix flags (sflagset).
  *
