@@ -1982,7 +1982,36 @@ pg_jsonfam_psprintf(const char *fmt, ...)
 _Thread_local jmp_buf pg_jsonfam_jmp;
 _Thread_local int pg_jsonfam_errcode;
 _Thread_local int pg_jsonfam_pending_errcode;
-_Thread_local int pg_jsonfam_stack_depth;
+
+/* Recursion guard state (see jsonfam/include/miscadmin.h for the contract:
+ * BYTE-denominated at PG's effective 2048 kB default, never a frame count). */
+_Thread_local const char *pg_jsonfam_stack_base;
+
+void
+pg_jsonfam_set_stack_base(void)
+{
+	char		here;
+
+	/* stack_depth.c:60-61's portable arm: the address of an own local (the
+	 * __builtin_frame_address(0) branch is an equivalent warning dodge). */
+	pg_jsonfam_stack_base = &here;
+}
+
+/* stack_depth.c:108-137 stack_is_too_deep, verbatim shape: distance from the
+ * armed base to a local of THIS frame, absolute value, byte-compared; the
+ * base==NULL test comes last exactly as upstream orders it. */
+bool
+pg_jsonfam_stack_is_too_deep(void)
+{
+	char		stack_top_loc;
+	ptrdiff_t	stack_depth;
+
+	stack_depth = pg_jsonfam_stack_base - &stack_top_loc;
+	if (stack_depth < 0)
+		stack_depth = -stack_depth;
+	return stack_depth > PG_JSONFAM_MAX_STACK_DEPTH_BYTES &&
+		pg_jsonfam_stack_base != NULL;
+}
 
 pg_noreturn void
 pg_jsonfam_error_fire(int code)
@@ -1997,7 +2026,7 @@ pg_jsonfam_error_fire(int code)
 		pg_jsonfam_arena_reset(); \
 		pg_jsonfam_errcode = 0; \
 		pg_jsonfam_pending_errcode = 0; \
-		pg_jsonfam_stack_depth = 0; \
+		pg_jsonfam_set_stack_base(); \
 	} while (0)
 
 static text *

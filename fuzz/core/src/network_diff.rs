@@ -281,6 +281,16 @@ extern "C" {
         obits: *mut u8,
         oaddr: *mut u8,
     ) -> i32;
+
+    /// SHIM-CONTRACT PROBES (read-only, never on a comparator path); see
+    /// csrc/pg_network_io.c. `pg_network_pstrdup_len_probe` =
+    /// `strlen(pstrdup(s))`, which mcxt.c:1711-1728's contract makes
+    /// `== strlen(s)` for every `s`. `pg_network_msgbuf_slack` = bytes the
+    /// allocation carries beyond strlen+1+GUARD (0 under exact sizing, -1
+    /// before the first call).
+    fn pg_network_pstrdup_len_probe(s: *const c_char) -> usize;
+    fn pg_network_msgbuf_slack() -> i32;
+    fn pg_network_msgbuf_check() -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,6 +1368,76 @@ pub fn network_diff(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SHIM-CONTRACT PIN (task #131, rework of the refuted 515fffe6d6a) —
+    /// THE SCRIBBLER CLASS, second instance.
+    ///
+    /// The contract is mcxt.c's (vendor/postgres-src, 18.3): `pstrdup(in)` =
+    /// `MemoryContextStrdup(CurrentMemoryContext, in)` (mcxt.c:1724-1728),
+    /// and MemoryContextStrdup allocates EXACTLY `strlen(string)+1` bytes and
+    /// copies the whole string (mcxt.c:1711-1722). Both halves are pinned:
+    ///
+    ///  * LENGTH: `strlen(pstrdup(s)) == strlen(s)` at every driven length —
+    ///    catches any truncating buffer up to 1 MiB.
+    ///  * EXACT SIZE: `pg_network_msgbuf_slack() == 0` after EVERY call.
+    ///    This is what makes the pin fail for ANY wrong-size buffer, not
+    ///    just 64: a fixed buffer of ANY size (the refuted pin was measured
+    ///    blind past 4096) and a grow-never-shrink realloc both report
+    ///    nonzero slack at some driven length; the long->short tail is the
+    ///    dedicated grow-never-shrink control (pg_float_io.c fbb8c572ec3
+    ///    lesson: memory-SAFE but detection-BLIND, the overrun class this
+    ///    shim exists to expose lands in slack and goes unseen).
+    ///
+    /// A rewrite that deletes the probes fails to link; a rewrite that lies
+    /// through them has to reimplement exact sizing to do so.
+    ///
+    /// MUST-FAIL CONTROLS (run for task #131, outputs in the lane report):
+    ///  * pristine fixed-64 truncating shim -> the len assertion fails at 64;
+    ///  * fixed 2 MiB non-truncating buffer -> the slack assertion fails at
+    ///    len 0;
+    ///  * grow-never-shrink (`>` for `!=`) -> the long->short tail fails.
+    #[test]
+    fn shim_pstrdup_sizes_exactly_the_scribbler_class() {
+        let _serial = crate::c_oracle_serial();
+
+        let probe = |len: usize| -> (usize, i32) {
+            let s = std::ffi::CString::new(vec![b'x'; len]).unwrap();
+            let got = unsafe { pg_network_pstrdup_len_probe(s.as_ptr()) };
+            let slack = unsafe { pg_network_msgbuf_slack() };
+            (got, slack)
+        };
+
+        for len in [0usize, 1, 49, 63, 64, 65, 300, 4096, 8192, 65536, 1 << 20] {
+            let (got, slack) = probe(len);
+            assert_eq!(
+                got, len,
+                "pstrdup truncated a {len}-byte string to {got}: mcxt.c \
+                 allocates strlen+1 and never truncates (THE SCRIBBLER, #112)"
+            );
+            assert_eq!(
+                slack, 0,
+                "pstrdup allocation carries {slack} bytes of slack at len \
+                 {len}: the mcxt.c contract is EXACTLY strlen+1, and slack is \
+                 where an input-derived overrun hides from the guard band"
+            );
+            assert_eq!(
+                unsafe { pg_network_msgbuf_check() },
+                0,
+                "guard band clobbered at len {len}"
+            );
+        }
+
+        // Grow-never-shrink control: a long call then a short one. Sizing up
+        // only would leave ~1 MiB of slack here.
+        probe(1 << 20);
+        let (_, slack) = probe(10);
+        assert_eq!(
+            slack, 0,
+            "pstrdup kept {slack} bytes of slack after a short call following \
+             a 1 MiB one: grow-never-shrink is not mcxt.c's contract \
+             (fbb8c572ec3)"
+        );
+    }
 
     pub const TEXT_CORPUS: &[&str] = &[
         "0.0.0.0/0",

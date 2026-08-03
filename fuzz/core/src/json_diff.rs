@@ -159,6 +159,27 @@ fn pin_utf8() {
     });
 }
 
+/// Arm the Rust-side recursion guard on the CALLING thread and pin
+/// max_stack_depth to the server default 2048 kB (vendor guc.c:1613-1635
+/// clamps the startup raise at 2048; nodesfam_diff::rearm_stack_bases is the
+/// precedent, pinning BOTH sides). The C oracle arms its own base per entry
+/// (PG_JSONFAM_ENTRY, csrc/pg_json_io.c) at the same 2048 kB — without this
+/// the plane is one-sided: `stack_depth_core`'s base defaults to 0 (inert),
+/// so adt_json's check_stack_depth lines never fire while the oracle's do.
+/// In-domain this is verdict-neutral (MAX_LEN = 1024 => nesting <= 512 =>
+/// ~49 kB, far under 2048 kB on both sides); the guard exists for corpus
+/// replays, raised -max_len runs, and direct entry calls. Per-thread because
+/// both bases are thread-locals; deep tests re-arm on their own big-stack
+/// thread (see the deep pin below).
+fn arm_stack_guards() {
+    const SERVER_DEFAULT_KB: i32 = 2048;
+    if stack_depth::max_stack_depth() != SERVER_DEFAULT_KB {
+        stack_depth::set_max_stack_depth(SERVER_DEFAULT_KB);
+        stack_depth::assign_max_stack_depth(SERVER_DEFAULT_KB);
+    }
+    let _ = stack_depth::set_stack_base();
+}
+
 // ---------------------------------------------------------------------------
 // C-result plumbing
 // ---------------------------------------------------------------------------
@@ -272,6 +293,7 @@ pub fn json_diff(data: &[u8]) {
         return;
     };
     pin_utf8();
+    arm_stack_guards();
     match sel % 14 {
         0 => json_in_diff(payload),
         1 => json_typeof_diff(payload),
@@ -1155,6 +1177,115 @@ fn escape_json_diff(payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nested(depth: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(depth * 2);
+        v.extend(std::iter::repeat(b'[').take(depth));
+        v.extend(std::iter::repeat(b']').take(depth));
+        v
+    }
+
+    fn json_in_rc(src: &[u8]) -> i32 {
+        let mut out: *const u8 = std::ptr::null();
+        let mut outlen: usize = 0;
+        unsafe { pg_diff_json_in(src.as_ptr(), src.len(), &mut out, &mut outlen) }
+    }
+
+    /// SHIM-CONTRACT PIN (task #131, rework of the refuted 515fffe6d6a).
+    ///
+    /// The oracle's `check_stack_depth` must reproduce stack_depth.c's
+    /// contract at the EFFECTIVE server default: a BYTE budget of 2048 kB
+    /// (vendor guc.c:1613-1635 raises the 100 kB boot value to
+    /// min((rlimit-512kB)/1024, 2048) kB at startup; guc_tables.c:2615-2618
+    /// says so in so many words), measured from a base armed at entry,
+    /// raising the catchable 54001. Three wrong shims are each rejected by a
+    /// dedicated arm:
+    ///
+    ///  * frame counter at 100000 (the pre-census shim): DEAD — needs
+    ///    ~9.1 MiB of stack to fire; nesting 60000 returns 0 under it, so
+    ///    the deep arm fails;
+    ///  * byte budget at 100 kB (the REFUTED first fix): 20x tighter than a
+    ///    real backend — fires 54001 at nesting 4000 (~0.4 MiB) where PG
+    ///    parses fine, so the mid-depth arm fails;
+    ///  * no guard at all: nesting 60000 rides the stack down, and on this
+    ///    test's 16 MiB thread nesting 200000 (~19 MiB unguarded) SIGBUSes.
+    ///
+    /// The deep arms run on a dedicated 16 MiB thread (nodesfam precedent):
+    /// a 2048 kB budget can never fire on a default 2 MiB libtest thread —
+    /// physical exhaustion comes first — and the guard caps consumption at
+    /// ~2 MiB + slop, so 16 MiB is safe headroom for every arm.
+    #[test]
+    fn shim_check_stack_depth_is_pg_byte_budget_2048kb() {
+        // In-domain (<= MAX_LEN): must parse on any thread, exactly as
+        // before the fix — the guard is not allowed to change any verdict
+        // json_diff can actually reach (nesting <= 512 => ~49 kB).
+        {
+            let _serial = crate::c_oracle_serial();
+            for depth in [1usize, 8, 256, MAX_LEN / 2] {
+                assert_eq!(
+                    json_in_rc(&nested(depth)),
+                    0,
+                    "in-domain nesting {depth} must stay accepted"
+                );
+            }
+        }
+
+        std::thread::Builder::new()
+            .name("json_stack_guard_deep".into())
+            .stack_size(16 << 20)
+            .spawn(|| {
+                let _serial = crate::c_oracle_serial();
+                let too_complex = types_error::ERRCODE_STATEMENT_TOO_COMPLEX.0;
+
+                // Mid-depth: ~0.4 MiB of oracle stack. A real backend
+                // (max_stack_depth 2048 kB) parses this; the refuted 100 kB
+                // bound raised 54001 here. MUST stay accepted.
+                assert_eq!(
+                    json_in_rc(&nested(4_000)),
+                    0,
+                    "nesting 4000 is within PG's 2048 kB default: a shim that \
+                     rejects it fires where a real server does not \
+                     (the refuted 100 kB bound)"
+                );
+
+                // Past 2048 kB: PG raises the catchable 54001; the oracle
+                // must too — not a success (dead frame counter) and not a
+                // crash (no guard).
+                for depth in [60_000usize, 200_000] {
+                    assert_eq!(
+                        json_in_rc(&nested(depth)),
+                        too_complex,
+                        "nesting {depth} exceeds max_stack_depth (2048 kB): \
+                         the shim owes PG's catchable 54001"
+                    );
+                }
+
+                // Two-sidedness: armed the same way (2048 kB, base at this
+                // frame), the shipped Rust side raises the SAME 54001 on the
+                // same shape — the refuted fix left this side inert.
+                arm_stack_guards();
+                let cx = mcx::MemoryContext::new("json_stack_guard_deep");
+                let m = cx.mcx();
+                match adt_json::json_in(m, &nested(60_000), None) {
+                    Err(e) => assert_eq!(
+                        sqlstate_i32(&e),
+                        too_complex,
+                        "Rust json_in must raise 54001 past the budget"
+                    ),
+                    Ok(_) => panic!(
+                        "Rust json_in accepted nesting 60000 with the guard \
+                         armed at 2048 kB — one-sided stack-depth plane"
+                    ),
+                }
+                assert!(
+                    adt_json::json_in(m, &nested(MAX_LEN / 2), None).is_ok(),
+                    "in-domain nesting must stay accepted on the Rust side"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     /// Replay every checked-in seed (catches shim/link errors before the
     /// nightly fuzz campaign).

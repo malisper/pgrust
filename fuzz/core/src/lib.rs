@@ -302,6 +302,10 @@ extern "C" {
     /// 1 = a truncating shim is back; 2+off = a verbatim body indexed past
     /// the string it was handed. Defined in csrc/pg_float_io.c.
     fn pg_diff_msgbuf_check() -> i32;
+    /// Same detector over the network oracle's pstrdup buffer — the SECOND
+    /// fixed-buffer pstrdup in the tree (shim-contract census, task
+    /// #129/#131). Defined in csrc/pg_network_io.c.
+    fn pg_network_msgbuf_check() -> i32;
 }
 
 impl Drop for OracleSerial {
@@ -350,6 +354,28 @@ impl Drop for OracleSerial {
                      a verbatim body indexed past the string pstrdup handed it; \
                      see csrc/pg_float_io.c and docs/conformance/\
                      scribbler-investigation-2026-08-02.md §8",
+                    if code == 1 {
+                        "capacity < string length (truncating shim is back)".to_string()
+                    } else {
+                        format!("guard byte +{} clobbered", code - 2)
+                    },
+                    t.name().unwrap_or("<unnamed>"),
+                );
+                if std::thread::panicking() {
+                    eprintln!("{msg}");
+                } else {
+                    panic!("{msg}");
+                }
+            }
+            // Same band over the network oracle's pstrdup buffer (the tree's
+            // second fixed-buffer pstrdup; shim-contract census #129/#131).
+            let code = unsafe { pg_network_msgbuf_check() };
+            if code != 0 {
+                let t = std::thread::current();
+                let msg = format!(
+                    "SCRIBBLER H6 (network): shim pstrdup buffer overrun \
+                     (code {code}: {}) detected at oracle exit in test thread \
+                     {:?} — see csrc/pg_network_io.c pstrdup",
                     if code == 1 {
                         "capacity < string length (truncating shim is back)".to_string()
                     } else {

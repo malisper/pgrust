@@ -40,8 +40,12 @@
  *     longjmp back to the driver entry (escontext is always NULL here: the
  *     hard-error shape); errmsg/errdetail evaluate to 0, args unevaluated.
  *     elog(ERROR, ...) records PG_DIFF_ERR_INTERNAL (XX000) and longjmps.
- *   - pstrdup(tmp) in network_out -> bounded copy into a thread-local
- *     static buffer.
+ *   - pstrdup(tmp) in network_out -> thread-local buffer sized EXACTLY to
+ *     strlen(s)+1 (plus a 0xA5 guard band past the NUL), realloc'd DOWN as
+ *     well as up per call, with slack/band probes — the pg_float_io.c
+ *     pattern of record (THE SCRIBBLER, task #112 + its exact-sizing
+ *     follow-up). See the block comment at pstrdup below for the mcxt.c
+ *     contract and why the SIZE is load-bearing.
  *   - cstring_to_text(tmp) + PG_RETURN_TEXT_P -> the driver entry copies
  *     tmp into the caller's buffer and returns its strlen (text varlena
  *     packaging is asserted Rust-side against the fc_* wrapper).
@@ -74,6 +78,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>				/* realloc/abort for the pstrdup size contract */
 #include <string.h>
 
 /* Shared TLS errcode channel (defined in csrc/pg_float_io.c). */
@@ -149,18 +154,126 @@ pgc_inet_alloc0(void)
 #define palloc0(sz) pgc_inet_alloc0()
 #define palloc(sz) pgc_inet_alloc0()
 
-static _Thread_local char pg_network_msgbuf[64];
+/*
+ * pstrdup — THE SCRIBBLER class, second instance (task #131 rework of the
+ * refuted 515fffe6d6a; first instance was pg_float_io.c, task #112).
+ *
+ * The real contract (vendor/postgres-src, PostgreSQL 18.3):
+ *
+ *     src/backend/utils/mmgr/mcxt.c:1724-1728
+ *         char *pstrdup(const char *in)
+ *         { return MemoryContextStrdup(CurrentMemoryContext, in); }
+ *     src/backend/utils/mmgr/mcxt.c:1711-1722  MemoryContextStrdup:
+ *         Size len = strlen(string) + 1;
+ *         nstr = (char *) MemoryContextAlloc(context, len);
+ *         memcpy(nstr, string, len);
+ *
+ * EXACTLY strlen(s)+1 bytes, never truncated. The SIZE is load-bearing even
+ * when the contents are out of comparator scope, because verbatim bodies
+ * index a pstrdup result by input-derived offsets (float{4,8}in_internal's
+ * `errnumber[endptr - num] = '\0'` is the attributed instance: at 256 fixed
+ * bytes in pg_float_io.c it wrote one NUL 1346 bytes past the buffer onto
+ * another TU's datecache). This TU's previous shim was a fixed 64-byte
+ * truncating buffer — the same shape.
+ *
+ * Sizing is EXACT, not grow-never-shrink (the pg_float_io.c pattern of
+ * record): sizing up only would leave slack after a long call, so a later
+ * input-derived store past strlen would land in slack and go UNSEEN by the
+ * guard band. realloc DOWN as well as up; keep a 64-byte 0xA5 band
+ * immediately after the NUL so an over-index is named at the next oracle
+ * exit (pg_network_msgbuf_check, wired next to the float H6 check in
+ * fuzz/core/src/lib.rs OracleSerial::drop).
+ *
+ * Deviation kept and bounded: PG hands out a FRESH chunk per call; this shim
+ * reuses one thread-local allocation, so two live results would alias. The
+ * TU's single call site (network_out, below) consumes the result before any
+ * other pstrdup can run, and the band check makes a violated overrun loud.
+ */
+static _Thread_local char *pg_network_msgbuf;
+static _Thread_local size_t pg_network_msgbuf_cap;
+static _Thread_local size_t pg_network_msgbuf_len;
+
+#define PG_NETWORK_MSGBUF_GUARD 64
+#define PG_NETWORK_MSGBUF_FILL 0xA5
 
 static char *
 pstrdup(const char *s)
 {
 	size_t		n = strlen(s);
+	size_t		want = n + 1 + PG_NETWORK_MSGBUF_GUARD;
 
-	if (n >= sizeof(pg_network_msgbuf))
-		n = sizeof(pg_network_msgbuf) - 1;
+	if (want != pg_network_msgbuf_cap)
+	{
+		char	   *p = realloc(pg_network_msgbuf, want);
+
+		if (p == NULL)
+			abort();			/* OOM in a shim: loud, never silent */
+		pg_network_msgbuf = p;
+		pg_network_msgbuf_cap = want;
+	}
 	memcpy(pg_network_msgbuf, s, n);
 	pg_network_msgbuf[n] = '\0';
+	pg_network_msgbuf_len = n;
+	memset(pg_network_msgbuf + n + 1, PG_NETWORK_MSGBUF_FILL,
+		   PG_NETWORK_MSGBUF_GUARD);
 	return pg_network_msgbuf;
+}
+
+/*
+ * Test probes (read-only, never on a comparator path).
+ *
+ * pg_network_pstrdup_len_probe: strlen(pstrdup(s)), which the mcxt.c
+ * contract makes == strlen(s) for EVERY s. Catches any truncating rewrite up
+ * to the longest length the pin drives.
+ *
+ * pg_network_msgbuf_slack: bytes the allocation carries beyond
+ * strlen+1+GUARD. Exact sizing keeps this 0 after EVERY call; any fixed-size
+ * buffer (of any size — the refuted pin was blind past 4096) and any
+ * grow-never-shrink policy reports nonzero slack for some length, so the pin
+ * over this probe fails for ANY wrong-size buffer, not just 64. -1 = no call
+ * yet on this thread.
+ */
+size_t
+pg_network_pstrdup_len_probe(const char *s)
+{
+	return strlen(pstrdup(s));
+}
+
+int
+pg_network_msgbuf_slack(void)
+{
+	if (pg_network_msgbuf == NULL)
+		return -1;
+	return (int) (pg_network_msgbuf_cap -
+				  (pg_network_msgbuf_len + 1 + PG_NETWORK_MSGBUF_GUARD));
+}
+
+/*
+ * 0 = intact. 1 = capacity smaller than the string it holds (a truncating
+ * shim is back). 2+off = guard byte at offset off clobbered (a body indexed
+ * past the string it was handed). Called at oracle exit depth 0 from
+ * OracleSerial::drop (fuzz/core/src/lib.rs), release-effective.
+ */
+int
+pg_network_msgbuf_check(void)
+{
+	if (pg_network_msgbuf == NULL)
+		return 0;				/* pstrdup not reached on this thread yet */
+	if (pg_network_msgbuf_len + 1 + PG_NETWORK_MSGBUF_GUARD >
+		pg_network_msgbuf_cap)
+		return 1;
+	for (size_t i = 0; i < PG_NETWORK_MSGBUF_GUARD; i++)
+	{
+		if ((unsigned char) pg_network_msgbuf[pg_network_msgbuf_len + 1 + i]
+			!= PG_NETWORK_MSGBUF_FILL)
+		{
+			/* self-heal: re-arm the band so one hit cannot cascade */
+			memset(pg_network_msgbuf + pg_network_msgbuf_len + 1,
+				   PG_NETWORK_MSGBUF_FILL, PG_NETWORK_MSGBUF_GUARD);
+			return 2 + (int) i;
+		}
+	}
+	return 0;
 }
 
 /* ============ SECTION 1: src/backend/utils/adt/inet_net_pton.c ============ */
