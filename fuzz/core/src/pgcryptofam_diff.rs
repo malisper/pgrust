@@ -102,12 +102,20 @@
 //! the shipped-wrapper-only route can and cannot address.
 //!
 //! DOMAIN CARVES (harness/caller contract, never pgrust behavior):
-//!   - arm 0/1 text domain: the SQL wrappers reach the cores through
-//!     `String::from_utf8_lossy`, so the driver materializes ONE byte string
-//!     per field (NUL-sanitized 0x00 -> 0x01, then lossy-decoded to UTF-8)
-//!     and hands the IDENTICAL bytes to both sides. Non-ASCII stays in the
-//!     domain (D11 needs password bytes >= 0x80); only NUL and invalid-UTF-8
-//!     tails are normalized, and PG `text` can carry neither.
+//!   - arm 0 byte domain: since D21 (817f379310d) `fc_pg_crypt` carries
+//!     password, setting, and result as RAW BYTES end to end, exactly like
+//!     C's text_to_cstring -> px_crypt -> cstring_to_text. The driver hands
+//!     both sides IDENTICAL bytes, NUL-sanitized ONLY (0x00 -> 0x01: PG
+//!     `text` can never carry NUL in any server encoding, and the oracle's
+//!     frame_to_cstring would truncate C-side alone). Invalid UTF-8 STAYS in
+//!     the domain — non-UTF-8 passwords and settings are precisely what
+//!     witness a D21 regression (D11 also needs password bytes >= 0x80) —
+//!     and crypt outputs are compared byte for byte (see DIVERGENCE 2).
+//!   - arm 1 algo / arm 4/5 name text domain: those wrappers still reach
+//!     their cores through `String::from_utf8_lossy`, so the driver
+//!     materializes ONE byte string per field (NUL-sanitized 0x00 -> 0x01,
+//!     then lossy-decoded to UTF-8) and hands the IDENTICAL bytes to both
+//!     sides.
 //!   - ARM 1 ENTROPY CARVE. gen_salt output is entropy-dependent AND the two
 //!     sides consume DIFFERENT NUMBERS of random bytes for the same
 //!     algorithm (C's md5 generator packs 6 bytes into 8 chars; pgrust draws
@@ -395,9 +403,11 @@ impl<'a> Rdr<'a> {
     }
 }
 
-/// The single byte string BOTH sides receive for a `text`-typed field: NUL
-/// sanitized then lossy-decoded to UTF-8, because the SQL wrappers reach the
-/// cores through `String::from_utf8_lossy`. See DOMAIN CARVES.
+/// The single byte string BOTH sides receive for a `text`-typed field whose
+/// SHIPPED wrapper still reaches its core through `String::from_utf8_lossy`
+/// (arm 1's algo, arm 4/5's hash name): NUL sanitized then lossy-decoded to
+/// UTF-8. NOT used by arm 0 — since D21 crypt is raw bytes end to end. See
+/// DOMAIN CARVES.
 fn text_field(bytes: &[u8]) -> String {
     let sanitized: Vec<u8> = bytes.iter().map(|&b| if b == 0 { 1 } else { b }).collect();
     String::from_utf8_lossy(&sanitized).into_owned()
@@ -438,36 +448,27 @@ fn oracle_note(st: &PgcryptofamStatus) -> String {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// KNOWN DIVERGENCE 2 — CRYPT VALUE IS `text` MADE FROM A `String` (found by
-// this target during the first smoke, 2026-08-02). CLASS: pgrust bug
-// (representational), NOT a harness defect.
+// DIVERGENCE 2 — CRYPT VALUE WAS `text` MADE FROM A `String` — FOUND BY THIS
+// TARGET (first smoke, 2026-08-02) AND FIXED (D21, main 817f379310d).
 //
 // C's crypt() result BEGINS WITH A VERBATIM COPY OF THE SETTING BYTES:
 // crypt-des.c copies setting[0..2] (traditional) / setting[0..9] (xdes) and
 // crypt-md5.c re-emits the raw salt run, then appends an all-itoa64 hash.
-// pgrust's `crypt` returns `String`, and desc.rs / crypt.rs launder those
-// copied bytes through `String::from_utf8_lossy`. A setting whose copied
-// prefix is a TRUNCATED multibyte sequence is therefore U+FFFD-substituted
-// pgrust-side while C returns the raw bytes:
+// pgrust's crypt cone used to launder password, salt, and those copied
+// result bytes through `String::from_utf8_lossy`, so a setting whose copied
+// prefix truncated a multibyte sequence was U+FFFD-substituted pgrust-side
+// while C returned the raw bytes:
 //   crypt('foox', <U+FFFD>.)  C -> EF BF + "jiOTA4TpMRw"  (13 bytes)
-//                        pgrust -> EF BF BD + same 11     (14 bytes)
-// The setting is valid UTF-8; only the 2-byte PREFIX C copies out of it is
-// not, so this is reachable from SQL (PG does not encoding-validate a
-// function's text result). Fixing it is a signature change across the crypt
-// cone (`String` -> `Vec<u8>`), which this lane's frozen product cannot take.
-//
-// The carve is as narrow as the defect: when C's bytes are valid UTF-8 the
-// comparison is EXACT. Only when they are not does the driver compare
-// pgrust's output against C's LOSSY IMAGE — and the hash tail is all itoa64,
-// so a hash-value defect in that region is still caught byte for byte.
-// Deleting `crypt_value_matches` is the fix gate.
+//                   pre-D21 Rust -> EF BF BD + same 11     (14 bytes)
+// D21 rewrote the cone to `&[u8] -> Vec<u8>` end to end (`fc_pg_crypt`
+// passes pw.data()/salt.data() raw), so the value plane below is UNCARVED —
+// crypt outputs are compared BYTE FOR BYTE, both the raw input domain and
+// the raw output comparison live here. The interim `crypt_value_matches`
+// lossy-image mask is deleted per its own stated fix gate (task #145): with
+// it in place, a regression of D21 would have been invisible. The
+// `crypt_value_plane_rejects_the_lossy_image` test is the standing
+// must-fail control. This comment is the record, not an exception.
 // ---------------------------------------------------------------------------
-fn crypt_value_matches(rust: &[u8], c: &[u8]) -> bool {
-    match std::str::from_utf8(c) {
-        Ok(_) => rust == c,
-        Err(_) => rust == String::from_utf8_lossy(c).as_bytes(),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // arm 0: crypt(password, setting)
@@ -481,14 +482,19 @@ const SETTING_PREFIXES: [&str; 12] = [
 ];
 
 fn run_crypt(r: &mut Rdr, mode: u8) {
+    // RAW BYTES both sides, NUL-sanitized only (D21 — see DOMAIN CARVES).
     let pwlen = r.u8() as usize % 64;
-    let pw = text_field(r.bytes(pwlen));
+    let pw = nul_free(r.bytes(pwlen));
     let prefix = SETTING_PREFIXES[(mode >> 1) as usize % SETTING_PREFIXES.len()];
-    let mut setting = String::from(prefix);
-    setting.push_str(&text_field(r.rest()));
+    let mut setting = prefix.as_bytes().to_vec();
+    setting.extend_from_slice(&nul_free(r.rest()));
+    // Triage-only lossy images for panic TEXT; every comparison below is on
+    // the raw bytes.
+    let pw_d = String::from_utf8_lossy(&pw);
+    let setting_d = String::from_utf8_lossy(&setting);
 
     // ---- COST BOUND: probe first, decide before EITHER side runs ----
-    let (kind, cost) = cost_probe(setting.as_bytes());
+    let (kind, cost) = cost_probe(&setting);
     if !cost_within_bound(kind, cost) {
         COST_SKIPS.with(|c| *c.borrow_mut() += 1);
         return;
@@ -503,7 +509,7 @@ fn run_crypt(r: &mut Rdr, mode: u8) {
     // `c_crypt_status` keeps the SUCCESS-path status too: crypt-sha's clamp
     // NOTICE rides a call that returns normally, and the plain `Result`
     // wrapper drops the status on Ok. ONE exec per side, always.
-    let (cn, cst) = c_crypt_status(pw.as_bytes(), setting.as_bytes(), &mut out);
+    let (cn, cst) = c_crypt_status(&pw, &setting, &mut out);
     let cval: Option<&[u8]> = cn.map(|n| &out[..n]);
     let cnotices: Vec<String> = if cst.notice_count > 0 {
         vec![cst.notice_str().to_string()]
@@ -512,8 +518,8 @@ fn run_crypt(r: &mut Rdr, mode: u8) {
     };
 
     let ctx = mcx::MemoryContext::new("pgcryptofam_fc");
-    let pwi = text_image(pw.as_bytes());
-    let sti = text_image(setting.as_bytes());
+    let pwi = text_image(&pw);
+    let sti = text_image(&setting);
     let fc = fc_call(
         lookup("pg_crypt"),
         ctx.mcx(),
@@ -528,13 +534,13 @@ fn run_crypt(r: &mut Rdr, mode: u8) {
     assert_eq!(
         cnotices.is_empty(),
         rnotices.is_empty(),
-        "crypt({pw:?},{setting:?}) NOTICE presence: C {cnotices:?} vs Rust {rnotices:?}"
+        "crypt({pw_d:?},{setting_d:?}) NOTICE presence: C {cnotices:?} vs Rust {rnotices:?}"
     );
     if let (Some(c), Some(rn)) = (cnotices.first(), rnotices.first()) {
         assert_eq!(
             numbers_in(c),
             numbers_in(rn),
-            "crypt({pw:?},{setting:?}) NOTICE numbers: C {c:?} vs Rust {rn:?}"
+            "crypt({pw_d:?},{setting_d:?}) NOTICE numbers: C {c:?} vs Rust {rn:?}"
         );
     }
 
@@ -543,26 +549,29 @@ fn run_crypt(r: &mut Rdr, mode: u8) {
         (Some(cv), Ok(d)) => {
             // SAFETY: fc_pg_crypt returns a live text varlena in ctx.
             let rv = unsafe { result_payload(d) };
-            assert!(
-                crypt_value_matches(rv, cv),
-                "crypt({pw:?},{setting:?}) value: Rust {rv:?} vs C {cv:?}"
-            );
+            // BYTE-EXACT, like every other value plane in this target. C's
+            // result can carry non-UTF-8 setting-prefix bytes and pgrust
+            // must reproduce them verbatim (D21; see DIVERGENCE 2).
+            assert_eq!(rv, cv, "crypt({pw_d:?},{setting_d:?}) value");
         }
         (None, Err(e)) => assert_eq!(
             e.sqlstate.0,
             cst.sqlstate,
-            "crypt({pw:?},{setting:?}) SQLSTATE: Rust {:?}/{} vs {}",
+            "crypt({pw_d:?},{setting_d:?}) SQLSTATE: Rust {:?}/{} vs {}",
             e.message,
             e.sqlstate.0,
             oracle_note(&cst)
         ),
         (Some(cv), Err(e)) => panic!(
-            "crypt({pw:?},{setting:?}): C ok {:?}, Rust errored {:?}/{}",
+            "crypt({pw_d:?},{setting_d:?}): C ok {:?}, Rust errored {:?}/{}",
             String::from_utf8_lossy(cv),
             e.message,
             e.sqlstate.0
         ),
-        (None, Ok(_)) => panic!("crypt({pw:?},{setting:?}): Rust ok, {}", oracle_note(&cst)),
+        (None, Ok(_)) => panic!(
+            "crypt({pw_d:?},{setting_d:?}): Rust ok, {}",
+            oracle_note(&cst)
+        ),
     }
 }
 
@@ -1207,6 +1216,51 @@ mod tests {
         assert_eq!(numbers_in(cst.notice_str()), vec![10, 1000, 1000]);
     }
 
+    /// Must-fail control for the task #145 de-masking: the retired
+    /// `crypt_value_matches` compared pgrust's output against the LOSSY
+    /// IMAGE of C's raw bytes whenever those bytes were not UTF-8 — which
+    /// accepted exactly the pre-D21 defect. This pins, on a live C-oracle
+    /// vector: (a) the D21 seed really produces non-UTF-8 C output, (b) the
+    /// shipped fc plane reproduces it BYTE FOR BYTE, and (c) the pre-D21
+    /// lossy image DIFFERS from those raw bytes — so `run_crypt`'s
+    /// byte-exact plane fails on a D21 regression where the old mask
+    /// (`rust == from_utf8_lossy(c)` on the invalid-UTF-8 arm) passed.
+    #[test]
+    fn crypt_value_plane_rejects_the_lossy_image() {
+        seams_setup();
+        assert!(guc_store_ready(), "GUC store did not come up");
+        // trad-DES copies setting[0..2] = EF BF (truncated multibyte).
+        let (pw, setting): (&[u8], &[u8]) = (b"foox", b"\xef\xbf\xbd.");
+        let mut out = vec![0u8; 1024];
+        let (cn, _) = c_crypt_status(pw, setting, &mut out);
+        let cv = &out[..cn.expect("C crypt succeeds on the D21 seed")];
+        assert!(
+            std::str::from_utf8(cv).is_err(),
+            "seed no longer exercises the non-UTF-8 output plane: {cv:?}"
+        );
+        let ctx = mcx::MemoryContext::new("pgcryptofam_d21_probe");
+        let pwi = text_image(pw);
+        let sti = text_image(setting);
+        let d = fc_call(
+            lookup("pg_crypt"),
+            ctx.mcx(),
+            [
+                Datum::from_usize(pwi.as_ptr() as usize),
+                Datum::from_usize(sti.as_ptr() as usize),
+            ],
+        )
+        .expect("fc pg_crypt succeeds on the D21 seed");
+        // SAFETY: fc_pg_crypt returns a live varlena in ctx.
+        let rv = unsafe { result_payload(d) };
+        assert_eq!(rv, cv, "D21 regressed: crypt output is not C's raw bytes");
+        let lossy = String::from_utf8_lossy(cv).into_owned().into_bytes();
+        assert_ne!(
+            lossy.as_slice(),
+            cv,
+            "control lost its teeth: the lossy image equals the raw bytes"
+        );
+    }
+
     /// Every plane's pgrust side must actually resolve through dfmgr, and the
     /// GUC store must come up, or arms 0/1 silently degrade to zero execs.
     #[test]
@@ -1279,7 +1333,14 @@ mod tests {
         exec(0, 20, b"\x04foox$abc"); // $5$rounds=$abc (empty rounds -> clamp NOTICE)
         exec(0, 20, b"\x04foox0$abc"); // $5$rounds=0$abc (clamp NOTICE)
         exec(0, 0, b"\x04foox"); // empty setting -> invalid salt
-        exec(0, 0, b"\x04foox\xff."); // KNOWN DIVERGENCE 2 regression seed
+        // D21 regression seeds (DIVERGENCE 2): trad-DES copies setting[0..2]
+        // = EF BF — a truncated multibyte sequence — VERBATIM into the
+        // result, so the byte-exact value plane runs over non-UTF-8 output...
+        exec(0, 0, b"\x04foox\xef\xbf\xbd.");
+        // ...and the raw input plane: non-UTF-8 setting and password bytes
+        // stay in the domain un-laundered (pre-D21 these were lossy-collapsed).
+        exec(0, 0, b"\x04foox\xff.");
+        exec(0, 0, b"\x04fo\xffxab");
 
         // ---- arm 1: every gen_list row + boundaries, both wrappers ----
         for algo in 0u8..10 {
