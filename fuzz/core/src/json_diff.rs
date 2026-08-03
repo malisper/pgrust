@@ -1189,6 +1189,7 @@ mod tests {
     #[test]
     #[ignore = "a0 exhaustive sweep: run explicitly in release"]
     fn exhaustive_unicode_escape_domain() {
+        let _serial = crate::c_oracle_serial();
         // NO outer c_oracle_serial here: phase 2's scoped workers call the
         // guarded driver entries (json_get_field_diff/json_in_diff take
         // oracle_serial at entry since the 2026-08-02 rework), and an outer

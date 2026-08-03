@@ -400,6 +400,14 @@ fn on_backend_sized_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'sta
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
+            // The oracle guard must be held by the EXECUTING thread: it is
+            // taken here, not in the spawning test. A guard held by the
+            // spawner while it blocks in join() still excludes other suites,
+            // but it breaks the holder-thread invariant the C-side runtime
+            // check (csrc/pg_oracle_guard.c) enforces — and an inner
+            // acquisition on this thread would then self-deadlock against
+            // the parked spawner.
+            let _serial = crate::c_oracle_serial();
             rearm_stack_bases();
             f()
         })
@@ -410,7 +418,8 @@ fn on_backend_sized_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'sta
 
 #[test]
 fn deep_nesting_hits_the_guard_on_both_sides() {
-    let _serial = crate::c_oracle_serial();
+    // No guard here: on_backend_sized_stack takes it on the worker thread
+    // (taking it here too would deadlock that thread against our join).
     on_backend_sized_stack(deep_nesting_body);
 }
 

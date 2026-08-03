@@ -146,6 +146,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>			/* ssize_t */
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ---------------------------------------------------------------- */
 /* c.h basics                                                        */
@@ -854,6 +855,7 @@ int
 pg_diff_fmt_timestamp_to_char(int64_t ts, const uint8_t *fmt, int32_t fmt_len,
 							  uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcdata;
 	Datum		d;
 
@@ -876,6 +878,7 @@ int
 pg_diff_fmt_timestamptz_to_char(int64_t ts, const uint8_t *fmt, int32_t fmt_len,
 								uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcdata;
 	Datum		d;
 
@@ -899,6 +902,7 @@ pg_diff_fmt_interval_to_char(int64_t time_usec, int32_t day, int32_t month,
 							 const uint8_t *fmt, int32_t fmt_len,
 							 uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcdata;
 	Interval	iv;
 	Datum		d;
@@ -926,6 +930,7 @@ pg_diff_fmt_to_timestamp(const uint8_t *txt, int32_t txt_len,
 						 const uint8_t *fmt, int32_t fmt_len,
 						 int64_t *out_ts)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcdata;
 	Datum		d;
 
@@ -952,6 +957,7 @@ pg_diff_fmt_to_date(const uint8_t *txt, int32_t txt_len,
 					const uint8_t *fmt, int32_t fmt_len,
 					int32_t *out_date)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcdata;
 	Datum		d;
 
@@ -985,6 +991,7 @@ pg_diff_fmt_parse_datetime(const uint8_t *txt, int32_t txt_len,
 						   int32_t *out_kind, int32_t *out_typmod,
 						   int32_t *out_tz, int64_t *out_v, int32_t *out_v2)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	Datum		d;
 	Oid			typid;
 	int32		typmod;
@@ -1038,6 +1045,7 @@ pg_diff_fmt_parse_datetime(const uint8_t *txt, int32_t txt_len,
 int
 pg_diff_fmt_datetime_format_has_tz(const uint8_t *fmt, int32_t fmt_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	char	   *fmt_str;
 	bool		r;
 
@@ -1354,6 +1362,7 @@ pg_diff_fmt_numeric_to_char(const uint8_t *num_str, int32_t num_len,
 							const uint8_t *fmt, int32_t fmt_len,
 							uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcdata;
 	Datum		d;
 
@@ -1397,6 +1406,7 @@ int
 pg_diff_fmt_int4_to_char(int32_t v, const uint8_t *fmt, int32_t fmt_len,
 						 uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_diff_fmt_reset();
 	if (setjmp(pg_diff_fmt_jmp) != 0)
 		return -1;
@@ -1408,6 +1418,7 @@ int
 pg_diff_fmt_int8_to_char(int64_t v, const uint8_t *fmt, int32_t fmt_len,
 						 uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_diff_fmt_reset();
 	if (setjmp(pg_diff_fmt_jmp) != 0)
 		return -1;
@@ -1419,6 +1430,7 @@ int
 pg_diff_fmt_float4_to_char(float v, const uint8_t *fmt, int32_t fmt_len,
 						   uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_diff_fmt_reset();
 	if (setjmp(pg_diff_fmt_jmp) != 0)
 		return -1;
@@ -1430,6 +1442,7 @@ int
 pg_diff_fmt_float8_to_char(double v, const uint8_t *fmt, int32_t fmt_len,
 						   uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_diff_fmt_reset();
 	if (setjmp(pg_diff_fmt_jmp) != 0)
 		return -1;
@@ -1446,6 +1459,7 @@ pg_diff_fmt_numeric_to_number(const uint8_t *txt, int32_t txt_len,
 							  const uint8_t *fmt, int32_t fmt_len,
 							  uint8_t *out, int32_t out_cap, int32_t *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcdata;
 	Datum		d;
 	char	   *str;

@@ -61,6 +61,7 @@
 
 #include "wchar.c"
 #include "encnames.c"
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ---- error-capture shims (see header) ---- */
 static _Thread_local jmp_buf wfam_env;
@@ -927,6 +928,7 @@ report_untranslatable_char(int src_encoding, int dest_encoding,
 void
 wfam_x_set_db_encoding(int encoding)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	/* SetDatabaseEncoding's assignment, minus the elog gate (the driver
 	 * only feeds PG_VALID_BE_ENCODING values). */
 	DatabaseEncoding = &pg_enc2name_tbl[encoding];
@@ -935,6 +937,7 @@ wfam_x_set_db_encoding(int encoding)
 void
 wfam_x_sqlstate(char out[6])
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	int			val = wfam_errcode_val;
 
 	for (int i = 0; i < 5; i++)
@@ -954,6 +957,7 @@ wfam_x_sqlstate(char out[6])
 int
 wfam_x_verify_mbstr(int encoding, const char *mbstr, int len, int noError, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return (int) pg_verify_mbstr(encoding, mbstr, len, (bool) noError);
 }
@@ -961,6 +965,7 @@ wfam_x_verify_mbstr(int encoding, const char *mbstr, int len, int noError, int *
 int
 wfam_x_verify_mbstr_len(int encoding, const char *mbstr, int len, int noError, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return pg_verify_mbstr_len(encoding, mbstr, len, (bool) noError);
 }
@@ -968,6 +973,7 @@ wfam_x_verify_mbstr_len(int encoding, const char *mbstr, int len, int noError, i
 int
 wfam_x_verifymbstr_db(const char *mbstr, int len, int noError, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return (int) pg_verifymbstr(mbstr, len, (bool) noError);
 }
@@ -975,126 +981,147 @@ wfam_x_verifymbstr_db(const char *mbstr, int len, int noError, int *err)
 int
 wfam_x_encoding_verifymbstr(int encoding, const char *mbstr, int len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_verifymbstr(encoding, mbstr, len);
 }
 
 int
 wfam_x_encoding_verifymbchar(int encoding, const char *mbstr, int len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_verifymbchar(encoding, mbstr, len);
 }
 
 int
 wfam_x_encoding_mblen(int encoding, const char *mbstr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_mblen(encoding, mbstr);
 }
 
 int
 wfam_x_encoding_mblen_bounded(int encoding, const char *mbstr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_mblen_bounded(encoding, mbstr);
 }
 
 int
 wfam_x_encoding_mblen_or_incomplete(int encoding, const char *mbstr, size_t remaining)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_mblen_or_incomplete(encoding, mbstr, remaining);
 }
 
 int
 wfam_x_encoding_dsplen(int encoding, const char *mbstr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_dsplen(encoding, mbstr);
 }
 
 int
 wfam_x_encoding_max_length(int encoding)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_max_length(encoding);
 }
 
 void
 wfam_x_encoding_set_invalid(int encoding, char *dst)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_encoding_set_invalid(encoding, dst);
 }
 
 int
 wfam_x_utf8_islegal(const unsigned char *source, int length)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) pg_utf8_islegal(source, length);
 }
 
 int
 wfam_x_utf_mblen(const unsigned char *s)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_utf_mblen(s);
 }
 
 unsigned int
 wfam_x_utf8_to_unicode(const unsigned char *c)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (unsigned int) utf8_to_unicode(c);
 }
 
 void
 wfam_x_unicode_to_utf8(unsigned int c, unsigned char *utf8string)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	(void) unicode_to_utf8((pg_wchar) c, utf8string);
 }
 
 int
 wfam_x_unicode_utf8len(unsigned int c)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return unicode_utf8len((pg_wchar) c);
 }
 
 int
 wfam_x_is_valid_unicode_codepoint(unsigned int c)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) is_valid_unicode_codepoint((pg_wchar) c);
 }
 
 int
 wfam_x_is_utf16_surrogate_first(unsigned int c)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) is_utf16_surrogate_first((pg_wchar) c);
 }
 
 int
 wfam_x_is_utf16_surrogate_second(unsigned int c)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) is_utf16_surrogate_second((pg_wchar) c);
 }
 
 unsigned int
 wfam_x_surrogate_pair_to_codepoint(unsigned int first, unsigned int second)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (unsigned int) surrogate_pair_to_codepoint((pg_wchar) first, (pg_wchar) second);
 }
 
 int
 wfam_x_mb2wchar_with_len(int encoding, const char *from, unsigned int *to, int len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_mb2wchar_with_len(encoding, from, (pg_wchar *) to, len);
 }
 
 int
 wfam_x_wchar2mb_with_len(int encoding, const unsigned int *from, char *to, int len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_wchar2mb_with_len(encoding, (const pg_wchar *) from, to, len);
 }
 
 int
 wfam_x_mblen_db(const char *mbstr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_mblen(mbstr);
 }
 
 int
 wfam_x_dsplen_db(const char *mbstr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_dsplen(mbstr);
 }
 
@@ -1108,6 +1135,7 @@ wfam_x_mblen_cstr_db(const char *mbstr, int *err)
 int
 wfam_x_mblen_range_db(const char *mbstr, const char *end, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return pg_mblen_range(mbstr, end);
 }
@@ -1115,6 +1143,7 @@ wfam_x_mblen_range_db(const char *mbstr, const char *end, int *err)
 int
 wfam_x_mblen_with_len_db(const char *mbstr, int limit, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return pg_mblen_with_len(mbstr, limit);
 }
@@ -1122,6 +1151,7 @@ wfam_x_mblen_with_len_db(const char *mbstr, int limit, int *err)
 int
 wfam_x_mbstrlen_db(const char *mbstr, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return pg_mbstrlen(mbstr);
 }
@@ -1129,6 +1159,7 @@ wfam_x_mbstrlen_db(const char *mbstr, int *err)
 int
 wfam_x_mbstrlen_with_len_db(const char *mbstr, int limit, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return pg_mbstrlen_with_len(mbstr, limit);
 }
@@ -1136,18 +1167,21 @@ wfam_x_mbstrlen_with_len_db(const char *mbstr, int limit, int *err)
 int
 wfam_x_mbcliplen_db(const char *mbstr, int len, int limit)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_mbcliplen(mbstr, len, limit);
 }
 
 int
 wfam_x_encoding_mbcliplen(int encoding, const char *mbstr, int len, int limit)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_mbcliplen(encoding, mbstr, len, limit);
 }
 
 int
 wfam_x_mbcharcliplen_db(const char *mbstr, int len, int limit, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	return pg_mbcharcliplen(mbstr, len, limit);
 }
@@ -1155,24 +1189,28 @@ wfam_x_mbcharcliplen_db(const char *mbstr, int len, int limit, int *err)
 int
 wfam_x_database_encoding_max_length_db(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_database_encoding_max_length();
 }
 
 int
 wfam_x_utf8_increment(unsigned char *charptr, int length)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) pg_utf8_increment(charptr, length);
 }
 
 int
 wfam_x_eucjp_increment(unsigned char *charptr, int length)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) pg_eucjp_increment(charptr, length);
 }
 
 int
 wfam_x_generic_charinc_db(unsigned char *charptr, int len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) pg_generic_charinc(charptr, len);
 }
 
@@ -1181,6 +1219,7 @@ wfam_x_generic_charinc_db(unsigned char *charptr, int len)
 int
 wfam_x_charinc_selector_db(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	mbcharacter_incrementer f = pg_database_encoding_character_incrementer();
 
 	if (f == pg_utf8_increment)
@@ -1195,6 +1234,7 @@ wfam_x_check_encoding_conversion_args(int src_encoding, int dest_encoding, int l
 									  int expected_src_encoding, int expected_dest_encoding,
 									  int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	check_encoding_conversion_args(src_encoding, dest_encoding, len,
 								   expected_src_encoding, expected_dest_encoding);
@@ -1205,6 +1245,7 @@ int
 wfam_x_report_untranslatable_char(int src_encoding, int dest_encoding,
 								  const char *mbstr, int len, int *err)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	WFAM_TRY(err);
 	report_untranslatable_char(src_encoding, dest_encoding, mbstr, len);
 	return 0;
@@ -1213,24 +1254,28 @@ wfam_x_report_untranslatable_char(int src_encoding, int dest_encoding,
 int
 wfam_x_char_to_encoding(const char *name)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_char_to_encoding(name);
 }
 
 const char *
 wfam_x_encoding_to_char(int encoding)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_encoding_to_char(encoding);
 }
 
 int
 wfam_x_valid_client_encoding(const char *name)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_valid_client_encoding(name);
 }
 
 int
 wfam_x_valid_server_encoding(const char *name)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_valid_server_encoding(name);
 }
 

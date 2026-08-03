@@ -56,6 +56,7 @@
 #include "datatype/timestamp.h"
 #include "utils/datetime.h"
 #include "utils/date.h"
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ---- miscadmin.h constants (verbatim values) ---- */
 #define MAXTZLEN		10
@@ -348,12 +349,14 @@ _Thread_local char pg_dt_tzset_name[TZ_STRLEN_MAX + 1];
 int
 pg_diff_datetime_tzset_nongmt(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_dt_tzset_nongmt;
 }
 
 const char *
 pg_diff_datetime_tzset_name(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_dt_tzset_name;
 }
 
@@ -1146,6 +1149,7 @@ int
 pg_tsdiff_timestamp_in(const char *str, int32 typmod, int style, int order,
 					   int tz, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Datum		d;
 
@@ -1163,6 +1167,7 @@ pg_tsdiff_timestamp_in(const char *str, int32 typmod, int style, int order,
 int
 pg_tsdiff_timestamp_out(int64 ts, int style, int order, int tz, char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Datum		d;
 
@@ -1179,6 +1184,7 @@ int
 pg_tsdiff_interval_in(const char *str, int32 typmod, int istyle,
 					  int64 *t, int32 *day, int32 *month)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval   *iv;
 
@@ -1198,6 +1204,7 @@ pg_tsdiff_interval_in(const char *str, int32 typmod, int istyle,
 int
 pg_tsdiff_interval_out(int64 t, int32 day, int32 month, int istyle, char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Datum		d;
@@ -1218,6 +1225,7 @@ int
 pg_tsdiff_timestamp_recv(const unsigned char *bytes, int len, int32 typmod,
 						 int tz, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	StringInfoData buf;
 	Datum		d;
@@ -1240,6 +1248,7 @@ pg_tsdiff_timestamp_recv(const unsigned char *bytes, int len, int32 typmod,
 int
 pg_tsdiff_timestamp_send(int64 ts, unsigned char *out8)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	bytea	   *b;
 
@@ -1257,6 +1266,7 @@ int
 pg_tsdiff_interval_recv(const unsigned char *bytes, int len, int32 typmod,
 						int64 *t, int32 *day, int32 *month)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	StringInfoData buf;
 	Interval   *iv;
@@ -1281,6 +1291,7 @@ pg_tsdiff_interval_recv(const unsigned char *bytes, int len, int32 typmod,
 int
 pg_tsdiff_interval_send(int64 t, int32 day, int32 month, unsigned char *out16)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	bytea	   *b;
@@ -1301,6 +1312,7 @@ pg_tsdiff_interval_send(int64 t, int32 day, int32 month, unsigned char *out16)
 int
 pg_tsdiff_timestamp_scale(int64 ts, int32 typmod, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 
 	pg_ts_reset(USE_ISO_DATES, DATEORDER_MDY, INTSTYLE_POSTGRES);
@@ -1316,6 +1328,7 @@ int
 pg_tsdiff_interval_scale(int64 t, int32 day, int32 month, int32 typmod,
 						 int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Interval   *r;
@@ -1339,6 +1352,7 @@ int
 pg_tsdiff_timestamp_trunc(const char *units, int ulen, int64 ts, int tz,
 						  int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Datum		d;
 
@@ -1357,6 +1371,7 @@ pg_tsdiff_timestamptz_trunc_zone(const char *units, int ulen,
 								 const char *zone, int zlen,
 								 int64 ts, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 
 	pg_ts_reset(USE_ISO_DATES, DATEORDER_MDY, INTSTYLE_POSTGRES);
@@ -1374,6 +1389,7 @@ pg_tsdiff_interval_trunc(const char *units, int ulen,
 						 int64 t, int32 day, int32 month,
 						 int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Interval   *r;
@@ -1400,6 +1416,7 @@ pg_tsdiff_ts_part(const char *units, int ulen, int64 ts, int tz,
 				  int retnumeric, double *fval, int *isnull,
 				  int64 *nval, int *nlog10, int *numset, int *numchain)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Datum		d;
 
@@ -1427,6 +1444,7 @@ pg_tsdiff_interval_part(const char *units, int ulen,
 						int retnumeric, double *fval, int *isnull,
 						int64 *nval, int *nlog10, int *numset, int *numchain)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Datum		d;
@@ -1453,6 +1471,7 @@ int
 pg_tsdiff_timestamp_age(int64 a, int64 b, int tz,
 						int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval   *r;
 
@@ -1472,6 +1491,7 @@ int
 pg_tsdiff_make_timestamp(int32 y, int32 mo, int32 d, int32 h, int32 mi,
 						 double sec, int tz, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Datum		r;
 
@@ -1494,6 +1514,7 @@ pg_tsdiff_make_timestamptz_at_timezone(int32 y, int32 mo, int32 d, int32 h,
 									   int32 mi, double sec,
 									   const char *zone, int zlen, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 
 	pg_ts_reset(USE_ISO_DATES, DATEORDER_MDY, INTSTYLE_POSTGRES);
@@ -1515,6 +1536,7 @@ pg_tsdiff_make_interval(int32 y, int32 mo, int32 w, int32 d, int32 h,
 						int32 mi, double sec,
 						int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval   *r;
 
@@ -1539,6 +1561,7 @@ int
 pg_tsdiff_interval_muldiv(int isdiv, int64 t, int32 day, int32 month,
 						  double factor, int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Interval   *r;
@@ -1561,6 +1584,7 @@ pg_tsdiff_interval_muldiv(int isdiv, int64 t, int32 day, int32 month,
 int
 pg_tsdiff_timestamp_mi(int64 a, int64 b, int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval   *r;
 
@@ -1583,6 +1607,7 @@ pg_tsdiff_timestamp_mi(int64 a, int64 b, int64 *ot, int32 *od, int32 *om)
 int
 pg_tsdiff_timestamp_difference(int64 start, int64 stop, int64 *osecs, int32 *ousecs)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	long		secs;
 	int			usecs;
 
@@ -1595,18 +1620,21 @@ pg_tsdiff_timestamp_difference(int64 start, int64 stop, int64 *osecs, int32 *ous
 int64
 pg_tsdiff_timestamp_difference_ms(int64 start, int64 stop)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int64) TimestampDifferenceMilliseconds(start, stop);
 }
 
 int
 pg_tsdiff_timestamp_difference_exceeds(int64 start, int64 stop, int32 msec)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return TimestampDifferenceExceeds(start, stop, msec) ? 1 : 0;
 }
 
 int
 pg_tsdiff_timestamp_difference_exceeds_secs(int64 start, int64 stop, int32 threshold_sec)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return TimestampDifferenceExceedsSeconds(start, stop, threshold_sec) ? 1 : 0;
 }
 
@@ -1614,6 +1642,7 @@ int
 pg_tsdiff_timestamp_plmi_interval(int tz, int ismi, int64 ts,
 								  int64 t, int32 day, int32 month, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Datum		d;
@@ -1638,6 +1667,7 @@ int
 pg_tsdiff_justify(int which, int64 t, int32 day, int32 month,
 				  int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Interval   *r;
@@ -1667,6 +1697,7 @@ int
 pg_tsdiff_timestamp_bin(int tz, int64 st, int32 sd, int32 sm,
 						int64 ts, int64 origin, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	stride;
 	Datum		d;
@@ -1689,6 +1720,7 @@ int
 pg_tsdiff_interval_um(int64 t, int32 day, int32 month,
 					  int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	iv;
 	Interval   *r;
@@ -1712,6 +1744,7 @@ pg_tsdiff_interval_plmi(int ismi, int64 t1, int32 d1, int32 m1,
 						int64 t2, int32 d2, int32 m2,
 						int64 *ot, int32 *od, int32 *om)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	a,
 				b;
@@ -1740,6 +1773,7 @@ pg_tsdiff_interval_minmax(int larger, int64 t1, int32 d1, int32 m1,
 						  int64 t2, int32 d2, int32 m2,
 						  int64 *ot, int32 *od, int32 *om, int *cmp)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	a,
 				b;
@@ -1768,6 +1802,7 @@ int
 pg_tsdiff_timestamp_izone(int tz, int64 zt, int32 zd, int32 zm,
 						  int64 ts, int64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	Interval	zone;
 	Datum		d;
@@ -1792,6 +1827,7 @@ pg_tsdiff_interval_agg(int op,
 					   int64 *pinf, int64 *ninf,
 					   int64 t, int32 day, int32 month)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	IntervalAggState state;
 	Interval	nv;
 
@@ -1827,6 +1863,7 @@ pg_tsdiff_interval_avg_final(int issum,
 							 int64 pinf, int64 ninf,
 							 int64 *ot, int32 *od, int32 *om, int *isnull)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	IntervalAggState state;
 	Datum		d;
@@ -1863,6 +1900,7 @@ pg_tsdiff_interval_avg_combine(int64 N1, int64 st1, int32 sd1, int32 sm1,
 							   int64 *N, int64 *st, int32 *sd, int32 *sm,
 							   int64 *pinf, int64 *ninf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	IntervalAggState s1,
 				s2;
@@ -1902,6 +1940,7 @@ pg_tsdiff_interval_avg_serialize(int64 N, int64 st, int32 sd, int32 sm,
 								 int64 pinf, int64 ninf,
 								 unsigned char *out, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	IntervalAggState state;
 	bytea	   *b;
@@ -1931,6 +1970,7 @@ pg_tsdiff_interval_avg_deserialize(const unsigned char *bytes, int len,
 								   int64 *N, int64 *st, int32 *sd, int32 *sm,
 								   int64 *pinf, int64 *ninf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfo fcinfo = pg_ts_fcinfo();
 	IntervalAggState *r;
 
@@ -1952,12 +1992,14 @@ pg_tsdiff_interval_avg_deserialize(const unsigned char *bytes, int len,
 int
 pg_tsdiff_tz_carved(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_dt_tzset_nongmt;
 }
 
 const char *
 pg_tsdiff_tz_carved_name(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_dt_tzset_name;
 }
 

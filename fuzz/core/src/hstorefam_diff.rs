@@ -1215,6 +1215,7 @@ mod tests {
     /// C: pcount > MaxAllocSize/sizeof(Pairs) -> 54000 BEFORE any palloc.
     #[test]
     fn recv_pair_count_limit() {
+        let _serial = crate::c_oracle_serial();
         init_env();
         pin_encoding();
         unsafe { pg_hst_reset() };

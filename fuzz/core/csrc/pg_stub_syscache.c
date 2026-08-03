@@ -57,6 +57,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <setjmp.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ---- plumbing typedefs (LP64, same as the other csrc shims) ---- */
 typedef uint32_t Oid;
@@ -445,6 +446,7 @@ rd_count(StubRd *r, int *out)
 int
 pg_stub_syscache_load(const uint8_t *wire, int wirelen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StubRd		rd = {wire, wirelen, 0, 0};
 
 	pg_stub_syscache_reset();
@@ -579,6 +581,7 @@ pg_stub_syscache_load(const uint8_t *wire, int wirelen)
 int
 pg_stub_syscache_plane(uint8_t *out, int outcap, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StubWr		wr = {out, outcap, 0, 0};
 
 	wr_u8(&wr, (uint8_t) store.n_amop);
@@ -1143,6 +1146,7 @@ get_func_rettype(Oid funcid)
 int
 pg_stub_syscache_try_get_opclass_family(Oid opclass, Oid *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_syscache_jmp_armed = 1;
 	if (setjmp(pg_stub_syscache_jmp) != 0)
 	{
@@ -1157,6 +1161,7 @@ pg_stub_syscache_try_get_opclass_family(Oid opclass, Oid *out)
 int
 pg_stub_syscache_try_get_typlenbyval(Oid typid, int16 *typlen, uint8_t *typbyval)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		byval = false;
 
 	pg_stub_syscache_jmp_armed = 1;
@@ -1174,6 +1179,7 @@ pg_stub_syscache_try_get_typlenbyval(Oid typid, int16 *typlen, uint8_t *typbyval
 int
 pg_stub_syscache_try_get_func_rettype(Oid funcid, Oid *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_syscache_jmp_armed = 1;
 	if (setjmp(pg_stub_syscache_jmp) != 0)
 	{

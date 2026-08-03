@@ -78,6 +78,7 @@
 #include <wchar.h>
 #include <wctype.h>
 #include <setjmp.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 typedef int8_t int8;
 typedef int16_t int16;
@@ -2284,6 +2285,7 @@ prsd_end(PG_FUNCTION_ARGS)
 void
 pg_wpd_reset(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	for (size_t i = 0; i < wpd_nallocs; i++)
 		free(wpd_allocs[i]);
 	wpd_nallocs = 0;
@@ -2292,12 +2294,14 @@ pg_wpd_reset(void)
 int
 pg_wpd_sqlstate(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return wpd_sqlstate;
 }
 
 void
 pg_wpd_set_ctype_is_c(int v)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	database_ctype_is_c = (v != 0);
 }
 
@@ -2315,6 +2319,7 @@ int
 pg_wpd_tokenize(const char *str, int len, int maxtok,
 				int *types, int *offsets, int *lens)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fc;
 	void	   *prs;
 	int			n = 0;
@@ -2366,6 +2371,7 @@ pg_wpd_tokenize(const char *str, int len, int maxtok,
 int
 pg_wpd_lextype(int i, int *lexid, const char **alias, const char **descr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fc;
 	LexDescr   *d;
 

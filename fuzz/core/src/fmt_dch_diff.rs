@@ -833,6 +833,7 @@ mod probe {
     #[test]
     #[ignore = "manual probe"]
     fn of_sign_probe() {
+        let _serial = crate::c_oracle_serial();
         pin_environment();
         let cases: Vec<(&[u8], &[u8])> = vec![
             (b"312", "\u{01bb}MM".as_bytes()),

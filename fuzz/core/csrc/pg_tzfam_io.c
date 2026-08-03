@@ -77,6 +77,7 @@
 #include <dirent.h>
 #include <wchar.h>
 #include <wctype.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 typedef int8_t int8;
 typedef int16_t int16;
@@ -1635,6 +1636,7 @@ pg_tzf_strftime(char *s, size_t maxsize, const char *format,
 				int tm_mon, int tm_year, int tm_wday, int tm_yday,
 				int tm_isdst, long tm_gmtoff, const char *tm_zone)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	struct pg_tm t;
 	size_t		n;
 
@@ -1662,6 +1664,7 @@ static TimeZoneAbbrevTable *tzf_last_tbl;
 int
 pg_tzf_load_tzoffsets(const char *filename)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	tzf_last_tbl = tzf_load_tzoffsets(filename);
 	if (tzf_last_tbl == NULL)
 		return -1;
@@ -1672,6 +1675,7 @@ void
 pg_tzf_abbrev(int i, char *token_out /* >= TOKMAXLEN+1 */ ,
 			  int *type_out, int *value_out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	const datetkn *tk = tzf_last_tbl->abbrevs + i;
 
 	memcpy(token_out, tk->token, TOKMAXLEN + 1);
@@ -1682,6 +1686,7 @@ pg_tzf_abbrev(int i, char *token_out /* >= TOKMAXLEN+1 */ ,
 const char *
 pg_tzf_dynzone(int value)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	DynamicZoneAbbrev *dtza = (DynamicZoneAbbrev *) ((char *) tzf_last_tbl + value);
 
 	return dtza->zone;
@@ -1690,24 +1695,28 @@ pg_tzf_dynzone(int value)
 const char *
 pg_tzf_guc_msg(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return tzf_guc_msg_set ? tzf_guc_msg : NULL;
 }
 
 const char *
 pg_tzf_guc_detail(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return tzf_guc_detail_set ? tzf_guc_detail : NULL;
 }
 
 const char *
 pg_tzf_guc_hint(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return tzf_guc_hint_set ? tzf_guc_hint : NULL;
 }
 
 void
 pg_tzf_reset(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	for (size_t i = 0; i < tzf_nallocs; i++)
 		free(tzf_allocs[i]);
 	tzf_nallocs = 0;
@@ -1720,12 +1729,14 @@ pg_tzf_reset(void)
 int
 pg_tzf_t_isalpha(const char *ptr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return tzf_t_isalpha(ptr);
 }
 
 int
 pg_tzf_t_isalnum(const char *ptr)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return tzf_t_isalnum(ptr);
 }
 
@@ -1744,11 +1755,13 @@ pg_tzf_t_isalnum_with_len(const char *ptr, int mblen)
 int
 pg_tzf_t_iseq(const char *x, char c)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return t_iseq(x, c);
 }
 
 int
 pg_tzf_isspace_c(int c)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return isspace(c);
 }

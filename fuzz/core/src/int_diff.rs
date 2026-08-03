@@ -830,6 +830,7 @@ mod tests {
 
     #[test]
     fn smoke_in_out() {
+        let _serial = crate::c_oracle_serial();
         for soft in [false, true] {
             int2in_diff(b"12345", soft);
             int2in_diff(b"-32768", soft);
@@ -858,6 +859,7 @@ mod tests {
 
     #[test]
     fn smoke_vector() {
+        let _serial = crate::c_oracle_serial();
         for soft in [false, true] {
             int2vectorin_diff(b"", soft);
             int2vectorin_diff(b"1 2 3", soft);
@@ -883,6 +885,7 @@ mod tests {
 
     #[test]
     fn smoke_recv_send() {
+        let _serial = crate::c_oracle_serial();
         // exact, short, long wires; both widths
         recv_send_diff(&[0, 0x12, 0x34]);
         recv_send_diff(&[0, 0xff, 0xff]);
@@ -897,6 +900,7 @@ mod tests {
 
     #[test]
     fn smoke_fns() {
+        let _serial = crate::c_oracle_serial();
         let spots = [
             0i64,
             1,

@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 typedef uint32_t TransactionId;
 typedef uint32_t CommandId;
@@ -162,6 +163,7 @@ int
 pg_stub_snapshot_build(const uint8_t *wire, int wirelen,
 					   uint8_t *out, int outcap, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StubRd		rd = {wire, wirelen, 0, 0};
 	StubWr		wr = {out, outcap, 0, 0};
 	TransactionId xip[PG_STUB_MAX_XIP];

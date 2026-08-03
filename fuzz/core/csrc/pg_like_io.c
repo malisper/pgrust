@@ -91,6 +91,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* Shared TLS errcode channel (defined in csrc/pg_float_io.c). */
 extern _Thread_local int pg_diff_errcode;
@@ -262,6 +263,7 @@ static _Thread_local int pg_like_encoding = PG_UTF8;
 void
 pg_diff_like_set_encoding(int utf8)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_like_encoding = utf8 ? PG_UTF8 : PG_LATIN1;
 }
 
@@ -2774,6 +2776,7 @@ int
 pg_diff_like_textlike(const char *sdat, int slen_in, const char *pdat,
 					  int plen_in, unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		text	   *str = pg_like_mktext(sdat, slen_in);
@@ -2801,6 +2804,7 @@ int
 pg_diff_like_textnlike(const char *sdat, int slen_in, const char *pdat,
 					   int plen_in, unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		text	   *str = pg_like_mktext(sdat, slen_in);
@@ -2828,6 +2832,7 @@ int
 pg_diff_like_namelike(const char *name64, const char *pdat, int plen_in,
 					  unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		Name		str = (Name) name64;
@@ -2855,6 +2860,7 @@ int
 pg_diff_like_namenlike(const char *name64, const char *pdat, int plen_in,
 					   unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		Name		str = (Name) name64;
@@ -2882,6 +2888,7 @@ int
 pg_diff_like_texticlike(const char *sdat, int slen_in, const char *pdat,
 						int plen_in, unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		text	   *str = pg_like_mktext(sdat, slen_in);
@@ -2900,6 +2907,7 @@ int
 pg_diff_like_texticnlike(const char *sdat, int slen_in, const char *pdat,
 						 int plen_in, unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		text	   *str = pg_like_mktext(sdat, slen_in);
@@ -2918,6 +2926,7 @@ int
 pg_diff_like_nameiclike(const char *name64, const char *pdat, int plen_in,
 						unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		Name		str = (Name) name64;
@@ -2939,6 +2948,7 @@ int
 pg_diff_like_nameicnlike(const char *name64, const char *pdat, int plen_in,
 						 unsigned int collation, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		Name		str = (Name) name64;
@@ -2960,6 +2970,7 @@ int
 pg_diff_like_bytealike(const char *sdat, int slen_in, const char *pdat,
 					   int plen_in, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		bytea	   *str = pg_like_mktext(sdat, slen_in);
@@ -2987,6 +2998,7 @@ int
 pg_diff_like_byteanlike(const char *sdat, int slen_in, const char *pdat,
 						int plen_in, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		bytea	   *str = pg_like_mktext(sdat, slen_in);
@@ -3014,6 +3026,7 @@ int
 pg_diff_like_escape(const char *pdat, int plen_in, const char *edat,
 					int elen_in, char *out, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		text	   *pat = pg_like_mktext(pdat, plen_in);
@@ -3036,6 +3049,7 @@ int
 pg_diff_like_escape_bytea(const char *pdat, int plen_in, const char *edat,
 						  int elen_in, char *out, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	{
 		bytea	   *pat = pg_like_mktext(pdat, plen_in);
@@ -3064,6 +3078,7 @@ int
 pg_diff_like_sb_match(const char *t, int tlen, const char *p, int plen,
 					  int use_locale, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	*out = SB_MatchText(t, tlen, p, plen,
 						use_locale ? &pg_like_c_locale : NULL);
@@ -3074,6 +3089,7 @@ int
 pg_diff_like_utf8_match(const char *t, int tlen, const char *p, int plen,
 						int use_locale, int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	*out = UTF8_MatchText(t, tlen, p, plen,
 						  use_locale ? &pg_like_c_locale : NULL);
@@ -3084,6 +3100,7 @@ int
 pg_diff_like_sb_imatch(const char *t, int tlen, const char *p, int plen,
 					   int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_DIFF_LIKE_ENTRY_PROLOGUE();
 	*out = SB_IMatchText(t, tlen, p, plen, &pg_like_c_locale);
 	return 0;

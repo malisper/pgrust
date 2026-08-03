@@ -152,6 +152,7 @@ fn sample_spec() -> SnapSpec {
 /// Baseline agreement + mini-fuzz over seeded pseudo-random specs.
 #[test]
 fn snapshot_construction_agrees() {
+    let _serial = crate::c_oracle_serial();
     let cx = mcx::MemoryContext::new("stub_snapshot_test");
     let m = cx.mcx();
     crate::stub_snapshot::assert_snapshot_construction_agrees(m, &sample_spec());
@@ -176,6 +177,7 @@ fn snapshot_construction_agrees() {
 /// the Rust side's spec) — the field plane must diverge.
 #[test]
 fn snapshot_control_c_side_tamper_is_caught() {
+    let _serial = crate::c_oracle_serial();
     let cx = mcx::MemoryContext::new("stub_snapshot_control");
     let m = cx.mcx();
     let spec = sample_spec();
@@ -200,6 +202,7 @@ fn snapshot_control_c_side_tamper_is_caught() {
 /// diverge in the other direction.
 #[test]
 fn snapshot_control_rust_side_tamper_is_caught() {
+    let _serial = crate::c_oracle_serial();
     let cx = mcx::MemoryContext::new("stub_snapshot_control2");
     let m = cx.mcx();
     let spec = sample_spec();
@@ -224,6 +227,7 @@ fn snapshot_control_rust_side_tamper_is_caught() {
 /// The pin itself: every row of the encoding tables agrees.
 #[test]
 fn encoding_tables_are_pinned() {
+    let _serial = crate::c_oracle_serial();
     stub_encoding::assert_encoding_tables_pinned();
 }
 
@@ -231,6 +235,7 @@ fn encoding_tables_are_pinned() {
 /// comparator must see every one (official names are all distinct).
 #[test]
 fn encoding_control_shifted_index_is_caught() {
+    let _serial = crate::c_oracle_serial();
     for e in 0..stub_encoding::N_ENCODINGS {
         let r = stub_encoding::rust_row(e);
         let mut c = stub_encoding::c_row((e + 1) % stub_encoding::N_ENCODINGS);

@@ -106,6 +106,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <setjmp.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 typedef int8_t int8;
 typedef int16_t int16;
@@ -5552,6 +5553,7 @@ hstore_hash_extended(PG_FUNCTION_ARGS)
 void
 pg_hst_reset(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	for (size_t i = 0; i < hst_nallocs; i++)
 		free(hst_allocs[i]);
 	hst_nallocs = 0;
@@ -5560,6 +5562,7 @@ pg_hst_reset(void)
 int
 pg_hst_sqlstate(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return hst_sqlstate;
 }
 
@@ -5611,12 +5614,14 @@ static _Thread_local Node hst_soft_node;
 int
 pg_hst_soft_sqlstate(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return hst_soft_sqlstate;
 }
 
 int
 pg_hst_in(const char *str, int soft, const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 
@@ -5636,6 +5641,7 @@ int
 pg_hst_recv(const unsigned char *wire, int wirelen,
 			const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StringInfoData buf;
 	bool		isnull = false;
 	Datum		d;
@@ -5655,6 +5661,7 @@ pg_hst_recv(const unsigned char *wire, int wirelen,
 int
 pg_hst_out(const unsigned char *img, const char **out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 
 	HST_TRY();
@@ -5666,6 +5673,7 @@ pg_hst_out(const unsigned char *img, const char **out)
 int
 pg_hst_send(const unsigned char *img, const unsigned char **out, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 
@@ -5693,6 +5701,7 @@ pg_hst_from_text(const unsigned char *key, int keylen, int key_null,
 				 const unsigned char *val, int vallen, int val_null,
 				 const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 
@@ -5715,6 +5724,7 @@ pg_hst_from_arrays(const unsigned char *karr, int k_null,
 				   const unsigned char *varr, int v_null,
 				   const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 
@@ -5734,6 +5744,7 @@ int
 pg_hst_from_array(const unsigned char *arr,
 				  const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 
@@ -5749,6 +5760,7 @@ int
 pg_hst_fetchval(const unsigned char *img, const unsigned char *key, int keylen,
 				const unsigned char **out, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 
@@ -5765,6 +5777,7 @@ pg_hst_fetchval(const unsigned char *img, const unsigned char *key, int keylen,
 int
 pg_hst_exists(const unsigned char *img, const unsigned char *key, int keylen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 
 	HST_TRY();
@@ -5776,6 +5789,7 @@ pg_hst_exists(const unsigned char *img, const unsigned char *key, int keylen)
 int
 pg_hst_defined(const unsigned char *img, const unsigned char *key, int keylen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 
 	HST_TRY();
@@ -5788,6 +5802,7 @@ pg_hst_defined(const unsigned char *img, const unsigned char *key, int keylen)
 int
 pg_hst_bool2(int which, const unsigned char *a, const unsigned char *b)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	static hst_pgfunc const tab[] = {
 		hst_hstore_exists_any, hst_hstore_exists_all,
 		hst_hstore_contains, hst_hstore_contained,
@@ -5807,6 +5822,7 @@ pg_hst_binop(int which, const unsigned char *a,
 			 const unsigned char *b, int blen_for_text,
 			 const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	static hst_pgfunc const tab[] = {
 		hst_hstore_delete, hst_hstore_delete_array, hst_hstore_delete_hstore,
 		hst_hstore_concat, hst_hstore_slice_to_hstore,
@@ -5831,6 +5847,7 @@ int
 pg_hst_unop_array(int which, const unsigned char *a,
 				  const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	static hst_pgfunc const tab[] = {
 		hst_hstore_akeys, hst_hstore_avals,
 		hst_hstore_to_array, hst_hstore_to_matrix,
@@ -5849,6 +5866,7 @@ int
 pg_hst_slice_to_array(const unsigned char *a, const unsigned char *keys,
 					  const unsigned char **img, int *imglen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 
@@ -5864,6 +5882,7 @@ pg_hst_slice_to_array(const unsigned char *a, const unsigned char *keys,
 int
 pg_hst_cmp_ops(const unsigned char *a, const unsigned char *b, int32 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 
 	HST_TRY();
@@ -5887,6 +5906,7 @@ pg_hst_cmp_ops(const unsigned char *a, const unsigned char *b, int32 *out)
 int
 pg_hst_hash(const unsigned char *img, uint32 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 
 	HST_TRY();
@@ -5898,6 +5918,7 @@ pg_hst_hash(const unsigned char *img, uint32 *out)
 int
 pg_hst_hash_extended(const unsigned char *img, uint64 seed, uint64 *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 
 	HST_TRY();
@@ -5917,6 +5938,7 @@ static _Thread_local HSParser hst_pp_state;
 int
 pg_hst_parse_pairs(const char *str)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	HST_TRY();
 	hst_pp_state.begin = (char *) str;
 	hst_pp_state.escontext = NULL;
@@ -5929,6 +5951,7 @@ void
 pg_hst_parse_pair(int i, const char **k, int *klen,
 				  const char **v, int *vlen, int *isnull)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	*k = hst_pp_state.pairs[i].key;
 	*klen = (int) hst_pp_state.pairs[i].keylen;
 	*v = hst_pp_state.pairs[i].val;
@@ -5941,6 +5964,7 @@ int
 pg_hst_to_json(const unsigned char *img, int loose,
 			   const unsigned char **out, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bool		isnull = false;
 	Datum		d;
 

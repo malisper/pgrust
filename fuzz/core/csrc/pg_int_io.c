@@ -93,6 +93,7 @@
 #include <setjmp.h>
 #include <stdio.h>
 #include <assert.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ---- error-plane shim (same classes convention as pg_float_io.c) ---- */
 
@@ -2570,6 +2571,7 @@ int2shr(PG_FUNCTION_ARGS)
 int
 pg_diff_int2in(const char *num, int soft, int16_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	static _Thread_local int soft_sentinel;
 	MiniFcinfo	fc = {{0}};
 
@@ -2586,6 +2588,7 @@ pg_diff_int2in(const char *num, int soft, int16_t *out)
 int
 pg_diff_int4in(const char *num, int soft, int32_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	static _Thread_local int soft_sentinel;
 	MiniFcinfo	fc = {{0}};
 
@@ -2604,6 +2607,7 @@ pg_diff_int4in(const char *num, int soft, int32_t *out)
 int
 pg_diff_int2out(int16_t val, char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	MiniFcinfo	fc = {{0}};
 	char	   *res;
 	int			len;
@@ -2622,6 +2626,7 @@ pg_diff_int2out(int16_t val, char *buf)
 int
 pg_diff_int4out(int32_t val, char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	MiniFcinfo	fc = {{0}};
 	char	   *res;
 	int			len;
@@ -2644,6 +2649,7 @@ int
 pg_diff_int2vectorin(const char *str, int soft, unsigned char *out_img,
 					 int out_cap, int *out_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	static _Thread_local int soft_sentinel;
 	MiniFcinfo	fc = {{0}};
 	int2vector *res;
@@ -2671,6 +2677,7 @@ pg_diff_int2vectorin(const char *str, int soft, unsigned char *out_img,
 int
 pg_diff_int2vectorout(const unsigned char *img, char *buf, int buflen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	MiniFcinfo	fc = {{0}};
 	char	   *res;
 	int			len;
@@ -2691,6 +2698,7 @@ pg_diff_int2vectorout(const unsigned char *img, char *buf, int buflen)
 int
 pg_diff_int2recv(const unsigned char *data, int len, int16_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StringInfoData msg;
 	MiniFcinfo	fc = {{0}};
 
@@ -2710,6 +2718,7 @@ pg_diff_int2recv(const unsigned char *data, int len, int16_t *out)
 int
 pg_diff_int4recv(const unsigned char *data, int len, int32_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StringInfoData msg;
 	MiniFcinfo	fc = {{0}};
 
@@ -2731,6 +2740,7 @@ pg_diff_int4recv(const unsigned char *data, int len, int32_t *out)
 int
 pg_diff_int2send(int16_t val, unsigned char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	MiniFcinfo	fc = {{0}};
 	char		backing[64];
 	StringInfoData si;
@@ -2761,6 +2771,7 @@ pg_diff_int2send(int16_t val, unsigned char *buf)
 int
 pg_diff_int4send(int32_t val, unsigned char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	MiniFcinfo	fc = {{0}};
 	char		backing[64];
 	StringInfoData si;
@@ -2796,6 +2807,7 @@ int
 pg_diff_int_fn(int fn_id, int64_t a, int64_t b, int64_t c, int sub, int less,
 			   int64_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	MiniFcinfo	fc = {{0}};
 	Datum		d = 0;
 

@@ -86,6 +86,7 @@
 
 #include "segdata.h"
 #include "cubedata.h"
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ================= SHIM: unified error channel + arena ================= */
 
@@ -244,6 +245,7 @@ char *
 void
 pg_cb_reset(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	size_t		i;
 
 	for (i = 0; i < pg_cb_nptrs; i++)
@@ -2936,6 +2938,7 @@ typedef char pg_cb_ndbox_hdr_is_8[offsetof(NDBOX, x) == 8 ? 1 : -1];
 int
 pg_cb_seg_in(const char *str, uint8 *out12)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	Datum		d;
 
@@ -2953,6 +2956,7 @@ pg_cb_seg_in(const char *str, uint8 *out12)
 int
 pg_cb_seg_out(const uint8 *seg12, char *out, int outsz)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	SEG			s;
 	Datum		d;
@@ -2978,6 +2982,7 @@ int
 pg_cb_seg_binop(int op, const uint8 *a12, const uint8 *b12,
 				int32 *iout, uint8 *segout12)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	SEG			a,
 				b;
@@ -3058,6 +3063,7 @@ pg_cb_seg_binop(int op, const uint8 *a12, const uint8 *b12,
 int
 pg_cb_seg_unop(int op, const uint8 *a12, uint32 *bits)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	SEG			a;
 	Datum		d;
@@ -3118,6 +3124,7 @@ pg_cb_cube_store(Datum d, uint8 *out, int cap, int *outlen)
 int
 pg_cb_cube_in(const char *str, uint8 *out, int cap, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	Datum		d;
 
@@ -3134,6 +3141,7 @@ pg_cb_cube_in(const char *str, uint8 *out, int cap, int *outlen)
 int
 pg_cb_cube_out(const uint8 *img, int len, char *out, int outsz)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	Datum		d;
 	const char *s;
@@ -3155,6 +3163,7 @@ pg_cb_cube_out(const uint8 *img, int len, char *out, int outsz)
 int
 pg_cb_cube_send(const uint8 *img, int len, uint8 *out, int cap, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	Datum		d;
 	bytea	   *b;
@@ -3179,6 +3188,7 @@ pg_cb_cube_send(const uint8 *img, int len, uint8 *out, int cap, int *outlen)
 int
 pg_cb_cube_recv(const uint8 *msg, int msglen, uint8 *out, int cap, int *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	StringInfoData buf;
 	Datum		d;
@@ -3209,6 +3219,7 @@ int
 pg_cb_cube_binop(int op, const uint8 *a, int alen, const uint8 *b, int blen,
 				 int32 *iout, uint64 *fbits, uint8 *imgout, int *imgoutlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	Datum		d;
 
@@ -3295,6 +3306,7 @@ pg_cb_cube_unop(int op, const uint8 *img, int len, int32 n,
 				uint64 f1bits, uint64 f2bits,
 				int32 *iout, uint64 *fbits, uint8 *imgout, int *imgoutlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	Datum		d;
 
@@ -3386,6 +3398,7 @@ pg_cb_cube_arrayop(int op, const uint8 *arr1, int len1,
 				   const uint8 *arr2, int len2,
 				   uint8 *imgout, int *imgoutlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	FunctionCallInfoBaseData fcinfo;
 	void	   *p1;
 	void	   *p2;

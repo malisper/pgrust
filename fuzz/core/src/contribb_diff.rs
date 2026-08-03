@@ -1061,6 +1061,7 @@ mod tests {
 
     #[test]
     fn c_dist_repro() {
+        let _serial = crate::c_oracle_serial();
         fns();
         unsafe { pg_cb_reset() };
         let mut img = Vec::new();

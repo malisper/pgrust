@@ -775,6 +775,7 @@ mod tests {
     /// C oracle — every value compared, loop coverage asserted.
     #[test]
     fn pg_class_exhaustive() {
+        let _serial = crate::c_oracle_serial();
         let mut covered = 0u32;
         for relkind in 0u8..=255 {
             check_relkind(relkind);
@@ -788,6 +789,7 @@ mod tests {
     /// BuildQueryCompletionString modes for every tag.
     #[test]
     fn cmdtag_exhaustive() {
+        let _serial = crate::c_oracle_serial();
         let mut covered = 0u32;
         for tag in 0..NTAGS as i32 {
             check_cmdtag_props(tag);
@@ -825,6 +827,7 @@ mod tests {
     /// differences. The carve is exactly both-sides-NaN and nothing wider.
     #[test]
     fn geo_nan_carve_narrowness() {
+        let _serial = crate::c_oracle_serial();
         // (1) CI cluster artifact replay: both sides NaN => carved, no panic.
         // (Exercises the real divergence class end-to-end, incl. fc plane.)
         check_geo_distance(

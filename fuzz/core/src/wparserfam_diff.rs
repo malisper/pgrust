@@ -229,6 +229,7 @@ mod tests {
     /// + alias + descr, against the verbatim C table.
     #[test]
     fn lextype_table() {
+        let _serial = crate::c_oracle_serial();
         unsafe { pg_wpd_reset() };
         // The Rust face returns the LASTNUM live rows; C's palloc'd array
         // carries a trailing lexid==0 terminator (a C array-length

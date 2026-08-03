@@ -61,6 +61,7 @@
 #include "common/jsonapi.h"
 #include "mb/pg_wchar.h"
 #include "port/simd.h"
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ---- cross-lane symbol-collision guard: pure renames of the extracted
  * extern-linkage functions (bodies untouched) ---- */
@@ -2023,6 +2024,7 @@ pg_jsonfam_mk_cstring(const char *s, size_t len)
 int
 pg_diff_json_in(const char *s, size_t len, const char **out, size_t *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	Datum		d;
 	text	   *t;
@@ -2043,6 +2045,7 @@ pg_diff_json_in(const char *s, size_t len, const char **out, size_t *outlen)
 int
 pg_diff_json_typeof(const char *s, size_t len, const char **out, size_t *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	Datum		d;
 	text	   *t;
@@ -2062,6 +2065,7 @@ pg_diff_json_typeof(const char *s, size_t len, const char **out, size_t *outlen)
 int
 pg_diff_json_array_length(const char *s, size_t len, int32_t *count)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	Datum		d;
 
@@ -2079,6 +2083,7 @@ int
 pg_diff_json_strip_nulls(const char *s, size_t len, int strip_in_arrays,
 						 const char **out, size_t *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	Datum		d;
 	text	   *t;
@@ -2101,6 +2106,7 @@ int
 pg_diff_json_validate(const char *s, size_t len, int check_unique,
 					  int throw_error, int *ok)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_JSONFAM_ENTRY();
 	if (setjmp(pg_jsonfam_jmp) != 0)
 		return pg_jsonfam_errcode;
@@ -2118,6 +2124,7 @@ pg_diff_json_get_field(const char *s, size_t len, const char *key,
 					   size_t keylen, int as_text,
 					   const char **out, size_t *outlen, int *isnull)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	Datum		d;
 	text	   *t;
@@ -2145,6 +2152,7 @@ int
 pg_diff_json_get_element(const char *s, size_t len, int32_t idx, int as_text,
 						 const char **out, size_t *outlen, int *isnull)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	Datum		d;
 	text	   *t;
@@ -2175,6 +2183,7 @@ pg_diff_json_get_path(const char *s, size_t len, int npath,
 					  int as_text,
 					  const char **out, size_t *outlen, int *isnull)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	ArrayType	path;
 	Datum	   *pd;
@@ -2256,6 +2265,7 @@ pg_diff_json_object(int ndim, const int32_t *dims, int nelems,
 					const uint8_t *nulls,
 					const char **out, size_t *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	ArrayType	arr;
 	Datum		d;
@@ -2283,6 +2293,7 @@ pg_diff_json_object_two_arg(int nkdim, const int32_t *kdims, int nkelems,
 							const uint8_t *vnulls,
 							const char **out, size_t *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PgJsonfamFcinfoData fc = {0};
 	ArrayType	karr,
 				varr;
@@ -2308,6 +2319,7 @@ pg_diff_json_object_two_arg(int nkdim, const int32_t *kdims, int nkelems,
 int
 pg_diff_escape_json(const char *s, size_t len, const char **out, size_t *outlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	StringInfoData buf;
 
 	PG_JSONFAM_ENTRY();

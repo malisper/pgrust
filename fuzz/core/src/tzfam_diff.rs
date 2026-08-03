@@ -650,6 +650,7 @@ mod tests {
     /// covered the whole domain.
     #[test]
     fn ts_locale_bytes_exhaustive() {
+        let _serial = crate::c_oracle_serial();
         init_env();
         pin_ctype_and_encoding();
         let mut count = 0usize;
@@ -762,6 +763,7 @@ mod nul_probe {
     #[test]
     #[ignore]
     fn tzparser_interior_nul_split() {
+        let _serial = crate::c_oracle_serial();
         init_env();
 
         // Direction 1: C FAILS, pgrust SUCCEEDS.

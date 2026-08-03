@@ -1076,6 +1076,7 @@ mod tests {
     /// shapes, both families and the None arm, against the vendored C.
     #[test]
     fn cidr_exhaustive_bits() {
+        let _serial = crate::c_oracle_serial();
         for family_sel in [0u8, 1, 2] {
             for bits in 0..=200u32 {
                 let s = bits.to_string();
@@ -1103,6 +1104,7 @@ mod tests {
 
     #[test]
     fn range_smoke() {
+        let _serial = crate::c_oracle_serial();
         // v4: 10.1.2.3 in 10.0.0.0/8, not in 127.0.0.0/8
         let mut p = vec![0u8, 0];
         p.extend_from_slice(&[10, 1, 2, 3, 10, 0, 0, 0, 255, 0, 0, 0]);
@@ -1125,6 +1127,7 @@ mod tests {
 
     #[test]
     fn foreach_differential() {
+        let _serial = crate::c_oracle_serial();
         check_foreach();
     }
 
@@ -1132,6 +1135,7 @@ mod tests {
     /// zero-mask (invalid -> fullmask) and family-mismatch arms.
     #[test]
     fn run_cb_cells() {
+        let _serial = crate::c_oracle_serial();
         for addr_v6 in [0u8, 1] {
             for mask_kind in 0..4u8 {
                 for mask_byte in [0u8, 0xff, 0xf0] {

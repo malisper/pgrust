@@ -22,6 +22,7 @@
  *   sides. A transcription defect on EITHER side is a caught divergence
  *   (the Rust tables are the shipped crates, not copies of this file).
  */
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 typedef enum pg_enc
 {
@@ -143,18 +144,21 @@ static const int pg_stub_maxmblen_tbl[_PG_LAST_ENCODING_] = {
 int
 pg_stub_enc_count(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) _PG_LAST_ENCODING_;
 }
 
 int
 pg_stub_enc_be_last(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) PG_ENCODING_BE_LAST;
 }
 
 const char *
 pg_stub_enc_name(int enc)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (enc < 0 || enc >= (int) _PG_LAST_ENCODING_)
 		return 0;
 	return pg_enc2name_tbl[enc].name;
@@ -163,6 +167,7 @@ pg_stub_enc_name(int enc)
 int
 pg_stub_enc_enum_value(int enc)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (enc < 0 || enc >= (int) _PG_LAST_ENCODING_)
 		return -1;
 	return (int) pg_enc2name_tbl[enc].encoding;
@@ -171,6 +176,7 @@ pg_stub_enc_enum_value(int enc)
 int
 pg_stub_enc_maxmblen(int enc)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (enc < 0 || enc >= (int) _PG_LAST_ENCODING_)
 		return -1;
 	return pg_stub_maxmblen_tbl[enc];

@@ -259,9 +259,30 @@ pub fn wire_pqformat(data: &[u8]) {
 /// Reentrant per thread: tests hold `c_oracle_serial()` and then call a
 /// driver, and drivers may call sibling drivers — an inner acquisition on
 /// the owning thread is a no-op instead of a self-deadlock.
+///
+/// 2026-08-02 (task #125, oracle-serial guards): the discipline is now
+/// MECHANICALLY enforced on both planes, because the hand sweep above still
+/// left 25 unguarded test entry points (docs/conformance/
+/// scribbler-investigation-2026-08-02.md §4; one was a live cross-thread
+/// free() generator via pg_tzf_reset):
+///   - statically, scripts/lint-oracle-serial.py walks every #[test] in
+///     fuzz/core/src to any reachable C oracle extern and fails on a path
+///     with no oracle_serial() frame (wired into scripts/lint-gates.sh);
+///   - at runtime, this guard publishes its holder thread to the C side
+///     (csrc/pg_oracle_guard.c), and instrumented shim entries verify the
+///     CALLING thread is the holder — release-effective (never a
+///     debug_assert; the debug-assert masking law), panicking through
+///     `pgf_oracle_guard_violation` with the entry and test name.
 static ORACLE_M: std::sync::Mutex<()> = std::sync::Mutex::new(());
 thread_local! {
     static ORACLE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+extern "C" {
+    // csrc/pg_oracle_guard.c: process-global holder cell for the runtime
+    // holder check. Both calls are made while ORACLE_M is held.
+    fn pg_oracle_guard_enter();
+    fn pg_oracle_guard_exit();
 }
 
 pub(crate) struct OracleSerial(#[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>);
@@ -289,6 +310,10 @@ impl Drop for OracleSerial {
         // and name the poisoning test at the moment of the corrupting write.
         // Release-effective by design: no debug_assert, no sanitizer.
         if depth == 0 {
+            // Clear the C-side holder first (before H0 can panic and before
+            // the mutex guard field drops): both stores happen with the
+            // lock held, so enter/exit never race each other.
+            unsafe { pg_oracle_guard_exit() };
             let code = unsafe { pg_tsdiff_cache_check() };
             if code != 0 {
                 let t = std::thread::current();
@@ -320,10 +345,62 @@ pub(crate) fn oracle_serial() -> OracleSerial {
     if depth == 0 {
         // Poison-tolerant: a divergence panic in one test must not cascade
         // "poisoned Mutex" noise into siblings.
-        OracleSerial(Some(ORACLE_M.lock().unwrap_or_else(|e| e.into_inner())))
+        let guard = ORACLE_M.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { pg_oracle_guard_enter() };
+        OracleSerial(Some(guard))
     } else {
         OracleSerial(None)
     }
+}
+
+/// Violation hook for csrc/pg_oracle_guard.c's holder check: a C oracle
+/// entry ran on a thread that does not hold `oracle_serial()`. Panics with
+/// the C entry name and the calling thread's name (under cargo test, the
+/// offending test). "C-unwind" so the panic propagates through the C entry
+/// frame back into the calling test where unwind tables exist; where they
+/// don't, the runtime aborts — still loud, message already printed.
+///
+/// `oracle_guard_trap` redirects the next violation into a cell instead of
+/// panicking — the must-fail control (oracle_guard_tests.rs) uses it to
+/// prove the check fires without killing the suite.
+#[no_mangle]
+pub extern "C-unwind" fn pgf_oracle_guard_violation(entry: *const std::os::raw::c_char) {
+    let entry = if entry.is_null() {
+        "<null>".to_string()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(entry) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    if let Ok(mut trap) = ORACLE_GUARD_TRAP.lock() {
+        if let Some(cell) = trap.as_mut() {
+            cell.push(entry);
+            return;
+        }
+    }
+    let thread = std::thread::current();
+    panic!(
+        "ORACLE GUARD VIOLATION: C oracle entry `{entry}` called on a thread \
+         that does not hold oracle_serial() (thread/test: {:?}). Take \
+         `let _g = crate::c_oracle_serial();` on THIS thread before calling \
+         into the C oracle — see fuzz/core/src/lib.rs and \
+         scripts/lint-oracle-serial.py.",
+        thread.name().unwrap_or("<unnamed>")
+    );
+}
+
+static ORACLE_GUARD_TRAP: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// Arm the trap (test-only): violations are recorded, not panicked. Returns
+/// the recorded entries when disarmed.
+#[cfg(test)]
+pub(crate) fn oracle_guard_trap_arm() {
+    *ORACLE_GUARD_TRAP.lock().unwrap() = Some(Vec::new());
+}
+
+#[cfg(test)]
+pub(crate) fn oracle_guard_trap_disarm() -> Vec<String> {
+    ORACLE_GUARD_TRAP.lock().unwrap().take().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -493,6 +570,10 @@ mod stub_controls_tests;
 // H0 SCRIBBLER detector controls (task #112): clean-path + must-fail poison.
 #[cfg(test)]
 mod scribbler_h0_tests;
+// must-fail controls for the oracle-serialization holder check
+// (csrc/pg_oracle_guard.c; see oracle_serial() above).
+#[cfg(test)]
+mod oracle_guard_tests;
 pub mod stub_nodes;
 pub mod stub_snapshot;
 pub mod stub_syscache;

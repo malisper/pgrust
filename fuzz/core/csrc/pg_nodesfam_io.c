@@ -70,6 +70,7 @@
 #include "utils/expandeddatum.h"
 #include "utils/guc_hooks.h"
 #include "utils/memutils.h"
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 extern char *nodeToString(const void *obj);
 
@@ -423,6 +424,7 @@ static NdfOut ndf_result;
 void
 pg_ndf_init(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	set_stack_base();
 	/* server default: postmaster raises 100kB -> 2048kB given >=2.5MB rlimit */
 	assign_max_stack_depth(2048, NULL);
@@ -437,6 +439,7 @@ pg_ndf_init(void)
 const NdfOut *
 pg_ndf_exec(const char *input)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	void	   *node;
 	void	   *copy;
 	char	   *out1;

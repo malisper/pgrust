@@ -20,6 +20,9 @@ fn main() {
         // SCAFFOLD-TODO #error paste site in csrc/pg_define_io.c is filled
         // with verbatim vendored C (README-TODO-define_diff.md step 1).
         .file("csrc/pg_define_io.c")
+        // oracle-serialization holder check (fuzz plumbing; see the
+        // file header + scripts/lint-oracle-serial.py)
+        .file("csrc/pg_oracle_guard.c")
         // libfam_diff oracle: verbatim vendored files under csrc/libfam/
         // (whole-file includes; provenance in csrc/pg_libfam_io.c header).
         .file("csrc/pg_libfam_io.c")
@@ -246,6 +249,9 @@ fn main() {
         .define("numeric_power", "fmtdch_numeric_power")
         .define("numeric_int4_opt_error", "fmtdch_numeric_int4_opt_error")
         .define("int64_to_numeric", "fmtdch_int64_to_numeric")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_oracle");
 
     // tsvec oracle family (p1-laneae, tsvector_core_diff + tsrank_diff):
@@ -314,6 +320,9 @@ fn main() {
                 "-fno-strict-aliasing"
             },
         )
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_tsvec");
     println!("cargo:rerun-if-changed=csrc/pg_tsvector_core_io.c");
     println!("cargo:rerun-if-changed=csrc/pg_tsrank_io.c");
@@ -340,6 +349,9 @@ fn main() {
         .include("csrc/wcharfam")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_wcharfam");
     println!("cargo:rerun-if-changed=csrc/pg_wcharfam.c");
     println!("cargo:rerun-if-changed=csrc/wcharfam");
@@ -384,6 +396,9 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-ffp-contract=off")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_jsonbfam");
 
     // SYMBOL ISOLATION (landing fix, merge/p1-wave1 2026-07-30): three lane
@@ -447,6 +462,9 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-but-set-variable")
         .flag_if_supported("-Wno-unused-function")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_numericfam");
 
     // hashenc_diff oracle (p1-lanee): verbatim src/common + ascii/crc TUs.
@@ -474,6 +492,9 @@ fn main() {
         .include("csrc/hashenc")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_hashenc");
     let mut hashenc = cc::Build::new();
     for s in CRYPTO_SHARED_SYMS.iter().chain(HASHENC_EXTRA_SYMS) {
@@ -492,6 +513,9 @@ fn main() {
         .include("csrc/hashenc")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_hashenc_fe");
     // cryptofam_diff oracle (p1-lanef): verbatim 18.3 crypto/hash family,
     // FRONTEND arms (malloc/free, no CHECK_FOR_INTERRUPTS), own shim include
@@ -518,6 +542,9 @@ fn main() {
         .define("FRONTEND", None)
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_cryptofam");
 
     // tablesfam_diff oracle (p1-lanef): verbatim 18.3 kwlookup/keywords/
@@ -544,6 +571,9 @@ fn main() {
         .define("FRONTEND", None)
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_tablesfam");
 
     // json_diff oracle (p1-laneab): whole-TU verbatim 18.3 common/jsonapi.c +
@@ -563,6 +593,9 @@ fn main() {
         .include("csrc/jsonfam/include")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_jsonfam");
     // mbconv_diff oracle (p1-lanez): the SAME vendored 18.3 conversion-proc
     // C the proofs/mbconv Kani family solves against (conv.c engines +
@@ -602,6 +635,9 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-O2")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_mbconv");
     println!("cargo:rerun-if-changed=../../proofs/mbconv/c");
     // jsonpath_diff oracle (p1-laneaa): verbatim 18.3 jsonpath.c + generated
@@ -729,6 +765,9 @@ fn main() {
         .include("csrc/jsonpath")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_jsonpath");
     // regexp_diff oracle (p1-laneag): the VERBATIM 18.3 Spencer regex engine
     // (csrc/regexfam/, own shim include tree — regcomp.c/regexec.c #include
@@ -767,6 +806,9 @@ fn main() {
         .include("csrc/regexfam/include")
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_regexfam");
 
     println!("cargo:rerun-if-changed=csrc");
@@ -836,6 +878,9 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-ffp-contract=off")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_tsdiff");
 
     // datetime_io_diff oracle (p1-lanel; gate cleared: all paste sites
@@ -866,6 +911,9 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-ffp-contract=off")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_dtio");
 
     // datetime_closeout_diff oracle (p1-lanel2): extract_date /
@@ -894,6 +942,9 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-ffp-contract=off")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_dtclo");
 
     // portfam_diff oracle (p1-microbatch PORTFAM: pg_bitutils, crc32c,
@@ -952,6 +1003,9 @@ fn main() {
         .flag_if_supported("-fno-strict-aliasing")
         .flag_if_supported("-fwrapv")
         .warnings(false)
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_radixtree");
 
     let mut portfam = cc::Build::new();
@@ -986,6 +1040,9 @@ fn main() {
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-function")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_portfam");
     println!("cargo:rerun-if-changed=csrc/pg_portfam_io.c");
     println!("cargo:rerun-if-changed=csrc/portfam");
@@ -1032,6 +1089,9 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-ffp-contract=off")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_contribb");
     println!("cargo:rerun-if-changed=csrc/pg_contribb_io.c");
     println!("cargo:rerun-if-changed=csrc/contribb");
@@ -1100,6 +1160,9 @@ fn main() {
         .flag_if_supported("-ffp-contract=off")
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-function")
+        // Oracle-guard holder check (csrc/pg_oracle_guard.h): release-
+        // effective in every build.rs compile of the oracle TUs.
+        .define("PG_ORACLE_GUARD_CHECKS", None)
         .compile("pg_difffuzz_nodesfam");
     println!("cargo:rerun-if-changed=csrc/pg_nodesfam_io.c");
     println!("cargo:rerun-if-changed=csrc/nodesfam");

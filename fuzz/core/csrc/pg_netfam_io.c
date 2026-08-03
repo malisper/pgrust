@@ -79,6 +79,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <ifaddrs.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 typedef int8_t int8;
 typedef int16_t int16;
@@ -1658,6 +1659,7 @@ pg_nf_putmessage(char msgtype, const char *s, size_t len)
 void
 pg_nf_set_convert(int flag)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_nf_convert = flag;
 }
 
@@ -1692,6 +1694,7 @@ int
 pg_nf_range(int family, const uint8_t *addr, const uint8_t *netaddr,
 			const uint8_t *netmask)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	struct sockaddr_storage a, n, m;
 
 	pg_nf_mk_sockaddr(&a, family, addr);
@@ -1704,6 +1707,7 @@ pg_nf_range(int family, const uint8_t *addr, const uint8_t *netaddr,
 int
 pg_nf_range_other(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	struct sockaddr_storage a, n, m;
 
 	memset(&a, 0, sizeof(a));
@@ -1721,6 +1725,7 @@ pg_nf_range_other(void)
 int
 pg_nf_cidr_mask(const char *numbits, int family_sel, uint8_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	struct sockaddr_storage mask;
 	int			family;
 	int			rc;
@@ -1804,6 +1809,7 @@ pg_nf_run_cb(int addr_family, const uint8_t *addr, int mask_kind,
 			 const uint8_t *mask, uint8_t *out_fam, uint8_t *out_addr,
 			 uint8_t *out_mask)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	struct sockaddr_storage a, m;
 	pg_nf_if_entry ent;
 	pg_nf_if_acc acc;
@@ -1838,6 +1844,7 @@ pg_nf_run_cb(int addr_family, const uint8_t *addr, int mask_kind,
 int
 pg_nf_foreach(pg_nf_if_entry *out, int cap)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_nf_if_acc acc;
 
 	acc.ents = out;
@@ -1858,6 +1865,7 @@ static _Thread_local int pg_nf_out_live;
 int
 pg_nf_out_begin(int kind, uint8_t msgtype)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (kind != 2 && pg_nf_out_live)
 	{
 		free(pg_nf_out.data);
@@ -1879,6 +1887,7 @@ pg_nf_out_begin(int kind, uint8_t msgtype)
 const char *
 pg_nf_out_get(int *len, int *maxlen, int *cursor)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	*len = pg_nf_out.len;
 	*maxlen = pg_nf_out.maxlen;
 	*cursor = pg_nf_out.cursor;
@@ -1888,48 +1897,56 @@ pg_nf_out_get(int *len, int *maxlen, int *cursor)
 int
 pg_nf_out_enlarge(int needed)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_enlargeStringInfo(&pg_nf_out, needed));
 }
 
 int
 pg_nf_sendbyte(uint8_t b)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(pq_sendbyte(&pg_nf_out, b));
 }
 
 int
 pg_nf_sendint(uint32_t i, int b)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(pq_sendint(&pg_nf_out, i, b));
 }
 
 int
 pg_nf_sendint8(uint8_t i)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(pq_sendint8(&pg_nf_out, i));
 }
 
 int
 pg_nf_sendint16(uint16_t i)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(pq_sendint16(&pg_nf_out, i));
 }
 
 int
 pg_nf_sendint32(uint32_t i)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(pq_sendint32(&pg_nf_out, i));
 }
 
 int
 pg_nf_sendint64(uint64_t i)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(pq_sendint64(&pg_nf_out, i));
 }
 
 int
 pg_nf_sendfloat4(uint32_t bits)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	float4		f;
 
 	memcpy(&f, &bits, 4);
@@ -1939,6 +1956,7 @@ pg_nf_sendfloat4(uint32_t bits)
 int
 pg_nf_sendfloat8(uint64_t bits)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	float8		f;
 
 	memcpy(&f, &bits, 8);
@@ -1948,30 +1966,35 @@ pg_nf_sendfloat8(uint64_t bits)
 int
 pg_nf_sendbytes(const uint8_t *data, int datalen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_sendbytes(&pg_nf_out, data, datalen));
 }
 
 int
 pg_nf_sendtext(const uint8_t *data, int datalen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_sendtext(&pg_nf_out, (const char *) data, datalen));
 }
 
 int
 pg_nf_sendcountedtext(const uint8_t *data, int datalen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_sendcountedtext(&pg_nf_out, (const char *) data, datalen));
 }
 
 int
 pg_nf_sendstring(const char *s)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_sendstring(&pg_nf_out, s));
 }
 
 int
 pg_nf_send_ascii_string(const char *s)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_send_ascii_string(&pg_nf_out, s));
 }
 
@@ -1979,6 +2002,7 @@ pg_nf_send_ascii_string(const char *s)
 int
 pg_nf_writeint(int width, uint64_t v)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_nf_errcode = 0;
 	if (setjmp(pg_nf_jmp) != 0)
 		return pg_nf_errcode;
@@ -2003,12 +2027,14 @@ pg_nf_writeint(int width, uint64_t v)
 int
 pg_nf_writestring(const char *s)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(pq_writestring(&pg_nf_out, s));
 }
 
 int
 pg_nf_endmessage(int reuse)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_nf_errcode = 0;
 	if (setjmp(pg_nf_jmp) != 0)
 		return pg_nf_errcode;
@@ -2026,6 +2052,7 @@ pg_nf_endmessage(int reuse)
 const uint8_t *
 pg_nf_endtypsend(int *lenout)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	bytea	   *result;
 
 	result = nf_pq_endtypsend(&pg_nf_out);
@@ -2036,18 +2063,21 @@ pg_nf_endtypsend(int *lenout)
 int
 pg_nf_puttextmessage(uint8_t msgtype, const char *s)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_puttextmessage((char) msgtype, s));
 }
 
 int
 pg_nf_putemptymessage(uint8_t msgtype)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_putemptymessage((char) msgtype));
 }
 
 const uint8_t *
 pg_nf_put_get(int *msgtype, size_t *len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (!pg_nf_put_seen)
 	{
 		*msgtype = -1;
@@ -2062,6 +2092,7 @@ pg_nf_put_get(int *msgtype, size_t *len)
 void
 pg_nf_put_reset(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_nf_put_seen = 0;
 	pg_nf_put_len = 0;
 }
@@ -2074,6 +2105,7 @@ static _Thread_local int pg_nf_msg_live;
 int
 pg_nf_msg_set(const uint8_t *bytes, int len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (pg_nf_msg_live)
 	{
 		free(pg_nf_msg.data);
@@ -2091,30 +2123,35 @@ pg_nf_msg_set(const uint8_t *bytes, int len)
 int
 pg_nf_msg_cursor(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_nf_msg.cursor;
 }
 
 int
 pg_nf_getmsgbyte(int *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(*out = nf_pq_getmsgbyte(&pg_nf_msg));
 }
 
 int
 pg_nf_getmsgint(int b, uint32_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(*out = nf_pq_getmsgint(&pg_nf_msg, b));
 }
 
 int
 pg_nf_getmsgint64(int64_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(*out = nf_pq_getmsgint64(&pg_nf_msg));
 }
 
 int
 pg_nf_getmsgfloat4(uint32_t *bits)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_nf_errcode = 0;
 	if (setjmp(pg_nf_jmp) != 0)
 		return pg_nf_errcode;
@@ -2129,6 +2166,7 @@ pg_nf_getmsgfloat4(uint32_t *bits)
 int
 pg_nf_getmsgfloat8(uint64_t *bits)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_nf_errcode = 0;
 	if (setjmp(pg_nf_jmp) != 0)
 		return pg_nf_errcode;
@@ -2143,12 +2181,14 @@ pg_nf_getmsgfloat8(uint64_t *bits)
 int
 pg_nf_getmsgbytes(int datalen, const char **out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(*out = nf_pq_getmsgbytes(&pg_nf_msg, datalen));
 }
 
 int
 pg_nf_copymsgbytes(int datalen, uint8_t *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_copymsgbytes(&pg_nf_msg, out, datalen));
 }
 
@@ -2156,23 +2196,27 @@ pg_nf_copymsgbytes(int datalen, uint8_t *out)
 int
 pg_nf_getmsgtext(int rawbytes, char **out, int *nbytes)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(*out = nf_pq_getmsgtext(&pg_nf_msg, rawbytes, nbytes));
 }
 
 int
 pg_nf_getmsgstring(const char **out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(*out = nf_pq_getmsgstring(&pg_nf_msg));
 }
 
 int
 pg_nf_getmsgrawstring(const char **out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(*out = nf_pq_getmsgrawstring(&pg_nf_msg));
 }
 
 int
 pg_nf_getmsgend(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_NF_OP(nf_pq_getmsgend(&pg_nf_msg));
 }

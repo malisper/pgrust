@@ -140,6 +140,7 @@ extern int	pg_ulltoa_n(uint64 value, char *a);
 /* c.h verbatim values + ctype, for pg_strcasecmp (vendored below: the
  * copies elsewhere in csrc are pg_afx_-prefixed or static) */
 #include <ctype.h>
+#include "pg_oracle_guard.h"	/* oracle-serialization holder check */
 #define HIGHBIT					(0x80)
 #define IS_HIGHBIT_SET(ch)		((unsigned char)(ch) & HIGHBIT)
 
@@ -1098,6 +1099,7 @@ const char *
 pg_mf_cmdtag_props(int tag, uint64 *namelen, int *evtrgok, int *rwrok,
 				   int *rowcnt)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	Size		len = 0;
 	const char *name = GetCommandTagNameAndLen((CommandTag) tag, &len);
 
@@ -1114,12 +1116,14 @@ pg_mf_cmdtag_props(int tag, uint64 *namelen, int *evtrgok, int *rwrok,
 int
 pg_mf_cmdtag_enum(const char *commandname)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return (int) GetCommandTagEnum(commandname);
 }
 
 void
 pg_mf_init_qc(int *tag, uint64 *nprocessed)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	QueryCompletion qc;
 
 	qc.commandTag = (CommandTag) 42;
@@ -1132,6 +1136,7 @@ pg_mf_init_qc(int *tag, uint64 *nprocessed)
 uint64
 pg_mf_build_qc(int tag, uint64 nprocessed, int nameonly, char *buff)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	QueryCompletion qc;
 
 	qc.commandTag = (CommandTag) tag;
@@ -1144,6 +1149,7 @@ pg_mf_build_qc(int tag, uint64 nprocessed, int nameonly, char *buff)
 int
 pg_mf_relkind_detail(uint8 relkind, char *out, int outsz)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_mf_errcode = 0;
 	pg_mf_detail[0] = '\0';
 	if (setjmp(pg_mf_jmp) != 0)
@@ -1159,6 +1165,7 @@ pg_mf_relkind_detail(uint8 relkind, char *out, int outsz)
 double
 pg_mf_geo_distance(double x1, double y1, double x2, double y2)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	Point		pt1 = {x1, y1};
 	Point		pt2 = {x2, y2};
 
@@ -1170,6 +1177,7 @@ pg_mf_geo_distance(double x1, double y1, double x2, double y2)
 void
 pg_mf_rusage_show(const int64 *ru0_fields, const int64 *ru1_fields, char *out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PGRUsage	ru0;
 
 	memset(&ru0, 0, sizeof(ru0));
@@ -1196,6 +1204,7 @@ static XLogStats pg_mf_stats;
 void
 pg_mf_xlog_reset(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	memset(&pg_mf_stats, 0, sizeof(pg_mf_stats));
 }
 
@@ -1210,6 +1219,7 @@ pg_mf_xlog_store(uint8 rmid, uint8 info, uint32 tot_len, int max_block_id,
 				 const uint16 *bimg_len,
 				 uint32 *out_rec_len, uint32 *out_fpi_len)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	DecodedXLogRecord *rec;
 	XLogReaderState reader;
 	int			i;
@@ -1237,12 +1247,14 @@ pg_mf_xlog_store(uint8 rmid, uint8 info, uint32 tot_len, int max_block_id,
 uint64
 pg_mf_xlog_count(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_mf_stats.count;
 }
 
 void
 pg_mf_xlog_cell(int rmid, int recid, uint64 *rmgr_out, uint64 *rec_out)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	rmgr_out[0] = pg_mf_stats.rmgr_stats[rmid].count;
 	rmgr_out[1] = pg_mf_stats.rmgr_stats[rmid].rec_len;
 	rmgr_out[2] = pg_mf_stats.rmgr_stats[rmid].fpi_len;
@@ -1275,6 +1287,7 @@ pg_mf_si_init(int initsize)
 int
 pg_mf_si_init_default(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (pg_mf_si_live)
 	{
 		free(pg_mf_si.data);
@@ -1291,6 +1304,7 @@ pg_mf_si_init_default(void)
 int
 pg_mf_si_init_ext(int initsize)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (pg_mf_si_live)
 	{
 		free(pg_mf_si.data);
@@ -1316,42 +1330,49 @@ pg_mf_si_init_ext(int initsize)
 int
 pg_mf_si_reset(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_MF_SI_OP(resetStringInfo(&pg_mf_si));
 }
 
 int
 pg_mf_si_append_bin(const uint8 *data, int datalen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_MF_SI_OP(appendBinaryStringInfo(&pg_mf_si, data, datalen));
 }
 
 int
 pg_mf_si_append_bin_nt(const uint8 *data, int datalen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_MF_SI_OP(appendBinaryStringInfoNT(&pg_mf_si, data, datalen));
 }
 
 int
 pg_mf_si_append_char(uint8 ch)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_MF_SI_OP(appendStringInfoChar(&pg_mf_si, (char) ch));
 }
 
 int
 pg_mf_si_append_spaces(int count)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_MF_SI_OP(appendStringInfoSpaces(&pg_mf_si, count));
 }
 
 int
 pg_mf_si_append_string(const char *s)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_MF_SI_OP(appendStringInfoString(&pg_mf_si, s));
 }
 
 int
 pg_mf_si_enlarge(int needed)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	PG_MF_SI_OP(enlargeStringInfo(&pg_mf_si, needed));
 }
 
@@ -1362,6 +1383,7 @@ pg_mf_si_enlarge(int needed)
 int
 pg_mf_si_write_fixed(const uint8 *data, int n)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (pg_mf_si.maxlen - pg_mf_si.len < n)
 		return 99;				/* driver precondition violated */
 	memcpy(pg_mf_si.data + pg_mf_si.len, data, n);
@@ -1377,6 +1399,7 @@ pg_mf_si_write_fixed(const uint8 *data, int n)
 void
 pg_mf_si_truncate(int newlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	if (newlen < pg_mf_si.len)
 	{
 		pg_mf_si.len = newlen;
@@ -1387,6 +1410,7 @@ pg_mf_si_truncate(int newlen)
 const char *
 pg_mf_si_get(int *len, int *maxlen)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	*len = pg_mf_si.len;
 	*maxlen = pg_mf_si.maxlen;
 	return pg_mf_si.data;

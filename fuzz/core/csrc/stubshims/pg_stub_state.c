@@ -41,6 +41,7 @@
  * controls verify pinning is alive.
  */
 #include <stdint.h>
+#include "../pg_oracle_guard.h"	/* oracle-serialization holder check */
 
 /* ---- stub:guc — pinned GUC scalars -------------------------------------- */
 
@@ -53,18 +54,21 @@ _Thread_local int pg_stub_standard_conforming_strings = 1;
 void
 pg_stub_set_extra_float_digits(int v)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_extra_float_digits = v;
 }
 
 int
 pg_stub_get_extra_float_digits(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_stub_extra_float_digits;
 }
 
 void
 pg_stub_set_datestyle(int style, int order)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_DateStyle = style;
 	pg_stub_DateOrder = order;
 }
@@ -84,6 +88,7 @@ pg_stub_get_dateorder(void)
 void
 pg_stub_set_intervalstyle(int istyle)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_IntervalStyle = istyle;
 }
 
@@ -96,12 +101,14 @@ pg_stub_get_intervalstyle(void)
 void
 pg_stub_set_standard_conforming_strings(int on)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_standard_conforming_strings = on;
 }
 
 int
 pg_stub_get_standard_conforming_strings(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_stub_standard_conforming_strings;
 }
 
@@ -112,6 +119,7 @@ _Thread_local int64_t pg_stub_now_usecs = 0;
 void
 pg_stub_set_current_timestamp(int64_t usecs)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_now_usecs = usecs;
 }
 
@@ -122,6 +130,7 @@ pg_stub_set_current_timestamp(int64_t usecs)
 int64_t
 pg_stub_get_current_timestamp(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_stub_now_usecs;
 }
 
@@ -143,12 +152,14 @@ static _Thread_local uint64_t pg_stub_prng_s1 = 0;
 void
 pg_stub_prng_seed(uint64_t seed)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_diff_prng_seed(seed, &pg_stub_prng_s0, &pg_stub_prng_s1);
 }
 
 uint64_t
 pg_stub_prng_u64(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_diff_prng_u64(pg_stub_prng_s0, pg_stub_prng_s1,
 							&pg_stub_prng_s0, &pg_stub_prng_s1);
 }
@@ -156,6 +167,7 @@ pg_stub_prng_u64(void)
 double
 pg_stub_prng_double(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_diff_prng_double(pg_stub_prng_s0, pg_stub_prng_s1,
 							   &pg_stub_prng_s0, &pg_stub_prng_s1);
 }
@@ -168,6 +180,7 @@ _Thread_local int pg_stub_maintenance_work_mem = 65536;
 void
 pg_stub_set_work_mem(int work_mem_kb, int maintenance_work_mem_kb)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_stub_work_mem = work_mem_kb;
 	pg_stub_maintenance_work_mem = maintenance_work_mem_kb;
 }
@@ -175,6 +188,7 @@ pg_stub_set_work_mem(int work_mem_kb, int maintenance_work_mem_kb)
 int
 pg_stub_get_work_mem(void)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_stub_work_mem;
 }
 
@@ -196,6 +210,7 @@ extern int pg_diff_float8out_efd(double num, int efd, char *buf32);
 int
 pg_stub_float8out_guc(double num, char *buf32)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_diff_float8out_efd(num, pg_stub_extra_float_digits, buf32);
 }
 
@@ -212,6 +227,7 @@ extern int pg_tsdiff_interval_out(int64_t t, int32_t day, int32_t month, int ist
 int
 pg_stub_timestamp_out_guc(int64_t ts, char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_tsdiff_timestamp_out(ts, pg_stub_DateStyle, pg_stub_DateOrder,
 								   0 /* plain timestamp */, buf);
 }
@@ -219,6 +235,7 @@ pg_stub_timestamp_out_guc(int64_t ts, char *buf)
 int
 pg_stub_interval_out_guc(int64_t t, int32_t day, int32_t month, char *buf)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	return pg_tsdiff_interval_out(t, day, month, pg_stub_IntervalStyle, buf);
 }
 
@@ -234,6 +251,7 @@ extern uint64_t pg_diff_bloom_m(void);
 uint64_t
 pg_stub_bloom_m_guc(int64_t total_elems, uint64_t seed)
 {
+	PG_ORACLE_GUARD_CHECK(__func__);
 	pg_diff_bloom_create(total_elems, pg_stub_work_mem, seed);
 	return pg_diff_bloom_m();
 }

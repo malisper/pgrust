@@ -966,6 +966,7 @@ mod tests {
     #[test]
     #[ignore = "exhaustive sweep: run explicitly via -- --ignored (~1-2 s)"]
     fn exhaustive_kernel_sweep() {
+        let _serial = crate::c_oracle_serial();
         const ALPHABET: [u8; 5] = *b"ab%_\\";
         let mut words: Vec<Vec<u8>> = vec![Vec::new()];
         let mut layer: Vec<Vec<u8>> = vec![Vec::new()];
