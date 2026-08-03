@@ -5,7 +5,6 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-pg_string = { path = "../../../../common/string" }
 datum = { path = "../../../../_support/types/datum" }
 funcapi = { path = "../../fmgr/funcapi" }
 hashfn = { path = "../../../../common/hashfn" }
