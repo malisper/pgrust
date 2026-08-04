@@ -140,6 +140,13 @@ pub(crate) fn service_handouts(batch: Vec<PendingEnsure>) -> PgResult<Vec<Pendin
                     ),
                 );
                 crate::mint::wake_waiters(&waiters);
+                // Shared-catalog churn (maint.rs): the handout transaction
+                // heap-updated the spare's pg_database row (rename + chown
+                // + allow_connections) — one lifecycle op. No prewarm
+                // enqueue: the spare was touched at replenish and the
+                // RENAME preserves oid and datadir, so its init file and
+                // warm pages survive the handout — that is the point.
+                registry::note_catalog_churn(1);
             }
             Ok(HandoutVerdict::SpareStale) => {
                 pool_usable = false;
@@ -415,7 +422,20 @@ pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
     };
 
     let n = minted.len();
+    // Shared-catalog churn (maint.rs): one pg_database insert (plus
+    // shdepend/setting rows) per minted spare.
+    registry::note_catalog_churn(n as u64);
+    let prewarm = crate::ephemeral_db_prewarm();
     for (name, oid) in minted {
+        // Post-mint touch (prewarm.rs): spares are THE prewarm payoff —
+        // ALLOW_CONNECTIONS false means no client session ever warms them,
+        // so without the touch every handout's first client session pays
+        // the fresh-database catalog bootstrap. Enqueued before add_spare
+        // is irrelevant to ordering (dispatch runs as a later tick step);
+        // the touch worker enters via BGWORKER_BYPASS_ALLOWCONN.
+        if prewarm {
+            let _ = registry::enqueue_touch(&name, oid);
+        }
         // Registered (and thereby shielded) BEFORE this tick's reap pass
         // enumerates: the tick order makes a fresh zero-connection spare
         // never reap-visible unshielded.

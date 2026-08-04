@@ -58,12 +58,14 @@ fn table_counts_match_compiled_backend_shape() {
     //   Int +1 pgrust.ephemeral_db_pool_size (-> 169) = 459.
     // testmode mint-strategy addendum (pgrust-only): Int +1
     //   pgrust.ephemeral_db_wal_log_threshold (-> 170) = 460.
-    assert_eq!(ConfigureNamesBool.len(), 135);
+    // testmode prewarm addendum (pgrust-only): Bool +1
+    //   pgrust.ephemeral_db_prewarm (-> 136) = 461.
+    assert_eq!(ConfigureNamesBool.len(), 136);
     assert_eq!(ConfigureNamesInt.len(), 170);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 80);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 460);
+    assert_eq!(all_settings().count(), 461);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

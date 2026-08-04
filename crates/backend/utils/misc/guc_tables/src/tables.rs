@@ -702,6 +702,14 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // tier under the auto RE2 dispatch (regexp_alt::program). Hidden like
     // regex_engine; OFF restores the exact pre-tier RE2 arm — the toggle is
     // the four-engine differential's fourth arm and the escape hatch.
+    // pgrust.ephemeral_db_prewarm (pgrust-only, test-views.md prewarm
+    // addendum): after every successful janitor mint (warm-pool spares AND
+    // cold mints), a short-lived internal worker connects once to the new
+    // database so its relcache init file gets written and its catalog pages
+    // are warm BEFORE the first client session pays for them. Default ON:
+    // it only acts on janitor-minted databases, so an unarmed janitor makes
+    // it free; PGC_SIGHUP as the off switch.
+    GucBoolSetting { name: "pgrust.ephemeral_db_prewarm", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Prewarms janitor-minted ephemeral databases with a one-shot background session (relcache init file + catalog pages)."), long_desc: Some("After each successful mint the janitor launches a short-lived internal worker that connects to the new database and exits, off the connecting client's critical path. Warm-pool spares are prewarmed at replenish time, so a handed-out spare's first client session skips the fresh-database catalog bootstrap cost."), flags: 0, variable: &vars::pgrust_ephemeral_db_prewarm, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pgrust.regex_pattern_program", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Enables the anchored pattern-program fast tier for RE2-dispatched regexps."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_regex_pattern_program, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.regex_re2_linked: build-property preset (debug_assertions
     // shape) — the runtime witness that this binary carries the RE2 tier.

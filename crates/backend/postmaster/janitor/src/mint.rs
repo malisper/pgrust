@@ -667,11 +667,11 @@ pub(crate) fn service_pass() -> PgResult<()> {
 /// single-entry fast path and the whole-batch-abort fallback.
 fn service_serial(entries: &[registry::PendingEnsure]) -> PgResult<()> {
     for p in entries {
-        let outcome = match mint_one(p) {
+        let (outcome, created) = match mint_one(p) {
             Ok(created) => {
                 let waiters = registry::complete_ensure(p.gen, Ok(()), pg_clock::mono_ns());
                 log_mint_success(created.is_some(), p, waiters.len());
-                waiters
+                (waiters, created)
             }
             Err(e) => {
                 let saved: Box<PgError> = Box::new((*e).clone());
@@ -682,10 +682,19 @@ fn service_serial(entries: &[registry::PendingEnsure]) -> PgResult<()> {
                     e,
                     &format!("minting ephemeral database \"{}\"", p.name),
                 )?;
-                registry::complete_ensure(p.gen, Err(saved), pg_clock::mono_ns())
+                (registry::complete_ensure(p.gen, Err(saved), pg_clock::mono_ns()), None)
             }
         };
         wake_waiters(&outcome);
+        // AFTER the wakes (prewarm is strictly off the waiter path): churn
+        // accounting + the post-mint touch enqueue (prewarm.rs dispatches
+        // in a later tick step).
+        if let Some(oid) = created {
+            registry::note_catalog_churn(1);
+            if crate::ephemeral_db_prewarm() && !p.spare {
+                let _ = registry::enqueue_touch(&p.name, oid);
+            }
+        }
     }
     Ok(())
 }
@@ -734,9 +743,15 @@ fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
                 );
             }
             let mut deferred_serial: Vec<registry::PendingEnsure> = Vec::new();
+            // Minted outcomes and `created` oids track in lockstep (the
+            // replenish_batch zip precedent) — the prewarm enqueue needs
+            // each minted database's oid.
+            let mut created_oids = created.iter();
             for (p, o) in to_mint.iter().zip(outcomes) {
                 match o {
                     BatchOutcome::Minted { copied } => {
+                        let db_oid =
+                            created_oids.next().expect("created oids track Minted outcomes").oid;
                         if copied > 0 {
                             let _ = log_report(
                                 LOG,
@@ -751,6 +766,11 @@ fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
                         let waiters = registry::complete_ensure(p.gen, Ok(()), now);
                         log_mint_success(true, p, waiters.len());
                         wake_waiters(&waiters);
+                        // AFTER the wakes (the service_serial discipline).
+                        registry::note_catalog_churn(1);
+                        if crate::ephemeral_db_prewarm() && !p.spare {
+                            let _ = registry::enqueue_touch(&p.name, db_oid);
+                        }
                     }
                     BatchOutcome::FoundExisting => {
                         let waiters = registry::complete_ensure(p.gen, Ok(()), now);

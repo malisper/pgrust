@@ -47,8 +47,10 @@ pub mod builtins;
 mod dbscan;
 pub mod grammar;
 mod main_loop;
+mod maint;
 pub mod marker;
 pub mod mint;
+mod prewarm;
 // The parallel batch-copy helper is LIVE-ONLY: its workers issue raw
 // path-based syscalls (std::fs / libc), which are foreign to the
 // thread-local SimVfs; under pgrust_sim the batch mints copy serially
@@ -117,6 +119,13 @@ pub fn ephemeral_db_pool_size() -> i32 {
 /// Read at every strategy pick (mint.rs), never cached.
 pub fn ephemeral_db_wal_log_threshold() -> i32 {
     guc_tables::vars::pgrust_ephemeral_db_wal_log_threshold.read()
+}
+
+/// `pgrust.ephemeral_db_prewarm` (PGC_SIGHUP, default true). Whether the
+/// janitor launches a one-shot prewarm worker against every database it
+/// mints (prewarm.rs). Read at each enqueue/dispatch site, never cached.
+pub fn ephemeral_db_prewarm() -> bool {
+    guc_tables::vars::pgrust_ephemeral_db_prewarm.read()
 }
 
 /// Static bgworker registration (ApplyLauncherRegister precedent): called by

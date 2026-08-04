@@ -287,6 +287,14 @@ int_var!(
     set_pgrust_ephemeral_db_wal_log_threshold,
     -1
 );
+// Post-mint prewarm (test-views.md prewarm addendum): PGC_SIGHUP, read by
+// the janitor at each touch enqueue/dispatch.
+bool_var!(
+    B_pgrust_ephemeral_db_prewarm,
+    pgrust_ephemeral_db_prewarm,
+    set_pgrust_ephemeral_db_prewarm,
+    true
+);
 bool_var!(
     B_integer_datetimes,
     integer_datetimes,

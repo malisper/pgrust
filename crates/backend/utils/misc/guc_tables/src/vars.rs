@@ -348,6 +348,11 @@ pub static pgrust_ephemeral_db_pool_size: GucIntVar = GucSlot::new("pgrust_ephem
 // STRATEGY wal_log (zero checkpoints) over file_copy; -1 = never (always
 // file_copy). PGC_SIGHUP, read at each strategy pick.
 pub static pgrust_ephemeral_db_wal_log_threshold: GucIntVar = GucSlot::new("pgrust_ephemeral_db_wal_log_threshold");
+// pgrust-only (test-views.md prewarm addendum, no C symbol): whether the
+// janitor launches a one-shot prewarm worker against every database it
+// mints (relcache init file + warm catalog pages), off the waiter critical
+// path. PGC_SIGHUP, read at each enqueue/dispatch site.
+pub static pgrust_ephemeral_db_prewarm: GucBoolVar = GucSlot::new("pgrust_ephemeral_db_prewarm");
 // pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
 // force-overrides + the Gather read-fairness stride. Registered from the
 // deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is

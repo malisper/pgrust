@@ -280,6 +280,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_ephemeral_db_wal_log_threshold,
         set: backing::set_pgrust_ephemeral_db_wal_log_threshold,
     });
+    vars::pgrust_ephemeral_db_prewarm.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_prewarm,
+        set: backing::set_pgrust_ephemeral_db_prewarm,
+    });
     vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
         get: backing::pgrust_runtime_scan_pool,
         set: backing::set_pgrust_runtime_scan_pool,

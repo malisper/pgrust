@@ -18,6 +18,7 @@ aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 bgworker = { path = "../bgworker" }
 checkpointer = { path = "../checkpointer" }
+commands_vacuum = { path = "../../commands/vacuum" }
 datum = { path = "../../../_support/types/datum" }
 dbcommands = { path = "../../commands/dbcommands" }
 elog = { path = "../../utils/error/elog" }
@@ -42,8 +43,10 @@ pgsync = { path = "../../../_support/pgsync" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 procarray = { path = "../../storage/ipc/procarray" }
 procsignal = { path = "../../storage/ipc/procsignal" }
+relcache = { path = "../../utils/cache/relcache" }
 superuser_seams = { path = "../../utils/misc/superuser_seams" }
 table = { path = "../../access/table/table" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }

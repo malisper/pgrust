@@ -261,6 +261,21 @@ struct RegistryState {
     /// latch the refusal would log on EVERY deficit tick (~2 lines/s for
     /// the life of the server).
     pool_name_overflow_logged: bool,
+    /// Post-mint prewarm queue (prewarm.rs): (datname, oid) of databases the
+    /// janitor minted and has not yet touched. Bounded by MAX_TOUCHES;
+    /// enqueue drops on overflow (prewarm is background QoS — an untouched
+    /// database is merely a cold one). Restart-lossy like everything here.
+    touch_queue: Vec<(String, Oid)>,
+    /// Dispatched touches whose worker has not reported back: (oid,
+    /// deadline mono_ns). The deadline is the leak bound — a worker that
+    /// never STARTED (postmaster refused the spawn) never runs its clear
+    /// guard, so `begin_touches` expires stale entries instead of counting
+    /// them against the in-flight cap forever.
+    touch_inflight: Vec<(Oid, u64)>,
+    /// Shared-catalog lifecycle ops (pg_database/pg_shdepend/
+    /// pg_db_role_setting row churn: mints, handout renames, drops) since
+    /// the last maintenance VACUUM (maint.rs). Monotonic between resets.
+    catalog_churn: u64,
 }
 
 pgsync::process_global! {
@@ -277,6 +292,9 @@ pgsync::process_global! {
         template_flush_marks: Vec::new(),
         template_relcounts: Vec::new(),
         pool_name_overflow_logged: false,
+        touch_queue: Vec::new(),
+        touch_inflight: Vec::new(),
+        catalog_churn: 0,
     });
 }
 
@@ -770,6 +788,94 @@ pub(crate) fn next_spare_seq() -> u64 {
 /// PGC_POSTMASTER and the seq is monotonic).
 pub(crate) fn pool_name_overflow_log_once() -> bool {
     with_registry(|r| !std::mem::replace(&mut r.pool_name_overflow_logged, true))
+}
+
+// ---------------------------------------------------------------------------
+// Post-mint prewarm bookkeeping (prewarm.rs owns the policy; this is the
+// storage). All mutation runs under the one registry lock; `finish_touch`
+// is the exception to the loop-only discipline — it is called from the
+// prewarm WORKER's thread (its exit guard), which is exactly why the
+// in-flight table exists here and not in janitor-loop-local state.
+// ---------------------------------------------------------------------------
+
+/// Fixed touch-queue capacity: MAX_SPARES (a full pool replenish) plus a
+/// mint batch. Overflow drops the enqueue — prewarm is background QoS,
+/// never a correctness edge.
+pub(crate) const MAX_TOUCHES: usize = MAX_SPARES + crate::mint::MINT_BATCH_MAX;
+
+/// Enqueue a freshly minted database for a prewarm touch. Deduped by oid
+/// against both the queue and the in-flight set (an idempotent re-mint of
+/// the same name can otherwise enqueue twice across ticks). Returns false
+/// when dropped (full or duplicate).
+pub(crate) fn enqueue_touch(name: &str, oid: Oid) -> bool {
+    with_registry(|r| {
+        if r.touch_queue.len() >= MAX_TOUCHES
+            || r.touch_queue.iter().any(|&(_, o)| o == oid)
+            || r.touch_inflight.iter().any(|&(o, _)| o == oid)
+        {
+            return false;
+        }
+        r.touch_queue.push((name.to_string(), oid));
+        true
+    })
+}
+
+/// Dispatch step (prewarm.rs, once per janitor tick): expire deadline-passed
+/// in-flight entries, then pop up to `max_inflight - inflight` targets off
+/// the queue front (FIFO) and record them in-flight until `deadline_ns`.
+pub(crate) fn begin_touches(
+    now_ns: u64,
+    deadline_ns: u64,
+    max_inflight: usize,
+) -> Vec<(String, Oid)> {
+    with_registry(|r| {
+        r.touch_inflight.retain(|&(_, d)| d > now_ns);
+        let room = max_inflight.saturating_sub(r.touch_inflight.len());
+        let take = room.min(r.touch_queue.len());
+        let out: Vec<(String, Oid)> = r.touch_queue.drain(..take).collect();
+        for &(_, oid) in &out {
+            r.touch_inflight.push((oid, deadline_ns));
+        }
+        out
+    })
+}
+
+/// The prewarm worker's exit guard (runs on ITS thread, success or failure):
+/// the touch is no longer in flight.
+pub fn finish_touch(oid: Oid) {
+    with_registry(|r| r.touch_inflight.retain(|&(o, _)| o != oid));
+}
+
+/// Registration failed (no free bgworker slot): put the target back at the
+/// queue FRONT (it is the oldest) and release its in-flight slot; the next
+/// tick retries.
+pub(crate) fn requeue_touch(name: String, oid: Oid) {
+    with_registry(|r| {
+        r.touch_inflight.retain(|&(o, _)| o != oid);
+        if r.touch_queue.len() < MAX_TOUCHES && !r.touch_queue.iter().any(|&(_, o)| o == oid) {
+            r.touch_queue.insert(0, (name, oid));
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Shared-catalog churn accounting (maint.rs owns the cadence policy).
+// ---------------------------------------------------------------------------
+
+/// Record `n` shared-catalog lifecycle ops (mint commits, handout renames,
+/// drops). Saturating: the counter is a cadence trigger, not a ledger.
+pub(crate) fn note_catalog_churn(n: u64) {
+    with_registry(|r| r.catalog_churn = r.catalog_churn.saturating_add(n))
+}
+
+pub(crate) fn catalog_churn() -> u64 {
+    with_registry(|r| r.catalog_churn)
+}
+
+/// Reset after a SUCCESSFUL maintenance run only: a failed run keeps its
+/// churn so the retry (interval-spaced by maint.rs) stays armed.
+pub(crate) fn reset_catalog_churn() {
+    with_registry(|r| r.catalog_churn = 0)
 }
 
 // ---------------------------------------------------------------------------

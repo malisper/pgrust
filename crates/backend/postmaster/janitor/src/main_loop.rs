@@ -12,7 +12,7 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 use crate::dbscan::{scan_prefix_rows, DbRow};
 use crate::marker::{self, Guard};
 use crate::reap::{reap_candidate, StreakTracker};
-use crate::{grammar, mint, pool, registry};
+use crate::{grammar, maint, mint, pool, prewarm, registry};
 
 /// Poll cadence (spec: "~500ms").
 const TICK_MS: i64 = 500;
@@ -107,6 +107,7 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
     startup_guard_and_sweep(&prefix)?;
 
     let mut streaks = StreakTracker::new();
+    let mut maint_state = maint::MaintState::new();
 
     loop {
         let rc = latch::WaitLatch(
@@ -182,8 +183,26 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
             contain(e, "warm-pool replenish pass")?;
         }
 
+        // Post-mint prewarm dispatch (prewarm.rs), AFTER replenish (spares
+        // minted this tick dispatch this same tick) and BEFORE the reap
+        // pass (order-indifferent for safety — every touch target is
+        // Ensure-shielded or spare-shielded — but a touch backend appearing
+        // before the reap enumeration keeps the streak observation honest
+        // within the tick). Strictly off any waiter's critical path: the
+        // mint sites only enqueue; workers launch here.
+        if let Err(e) = prewarm::dispatch_pass() {
+            contain(e, "prewarm dispatch pass")?;
+        }
+
         if let Err(e) = reap_pass(&prefix, &mut streaks) {
             contain(e, "reap pass")?;
+        }
+
+        // Shared-catalog maintenance (maint.rs), AFTER the reap pass so
+        // this tick's drops count toward the churn trigger. Paused ticks
+        // never reach it (the paused branch above).
+        if let Err(e) = maint::maintenance_pass(&mut maint_state) {
+            contain(e, "shared-catalog maintenance")?;
         }
 
         // Retire resolved Ensure entries whose waiters left and whose
@@ -452,6 +471,9 @@ pub(crate) fn drop_batch(
         }
     }
     if dropped > 0 {
+        // Shared-catalog churn (maint.rs): one pg_database delete (plus
+        // shdepend cleanup) per drop.
+        registry::note_catalog_churn(dropped as u64);
         checkpointer::RequestCheckpoint(
             transam_xlog::CHECKPOINT_IMMEDIATE
                 | transam_xlog::CHECKPOINT_FORCE
