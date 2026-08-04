@@ -205,6 +205,18 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
             contain(e, "shared-catalog maintenance")?;
         }
 
+        // Late warm-handout re-check, LAST work of the turn (the
+        // tick-quantized-dispatch fix, part 3): an Ensure posted while
+        // replenish/prewarm/reap/maint ran above would otherwise wait out
+        // the NEXT full turn even against a stocked pool — its wake landed
+        // on an already-running loop. Warm entries are served here
+        // (~0.03ms renames); cold arrivals stay Pending and cost one
+        // latch-immediate turn as before (mint::late_handout_pass's
+        // rationale).
+        if let Err(e) = mint::late_handout_pass() {
+            contain(e, "late warm-handout pass")?;
+        }
+
         // Retire resolved Ensure entries whose waiters left and whose
         // fresh-mint shield linger expired.
         registry::gc_ensures(pg_clock::mono_ns());

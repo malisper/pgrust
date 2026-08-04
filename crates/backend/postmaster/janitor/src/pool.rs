@@ -372,6 +372,25 @@ pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
     if want == 0 {
         return Ok(());
     }
+    // Waiters outrank refill, EXTENDED to the dispatch shadow (the
+    // tick-quantized-dispatch fix's replenish lever): a replenish cycle
+    // blocks this single-threaded loop for its whole copy + checkpoint
+    // wall (~100ms+ per 8-member batch), so an Ensure arriving mid-cycle
+    // pays that wall in connect latency — for zero pool-health gain when
+    // the pool is deep. While mint traffic landed within the last tick AND
+    // the pool sits at/above HALF target, defer the top-up (the deficit
+    // simply waits; refill is background QoS by charter). Below half the
+    // refill proceeds regardless — sustained load must never starve the
+    // pool — and that residual shadow under drain pressure is accepted
+    // and documented here.
+    if should_defer_refill(
+        pool_size,
+        have,
+        pg_clock::mono_ns(),
+        registry::last_ensure_post_ns(),
+    ) {
+        return Ok(());
+    }
 
     // Mint specs under burned-forever monotonic names. The PendingEnsure
     // shape is reused so the batch/serial mint bodies are shared verbatim
@@ -463,6 +482,20 @@ pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
 /// Pure deficit math (unit-tested): how many spares to mint this tick.
 fn replenish_quota(pool_size: usize, have: usize, per_tick_cap: usize) -> usize {
     pool_size.saturating_sub(have).min(per_tick_cap)
+}
+
+/// Recent-traffic window for the refill deferral: one tick — traffic older
+/// than a full tick means at least one whole quiet turn passed, and the
+/// refill resumes at POOL_REPLENISH_MAX per tick.
+const REFILL_DEFER_TRAFFIC_NS: u64 = 500 * 1_000_000;
+
+/// Pure half of the refill deferral (unit-tested): defer iff the pool is
+/// at/above HALF target (integer arithmetic: have*2 >= pool_size) and an
+/// Ensure post landed within the last tick. `last_post_ns == 0` = never.
+fn should_defer_refill(pool_size: usize, have: usize, now_ns: u64, last_post_ns: u64) -> bool {
+    have * 2 >= pool_size
+        && last_post_ns != 0
+        && now_ns.saturating_sub(last_post_ns) < REFILL_DEFER_TRAFFIC_NS
 }
 
 fn probe_template_and_self(tpl_name: &str) -> PgResult<(Option<TplProbe>, Option<String>)> {
@@ -606,5 +639,26 @@ mod tests {
         assert_eq!(replenish_quota(64, 0, POOL_REPLENISH_MAX), POOL_REPLENISH_MAX);
         // Feature off.
         assert_eq!(replenish_quota(0, 0, POOL_REPLENISH_MAX), 0);
+    }
+
+    /// The refill deferral (pure half): defer iff pool at/above half AND
+    /// traffic within the window. RELEASE-effective plain asserts.
+    #[test]
+    fn refill_deferral_semantics() {
+        let now: u64 = 10_000_000_000;
+        let fresh = now - 1; // just-landed post
+        let stale = now - REFILL_DEFER_TRAFFIC_NS; // exactly aged out
+        // Deep pool + fresh traffic: defer (the dispatch-shadow case).
+        assert!(should_defer_refill(128, 128, now, fresh));
+        assert!(should_defer_refill(128, 64, now, fresh), "half target is inclusive");
+        // Below half: refill regardless of traffic (pool health outranks).
+        assert!(!should_defer_refill(128, 63, now, fresh));
+        assert!(!should_defer_refill(8, 0, now, fresh), "cold fill never defers");
+        // Quiet (or never-posted) traffic: refill proceeds.
+        assert!(!should_defer_refill(128, 128, now, stale));
+        assert!(!should_defer_refill(128, 128, now, 0));
+        // Odd pool_size boundary: have*2 >= pool_size (integer half-up).
+        assert!(should_defer_refill(7, 4, now, fresh));
+        assert!(!should_defer_refill(7, 3, now, fresh));
     }
 }

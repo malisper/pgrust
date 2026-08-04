@@ -144,6 +144,7 @@ pub enum PostEnsure {
 }
 
 /// Janitor-side view of a pending entry.
+#[derive(Clone)]
 pub struct PendingEnsure {
     pub gen: u64,
     pub name: String,
@@ -276,6 +277,12 @@ struct RegistryState {
     /// pg_db_role_setting row churn: mints, handout renames, drops) since
     /// the last maintenance VACUUM (maint.rs). Monotonic between resets.
     catalog_churn: u64,
+    /// mono_ns of the most recent Ensure post (mint_on_connect traffic).
+    /// The replenish-deferral signal (pool.rs should_defer_refill): while
+    /// mint traffic is landing and the pool is at/above half target, the
+    /// refill yields the loop to handout dispatch instead of shadowing
+    /// arrivals behind its copy+checkpoint wall. 0 = never.
+    last_ensure_post_ns: u64,
 }
 
 pgsync::process_global! {
@@ -295,6 +302,7 @@ pgsync::process_global! {
         touch_queue: Vec::new(),
         touch_inflight: Vec::new(),
         catalog_churn: 0,
+        last_ensure_post_ns: 0,
     });
 }
 
@@ -446,6 +454,10 @@ pub fn post_ensure(
         if r.paused {
             return PostEnsure::JanitorPaused;
         }
+        // Traffic stamp for the replenish-deferral signal (pool.rs), taken
+        // for every admitted post shape (Joined and Posted alike): both
+        // mean a waiter is parked on dispatch latency right now.
+        r.last_ensure_post_ns = pg_clock::mono_ns();
         if let Some(e) = r
             .ensures
             .iter_mut()
@@ -499,6 +511,12 @@ pub fn post_ensure(
         });
         PostEnsure::Posted(gen)
     })
+}
+
+/// mono_ns of the most recent admitted Ensure post (0 = never): the
+/// replenish-deferral traffic signal (pool.rs should_defer_refill).
+pub(crate) fn last_ensure_post_ns() -> u64 {
+    with_registry(|r| r.last_ensure_post_ns)
 }
 
 /// Waiter-side poll of an entry's state (Failed hands back a clone of the

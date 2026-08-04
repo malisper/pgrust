@@ -413,9 +413,12 @@ pub fn check_ephemeral_db_mint_roles(
 
 /// Batch ceiling per janitor cycle (docs/design/test-views.md batched-mint
 /// addendum): bounds the single batch transaction's lock footprint and the
-/// crash-orphan window. Excess entries simply stay Pending for the next
-/// tick — the pass re-arms the janitor's own latch so the follow-up tick is
-/// immediate, and waiters carry the 60s deadline regardless.
+/// crash-orphan window. COLD entries only — the cap amortizes checkpoint
+/// pairs across batch clones, so warm-pool handouts (catalog renames, no
+/// checkpoints) are served uncapped BEFORE it applies (gather_batch).
+/// Excess cold entries simply stay Pending for the next tick — the pass
+/// re-arms the janitor's own latch so the follow-up tick is immediate, and
+/// waiters carry the 60s deadline regardless.
 pub(crate) const MINT_BATCH_MAX: usize = 32;
 
 /// Worker-pool ceiling for the batch copy phase (F1): workers =
@@ -571,31 +574,20 @@ pub(crate) struct CreatedDb {
 /// janitor's exit drain (main_loop's ClearProc) then fails whatever is
 /// still pending.
 pub(crate) fn service_pass() -> PgResult<()> {
-    let pending = registry::pending_ensures();
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let (batch, deferred) = split_batch(pending, MINT_BATCH_MAX);
-    if deferred > 0 {
-        let _ = log_report(
-            LOG,
-            format!(
-                "pgrust ephemeral-db janitor: deferring {deferred} pending mint request(s) to \
-                 the next tick (batch cap {MINT_BATCH_MAX})"
-            ),
-        );
-        // Deferral must cost one loop turn, not a full 500ms tick: the
-        // janitor sets its own latch (wake_janitor targets janitor_proc,
-        // which is us).
-        registry::wake_janitor();
-    }
-
-    // D3 warm-pool handout, FIRST: an entry whose template has a live spare
-    // is satisfied by a catalog-only RENAME (pool.rs choreography) instead
-    // of a file copy; handout failures fall through to the mint paths below
-    // — a waiter is never failed on a pool problem. With the pool off (no
-    // spares) this is one registry probe.
-    let batch = crate::pool::service_handouts(batch)?;
+    // D3 warm-pool handout, FIRST and UNCAPPED (the tick-quantized-dispatch
+    // fix): every handout-eligible pending Ensure — default/pooled-template
+    // request with a live spare — is satisfied THIS pass by a catalog-only
+    // RENAME (pool.rs choreography, ~0.03ms each). MINT_BATCH_MAX exists to
+    // amortize checkpoint pairs across COLD batch clones and is meaningless
+    // for renames, so it applies only to the cold remainder below; handout
+    // failures fall through to the mint paths — a waiter is never failed on
+    // a pool problem. With the pool off (no spares) this is one registry
+    // probe. gather_batch also re-snapshots after each handout round, so
+    // Ensures arriving while a round's renames run are served this same
+    // pass instead of aging a loop turn.
+    let (batch, deferred) =
+        gather_batch(registry::pending_ensures, crate::pool::service_handouts, MINT_BATCH_MAX)?;
+    log_deferral(deferred);
     if batch.is_empty() {
         return Ok(());
     }
@@ -866,6 +858,82 @@ pub(crate) fn fail_pending_and_wake(cause: &PgError) {
 // ---------------------------------------------------------------------------
 // Batch assembly + preflight (pure halves unit-tested below).
 // ---------------------------------------------------------------------------
+
+/// The pass's dispatch choreography, generic over the two I/O actions
+/// (`snapshot` = registry::pending_ensures, `handout` =
+/// pool::service_handouts) so the no-cap-on-warm-handouts law is
+/// unit-testable without a catalog: drain warm handouts UNCAPPED — looping
+/// on a fresh snapshot after every round that served >= 1 entry, so
+/// arrivals during a round are picked up this same pass — then apply the
+/// cold batch cap to what the pool could not serve. Returns
+/// (cold batch, deferred_count).
+///
+/// TERMINATION BOUND: an entry leaves `handout`'s return only via a
+/// committed rename, which consumes one listed spare, and spares are added
+/// only by replenish_pass — a LATER step of this same single janitor
+/// thread — so the loop runs at most (listed spares + 1) rounds, each
+/// round's handouts costing ~0.03ms catalog transactions. Starvation of
+/// reap/replenish is not a real risk at these costs; the hard ceiling is
+/// the finite pool (MAX_SPARES).
+fn gather_batch(
+    mut snapshot: impl FnMut() -> Vec<registry::PendingEnsure>,
+    mut handout: impl FnMut(Vec<registry::PendingEnsure>) -> PgResult<Vec<registry::PendingEnsure>>,
+    cap: usize,
+) -> PgResult<(Vec<registry::PendingEnsure>, usize)> {
+    loop {
+        let pending = snapshot();
+        if pending.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let n = pending.len();
+        let rest = handout(pending)?;
+        if rest.len() == n {
+            // Nothing was served warm this round: the remainder is cold
+            // (no matching spare / stale pool / pool off) and flows into
+            // the capped batch path.
+            return Ok(split_batch(rest, cap));
+        }
+    }
+}
+
+/// End-of-tick warm-handout re-check (main_loop, after replenish/prewarm/
+/// reap/maint and before the loop returns to WaitLatch): Ensures posted
+/// while those passes ran must not age a full loop turn when a spare can
+/// serve them NOW. Cold arrivals are left Pending on purpose — their post
+/// already set our latch (mint_on_connect's wake_janitor), so the next
+/// WaitLatch returns immediately and the next full service pass takes
+/// them; running the cold mint machinery twice per turn would double
+/// checkpoint work for nothing. Same termination bound as gather_batch.
+/// A non-zero deferral IS logged here (the shared log_deferral): warm
+/// handouts must never be silently capped at ANY drain site — the race
+/// suite's dispatch phase pins the zero-deferral invariant against this
+/// pass exactly as against service_pass.
+pub(crate) fn late_handout_pass() -> PgResult<()> {
+    let (_cold, deferred) =
+        gather_batch(registry::pending_ensures, crate::pool::service_handouts, MINT_BATCH_MAX)?;
+    log_deferral(deferred);
+    Ok(())
+}
+
+/// The over-cap deferral witness line + self-wake, shared by every
+/// gather_batch call site (the line is load-bearing: the race suite's
+/// dispatch phase asserts ZERO of these fire for warm handouts, and the
+/// storm bookkeeping tolerates them for cold overflow). Deferral must
+/// cost one loop turn, not a full 500ms tick: the janitor sets its own
+/// latch (wake_janitor targets janitor_proc, which is us).
+fn log_deferral(deferred: usize) {
+    if deferred == 0 {
+        return;
+    }
+    let _ = log_report(
+        LOG,
+        format!(
+            "pgrust ephemeral-db janitor: deferring {deferred} pending mint request(s) to \
+             the next tick (batch cap {MINT_BATCH_MAX})"
+        ),
+    );
+    registry::wake_janitor();
+}
 
 /// Take at most `cap` entries off the front of the pending snapshot (oldest
 /// first — registry insertion order); the rest wait for the next tick.
@@ -1723,6 +1791,113 @@ mod tests {
         assert!(member_fires_pre(FileCopy, false, false, false));
         assert!(!member_fires_pre(FileCopy, true, false, true));
         assert!(!member_fires_pre(FileCopy, false, false, true));
+    }
+
+    /// The no-cap-on-warm-handouts law (gather_batch, the tick-quantized-
+    /// dispatch fix): N handout-eligible pending entries + M cold ones in
+    /// ONE pass — every one of the N is served warm (no MINT_BATCH_MAX
+    /// term), at most 32 of the M reach the cold batch, and an entry
+    /// arriving DURING a handout round is served the same pass. Driven
+    /// through injected snapshot/handout fakes over a pending-list model
+    /// (the drop_one_gated convention: choreography separated from
+    /// catalog I/O). RELEASE-effective plain asserts; no registry state.
+    ///
+    /// MUTATION SENSITIVITY: re-imposing the cap before the handout filter
+    /// (the pre-fix service_pass shape: split_batch THEN service_handouts)
+    /// caps warm service at 32 of the 96 and fails the served==64 assert.
+    #[test]
+    fn warm_handouts_uncapped_cold_capped() {
+        use core::cell::RefCell;
+
+        let warm = |i: u64| -> registry::PendingEnsure {
+            registry::PendingEnsure {
+                gen: i,
+                name: format!("w{i}"),
+                template: "tpl_default".to_string(),
+                owner_name: "minter".to_string(),
+                spare: false,
+            }
+        };
+        // Cold = a template the pool holds no spare of.
+        let cold = |i: u64| -> registry::PendingEnsure {
+            registry::PendingEnsure {
+                gen: 1000 + i,
+                name: format!("c{i}"),
+                template: "tpl_cold".to_string(),
+                owner_name: "minter".to_string(),
+                spare: false,
+            }
+        };
+
+        // Pending-list model: 64 warm + 40 cold posted before the pass,
+        // plus 2 warm stragglers that arrive DURING the first handout
+        // round (pushed by the handout fake below, modeling posts landing
+        // while the renames run).
+        let pending: RefCell<Vec<registry::PendingEnsure>> = RefCell::new(
+            (0..64).map(warm).chain((0..40).map(cold)).collect(),
+        );
+        let served: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let rounds: RefCell<usize> = RefCell::new(0);
+
+        let (batch, deferred) = gather_batch(
+            || pending.borrow().clone(),
+            |entries| {
+                let round = {
+                    let mut r = rounds.borrow_mut();
+                    *r += 1;
+                    *r
+                };
+                let mut rest = Vec::new();
+                for p in entries {
+                    if p.template == "tpl_default" {
+                        served.borrow_mut().push(p.name.clone());
+                        pending.borrow_mut().retain(|e| e.gen != p.gen);
+                    } else {
+                        rest.push(p);
+                    }
+                }
+                if round == 1 {
+                    // Mid-round arrivals (posted while round 1's renames
+                    // committed): must be served THIS pass, not next tick.
+                    pending.borrow_mut().push(warm(500));
+                    pending.borrow_mut().push(warm(501));
+                }
+                Ok(rest)
+            },
+            MINT_BATCH_MAX,
+        )
+        .unwrap();
+
+        // Every warm entry — including the two mid-pass arrivals — was
+        // served, uncapped: 66 > 2 x MINT_BATCH_MAX.
+        assert_eq!(served.borrow().len(), 66, "all warm entries served in ONE pass");
+        assert!(
+            served.borrow().iter().any(|n| n == "w500") && served.borrow().iter().any(|n| n == "w501"),
+            "mid-pass arrivals served the same pass"
+        );
+        // The cold remainder alone feeds the capped batch path.
+        assert_eq!(batch.len(), MINT_BATCH_MAX, "cold batch capped at MINT_BATCH_MAX");
+        assert_eq!(deferred, 40 - MINT_BATCH_MAX, "only cold overflow defers");
+        assert!(batch.iter().all(|p| p.template == "tpl_cold"), "no warm entry in the cold batch");
+        assert_eq!(batch.first().unwrap().gen, 1000, "cold batch keeps oldest-first order");
+
+        // Degenerate shapes: empty queue, and an all-cold queue (handout
+        // serves nothing -> exactly one round, straight to the cap).
+        let (b, d) = gather_batch(Vec::new, |e| Ok(e), MINT_BATCH_MAX).unwrap();
+        assert!(b.is_empty() && d == 0);
+        let all_cold: Vec<_> = (0..5).map(cold).collect();
+        let calls = RefCell::new(0usize);
+        let (b, d) = gather_batch(
+            || all_cold.clone(),
+            |e| {
+                *calls.borrow_mut() += 1;
+                Ok(e)
+            },
+            MINT_BATCH_MAX,
+        )
+        .unwrap();
+        assert_eq!((b.len(), d), (5, 0));
+        assert_eq!(*calls.borrow(), 1, "an all-cold round terminates the drain immediately");
     }
 
     /// Batch assembly (split_batch) + validation split (preflight_verdict):
