@@ -11,8 +11,8 @@ use types_rel::{
 };
 use types_storage::lock::{
     LockAcquireResult, DEFAULT_LOCKMETHOD, LOCKACQUIRE_ALREADY_CLEAR, LOCKACQUIRE_ALREADY_HELD,
-    LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK, LOCKTAG, LOCKTAG_OBJECT, LOCKTAG_RELATION,
-    LOCKTAG_TRANSACTION, LOCKTAG_TUPLE, USER_LOCKMETHOD, XLTW_Oper,
+    LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK, LOCKTAG, LOCKTAG_OBJECT, LOCKTAG_PAGE,
+    LOCKTAG_RELATION, LOCKTAG_TRANSACTION, LOCKTAG_TUPLE, USER_LOCKMETHOD, XLTW_Oper,
 };
 use types_tuple::{ItemPointerData, NameData, TupleDescData};
 
@@ -513,6 +513,33 @@ fn tuple_lock_tag_splits_item_pointer() {
             Ev::Acquire(tag, ShareLock, false, false, true, false),
             Ev::Release(tag, ShareLock, false),
             Ev::Acquire(tag, ShareLock, false, true, true, true),
+        ]
+    );
+}
+
+// The pending-list cleanup interlock contract (ginfast.c ginInsertCleanup):
+// LockPage waits (dont_wait=false), ConditionalLockPage tries without
+// blocking (dont_wait=true) and reports NOT_AVAIL as false so the caller can
+// back off instead of racing a concurrent cleanup.
+#[test]
+fn page_lock_cycle_and_conditional_backoff() {
+    install();
+    let ctx = mcx::MemoryContext::new("t");
+    let rel = make_rel(ctx.mcx(), PLAIN_REL);
+    LockPage(&rel, 0, ExclusiveLock).unwrap();
+    UnlockPage(&rel, 0, ExclusiveLock).unwrap();
+    queue_acquire(&[Ok(LOCKACQUIRE_NOT_AVAIL)]);
+    assert!(!ConditionalLockPage(&rel, 0, ExclusiveLock).unwrap());
+    assert!(ConditionalLockPage(&rel, 0, ExclusiveLock).unwrap());
+    let tag = LOCKTAG::page(DB, PLAIN_REL, 0);
+    assert_eq!(tag_fields(tag).4, LOCKTAG_PAGE as u8);
+    assert_eq!(
+        take_events(),
+        vec![
+            Ev::Acquire(tag, ExclusiveLock, false, false, true, false),
+            Ev::Release(tag, ExclusiveLock, false),
+            Ev::Acquire(tag, ExclusiveLock, false, true, true, false),
+            Ev::Acquire(tag, ExclusiveLock, false, true, true, false),
         ]
     );
 }

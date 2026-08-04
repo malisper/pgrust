@@ -4276,56 +4276,69 @@ pub fn matchingsel<'mcx>(
     generic_restriction_selectivity(run, operator, collation, args, varrelid, DEFAULT_MATCHING_SEL)
 }
 
+const INDEX_MAX_KEYS: usize = types_core::fmgr::INDEX_MAX_KEYS as usize;
+
 #[derive(Default)]
 struct GinQualCounts {
-    att_has_full_scan: bool,
-    att_has_normal_scan: bool,
+    att_has_full_scan: [bool; INDEX_MAX_KEYS],
+    att_has_normal_scan: [bool; INDEX_MAX_KEYS],
     partial_entries: f64,
     exact_entries: f64,
     search_entries: f64,
     array_scans: f64,
 }
 
-// gincost_pattern (selfuncs.c), single key column.
+// gincost_pattern (selfuncs.c). `opfamily`/`opcintype`/`collation` are the
+// clause's own index column's (iclause->indexcol), not column 0's.
 fn gincost_pattern(
     opfamily: Oid,
     opcintype: Oid,
+    collation: Oid,
+    indexcol: usize,
     clause_op: Oid,
     query: Datum,
     counts: &mut GinQualCounts,
 ) -> PgResult<bool> {
     const GIN_SEARCH_MODE_DEFAULT: i32 = 0;
     const GIN_SEARCH_MODE_INCLUDE_EMPTY: i32 = 1;
-    let _strategy = lsyscache::amop::get_op_opfamily_strategy(clause_op, opfamily)?;
+    // C uses get_op_opfamily_properties here precisely because it throws if
+    // the operator has no pg_amop entry in this opfamily (never the silent
+    // InvalidStrategy variant: strategy 0 must not reach extractQuery).
+    let (_strategy, _, _) =
+        lsyscache::amop::get_op_opfamily_properties(clause_op, opfamily, false)?;
     let strategy = _strategy as u16;
 
     let (nentries, npartial, search_mode) =
-        gin::gincost_extract_query(opfamily, opcintype, query, strategy)?;
+        gin::gincost_extract_query(opfamily, opcintype, collation, query, strategy)?;
 
     if nentries <= 0 && search_mode == GIN_SEARCH_MODE_DEFAULT {
         return Ok(false);
     }
-    counts.partial_entries += npartial as f64;
+    // No information to estimate the entries a partial match hits: 100 each.
+    counts.partial_entries += 100.0 * npartial as f64;
     counts.exact_entries += (nentries - npartial) as f64;
     counts.search_entries += nentries as f64;
 
     if search_mode == GIN_SEARCH_MODE_DEFAULT {
-        counts.att_has_normal_scan = true;
+        counts.att_has_normal_scan[indexcol] = true;
     } else if search_mode == GIN_SEARCH_MODE_INCLUDE_EMPTY {
-        counts.att_has_normal_scan = true;
+        counts.att_has_normal_scan[indexcol] = true;
         counts.exact_entries += 1.0;
         counts.search_entries += 1.0;
     } else {
-        counts.att_has_full_scan = true;
+        counts.att_has_full_scan[indexcol] = true;
     }
     Ok(true)
 }
 
 // gincost_scalararrayopexpr (selfuncs.c).
+#[allow(clippy::too_many_arguments)]
 fn gincost_scalararrayopexpr<'mcx>(
     run: &mut PlannerRun<'mcx>,
     opfamily: Oid,
     opcintype: Oid,
+    collation: Oid,
+    indexcol: usize,
     clause: Node<'mcx>,
     num_index_entries: f64,
     counts: &mut GinQualCounts,
@@ -4361,9 +4374,9 @@ fn gincost_scalararrayopexpr<'mcx>(
             continue;
         }
         let mut elemcounts = GinQualCounts::default();
-        if gincost_pattern(opfamily, opcintype, clause_op, v, &mut elemcounts)? {
+        if gincost_pattern(opfamily, opcintype, collation, indexcol, clause_op, v, &mut elemcounts)? {
             num_possible += 1;
-            if elemcounts.att_has_full_scan && !elemcounts.att_has_normal_scan {
+            if elemcounts.att_has_full_scan[indexcol] && !elemcounts.att_has_normal_scan[indexcol] {
                 elemcounts.partial_entries = 0.0;
                 elemcounts.exact_entries = num_index_entries;
                 elemcounts.search_entries = num_index_entries;
@@ -4389,7 +4402,7 @@ fn gincostestimate(
     path_id: types_pathnodes::PathId,
     loop_count: f64,
 ) -> PgResult<AmCostEstimate> {
-    let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamily0, opcintype0) = {
+    let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamilies, opcintypes, indexcollations, nkeycolumns) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
         (
@@ -4399,8 +4412,10 @@ fn gincostestimate(
             index.rel.expect("index rel set"),
             index.reltablespace,
             index.gin_stats.expect("gin stats captured at plancat"),
-            index.opfamily[0],
-            index.opcintype[0],
+            index.opfamily.clone(),
+            index.opcintype.clone(),
+            index.indexcollations.clone(),
+            index.nkeycolumns,
         )
     };
     let index_rel_relid = run.root.rel(index_rel).relid as i32;
@@ -4458,54 +4473,79 @@ fn gincostestimate(
         ..Default::default()
     };
     let mut match_possible = true;
-    'quals: {
+    {
         let iclauses = {
             let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
             ip.indexclauses.clone()
         };
+        let mcx = run.mcx;
         for ic in iclauses.iter() {
+            // Each clause is costed against its own index column's opfamily,
+            // opcintype, and collation (C threads iclause->indexcol down).
+            let indexcol = ic.indexcol as usize;
+            let opfamily = opfamilies[indexcol];
+            let opcintype = opcintypes[indexcol];
+            // Collation to pass to extractProc (should match initGinState).
+            let collation = if indexcollations[indexcol] != 0 {
+                indexcollations[indexcol]
+            } else {
+                types_core::catalog::DEFAULT_COLLATION_OID
+            };
+            // An unsatisfiable qual only breaks this clause's inner loop, as
+            // in C: a later clause reassigns match_possible.
             for &rid in ic.indexquals.iter() {
                 let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
                 match clause.node_tag() {
                     NodeTag::T_OpExpr => {
                         // gincost_opexpr: fixed indexquals put the indexkey on
-                        // the left; the operand is args[1].
+                        // the left; the operand is args[1], aggressively
+                        // reduced to a constant and stripped of relabeling.
                         let op = clause.as_op_expr().unwrap();
-                        let operand = op.args.nth(1);
+                        let opno = op.opno;
+                        let mut operand =
+                            clauses::estimate_expression_value(mcx, op.args.nth(1))?;
+                        if let Some(r) = operand.as_relabel_type() {
+                            operand = r.arg;
+                        }
                         match operand.as_const() {
                             None => {
+                                // Unknown operand: assume one ordinary search
+                                // entry at runtime.
                                 counts.exact_entries += 1.0;
                                 counts.search_entries += 1.0;
+                                match_possible = true;
                             }
-                            Some(c) if c.constisnull => {
-                                match_possible = false;
-                                break 'quals;
-                            }
+                            // A null Const can't match anything.
+                            Some(c) if c.constisnull => match_possible = false,
                             Some(c) => {
-                                if !gincost_pattern(
-                                    opfamily0,
-                                    opcintype0,
-                                    op.opno,
+                                match_possible = gincost_pattern(
+                                    opfamily,
+                                    opcintype,
+                                    collation,
+                                    indexcol,
+                                    opno,
                                     c.constvalue,
                                     &mut counts,
-                                )? {
-                                    match_possible = false;
-                                    break 'quals;
-                                }
+                                )?;
                             }
+                        }
+                        if !match_possible {
+                            break;
                         }
                     }
                     NodeTag::T_ScalarArrayOpExpr => {
-                        if !gincost_scalararrayopexpr(
+                        match_possible = gincost_scalararrayopexpr(
                             run,
-                            opfamily0,
-                            opcintype0,
+                            opfamily,
+                            opcintype,
+                            collation,
+                            indexcol,
                             clause,
                             num_entries,
                             &mut counts,
-                        )? {
-                            match_possible = false;
-                            break 'quals;
+                        )?;
+                        if !match_possible {
+                            break;
                         }
                     }
                     other => panic!("unsupported GIN indexqual type: {other:?}"),
@@ -4524,7 +4564,16 @@ fn gincostestimate(
         });
     }
 
-    let full_index_scan = counts.att_has_full_scan && !counts.att_has_normal_scan;
+    // A column with a full scan and no normal scan forces scanning all
+    // non-null entries of that column; without per-attribute GIN statistics,
+    // assume the whole index is scanned.
+    let mut full_index_scan = false;
+    for i in 0..nkeycolumns as usize {
+        if counts.att_has_full_scan[i] && !counts.att_has_normal_scan[i] {
+            full_index_scan = true;
+            break;
+        }
+    }
     if full_index_scan || index_quals.is_empty() {
         counts.partial_entries = 0.0;
         counts.exact_entries = num_entries;

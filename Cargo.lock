@@ -6575,6 +6575,7 @@ dependencies = [
  "gin_vocab",
  "guc_tables",
  "init_small",
+ "lmgr",
  "lsyscache",
  "mcx",
  "miscinit",

@@ -722,10 +722,12 @@ fn shim_tri_consistent(
 
 /// gincost_pattern's extractQuery probe (selfuncs.c gincostestimate):
 /// resolves the opclass from the opfamily and runs extractQueryFn, returning
-/// (nentries, npartial, searchMode).
+/// (nentries, npartial, searchMode). `collation` is the caller-resolved
+/// index-column collation (already defaulted when the column has none).
 pub fn gincost_extract_query(
     opfamily: ::types_core::Oid,
     opcintype: ::types_core::Oid,
+    collation: ::types_core::Oid,
     query: Datum,
     strategy: StrategyNumber,
 ) -> PgResult<(i32, i32, i32)> {
@@ -769,7 +771,7 @@ pub fn gincost_extract_query(
     let col = GinColState {
         opclass,
         elem_cmp: GinElemCmp::None,
-        support_collation: ::types_core::catalog::DEFAULT_COLLATION_OID,
+        support_collation: collation,
         can_partial_match: can_partial,
         key_byval: false,
         key_len: -1,

@@ -3071,21 +3071,34 @@ impl<'a> Estate<'a> {
         &mut self,
         value: Datum,
     ) -> PgResult<(RecDesc, std::rc::Rc<types_tuple::TupleDescData<'static>>, Vec<Datum>, Vec<bool>)> {
-        // SAFETY: non-null composite datum — a live HeapTupleHeader image.
-        let td_hdr = unsafe { &*(value.as_usize() as *const types_tuple::HeapTupleHeaderData) };
+        let mcx = self.datum_ctx.mcx();
+        let p = value.as_usize() as *const u8;
+        // C DatumGetHeapTupleHeader: detoast first — the datum can arrive
+        // short-headed (e.g. deformed back out of a materialized minimal
+        // tuple), compressed, or expanded; only the detoasted 4-byte-header
+        // form is a readable HeapTupleHeader image.
+        // SAFETY: non-null composite datum — a live varlena-headed image
+        // readable for its varsize.
+        let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        // Leaked into the datum context: the deformed byref values below
+        // point into this image and outlive this call (C detoasts into the
+        // caller's context and never pfrees either — pl_exec.c's "might
+        // leak memory" note).
+        let rec = detoast::detoast_attr(mcx, raw)?.leak();
+        // SAFETY: detoasted composite image; header prefix is in bounds.
+        let td_hdr = unsafe { &*(rec.as_ptr() as *const types_tuple::HeapTupleHeaderData) };
         let tup_type = td_hdr.type_id();
         let tup_typmod = td_hdr.typmod();
         let t_len = td_hdr.datum_length();
-        let tupdesc =
-            typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), tup_type, tup_typmod)?;
+        let tupdesc = typcache::lookup_rowtype_tupdesc_copy(mcx, tup_type, tup_typmod)?;
         let desc = RecDesc::from_tupdesc(&tupdesc);
         let natts = desc.types.len();
         let mut values = vec![Datum::null(); natts];
         let mut nulls = vec![true; natts];
-        // SAFETY: header address + declared datum length form the image.
+        // SAFETY: MAXALIGN'd detoasted image of datum_length() bytes.
         let htd = unsafe {
             types_tuple::HeapTupleData::from_raw_parts(
-                value.as_usize() as *const u8,
+                rec.as_ptr(),
                 t_len,
                 types_tuple::ItemPointerData::invalid(),
                 types_core::InvalidOid,

@@ -237,6 +237,17 @@ pub fn LockPage(
     Ok(())
 }
 
+// As above, but only lock if we can get the lock without blocking.
+// Returns true iff the lock was acquired.
+pub fn ConditionalLockPage(
+    rel: &RelationData<'_>,
+    blkno: types_core::BlockNumber,
+    lockmode: LOCKMODE,
+) -> PgResult<bool> {
+    let res = acquire(page_tag(rel, blkno), lockmode, true)?;
+    Ok(res != LOCKACQUIRE_NOT_AVAIL)
+}
+
 pub fn UnlockPage(
     rel: &RelationData<'_>,
     blkno: types_core::BlockNumber,
