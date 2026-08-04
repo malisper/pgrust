@@ -18,7 +18,7 @@ use types_tuple::NameData;
 // The `server_version` GUC stays exactly "18.3": that is what drivers parse
 // for feature detection and it must remain the plain upstream number.
 pub const PG_VERSION_STR: &str = concat!(
-    "pgrust 0.2 (PostgreSQL 18.3 compatible) on ",
+    "pgrust 0.3 (PostgreSQL 18.3 compatible) on ",
     env!("PGRUST_TARGET_TRIPLE"),
     ", 64-bit"
 );

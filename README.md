@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Postgres 18.3" src="https://img.shields.io/badge/Postgres-18.3-336791">
   <img alt="Regression suite: 100%" src="https://img.shields.io/badge/regression_suite-46%2C066%2F46%2C066-brightgreen">
-  <img alt="Version: v0.2" src="https://img.shields.io/badge/version-v0.2-blue">
+  <img alt="Version: v0.3" src="https://img.shields.io/badge/version-v0.3-blue">
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
@@ -45,6 +45,8 @@ and many other really awesome pieces. The scheduler and the OOM killer go
 after two of
 [the four horsemen behind thousands of Postgres outages](https://malisper.me/the-four-horsemen-behind-thousands-of-postgres-outages/).
 See [What's new in v0.2](#whats-new-in-v02) for more.
+<!-- TODO(v0.3): add a "What's new in v0.3" section (Michael to author) and
+     repoint the line above before the v0.3 release ships. -->
 
 ## Status
 
@@ -144,10 +146,10 @@ export PATH="$(brew --prefix postgresql@18)/bin:$PATH"
 # Download pgrust and verify the checksum. Download with curl: curl does not
 # set the quarantine flag a browser download gets, so Gatekeeper stays out of
 # the way (see the note below).
-curl -LO https://pgrust.com/downloads/v0.2/pgrust-0.2-macos-arm64
-curl -LO https://pgrust.com/downloads/v0.2/pgrust-0.2-macos-arm64.sha256
-shasum -a 256 -c pgrust-0.2-macos-arm64.sha256
-chmod +x pgrust-0.2-macos-arm64
+curl -LO https://pgrust.com/downloads/v0.3/pgrust-0.3-macos-arm64
+curl -LO https://pgrust.com/downloads/v0.3/pgrust-0.3-macos-arm64.sha256
+shasum -a 256 -c pgrust-0.3-macos-arm64.sha256
+chmod +x pgrust-0.3-macos-arm64
 
 # Create a data directory using Postgres' initdb.
 initdb -D /tmp/pgrust-data --no-locale --encoding UTF8 -U postgres
@@ -160,7 +162,7 @@ export PGRUST_TZDIR="$PGRUST_PGSHAREDIR/timezone"
 
 # Start the server. It runs in the foreground and logs to this terminal.
 ulimit -s 65520
-RUST_MIN_STACK=33554432 ./pgrust-0.2-macos-arm64 \
+RUST_MIN_STACK=33554432 ./pgrust-0.3-macos-arm64 \
   -D /tmp/pgrust-data \
   -k /tmp -p 5432 \
   -c listen_addresses= \
@@ -175,18 +177,18 @@ export PATH="$(brew --prefix postgresql@18)/bin:$PATH"
 psql -h /tmp -p 5432 -U postgres -c "select version()"
 ```
 
-You should see `pgrust 0.2 (PostgreSQL 18.3 compatible)`.
+You should see `pgrust 0.3 (PostgreSQL 18.3 compatible)`.
 
-**macOS Intel:** the same flow works with `pgrust-0.2-macos-x86_64` in place
-of `pgrust-0.2-macos-arm64` (`brew --prefix` handles the different Homebrew
-prefix). There is also `pgrust-0.2-macos-universal`, a universal binary
+**macOS Intel:** the same flow works with `pgrust-0.3-macos-x86_64` in place
+of `pgrust-0.3-macos-arm64` (`brew --prefix` handles the different Homebrew
+prefix). There is also `pgrust-0.3-macos-universal`, a universal binary
 covering both.
 
 **A note on Gatekeeper:** the binaries are not yet notarized by Apple. If you
 download with curl as above, the file is never quarantined and none of this
 comes up. If you download with a browser instead, macOS will refuse to run
 the binary with "Apple could not verify ... is free of malware". Clear the
-quarantine flag with `xattr -d com.apple.quarantine pgrust-0.2-macos-arm64`,
+quarantine flag with `xattr -d com.apple.quarantine pgrust-0.3-macos-arm64`,
 or approve the binary under System Settings > Privacy & Security > "Open
 Anyway".
 
@@ -211,10 +213,10 @@ sudo apt-get install -y postgresql-18 postgresql-client-18
 export PATH="/usr/lib/postgresql/18/bin:$PATH"
 
 # Download pgrust and verify the checksum.
-curl -LO "https://pgrust.com/downloads/v0.2/pgrust-0.2-$PLATFORM"
-curl -LO "https://pgrust.com/downloads/v0.2/pgrust-0.2-$PLATFORM.sha256"
-sha256sum -c "pgrust-0.2-$PLATFORM.sha256"
-chmod +x "pgrust-0.2-$PLATFORM"
+curl -LO "https://pgrust.com/downloads/v0.3/pgrust-0.3-$PLATFORM"
+curl -LO "https://pgrust.com/downloads/v0.3/pgrust-0.3-$PLATFORM.sha256"
+sha256sum -c "pgrust-0.3-$PLATFORM.sha256"
+chmod +x "pgrust-0.3-$PLATFORM"
 
 # Create a data directory using Postgres' initdb.
 initdb -D /tmp/pgrust-data --no-locale --encoding UTF8 -U postgres
@@ -228,7 +230,7 @@ export PGRUST_TZDIR=/usr/share/zoneinfo
 
 # Start the server. It runs in the foreground and logs to this terminal.
 ulimit -s 65520
-RUST_MIN_STACK=33554432 "./pgrust-0.2-$PLATFORM" \
+RUST_MIN_STACK=33554432 "./pgrust-0.3-$PLATFORM" \
   -D /tmp/pgrust-data \
   -k /tmp -p 5432 \
   -c listen_addresses= \
@@ -242,7 +244,7 @@ Leave the server running and connect from a second terminal:
 psql -h /tmp -p 5432 -U postgres -c "select version()"
 ```
 
-You should see `pgrust 0.2 (PostgreSQL 18.3 compatible)`.
+You should see `pgrust 0.3 (PostgreSQL 18.3 compatible)`.
 
 ### Stopping, restarting, cleaning up
 
@@ -294,7 +296,7 @@ scripts, same data volume at `/var/lib/postgresql/data`. Multi-arch
 (amd64 + arm64):
 
 ```bash
-docker run -d --name pgrust -e POSTGRES_PASSWORD=secret -p 5432:5432 malisper/pgrust:v0.2
+docker run -d --name pgrust -e POSTGRES_PASSWORD=secret -p 5432:5432 malisper/pgrust:v0.3
 ```
 
 Then connect:
