@@ -76,6 +76,113 @@ pub fn get_progname(argv0: &str) -> &str {
     argv0.rsplit('/').next().unwrap_or(argv0)
 }
 
+// ---------------------------------------------------------------------------
+// pgrust extension (additive, no C counterpart): `postgres --profile <name>`.
+//
+// CONTRACT: `--profile <name>` is macro-expansion into `-c` arguments at that
+// argv position, performed here as a literal argv rewrite BEFORE the existing
+// (ported-C) option parse ever sees the vector. Precedence therefore falls
+// out of the stock PGC_S_ARGV rules by construction: later explicit -c flags
+// override profile values (same source, later SetConfigOption call wins), and
+// profile values override postgresql.conf exactly as -c does. Invocations
+// without `--profile` return the borrowed argv untouched — the stock parse
+// path is byte-identical.
+//
+// 'profile' here = config preset. Unrelated to build/perf profiles
+// (SERVER_PROFILE / JANITOR_PROFILE / cargo --profile).
+// ---------------------------------------------------------------------------
+
+/// Profile names `--profile` accepts. Grow this table (and a matching
+/// `profile_settings` arm) to add a profile.
+pub const KNOWN_PROFILES: &[&str] = &["test"];
+
+/// The `--profile test` expansion list — THE single place it is defined.
+///
+/// First section = conf/test.conf verbatim (same keys, same values, same
+/// order); the `conf_sync` test parses that file and fails on any drift —
+/// a divergence between file and flag would be a silent doc lie. Second
+/// section = janitor arming (prewarm is already default-on when armed).
+///
+/// Deliberately NOT included: `pgrust.ephemeral_db_mint_roles` and
+/// `pgrust.ephemeral_db_default_template` — minting stays off by default
+/// (a profile must never silently enable minting); users add those via
+/// additional -c flags or the config file.
+pub const PROFILE_TEST_SETTINGS: &[(&str, &str)] = &[
+    // conf/test.conf — non-durable + quiet-background + test-shaped defaults
+    ("fsync", "off"),
+    ("synchronous_commit", "off"),
+    ("full_page_writes", "off"),
+    ("wal_level", "minimal"),
+    ("max_wal_senders", "0"),
+    ("autovacuum", "off"),
+    ("checkpoint_timeout", "1h"),
+    ("max_wal_size", "8GB"),
+    ("file_copy_method", "clone"),
+    ("jit", "off"),
+    ("shared_buffers", "128MB"),
+    // janitor arming (docs/design/test-views.md D1)
+    ("pgrust.ephemeral_db_prefix", "tv_"),
+    ("pgrust.ephemeral_db_grace", "15s"),
+];
+
+pub fn profile_settings(name: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match name {
+        "test" => Some(PROFILE_TEST_SETTINGS),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProfileArgvError {
+    /// `--profile` with no value (or an empty `--profile=`).
+    MissingValue,
+    /// `--profile <name>` where <name> is not in KNOWN_PROFILES.
+    UnknownProfile(String),
+}
+
+/// Rewrite argv, replacing each `--profile <name>` / `--profile=<name>` with
+/// the profile's `-c name=value` pairs at that position. Returns Ok(None)
+/// when no `--profile` token is present (the stock path: caller keeps the
+/// original slice, untouched).
+pub fn expand_profile_argv(argv: &[String]) -> Result<Option<Vec<String>>, ProfileArgvError> {
+    if !argv
+        .iter()
+        .skip(1)
+        .any(|a| a == "--profile" || a.starts_with("--profile="))
+    {
+        return Ok(None);
+    }
+    let mut out: Vec<String> = Vec::with_capacity(argv.len() + 2 * PROFILE_TEST_SETTINGS.len());
+    let mut it = argv.iter();
+    if let Some(argv0) = it.next() {
+        out.push(argv0.clone()); // argv[0] never participates
+    }
+    while let Some(arg) = it.next() {
+        let name: String = if arg == "--profile" {
+            match it.next() {
+                Some(v) if !v.is_empty() => v.clone(),
+                _ => return Err(ProfileArgvError::MissingValue),
+            }
+        } else if let Some(v) = arg.strip_prefix("--profile=") {
+            if v.is_empty() {
+                return Err(ProfileArgvError::MissingValue);
+            }
+            v.to_string()
+        } else {
+            out.push(arg.clone());
+            continue;
+        };
+        let Some(settings) = profile_settings(&name) else {
+            return Err(ProfileArgvError::UnknownProfile(name));
+        };
+        for (k, v) in settings {
+            out.push("-c".to_string());
+            out.push(format!("{k}={v}"));
+        }
+    }
+    Ok(Some(out))
+}
+
 fn init_locale(mcx: Mcx<'_>, categoryname: &str, category: i32, locale: &str) -> PgResult<()> {
     if pg_locale::pg_perm_setlocale(mcx, category, locale)?.is_some()
         || pg_locale::pg_perm_setlocale(mcx, category, "C")?.is_some()
@@ -118,6 +225,34 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
     let mut dispatch_option = DispatchOption::Postmaster;
 
     let progname = get_progname(argv.first().map(|s| s.as_str()).unwrap_or("postgres")).to_string();
+
+    // pgrust extension: `--profile <name>` macro-expansion into -c arguments
+    // at that argv position (see expand_profile_argv). Stock invocations
+    // (no --profile token) keep the original argv slice untouched. Note the
+    // expanded vector is what downstream sees everywhere — including
+    // postmaster.opts, which therefore records the equivalent -c list.
+    let expanded_argv;
+    let argv: &[String] = match expand_profile_argv(argv) {
+        Ok(None) => argv,
+        Ok(Some(v)) => {
+            expanded_argv = v;
+            &expanded_argv
+        }
+        Err(ProfileArgvError::MissingValue) => {
+            elog::write_stderr(&format!(
+                "{progname}: option requires an argument -- profile (known profiles: {})\n",
+                KNOWN_PROFILES.join(", ")
+            ));
+            std::process::exit(1);
+        }
+        Err(ProfileArgvError::UnknownProfile(name)) => {
+            elog::write_stderr(&format!(
+                "{progname}: unknown profile \"{name}\" (known profiles: {})\n",
+                KNOWN_PROFILES.join(", ")
+            ));
+            std::process::exit(1);
+        }
+    };
 
     startup_hacks(&progname);
 
@@ -338,5 +473,120 @@ mod tests {
     fn progname_is_basename() {
         assert_eq!(get_progname("/usr/local/bin/postgres"), "postgres");
         assert_eq!(get_progname("postgres"), "postgres");
+    }
+
+    fn sv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn profile_absent_is_untouched() {
+        // Stock invocations: expansion returns None (caller keeps the slice).
+        assert_eq!(expand_profile_argv(&sv(&["postgres", "-D", "dd"])), Ok(None));
+        assert_eq!(expand_profile_argv(&sv(&["postgres"])), Ok(None));
+        // argv[0] never participates, even if pathological.
+        assert_eq!(expand_profile_argv(&sv(&["--profile"])), Ok(None));
+    }
+
+    #[test]
+    fn profile_expands_in_place() {
+        // Expansion happens AT THAT POSITION: -D before, explicit -c after.
+        let out = expand_profile_argv(&sv(&[
+            "postgres", "-D", "dd", "--profile", "test", "-c", "fsync=on",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(&out[..3], &sv(&["postgres", "-D", "dd"])[..]);
+        let mut want = Vec::new();
+        for (k, v) in PROFILE_TEST_SETTINGS {
+            want.push("-c".to_string());
+            want.push(format!("{k}={v}"));
+        }
+        assert_eq!(&out[3..3 + want.len()], &want[..]);
+        // Later explicit -c stays AFTER the expansion — the precedence claim
+        // ("as-if -c at that argv position") holds by construction: same
+        // PGC_S_ARGV source, later SetConfigOption call wins.
+        assert_eq!(&out[3 + want.len()..], &sv(&["-c", "fsync=on"])[..]);
+        // fsync appears profile-first, override-second in effective order.
+        let fsync_positions: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.starts_with("fsync="))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(out[fsync_positions[0]], "fsync=off");
+        assert_eq!(out[fsync_positions[1]], "fsync=on");
+    }
+
+    #[test]
+    fn profile_equals_form_and_errors() {
+        let a = expand_profile_argv(&sv(&["postgres", "--profile", "test"])).unwrap().unwrap();
+        let b = expand_profile_argv(&sv(&["postgres", "--profile=test"])).unwrap().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(
+            expand_profile_argv(&sv(&["postgres", "--profile"])),
+            Err(ProfileArgvError::MissingValue)
+        );
+        assert_eq!(
+            expand_profile_argv(&sv(&["postgres", "--profile="])),
+            Err(ProfileArgvError::MissingValue)
+        );
+        assert_eq!(
+            expand_profile_argv(&sv(&["postgres", "--profile", "prod"])),
+            Err(ProfileArgvError::UnknownProfile("prod".into()))
+        );
+        assert!(profile_settings("test").is_some());
+        assert!(profile_settings("prod").is_none());
+        for name in KNOWN_PROFILES {
+            assert!(profile_settings(name).is_some(), "KNOWN_PROFILES lists {name} but profile_settings has no arm");
+        }
+    }
+
+    // Drift gate: the `--profile test` table's conf-file section must equal
+    // conf/test.conf key-for-key, value-for-value, in file order — plus
+    // exactly the two janitor-arming GUCs. A divergence between file and
+    // flag would be a silent doc lie (docs/testmode.md documents the flag
+    // as a macro for the file).
+    #[test]
+    fn conf_sync() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../conf/test.conf");
+        let text = std::fs::read_to_string(path).expect("conf/test.conf must exist");
+        let mut file_settings: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (k, v) = line.split_once('=').expect("conf line must be name = value");
+            file_settings.push((k.trim().to_string(), v.trim().to_string()));
+        }
+        assert!(!file_settings.is_empty(), "parsed zero settings from conf/test.conf");
+        let table: Vec<(String, String)> = PROFILE_TEST_SETTINGS
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        // Conf section: identical, in order.
+        assert_eq!(
+            &table[..file_settings.len()],
+            &file_settings[..],
+            "PROFILE_TEST_SETTINGS conf section drifted from conf/test.conf"
+        );
+        // Remainder: exactly the janitor arming pair; minting GUCs must
+        // NEVER creep in (security posture).
+        let rest = &table[file_settings.len()..];
+        assert_eq!(
+            rest,
+            &[
+                ("pgrust.ephemeral_db_prefix".to_string(), "tv_".to_string()),
+                ("pgrust.ephemeral_db_grace".to_string(), "15s".to_string()),
+            ],
+            "profile extras must be exactly the janitor arming pair"
+        );
+        for (k, _) in &table {
+            assert!(
+                !k.contains("mint_roles") && !k.contains("default_template"),
+                "profile must never silently enable minting: {k}"
+            );
+        }
     }
 }
