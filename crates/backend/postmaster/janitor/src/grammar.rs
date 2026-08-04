@@ -49,8 +49,9 @@ pub enum MintShape<'a> {
 }
 
 /// Parse `name` against the configured `prefix`. `None` = the name is not
-/// mint-eligible (feature off, prefix mismatch, over-long, or an empty
-/// token) — the caller falls through to the stock does-not-exist FATAL.
+/// mint-eligible (feature off, prefix mismatch, over-long, an empty
+/// token, or a reserved warm-pool spare name) — the caller falls through
+/// to the stock does-not-exist FATAL.
 pub fn parse_mint_name<'a>(prefix: &str, name: &'a str) -> Option<MintShape<'a>> {
     if prefix.is_empty() || name.len() > MAX_NAME_BYTES {
         return None;
@@ -58,6 +59,19 @@ pub fn parse_mint_name<'a>(prefix: &str, name: &'a str) -> Option<MintShape<'a>>
     let rest = name.strip_prefix(prefix)?;
     if rest.is_empty() {
         return None;
+    }
+    // D3 warm-pool namespace reservation: `<prefix>spare_<seq>` (seq =
+    // decimal digits) is the janitor's own spare namespace and is never
+    // mint-eligible. Without this, an Ensure for a spare name posted in
+    // the lookup-miss-to-service window could complete idempotently ON a
+    // listed spare — double-booking it: the client would hold a
+    // janitor-owned database that a later handout renames out from under
+    // its next reconnect. Exact-shape reservation only: bare tokens like
+    // `spare_x` and templates named `spare` stay legal.
+    if let Some(seq) = rest.strip_prefix("spare_") {
+        if !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
     }
     if let Some((template, token)) = rest.split_once("__") {
         if !template.is_empty() && !token.is_empty() {
@@ -148,6 +162,41 @@ mod tests {
             })
         );
         assert_eq!(template_of("tv_", "tv_my__tpl__x"), Some("my"));
+    }
+
+    #[test]
+    fn spare_namespace_is_reserved() {
+        // `<prefix>spare_<digits>` never mints (deleting the reservation in
+        // parse_mint_name fails this): the warm pool owns that namespace.
+        assert_eq!(parse_mint_name("tv_", "tv_spare_1"), None);
+        assert_eq!(parse_mint_name("tv_", "tv_spare_007"), None);
+        assert_eq!(
+            parse_mint_name("tv_", "tv_spare_18446744073709551615"),
+            None
+        );
+        // Exact shape only: non-digit tails, a bare `spare_` (empty seq),
+        // and template-form names keep their stock meaning.
+        assert_eq!(
+            parse_mint_name("tv_", "tv_spare_x"),
+            Some(MintShape::Bare { token: "spare_x" })
+        );
+        assert_eq!(
+            parse_mint_name("tv_", "tv_spare_"),
+            Some(MintShape::Bare { token: "spare_" })
+        );
+        assert_eq!(
+            parse_mint_name("tv_", "tv_spare_1a"),
+            Some(MintShape::Bare { token: "spare_1a" })
+        );
+        assert_eq!(
+            parse_mint_name("tv_", "tv_spare__x"),
+            Some(MintShape::Template {
+                template: "spare",
+                token: "x"
+            })
+        );
+        // Reserved names also attribute to no template.
+        assert_eq!(template_of("tv_", "tv_spare_1"), None);
     }
 
     #[test]

@@ -15,6 +15,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"]
 
 [dependencies]
 aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
 bgworker = { path = "../bgworker" }
 checkpointer = { path = "../checkpointer" }
 datum = { path = "../../../_support/types/datum" }

@@ -271,6 +271,14 @@ string_var!(
     set_pgrust_ephemeral_db_default_template,
     Some("")
 );
+// D3 warm pool (docs/design/test-views.md warm-pool addendum): PGC_SIGHUP,
+// read by the janitor each tick after its reload idiom.
+int_var!(
+    I_pgrust_ephemeral_db_pool_size,
+    pgrust_ephemeral_db_pool_size,
+    set_pgrust_ephemeral_db_pool_size,
+    0
+);
 bool_var!(
     B_integer_datetimes,
     integer_datetimes,

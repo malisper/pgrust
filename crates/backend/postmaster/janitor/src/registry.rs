@@ -149,7 +149,56 @@ pub struct PendingEnsure {
     pub name: String,
     pub template: String,
     pub owner_name: String,
+    /// True only for warm-pool replenish specs (gen 0, no registry entry):
+    /// the shared mint bodies then create the database with
+    /// ALLOW_CONNECTIONS false — a listed spare must not be enterable
+    /// (connect-write-disconnect would poison its content invisibly; the
+    /// handout flips connectability on inside its own transaction). Client
+    /// Ensures always mint connectable (stock createdb default).
+    pub spare: bool,
 }
+
+/// Fixed spare-table capacity (D3 warm pool): the hard ceiling
+/// pgrust.ephemeral_db_pool_size is clamped under (the GUC's own max is
+/// this value). Same capacity-cliff audit verdict as MAX_PINS: the pool is
+/// OPERATOR-sized (one GUC), never concurrency-scaled, and overflow is a
+/// silent skip-add (the replenisher simply stops early), not an error a
+/// connect path can hit.
+pub const MAX_SPARES: usize = 64;
+
+/// One pre-minted spare clone of the default template (D3 warm pool),
+/// restart-lossy like everything here: post-restart leftovers are
+/// unregistered survivors the startup sweep drops, and the pool cold-starts
+/// empty and replenishes.
+#[derive(Clone)]
+pub struct SpareEntry {
+    /// The spare's current datname (`<prefix>spare_<seq>`).
+    pub name: String,
+    /// Its pg_database oid (preserved across the handout RENAME).
+    pub oid: Oid,
+    /// Template identity AT MINT TIME: name + oid. A default-template
+    /// repoint (name changes) or rebuild (same name, new oid) makes the
+    /// spare STALE — `drain_stale_spares` removes it and the replenisher
+    /// drops the database.
+    pub template_name: String,
+    pub template_oid: Oid,
+    /// The template's datallowconn AT MINT TIME. A datallowconn EDGE
+    /// (sealed template unsealed-for-writes then re-sealed, or a writable
+    /// template1-shape template sealed) observed by the replenish probe or
+    /// the handout re-check makes the spare STALE too: its copied content
+    /// predates a window in which ordinary connections could write the
+    /// template. Both-connectable spares are kept — an always-connectable
+    /// default template serves spares whose content is as old as their
+    /// mint, the documented pool staleness residual (addendum item 6); an
+    /// unseal-reseal cycle wholly between janitor observations remains
+    /// invisible, mirroring the flush-mark discipline.
+    pub template_connectable: bool,
+}
+
+/// Fixed capacity of the sealed-template flush-mark table (batch
+/// pre-checkpoint skip). Overflow is fail-safe: an unmarkable template
+/// simply keeps paying the pre-checkpoint.
+pub const MAX_TEMPLATE_FLUSH_MARKS: usize = 64;
 
 struct RegistryState {
     /// Adoption-guard pause (spec item 4): while true the janitor performs
@@ -174,6 +223,33 @@ struct RegistryState {
     /// D2 per-template grace overrides, seconds, keyed by template name
     /// (restart-lossy like pins, spec D2).
     template_graces: Vec<(String, i32)>,
+    /// D3 warm-pool spares (bounded by MAX_SPARES). Mutated ONLY from the
+    /// janitor loop (replenish/handout), read by the reap/sweep shields.
+    spares: Vec<SpareEntry>,
+    /// Monotonic spare-name sequence: a name that ever failed a handout
+    /// (occupied, squatted) is burned and never reused.
+    next_spare_seq: u64,
+    /// Sealed-template flush marks (batch pre-checkpoint skip):
+    /// (template oid, datfrozenxid, datminmxid) at mark time. Restart-lossy
+    /// BY DESIGN — the first batch touching a template after janitor start
+    /// pays the FLUSH_ALL pre-checkpoint once and marks it (self-healing,
+    /// no marker file). The xid/mxid halves make a COMPLETED
+    /// anti-wraparound autovacuum (the one writer ALLOW_CONNECTIONS false
+    /// does not stop; it advances datfrozenxid/datminmxid at its end)
+    /// self-invalidate the mark. Marks whose template was DROPPED are
+    /// pruned by the reap pass (`retain_template_flush_marks`): the
+    /// observed-unseal clear sites key on a live tuple's oid, so a dropped
+    /// template — one per rebuild under the new-name recipe — would
+    /// otherwise leak its slot until the table fills and marking silently
+    /// stops (every batch then re-pays the pre-checkpoint, with no
+    /// witness).
+    template_flush_marks: Vec<(Oid, u32, u32)>,
+    /// One-shot latch for the replenisher's prefix-too-long-for-spare-names
+    /// refusal line: the prefix is PGC_POSTMASTER and the spare seq is
+    /// monotonic, so the condition is permanent once true — without the
+    /// latch the refusal would log on EVERY deficit tick (~2 lines/s for
+    /// the life of the server).
+    pool_name_overflow_logged: bool,
 }
 
 pgsync::process_global! {
@@ -185,6 +261,10 @@ pgsync::process_global! {
         ensures: Vec::new(),
         next_ensure_gen: 1,
         template_graces: Vec::new(),
+        spares: Vec::new(),
+        next_spare_seq: 1,
+        template_flush_marks: Vec::new(),
+        pool_name_overflow_logged: false,
     });
 }
 
@@ -427,6 +507,7 @@ pub fn pending_ensures() -> Vec<PendingEnsure> {
                 name: e.name.clone(),
                 template: e.template.clone(),
                 owner_name: e.owner_name.clone(),
+                spare: false,
             })
             .collect()
     })
@@ -547,6 +628,195 @@ pub fn template_grace_override(template: &str) -> Option<i32> {
             .iter()
             .find(|(t, _)| t == template)
             .map(|&(_, s)| s)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// D3 warm-pool spare set.
+// ---------------------------------------------------------------------------
+
+/// The warm-pool shield, consulted by sweep and reap NEXT TO pins and
+/// ensure_shields (all three call sites — the enumeration predicates AND
+/// the pre-drop re-check — or spares are lost silently): a listed spare is
+/// exempt from reaping while listed. Unlisted leftovers (post-restart, or
+/// dropped-from-pool poisoned spares) are ordinary ephemeral candidates.
+pub fn spare_shields(name: &str) -> bool {
+    with_registry(|r| r.spares.iter().any(|s| s.name == name))
+}
+
+/// Cheap pool-armed probe: the handout pass bails on this before touching
+/// any transaction machinery, so the pool-off service path costs one
+/// registry lock.
+pub(crate) fn any_spares() -> bool {
+    with_registry(|r| !r.spares.is_empty())
+}
+
+/// Register a freshly minted spare. False = table full or duplicate name
+/// (both are replenisher bookkeeping bugs upstream, tolerated fail-safe:
+/// an unregistered spare is unshielded and reaps like any ephemeral).
+pub(crate) fn add_spare(e: SpareEntry) -> bool {
+    with_registry(|r| {
+        if r.spares.len() >= MAX_SPARES || r.spares.iter().any(|s| s.name == e.name) {
+            return false;
+        }
+        r.spares.push(e);
+        true
+    })
+}
+
+/// First spare minted from `template_name` (handout candidate). A clone,
+/// not a removal: the entry keeps shielding the spare's name until the
+/// handout RENAME commits (`remove_spare` then retires it) or fails
+/// (poisoned spares are removed and left to the ordinary reap path).
+pub(crate) fn peek_spare(template_name: &str) -> Option<SpareEntry> {
+    with_registry(|r| {
+        r.spares
+            .iter()
+            .find(|s| s.template_name == template_name)
+            .cloned()
+    })
+}
+
+pub(crate) fn remove_spare(name: &str) -> bool {
+    with_registry(|r| {
+        let before = r.spares.len();
+        r.spares.retain(|s| s.name != name);
+        r.spares.len() != before
+    })
+}
+
+/// Live spares matching the CURRENT default-template identity (replenish
+/// deficit accounting; stale spares are drained, never counted).
+pub(crate) fn spare_count(template_name: &str, template_oid: Oid) -> usize {
+    with_registry(|r| {
+        r.spares
+            .iter()
+            .filter(|s| s.template_name == template_name && s.template_oid == template_oid)
+            .count()
+    })
+}
+
+/// Remove and return every spare NOT matching `identity` ((template name,
+/// template oid, template datallowconn AS OBSERVED NOW)); `None` = no
+/// valid pool (feature off, template unset/missing/unsealed) drains ALL
+/// spares. The datallowconn term drains spares across a connectable EDGE
+/// (either direction — see `SpareEntry::template_connectable`); a stable
+/// datallowconn keeps them. The caller drops the returned databases via
+/// the batch drop path.
+pub(crate) fn drain_stale_spares(identity: Option<(&str, Oid, bool)>) -> Vec<SpareEntry> {
+    with_registry(|r| {
+        let (keep, stale): (Vec<SpareEntry>, Vec<SpareEntry>) =
+            r.spares.drain(..).partition(|s| match identity {
+                Some((name, oid, allowconn)) => {
+                    s.template_name == name
+                        && s.template_oid == oid
+                        && s.template_connectable == allowconn
+                }
+                None => false,
+            });
+        r.spares = keep;
+        stale
+    })
+}
+
+/// Remove and return identity-matching spares beyond `keep` (newest first
+/// leave; the oldest `keep` stay): the pool_size-shrink drain. The caller
+/// drops the returned databases via the batch drop path.
+pub(crate) fn take_excess_spares(
+    template_name: &str,
+    template_oid: Oid,
+    keep: usize,
+) -> Vec<SpareEntry> {
+    with_registry(|r| {
+        let mut seen = 0usize;
+        let (kept, excess): (Vec<SpareEntry>, Vec<SpareEntry>) =
+            r.spares.drain(..).partition(|s| {
+                if s.template_name == template_name && s.template_oid == template_oid {
+                    seen += 1;
+                    seen <= keep
+                } else {
+                    true
+                }
+            });
+        r.spares = kept;
+        excess
+    })
+}
+
+/// Next spare-name sequence number (monotonic per postmaster lifetime).
+pub(crate) fn next_spare_seq() -> u64 {
+    with_registry(|r| {
+        let s = r.next_spare_seq;
+        r.next_spare_seq += 1;
+        s
+    })
+}
+
+/// One-shot token for the replenisher's spare-name-overflow refusal line:
+/// true exactly once per postmaster lifetime (the condition — prefix too
+/// long for `<prefix>spare_<seq>` — is permanent: the prefix is
+/// PGC_POSTMASTER and the seq is monotonic).
+pub(crate) fn pool_name_overflow_log_once() -> bool {
+    with_registry(|r| !std::mem::replace(&mut r.pool_name_overflow_logged, true))
+}
+
+// ---------------------------------------------------------------------------
+// Sealed-template flush marks (batch pre-checkpoint skip; the safety
+// rationale lives on mint.rs's batch body, next to the skip itself).
+// ---------------------------------------------------------------------------
+
+/// Is `oid` marked sealed-and-flushed with EXACTLY this
+/// datfrozenxid/datminmxid? A mismatch (a completed anti-wraparound
+/// autovacuum advanced either) reads as unmarked, so the next batch pays
+/// the pre-checkpoint and re-marks.
+pub(crate) fn template_flushed_matches(oid: Oid, frozenxid: u32, minmxid: u32) -> bool {
+    with_registry(|r| {
+        r.template_flush_marks
+            .iter()
+            .any(|&(o, f, m)| o == oid && f == frozenxid && m == minmxid)
+    })
+}
+
+/// Upsert the flush mark for `oid`. Skip-on-full is fail-safe (the batch
+/// keeps checkpointing).
+pub(crate) fn mark_template_flushed(oid: Oid, frozenxid: u32, minmxid: u32) {
+    with_registry(|r| {
+        if let Some(slot) = r.template_flush_marks.iter_mut().find(|(o, _, _)| *o == oid) {
+            slot.1 = frozenxid;
+            slot.2 = minmxid;
+            return;
+        }
+        if r.template_flush_marks.len() < MAX_TEMPLATE_FLUSH_MARKS {
+            r.template_flush_marks.push((oid, frozenxid, minmxid));
+        }
+    })
+}
+
+/// Drop `oid`'s flush mark. Called whenever a janitor probe OBSERVES the
+/// template unsealed or connectable (datistemplate = false or datallowconn
+/// = true): once ordinary connections can reach it, "no dirty buffers can
+/// exist" no longer holds and the mark must not survive a later re-seal.
+/// (An unseal-write-reseal cycle entirely between janitor observations is
+/// invisible — the documented residual; the recipe never unseals a
+/// template, rebuilds get a NEW name.) All observation sites clear:
+/// preflight, the batch re-check, the SERIAL mint's template check
+/// (mint_one — the single-entry tick bypasses preflight entirely), and
+/// the warm-pool probe + handout re-check.
+pub(crate) fn clear_template_flushed(oid: Oid) {
+    with_registry(|r| r.template_flush_marks.retain(|&(o, _, _)| o != oid))
+}
+
+/// Prune flush marks whose template no longer exists (reap-pass tail, fed
+/// the full pg_database oid set from the tick's one catalog scan). Without
+/// this, a dropped template's mark — one per rebuild under the
+/// rebuilds-get-a-NEW-name recipe — leaks its slot forever: at
+/// MAX_TEMPLATE_FLUSH_MARKS dead entries, `mark_template_flushed`
+/// silently stops marking and every batch re-pays the FLUSH_ALL
+/// pre-checkpoint with no witness.
+pub(crate) fn retain_template_flush_marks(live_oids: &[Oid]) {
+    with_registry(|r| {
+        r.template_flush_marks
+            .retain(|&(o, _, _)| live_oids.contains(&o))
     })
 }
 
@@ -809,5 +1079,163 @@ mod tests {
         }
 
         set_janitor_proc(None);
+    }
+
+    // ONE test function for the whole D3 warm-pool surface (spare set +
+    // sealed-template flush marks), same process-global-state rationale as
+    // its siblings, under the same crate-wide lock.
+    #[test]
+    fn spare_and_flush_mark_semantics() {
+        let _table = test_pin_table_lock();
+
+        let sp = |name: &str, oid: Oid, tpl: &str, tpl_oid: Oid| SpareEntry {
+            name: name.to_string(),
+            oid,
+            template_name: tpl.to_string(),
+            template_oid: tpl_oid,
+            template_connectable: false,
+        };
+
+        // Empty pool: no shields, no peeks, cheap any_spares probe.
+        assert!(!any_spares());
+        assert!(!spare_shields("tv_spare_1"));
+        assert!(peek_spare("tpl_a").is_none());
+
+        // Registration shields the name; duplicates are refused.
+        assert!(add_spare(sp("tv_spare_1", 90401, "tpl_a", 90400)));
+        assert!(!add_spare(sp("tv_spare_1", 90499, "tpl_a", 90400)));
+        assert!(any_spares());
+        assert!(spare_shields("tv_spare_1"));
+        assert!(!spare_shields("tv_spare_2"));
+
+        // peek matches by template NAME and clones (the entry keeps
+        // shielding until remove_spare).
+        assert!(add_spare(sp("tv_spare_2", 90402, "tpl_b", 90410)));
+        let got = peek_spare("tpl_a").expect("tpl_a spare");
+        assert_eq!((got.name.as_str(), got.oid), ("tv_spare_1", 90401));
+        assert_eq!(got.template_oid, 90400);
+        assert!(spare_shields("tv_spare_1"), "peek must not remove");
+        assert!(peek_spare("tpl_zzz").is_none());
+
+        // Identity-filtered count: same name + same oid only.
+        assert!(add_spare(sp("tv_spare_3", 90403, "tpl_a", 90400)));
+        assert_eq!(spare_count("tpl_a", 90400), 2);
+        assert_eq!(spare_count("tpl_a", 90499), 0, "rebuilt-template oid mismatch");
+        assert_eq!(spare_count("tpl_b", 90410), 1);
+
+        // Stale drain: a repointed default template (identity = tpl_b)
+        // drains the tpl_a spares and keeps the match.
+        let stale = drain_stale_spares(Some(("tpl_b", 90410, false)));
+        let mut names: Vec<&str> = stale.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["tv_spare_1", "tv_spare_3"]);
+        assert!(spare_shields("tv_spare_2"));
+        assert!(!spare_shields("tv_spare_1"), "drained spares stop shielding");
+        // Same name, NEW template oid (template rebuilt under its name):
+        // stale too.
+        let stale = drain_stale_spares(Some(("tpl_b", 90411, false)));
+        assert_eq!(stale.len(), 1);
+        assert!(!any_spares());
+
+        // A datallowconn EDGE drains (either direction: a spare minted from
+        // a sealed template with the template now observed connectable, and
+        // vice versa); a STABLE datallowconn keeps the spare (the
+        // always-connectable template1-shape pool, documented staleness).
+        assert!(add_spare(SpareEntry {
+            name: "tv_spare_c1".to_string(),
+            oid: 90441,
+            template_name: "tpl_c".to_string(),
+            template_oid: 90440,
+            template_connectable: false,
+        }));
+        assert!(add_spare(SpareEntry {
+            name: "tv_spare_c2".to_string(),
+            oid: 90442,
+            template_name: "tpl_c".to_string(),
+            template_oid: 90440,
+            template_connectable: true,
+        }));
+        let stale = drain_stale_spares(Some(("tpl_c", 90440, true)));
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, "tv_spare_c1", "sealed-minted spare drains on the edge");
+        assert!(spare_shields("tv_spare_c2"), "connectable-stable spare stays");
+        assert_eq!(drain_stale_spares(None).len(), 1);
+
+        // None = no valid pool: drains everything.
+        assert!(add_spare(sp("tv_spare_4", 90404, "tpl_a", 90400)));
+        assert_eq!(drain_stale_spares(None).len(), 1);
+        assert!(!any_spares());
+
+        // Excess drain (pool_size shrink): keeps the OLDEST `keep`
+        // identity-matching spares, returns the rest, never touches other
+        // identities.
+        assert!(add_spare(sp("tv_spare_e1", 90421, "tpl_e", 90420)));
+        assert!(add_spare(sp("tv_spare_e2", 90422, "tpl_e", 90420)));
+        assert!(add_spare(sp("tv_spare_e3", 90423, "tpl_e", 90420)));
+        assert!(add_spare(sp("tv_spare_o1", 90431, "tpl_o", 90430)));
+        let excess = take_excess_spares("tpl_e", 90420, 1);
+        let mut names: Vec<&str> = excess.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["tv_spare_e2", "tv_spare_e3"]);
+        assert!(spare_shields("tv_spare_e1"), "oldest survivor stays");
+        assert!(spare_shields("tv_spare_o1"), "other identities untouched");
+        assert!(take_excess_spares("tpl_e", 90420, 1).is_empty());
+        assert_eq!(drain_stale_spares(None).len(), 2);
+
+        // remove_spare reports presence; the seq is monotonic (burned names
+        // never reused).
+        assert!(add_spare(sp("tv_spare_5", 90405, "tpl_a", 90400)));
+        assert!(remove_spare("tv_spare_5"));
+        assert!(!remove_spare("tv_spare_5"));
+        let s1 = next_spare_seq();
+        let s2 = next_spare_seq();
+        assert!(s2 > s1);
+
+        // Capacity: the table is bounded and overflow is a silent skip-add
+        // (fail-safe: an unregistered spare just reaps).
+        for i in 0..MAX_SPARES {
+            assert!(add_spare(sp(&format!("tv_spare_f{i}"), 91000 + i as Oid, "tpl_f", 90900)));
+        }
+        assert!(!add_spare(sp("tv_spare_overflow", 91999, "tpl_f", 90900)));
+        assert_eq!(drain_stale_spares(None).len(), MAX_SPARES);
+
+        // Flush marks: unmarked -> no match; mark -> exact-identity match;
+        // an advanced datfrozenxid OR datminmxid (completed wraparound
+        // autovacuum) reads unmarked; re-mark updates in place; clear
+        // (observed-unsealed invalidation) removes.
+        assert!(!template_flushed_matches(90400, 700, 1));
+        mark_template_flushed(90400, 700, 1);
+        assert!(template_flushed_matches(90400, 700, 1));
+        assert!(!template_flushed_matches(90400, 800, 1));
+        assert!(!template_flushed_matches(90400, 700, 2));
+        assert!(!template_flushed_matches(90401, 700, 1));
+        mark_template_flushed(90400, 800, 2);
+        assert!(template_flushed_matches(90400, 800, 2));
+        assert!(!template_flushed_matches(90400, 700, 1));
+        clear_template_flushed(90400);
+        assert!(!template_flushed_matches(90400, 800, 2));
+        // Mark-table overflow is fail-safe: the 65th template just never
+        // marks (keeps checkpointing), existing marks intact.
+        for i in 0..MAX_TEMPLATE_FLUSH_MARKS {
+            mark_template_flushed(92000 + i as Oid, 1, 1);
+        }
+        mark_template_flushed(93000, 1, 1);
+        assert!(!template_flushed_matches(93000, 1, 1));
+        assert!(template_flushed_matches(92000, 1, 1));
+        // Dead-oid pruning (the reap-pass tail): marks whose template is
+        // absent from the live oid set are dropped, live ones survive —
+        // deleting the retain call would leak one slot per template
+        // rebuild until marking silently stops at the table bound.
+        retain_template_flush_marks(&[92000]);
+        assert!(template_flushed_matches(92000, 1, 1));
+        assert!(!template_flushed_matches(92001, 1, 1), "dead-oid mark pruned");
+        retain_template_flush_marks(&[]);
+        assert!(!template_flushed_matches(92000, 1, 1));
+
+        // The spare-name-overflow log latch fires exactly once per
+        // lifetime (the misconfiguration is permanent: PGC_POSTMASTER
+        // prefix, monotonic seq).
+        assert!(pool_name_overflow_log_once());
+        assert!(!pool_name_overflow_log_once());
     }
 }

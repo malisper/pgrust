@@ -471,6 +471,17 @@ pub(crate) fn service_pass() -> PgResult<()> {
         // which is us).
         registry::wake_janitor();
     }
+
+    // D3 warm-pool handout, FIRST: an entry whose template has a live spare
+    // is satisfied by a catalog-only RENAME (pool.rs choreography) instead
+    // of a file copy; handout failures fall through to the mint paths below
+    // — a waiter is never failed on a pool problem. With the pool off (no
+    // spares) this is one registry probe.
+    let batch = crate::pool::service_handouts(batch)?;
+    if batch.is_empty() {
+        return Ok(());
+    }
+
     if batch.len() == 1 {
         return service_serial(&batch);
     }
@@ -539,9 +550,9 @@ pub(crate) fn service_pass() -> PgResult<()> {
 fn service_serial(entries: &[registry::PendingEnsure]) -> PgResult<()> {
     for p in entries {
         let outcome = match mint_one(p) {
-            Ok(minted) => {
+            Ok(created) => {
                 let waiters = registry::complete_ensure(p.gen, Ok(()), pg_clock::mono_ns());
-                log_mint_success(minted, p, waiters.len());
+                log_mint_success(created.is_some(), p, waiters.len());
                 waiters
             }
             Err(e) => {
@@ -583,11 +594,14 @@ fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
                 .filter(|o| matches!(o, BatchOutcome::Minted { .. }))
                 .count();
             if n_minted > 0 {
+                // "shared checkpoint cycle", not "pair": the sealed-template
+                // skip (mint_batch_body) may have elided the pre-checkpoint,
+                // in which case the adjacent skip line says so.
                 let _ = log_report(
                     LOG,
                     format!(
                         "pgrust ephemeral-db janitor: batch-minted {n_minted} ephemeral \
-                         database(s) in one transaction with one checkpoint pair"
+                         database(s) in one transaction with one shared checkpoint cycle"
                     ),
                 );
             }
@@ -627,6 +641,7 @@ fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
                         name: p.name.clone(),
                         template: p.template.clone(),
                         owner_name: p.owner_name.clone(),
+                        spare: p.spare,
                     }),
                 }
             }
@@ -767,8 +782,19 @@ fn preflight_probe(batch: &[registry::PendingEnsure]) -> PgResult<Vec<PreflightV
     let mut verdicts = Vec::with_capacity(batch.len());
     for p in batch {
         let name_exists = pg_database::get_database_tuple_by_name(mcx, &p.name)?.is_some();
-        let template_state = pg_database::get_database_tuple_by_name(mcx, &p.template)?
-            .map(|t| (t.datistemplate, t.datallowconn));
+        let template_state = match pg_database::get_database_tuple_by_name(mcx, &p.template)? {
+            Some(t) => {
+                if !t.datistemplate || t.datallowconn {
+                    // Observed unsealed/connectable: invalidate the
+                    // sealed-template flush mark (the skip rationale on
+                    // mint_batch_body — the mark must not survive an
+                    // observed unseal).
+                    registry::clear_template_flushed(t.oid);
+                }
+                Some((t.datistemplate, t.datallowconn))
+            }
+            None => None,
+        };
         verdicts.push(preflight_verdict(name_exists, template_state));
     }
     xact::CommitTransactionCommand()?;
@@ -780,7 +806,7 @@ fn preflight_probe(batch: &[registry::PendingEnsure]) -> PgResult<Vec<PreflightV
 // ---------------------------------------------------------------------------
 
 /// Per-entry result inside a successful batch transaction.
-enum BatchOutcome {
+pub(crate) enum BatchOutcome {
     /// createdb ran for this entry (`copied` = pg_db_role_setting rows).
     Minted { copied: usize },
     /// The name appeared between preflight and the batch transaction (the
@@ -803,7 +829,7 @@ enum BatchOutcome {
 /// row ever became visible); an error out of the commit itself is ambiguous
 /// (the record may have made it durable), so the caller must NOT remove
 /// files — the serial retry's exists-check resolves the ambiguity.
-enum BatchFailure {
+pub(crate) enum BatchFailure {
     BeforeCommit(Box<PgError>),
     AtCommit(Box<PgError>),
 }
@@ -819,7 +845,7 @@ enum BatchFailure {
 /// `created` collects the dst oids of every completed createdb as we go, so
 /// the caller can remove orphaned datadirs when a later member (or the
 /// post-checkpoint) fails and the whole transaction aborts.
-fn mint_batch(
+pub(crate) fn mint_batch(
     batch: &[registry::PendingEnsure],
     created: &mut Vec<Oid>,
 ) -> Result<Vec<BatchOutcome>, BatchFailure> {
@@ -853,6 +879,37 @@ fn mint_batch_body(
     // no checkpoints at all, so the storm gate's flush-all bookkeeping
     // stays exact (flush-all lines == cycles that created something) and
     // no synchronous checkpoint stall is paid for nothing.
+    //
+    // SEALED-TEMPLATE PRE-CHECKPOINT SKIP (D3 warm-pool addendum): the
+    // pre-checkpoint is additionally skipped for a member whose template
+    // carries a registry flush mark. Rationale, discharged term by term:
+    // C's FLUSH_ALL pre-checkpoint exists solely to push the SOURCE
+    // database's dirty buffers (unlogged relations included — hence
+    // FLUSH_ALL) to disk before the file-level copy. Every batch member's
+    // template is datistemplate = true AND datallowconn = false at THIS
+    // transaction's snapshot (the re-checks below), so ordinary connections
+    // cannot dirty its buffers; once ONE flush-all checkpoint has completed
+    // while it is in that state, no dirty buffer of it can exist and the
+    // pre-checkpoint is a no-op — skipped. The mark is restart-lossy BY
+    // DESIGN: the first batch touching a template after janitor start pays
+    // the checkpoint once and marks it (self-healing, no marker file).
+    //
+    // Caveats, carried honestly:
+    // - Anti-wraparound autovacuum is the one writer datallowconn = false
+    //   does NOT stop. A COMPLETED wraparound vacuum advances
+    //   datfrozenxid/datminmxid (vac_update_datfrozenxid), which the mark
+    //   records — the mark self-invalidates and the next batch re-pays. A
+    //   vacuum still IN PROGRESS at batch time has dirtied buffers without
+    //   advancing either — the undetectable residual; the template recipe
+    //   therefore recommends freeze-at-seal (VACUUM FREEZE before sealing),
+    //   which parks the wraparound trigger ~2^31 xids out.
+    // - An unseal-write-reseal cycle: any janitor probe that OBSERVES the
+    //   template unsealed/connectable clears the mark
+    //   (registry::clear_template_flushed at the preflight and batch
+    //   re-check sites); a cycle entirely between observations is invisible
+    //   — documented residual, and the recipe never unseals (rebuilds get a
+    //   NEW template name).
+    // The POST-checkpoint is NOT touched (option 4 stays parked).
     let mut pre_checkpointed = false;
 
     let mut outcomes = Vec::with_capacity(batch.len());
@@ -872,6 +929,9 @@ fn mint_batch_body(
                 continue;
             }
             Some(t) if !t.datistemplate => {
+                // Observed unsealed: the flush mark must not survive a
+                // later re-seal (the skip rationale above).
+                registry::clear_template_flushed(t.oid);
                 outcomes.push(BatchOutcome::Refused(template_unsealed_error(
                     &p.template,
                     &p.name,
@@ -886,18 +946,27 @@ fn mint_batch_body(
             // (provably, at the batch's own snapshot) instead of
             // convention-guarded.
             Some(t) if t.datallowconn => {
+                // Observed connectable: same mark invalidation as above.
+                registry::clear_template_flushed(t.oid);
                 outcomes.push(BatchOutcome::DeferSerial);
                 continue;
             }
             Some(t) => t,
         };
-        if !pre_checkpointed {
+        if !pre_checkpointed
+            && !registry::template_flushed_matches(tpl.oid, tpl.datfrozenxid, tpl.datminmxid)
+        {
             checkpointer::RequestCheckpoint(
                 CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FLUSH_ALL,
             )?;
             pre_checkpointed = true;
         }
-        let stmt = build_createdb_stmt(mcx, &p.name, &p.template, &p.owner_name)?;
+        // Reaching here implies marked-or-just-checkpointed, so the mark is
+        // sound to (re)record NOW, even if the batch later aborts: the
+        // checkpoint itself is synchronous and non-transactional, and an
+        // abort dirties no template buffers.
+        registry::mark_template_flushed(tpl.oid, tpl.datfrozenxid, tpl.datminmxid);
+        let stmt = build_createdb_stmt(mcx, p)?;
         let db_oid = dbcommands::createdb_skip_checkpoints(mcx, &stmt)?;
         created.push(db_oid);
         let copied = pg_db_role_setting::copy_database_settings(mcx, tpl.oid, db_oid)?;
@@ -911,6 +980,17 @@ fn mint_batch_body(
     }
 
     if !created.is_empty() {
+        if !pre_checkpointed {
+            // The race suite's skip witness: copies happened and the
+            // pre-checkpoint was skipped outright (every copying member's
+            // template carried a live flush mark).
+            let _ = log_report(
+                LOG,
+                "pgrust ephemeral-db janitor: batch pre-checkpoint skipped: every member \
+                 template already sealed-and-flushed"
+                    .to_string(),
+            );
+        }
         // ONE post-checkpoint INSIDE the transaction, after the last copy
         // and before the single commit (skipped when nothing was copied —
         // no member owes the invariant then).
@@ -932,7 +1012,7 @@ fn mint_batch_body(
 /// the commit (the flush comment in the body), so recovery never replays
 /// the aborted batch's durable CREATE_FILE_COPY records without the DROPs
 /// that follow them. Never fails the pass.
-fn cleanup_orphaned_datadirs(created: &[Oid]) {
+pub(crate) fn cleanup_orphaned_datadirs(created: &[Oid]) {
     if created.is_empty() {
         return;
     }
@@ -973,7 +1053,7 @@ fn cleanup_orphaned_datadirs(created: &[Oid]) {
 // Shared helpers (serial + batch paths).
 // ---------------------------------------------------------------------------
 
-fn wake_waiters(waiters: &[ProcNumber]) {
+pub(crate) fn wake_waiters(waiters: &[ProcNumber]) {
     for &w in waiters {
         latch::SetLatch(types_storage::latch::LatchHandle::proc(w));
     }
@@ -1001,7 +1081,7 @@ fn log_mint_success(minted: bool, p: &registry::PendingEnsure, n_waiters: usize)
 /// are decided outside, or before any work inside, a live transaction), so
 /// the gates' contained-failure audits count batch-path refusals the same
 /// way they count serial ones.
-fn report_contained_refusal(e: &PgError, name: &str) {
+pub(crate) fn report_contained_refusal(e: &PgError, name: &str) {
     g::HoldInterrupts();
     elog::emit_error_report_for(e);
     let _ = log_report(
@@ -1043,10 +1123,11 @@ fn template_unsealed_error(template: &str, name: &str) -> Box<PgError> {
 
 /// Mint one Ensure: idempotency pre-check, sealed-template enforcement,
 /// then the internal CREATE DATABASE — all in one private transaction (the
-/// dropdb_this_victim template). Returns Ok(true) = created, Ok(false) =
+/// dropdb_this_victim template). Returns Ok(Some(oid)) = created (the new
+/// database's oid — the warm-pool replenisher registers it), Ok(None) =
 /// already existed (idempotent success). On Err the transaction is left
 /// for the caller's contain() to abort.
-fn mint_one(p: &registry::PendingEnsure) -> PgResult<bool> {
+pub(crate) fn mint_one(p: &registry::PendingEnsure) -> PgResult<Option<Oid>> {
     let cx = mcx::MemoryContext::new("pgrust janitor mint");
     xact::StartTransactionCommand()?;
     let mcx = cx.mcx();
@@ -1058,7 +1139,7 @@ fn mint_one(p: &registry::PendingEnsure) -> PgResult<bool> {
     // mint) — never half of each.
     if pg_database::get_database_tuple_by_name(mcx, &p.name)?.is_some() {
         xact::CommitTransactionCommand()?;
-        return Ok(false);
+        return Ok(None);
     }
 
     // Sealed-template enforcement, HERE and not in the grammar: the janitor
@@ -1069,6 +1150,17 @@ fn mint_one(p: &registry::PendingEnsure) -> PgResult<bool> {
     let Some(tpl) = pg_database::get_database_tuple_by_name(mcx, &p.template)? else {
         return Err(template_missing_error(&p.template));
     };
+    if !tpl.datistemplate || tpl.datallowconn {
+        // Observed unsealed/connectable: invalidate the sealed-template
+        // flush mark (the mint_batch_body skip rationale). The serial path
+        // is an observation site EXACTLY like preflight and the batch
+        // re-check — a single-entry tick bypasses preflight entirely
+        // (service_pass routes batch.len()==1 straight here), so skipping
+        // the clear here would let a mark survive an observed unseal and a
+        // later batch skip the FLUSH_ALL pre-checkpoint over a template
+        // whose recent writes are still dirty in shared buffers.
+        registry::clear_template_flushed(tpl.oid);
+    }
     if !tpl.datistemplate {
         return Err(template_unsealed_error(&p.template, &p.name));
     }
@@ -1077,7 +1169,7 @@ fn mint_one(p: &registry::PendingEnsure) -> PgResult<bool> {
     // reaches the same effect via createdb's "owner" DefElem (datdba
     // resolution + member_can_set_role, which the janitor's superuser
     // session passes) — no post-CREATE ALTER OWNER needed.
-    let stmt = build_createdb_stmt(mcx, &p.name, &p.template, &p.owner_name)?;
+    let stmt = build_createdb_stmt(mcx, p)?;
     let db_oid = dbcommands::createdb(mcx, &stmt)?;
 
     // M4 clone fidelity, MINT-TIME ONLY: inherit the template's
@@ -1101,33 +1193,62 @@ fn mint_one(p: &registry::PendingEnsure) -> PgResult<bool> {
         );
     }
     xact::CommitTransactionCommand()?;
-    Ok(true)
+    Ok(Some(db_oid))
+}
+
+/// One string-valued DefElem (the gram_core actions.rs construction
+/// precedent), shared by the createdb and ALTER DATABASE stmt builders.
+fn def<'mcx>(mcx: Mcx<'mcx>, defname: &'static str, value: &str) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        DefElem {
+            defnamespace: None,
+            defname: Some(defname),
+            arg: Some(Node::mk_string(mcx, str_in(mcx, value)?)?),
+            defaction: DefElemAction::DEFELEM_UNSPEC,
+            location: -1,
+        },
+    )
 }
 
 /// Programmatic `CREATE DATABASE <name> TEMPLATE <t> STRATEGY file_copy
-/// OWNER <role>` (the gram_core actions.rs DefElem construction precedent).
+/// OWNER <role>`, plus `ALLOW_CONNECTIONS false` for warm-pool spare specs
+/// (`p.spare`): a listed spare must not be enterable — any role with
+/// CONNECT could otherwise connect-write-disconnect between ticks and the
+/// next handout would serve the dirtied database as a fresh template clone
+/// (the handout's occupancy check only sees clients still connected AT
+/// handout time). The handout transaction flips connectability back on
+/// (pool::handout_one). Client Ensures keep the stock createdb default.
 fn build_createdb_stmt<'mcx>(
     mcx: Mcx<'mcx>,
-    name: &str,
-    template: &str,
-    owner: &str,
+    p: &registry::PendingEnsure,
 ) -> PgResult<CreatedbStmt<'mcx>> {
-    fn def<'mcx>(mcx: Mcx<'mcx>, defname: &'static str, value: &str) -> PgResult<Node<'mcx>> {
-        Node::mk(
-            mcx,
-            DefElem {
-                defnamespace: None,
-                defname: Some(defname),
-                arg: Some(Node::mk_string(mcx, str_in(mcx, value)?)?),
-                defaction: DefElemAction::DEFELEM_UNSPEC,
-                location: -1,
-            },
-        )
-    }
-    let mut options = NodeList::make1(mcx, def(mcx, "template", template)?)?;
+    let mut options = NodeList::make1(mcx, def(mcx, "template", &p.template)?)?;
     options.lappend(mcx, def(mcx, "strategy", "file_copy")?)?;
-    options.lappend(mcx, def(mcx, "owner", owner)?)?;
+    options.lappend(mcx, def(mcx, "owner", &p.owner_name)?)?;
+    if p.spare {
+        options.lappend(mcx, def(mcx, "allow_connections", "false")?)?;
+    }
     Ok(CreatedbStmt {
+        dbname: Some(str_in(mcx, &p.name)?),
+        options,
+    })
+}
+
+/// Programmatic `ALTER DATABASE <name> WITH ALLOW_CONNECTIONS <bool>`
+/// (pool::handout_one's connectability flip). Internally callable like the
+/// rename/chown entries: AlterDatabase's only PreventInTransactionBlock
+/// arm is SET TABLESPACE's, which this stmt never selects.
+pub(crate) fn build_alterdb_allowconn_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+    allow: bool,
+) -> PgResult<types_nodes::parsenodes::AlterDatabaseStmt<'mcx>> {
+    let options = NodeList::make1(
+        mcx,
+        def(mcx, "allow_connections", if allow { "true" } else { "false" })?,
+    )?;
+    Ok(types_nodes::parsenodes::AlterDatabaseStmt {
         dbname: Some(str_in(mcx, name)?),
         options,
     })
@@ -1186,6 +1307,7 @@ mod tests {
             name: name.to_string(),
             template: "tpl_x".to_string(),
             owner_name: "minter".to_string(),
+            spare: false,
         }
     }
 

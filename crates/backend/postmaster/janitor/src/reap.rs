@@ -25,6 +25,13 @@ use types_core::Oid;
 ///   sweep is graceless and a zero/short per-template grace reaps at the
 ///   first idle observation, so without the shield a minted database could
 ///   be dropped in the mint-to-first-connect window (D2 race suite).
+/// - A listed warm-pool spare (`spare_shielded`, from
+///   `registry::spare_shields`) exempts like a pin for as long as it is
+///   listed (D3 warm pool): spares are zero-connection by construction, so
+///   without the shield the pool would reap itself after grace. Unlisted
+///   leftovers (post-restart — the registry is restart-lossy — or spares
+///   dropped from the pool after a poisoned handout) are ordinary
+///   candidates, which is exactly the wanted cold-start/self-heal behavior.
 pub fn reap_candidate(
     name: &str,
     prefix: &str,
@@ -32,6 +39,7 @@ pub fn reap_candidate(
     pinned: bool,
     is_own_db: bool,
     ensure_shielded: bool,
+    spare_shielded: bool,
 ) -> bool {
     !prefix.is_empty()
         && name.as_bytes().starts_with(prefix.as_bytes())
@@ -39,6 +47,7 @@ pub fn reap_candidate(
         && !pinned
         && !is_own_db
         && !ensure_shielded
+        && !spare_shielded
 }
 
 /// Continuous zero-backend streaks, keyed by database oid, living in janitor
@@ -116,65 +125,81 @@ mod tests {
     #[test]
     fn template_exemption_is_absolute() {
         // Prefix-matching template: never a candidate (spec item 1).
-        assert!(!reap_candidate("tv_tpl", "tv_", true, false, false, false));
+        assert!(!reap_candidate("tv_tpl", "tv_", true, false, false, false, false));
         // Sealed template under the recommended out-of-prefix convention.
-        assert!(!reap_candidate("tpl_abc", "tv_", true, false, false, false));
+        assert!(!reap_candidate("tpl_abc", "tv_", true, false, false, false, false));
         // The same name without the template bit IS a candidate.
-        assert!(reap_candidate("tv_tpl", "tv_", false, false, false, false));
+        assert!(reap_candidate("tv_tpl", "tv_", false, false, false, false, false));
     }
 
     #[test]
     fn pin_exempts() {
-        assert!(!reap_candidate(
-            "tv_pinned",
+        assert!(!reap_candidate("tv_pinned",
             "tv_",
             false,
             true,
             false,
-            false
-        ));
-        assert!(reap_candidate(
-            "tv_pinned",
+            false, false));
+        assert!(reap_candidate("tv_pinned",
             "tv_",
             false,
             false,
             false,
-            false
-        ));
+            false, false));
     }
 
     #[test]
     fn prefix_scoping_is_exact() {
-        assert!(reap_candidate("tv_x", "tv_", false, false, false, false));
-        assert!(!reap_candidate("tx_x", "tv_", false, false, false, false));
-        assert!(!reap_candidate("tv", "tv_", false, false, false, false));
+        assert!(reap_candidate("tv_x", "tv_", false, false, false, false, false));
+        assert!(!reap_candidate("tx_x", "tv_", false, false, false, false, false));
+        assert!(!reap_candidate("tv", "tv_", false, false, false, false, false));
         // Empty prefix means the feature is off: nothing ever matches, even
         // though every string starts with "".
-        assert!(!reap_candidate("tv_x", "", false, false, false, false));
+        assert!(!reap_candidate("tv_x", "", false, false, false, false, false));
     }
 
     #[test]
     fn own_database_is_never_a_candidate() {
-        assert!(!reap_candidate(
-            "postgres", "post", false, false, true, false
-        ));
+        assert!(!reap_candidate("postgres", "post", false, false, true, false, false));
     }
 
     #[test]
     fn ensure_shield_exempts_like_a_pin() {
         // An in-flight/lingering mint Ensure shields from sweep AND reap
         // (deleting the ensure_shielded clause fails this).
-        assert!(!reap_candidate(
-            "tv_minting",
+        assert!(!reap_candidate("tv_minting",
             "tv_",
+            false,
+            false,
+            false,
+            true, false));
+        assert!(reap_candidate("tv_minting",
+            "tv_",
+            false,
+            false,
+            false,
+            false, false));
+    }
+
+    #[test]
+    fn spare_shield_exempts_like_a_pin() {
+        // A listed warm-pool spare is exempt from sweep AND reap (deleting
+        // the spare_shielded clause fails this); an unlisted leftover with
+        // the same shape is an ordinary candidate (cold-start sweep /
+        // poisoned-spare self-heal).
+        assert!(!reap_candidate(
+            "tv_spare_1",
+            "tv_",
+            false,
             false,
             false,
             false,
             true
         ));
         assert!(reap_candidate(
-            "tv_minting",
+            "tv_spare_1",
             "tv_",
+            false,
             false,
             false,
             false,

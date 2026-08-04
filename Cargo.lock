@@ -7989,6 +7989,7 @@ name = "janitor"
 version = "0.0.0"
 dependencies = [
  "aclchk",
+ "adt_acl",
  "bgworker",
  "checkpointer",
  "datum",

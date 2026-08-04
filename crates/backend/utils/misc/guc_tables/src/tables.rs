@@ -915,6 +915,14 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // 0 = unlimited. Counting semantics documented on
     // janitor::mint::live_owned_names' call site.
     GucIntSetting { name: "pgrust.ephemeral_db_max_per_role", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Caps how many live ephemeral databases mint-on-connect will hold per role (0 = unlimited)."), long_desc: Some("Counted as prefix-matching non-template databases owned by the connecting role, plus that role's in-flight and just-completed mints."), flags: 0, variable: &vars::pgrust_ephemeral_db_max_per_role, boot_val: GucDefaultValue::Int(0), min: 0, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_pool_size (pgrust-only, test-views.md D3 warm-pool
+    // addendum): how many pre-minted spare clones of the DEFAULT template the
+    // janitor keeps warm; 0 = feature off. v1 scope is the default template
+    // ONLY — named-template pools are out of scope (recorded decision, the
+    // addendum). PGC_SIGHUP: the janitor re-reads it every tick after its
+    // reload idiom — shrinking it (or 0) drains the pool, growing refills
+    // it. Max 64 = registry::MAX_SPARES (the spare table's fixed bound).
+    GucIntSetting { name: "pgrust.ephemeral_db_pool_size", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Number of pre-minted spare clones of the default template the janitor keeps warm (0 = off)."), long_desc: Some("Applies to pgrust.ephemeral_db_default_template only (v1; named-template pools are out of scope). A default-template mint request is satisfied by a catalog-only RENAME of a spare instead of a file copy; spares are named <prefix>spare_<seq> (a namespace reserved from minting), owned by the janitor and not connectable until handout, and replenished in background janitor ticks. Spares are invalidated on template repoint/rebuild/unseal and on any observed change of the template's ALLOW_CONNECTIONS; a permanently connectable default template keeps its spares, so handouts may serve content as old as each spare's mint — reseal the template (or rebuild it under a new name) to force freshness."), flags: 0, variable: &vars::pgrust_ephemeral_db_pool_size, boot_val: GucDefaultValue::Int(0), min: 0, max: 64, check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
     // DOP cap for runtime-engine engagements, consulted ONLY under
     // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm

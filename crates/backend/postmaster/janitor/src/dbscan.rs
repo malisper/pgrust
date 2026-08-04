@@ -25,6 +25,19 @@ pub(crate) struct DbRow {
 /// takes &str — a harness minting non-UTF-8 ephemeral names is out of
 /// contract.
 pub(crate) fn scan_prefix_rows(prefix: &str) -> PgResult<Vec<DbRow>> {
+    scan_prefix_rows_collect(prefix, None)
+}
+
+/// `scan_prefix_rows` plus an every-row oid collector (`all_oids` — the
+/// UNFILTERED database population, prefix-matching or not, templates
+/// included). The reap pass feeds it to
+/// `registry::retain_template_flush_marks`: templates conventionally live
+/// OUTSIDE the prefix, so the filtered row set cannot prune dead flush
+/// marks — and this way the tick's ONE catalog scan serves both needs.
+pub(crate) fn scan_prefix_rows_collect(
+    prefix: &str,
+    mut all_oids: Option<&mut Vec<Oid>>,
+) -> PgResult<Vec<DbRow>> {
     let mut rows = Vec::new();
 
     let cx = mcx::MemoryContext::new("pgrust janitor pg_database scan");
@@ -45,6 +58,9 @@ pub(crate) fn scan_prefix_rows(prefix: &str) -> PgResult<Vec<DbRow>> {
             debug_assert!(!isnull);
             d
         };
+        if let Some(v) = all_oids.as_deref_mut() {
+            v.push(att(pg_database::Anum_pg_database_oid).as_oid());
+        }
         let name_d = att(pg_database::Anum_pg_database_datname);
         // SAFETY: a NameData column datum: NAMEDATALEN readable bytes,
         // NUL-terminated (the pg_database crate's own decode contract).

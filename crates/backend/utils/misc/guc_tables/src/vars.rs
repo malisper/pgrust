@@ -339,6 +339,10 @@ pub static pgrust_ephemeral_db_grace: GucIntVar = GucSlot::new("pgrust_ephemeral
 pub static pgrust_ephemeral_db_mint_roles: GucStringVar = GucSlot::new("pgrust_ephemeral_db_mint_roles");
 pub static pgrust_ephemeral_db_max_per_role: GucIntVar = GucSlot::new("pgrust_ephemeral_db_max_per_role");
 pub static pgrust_ephemeral_db_default_template: GucStringVar = GucSlot::new("pgrust_ephemeral_db_default_template");
+// pgrust-only (docs/design/test-views.md D3 warm-pool addendum, no C
+// symbol): how many pre-minted spare clones of the DEFAULT template the
+// janitor keeps warm (0 = off). PGC_SIGHUP, re-read every janitor tick.
+pub static pgrust_ephemeral_db_pool_size: GucIntVar = GucSlot::new("pgrust_ephemeral_db_pool_size");
 // pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
 // force-overrides + the Gather read-fairness stride. Registered from the
 // deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is

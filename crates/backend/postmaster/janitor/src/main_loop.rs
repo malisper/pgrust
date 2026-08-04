@@ -12,7 +12,7 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 use crate::dbscan::{scan_prefix_rows, DbRow};
 use crate::marker::{self, Guard};
 use crate::reap::{reap_candidate, StreakTracker};
-use crate::{grammar, mint, registry};
+use crate::{grammar, mint, pool, registry};
 
 /// Poll cadence (spec: "~500ms").
 const TICK_MS: i64 = 500;
@@ -170,6 +170,18 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
             contain(e, "mint service pass")?;
         }
 
+        // D3 warm-pool replenish, BETWEEN mint servicing and the reap pass
+        // (recorded ordering decision): after the deferred sweep (fresh
+        // spares must not be minted just to be swept), after mint servicing
+        // (waiters outrank refill, and handed-out slots are visible to the
+        // deficit count), before reap enumeration (new spares are
+        // registered/shielded before the pass that would otherwise see them
+        // as zero-connection candidates). The paused branch above skips it
+        // for free.
+        if let Err(e) = pool::replenish_pass(&prefix) {
+            contain(e, "warm-pool replenish pass")?;
+        }
+
         if let Err(e) = reap_pass(&prefix, &mut streaks) {
             contain(e, "reap pass")?;
         }
@@ -211,6 +223,18 @@ fn list_prefix_databases(prefix: &str) -> PgResult<Vec<DbRow>> {
     let rows = scan_prefix_rows(prefix)?;
     xact::CommitTransactionCommand()?;
     Ok(rows)
+}
+
+/// `list_prefix_databases` plus the UNFILTERED live-oid set from the same
+/// single scan (reap pass only): the oid set feeds the dead-template
+/// flush-mark pruning — templates live outside the prefix, so the filtered
+/// rows cannot drive it.
+fn list_prefix_databases_all_oids(prefix: &str) -> PgResult<(Vec<DbRow>, Vec<Oid>)> {
+    xact::StartTransactionCommand()?;
+    let mut all_oids: Vec<Oid> = Vec::new();
+    let rows = crate::dbscan::scan_prefix_rows_collect(prefix, Some(&mut all_oids))?;
+    xact::CommitTransactionCommand()?;
+    Ok((rows, all_oids))
 }
 
 /// The adoption guard (spec item 4), run once before the first tick.
@@ -296,6 +320,7 @@ fn sweep_rows(prefix: &str, rows: &[DbRow]) -> PgResult<()> {
                 registry::is_pinned(&d.name),
                 d.oid == own,
                 registry::ensure_shields(&d.name),
+                registry::spare_shields(&d.name),
             )
         })
         .map(|d| (d.oid, d.name.as_str()))
@@ -319,7 +344,14 @@ fn sweep_rows(prefix: &str, rows: &[DbRow]) -> PgResult<()> {
 /// One reap tick (spec item 2): observe zero-backend streaks over the
 /// candidates and batch-drop the ones idle for at least the grace period.
 fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
-    let rows = list_prefix_databases(prefix)?;
+    let (rows, all_oids) = list_prefix_databases_all_oids(prefix)?;
+    // Flush-mark hygiene, piggybacked on the tick's one catalog scan: drop
+    // marks whose template no longer exists (a DROP DATABASE clears no
+    // mark — the observed-unseal sites key on a live tuple — and the
+    // rebuilds-get-a-NEW-name recipe would otherwise leak one dead slot
+    // per rebuild until marking silently stops at the table bound and
+    // every batch re-pays the pre-checkpoint).
+    registry::retain_template_flush_marks(&all_oids);
     let own = g::MyDatabaseId();
     let default_grace_secs = crate::ephemeral_db_grace_secs().max(0) as u64;
     // The one monotonic authority (determinism choke; never std::time).
@@ -335,6 +367,7 @@ fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
             registry::is_pinned(&d.name),
             d.oid == own,
             registry::ensure_shields(&d.name),
+            registry::spare_shields(&d.name),
         ) {
             continue;
         }
@@ -344,7 +377,7 @@ fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
         // (grammar::template_of): bare tokens carry no template segment and
         // reap on the default grace.
         let grace_secs = grammar::template_of(prefix, &d.name)
-            .and_then(|t| registry::template_grace_override(t))
+            .and_then(registry::template_grace_override)
             .map(|s| s.max(0) as u64)
             .unwrap_or(default_grace_secs);
         let grace_ns = grace_secs * 1_000_000_000;
@@ -399,7 +432,10 @@ fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
 /// (stretching every cycle and starving the very connection that could
 /// resolve the block) and emits a contained error report per tick. With the
 /// reset, retries cost at most one attempt per grace period.
-fn drop_batch(victims: &[(Oid, &str)], mut streaks: Option<&mut StreakTracker>) -> PgResult<usize> {
+pub(crate) fn drop_batch(
+    victims: &[(Oid, &str)],
+    mut streaks: Option<&mut StreakTracker>,
+) -> PgResult<usize> {
     let mut dropped = 0usize;
     for &(oid, name) in victims {
         match drop_one(oid, name) {
@@ -454,6 +490,22 @@ fn drop_one_gated(
             LOG,
             format!(
                 "pgrust ephemeral-db janitor: skipping drop of \"{name}\": pinned during this cycle"
+            ),
+        );
+        return Ok(false);
+    }
+    // Warm-pool spare re-check, same last-instant discipline as pins: spare
+    // registration is janitor-loop-internal today (replenish and reap run
+    // sequentially in one thread), so this is defensive rather than
+    // race-closing — but the shield contract says "exempt while listed" and
+    // the enumeration-to-drop window spans the whole batch; a future
+    // registration path outside the loop must not silently lose spares.
+    if registry::spare_shields(name) {
+        let _ = log_report(
+            LOG,
+            format!(
+                "pgrust ephemeral-db janitor: skipping drop of \"{name}\": listed as a warm-pool \
+                 spare"
             ),
         );
         return Ok(false);
@@ -541,5 +593,30 @@ mod tests {
             "unpinned drop verdict passes through, got {r:?}"
         );
         assert!(ran.get(), "unpinned victim must reach the drop action");
+
+        // The warm-pool spare re-check gates identically (deleting the
+        // spare_shields re-check in drop_one_gated fails this).
+        let spare = "tv_dropgate_spare";
+        assert!(registry::add_spare(registry::SpareEntry {
+            name: spare.to_string(),
+            oid: 90203,
+            template_name: "tpl_gate".to_string(),
+            template_oid: 90200,
+            template_connectable: false,
+        }));
+        let ran = Cell::new(false);
+        let r = drop_one_gated(90203, spare, |_, _| {
+            ran.set(true);
+            Ok(true)
+        });
+        assert!(
+            matches!(r, Ok(false)),
+            "listed spare must be skipped as Ok(false), got {r:?}"
+        );
+        assert!(
+            !ran.get(),
+            "drop action ran on a listed spare: the pre-drop spare re-check is gone"
+        );
+        assert!(registry::remove_spare(spare));
     }
 }

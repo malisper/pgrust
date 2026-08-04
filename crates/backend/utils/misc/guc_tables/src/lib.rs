@@ -272,6 +272,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_ephemeral_db_default_template,
         set: backing::set_pgrust_ephemeral_db_default_template,
     });
+    vars::pgrust_ephemeral_db_pool_size.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_pool_size,
+        set: backing::set_pgrust_ephemeral_db_pool_size,
+    });
     vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
         get: backing::pgrust_runtime_scan_pool,
         set: backing::set_pgrust_runtime_scan_pool,

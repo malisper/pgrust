@@ -45,6 +45,7 @@ pub mod grammar;
 mod main_loop;
 pub mod marker;
 pub mod mint;
+pub mod pool;
 pub mod reap;
 pub mod registry;
 
@@ -92,6 +93,12 @@ pub fn ephemeral_db_default_template() -> String {
     guc_tables::vars::pgrust_ephemeral_db_default_template
         .read()
         .unwrap_or_default()
+}
+
+/// `pgrust.ephemeral_db_pool_size` (PGC_SIGHUP, default 0 = warm pool off).
+/// The janitor re-reads it every tick after its reload idiom (pool.rs).
+pub fn ephemeral_db_pool_size() -> i32 {
+    guc_tables::vars::pgrust_ephemeral_db_pool_size.read()
 }
 
 /// Static bgworker registration (ApplyLauncherRegister precedent): called by
