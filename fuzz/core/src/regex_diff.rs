@@ -39,10 +39,17 @@
 //!               the mapped values; the raw-byte grammar stays ASCII so
 //!               the corpus reads as patterns.
 //!
-//! Stack note: both sides guard recursion (C: stack_is_too_deep over a
-//! 100kB budget; Rust: stack_depth crate). At the 96-chr pattern cap parse
-//! depth stays far below either budget, so the guards are dead on both
-//! sides rather than a compared surface.
+//! Stack note: both sides guard recursion (C: stack_is_too_deep, Rust:
+//! stack_depth crate), armed at the same 2048kB real-server budget. PARSE
+//! nesting at the 96-chr pattern cap stays far below either budget, but
+//! bounded-repeat chains ({n} over nested groups) drive duptraverse
+//! (C regc_nfa.c:1386 / Rust regex_nfa.rs duptraverse) thousands of
+//! frames deep at parse time, INSIDE the budgets' environmental band:
+//! measured (task #69 r3 adjudication, macOS arm64 release) the Rust
+//! frame is 96 bytes vs C's 48, so Rust trips REG_ETOOBIG at half the
+//! recursion depth C survives — identical guard placement, environmental
+//! frame sizes. See stack_band_carve below for how the error plane
+//! tolerates exactly that band, input-decidably.
 
 use regex::{
     RegMatch, RegcompResult, RegexCompiled, RegexecResult, RegprefixResult,
@@ -165,6 +172,159 @@ fn is_etoobig(msg: &str) -> bool {
     msg == "regular expression is too complex"
 }
 
+/// Carve-band floor for `stack_band_carve`. Calibration (task #69 r3
+/// adjudication, 2026-08-03): the ten banked r2+r3 class artifacts
+/// estimate 7,750..857,430; 99.2% of the committed corpus estimates
+/// < 4,000. For a guard to trip at estimate 4,000 within the 2048kB
+/// budget it would need >524 bytes/duptraverse-frame — 11x the measured
+/// release frame (96B Rust / 48B C) and ~2x the deepest observed
+/// debug/instrumented inflation (~295B), so everything below the floor
+/// stays on the strict byte-exact plane.
+const STACK_BAND_MIN_EST: u64 = 4000;
+
+/// Estimated deepest single NFA-duplication recursion the pattern can
+/// drive: the longest chained path any bounded quantifier builds
+/// (C regcomp.c repeat() chains progressively longer dupnfa copies, so
+/// the deepest duptraverse ~ the full chained path of the largest
+/// quantified fragment, multipliers composing across nesting). Total on
+/// malformed input — these patterns are malformed by construction.
+/// ERE/ARE surface grammar only (see stack_band_carve's cflags gate);
+/// REG_EXPANDED whitespace is NOT skipped, which can only under-estimate
+/// (narrower carve, never wider).
+fn dup_chain_estimate(pat: &[u32]) -> u64 {
+    const CAP: u64 = u32::MAX as u64;
+    struct Frame {
+        cur: u64,
+        best: u64,
+    }
+    // (mult, chrs consumed) for a quantifier at pat[i..], if one is there.
+    fn quant(pat: &[u32], i: usize) -> Option<(u64, usize)> {
+        match pat.get(i) {
+            Some(&c) if c == '*' as u32 || c == '?' as u32 || c == '+' as u32 => {
+                // unbounded/optional: no bounded chain (C repeat() REP(0,INF)/
+                // REP(1,INF)/REP(0,1) build loop/skip arcs, not dup chains)
+                Some((1, 1))
+            }
+            Some(&c) if c == '{' as u32 => {
+                let mut j = i + 1;
+                let mut m: u64 = 0;
+                let mut saw = false;
+                while j < pat.len() && (0x30..=0x39).contains(&pat[j]) {
+                    m = (m * 10 + (pat[j] - 0x30) as u64).min(1 << 30);
+                    saw = true;
+                    j += 1;
+                }
+                if !saw {
+                    return None; // '{' without digits: literal brace, no bound
+                }
+                let mut nmax = m;
+                if pat.get(j) == Some(&(',' as u32)) {
+                    j += 1;
+                    let mut n2: u64 = 0;
+                    let mut saw2 = false;
+                    while j < pat.len() && (0x30..=0x39).contains(&pat[j]) {
+                        n2 = (n2 * 10 + (pat[j] - 0x30) as u64).min(1 << 30);
+                        saw2 = true;
+                        j += 1;
+                    }
+                    // {m,}: m chained copies + loop; {m,n}: n copies
+                    nmax = if saw2 { n2.max(m) } else { m };
+                }
+                if pat.get(j) != Some(&('}' as u32)) {
+                    return None; // unclosed bound: engines error, no duplication
+                }
+                if m > 255 || nmax > 255 {
+                    return Some((1, j + 1 - i)); // > DUPMAX: REG_BADBR, no duplication
+                }
+                Some((nmax.max(1), j + 1 - i))
+            }
+            _ => None,
+        }
+    }
+    let mut stack: Vec<Frame> = vec![Frame { cur: 0, best: 0 }];
+    let mut max_chain: u64 = 0;
+    let mut i = 0usize;
+    let n = pat.len();
+    while i < n {
+        let c = pat[i];
+        let mut atom: u64 = 1;
+        if c == '(' as u32 {
+            stack.push(Frame { cur: 0, best: 0 });
+            i += 1;
+            continue;
+        } else if c == ')' as u32 {
+            if stack.len() > 1 {
+                let f = stack.pop().unwrap();
+                atom = f.best.max(f.cur).max(1);
+            }
+            i += 1;
+        } else if c == '|' as u32 {
+            let f = stack.last_mut().unwrap();
+            f.best = f.best.max(f.cur);
+            f.cur = 0;
+            i += 1;
+            continue;
+        } else if c == '\\' as u32 {
+            i += 2; // escape + escaped chr (trailing backslash just ends the scan)
+        } else if c == '[' as u32 {
+            // bracket expression: one atom; skip to the closing ']'
+            let mut j = i + 1;
+            if pat.get(j) == Some(&('^' as u32)) {
+                j += 1;
+            }
+            if pat.get(j) == Some(&(']' as u32)) {
+                j += 1; // leading ']' is literal
+            }
+            while j < n && pat[j] != ']' as u32 {
+                j += 1;
+            }
+            i = (j + 1).min(n);
+        } else {
+            i += 1;
+        }
+        if let Some((mult, used)) = quant(pat, i) {
+            i += used;
+            atom = atom.saturating_mul(mult).min(CAP);
+            if mult >= 2 {
+                max_chain = max_chain.max(atom);
+            }
+        }
+        let f = stack.last_mut().unwrap();
+        f.cur = f.cur.saturating_add(atom).min(CAP);
+    }
+    max_chain
+}
+
+/// INPUT-DECIDABLE stack-band predicate (task #69 r3 adjudication): true
+/// iff the PATTERN ALONE says compile can drive the guarded duptraverse
+/// recursion deep enough that the 2048kB guards' environmental trip band
+/// is in play. Decided before and independent of either engine's verdict
+/// — never "the sides disagree" (the carve-discipline rule). Gated to
+/// ERE/ARE compile syntax, the grammar the estimator reads; BASIC and
+/// QUOTE patterns always stay on the strict plane.
+fn stack_band_carve(pat: &[u32], cflags: i32) -> bool {
+    use regex_core::regex_consts::{REG_EXTENDED, REG_QUOTE};
+    (cflags & REG_QUOTE) == 0
+        && (cflags & REG_EXTENDED) != 0
+        && dup_chain_estimate(pat) >= STACK_BAND_MIN_EST
+}
+
+/// The compile plane's error-vs-error tolerance, as a pure function so the
+/// must-fail controls below can probe it directly: BOTH sides failed, and
+/// exactly one reported REG_ETOOBIG (either direction — trip points are
+/// environmental on both sides), and the pattern is in the input-decidable
+/// stack band. Everything else stays byte-exact: an in-band mutant that
+/// produces a WRONG non-ETOOBIG message is still caught, as is one-sided
+/// ETOOBIG on any pattern outside the band.
+fn compile_error_carve_applies(
+    pat: &[u32],
+    cflags: i32,
+    rust_msg: &str,
+    c_msg: &str,
+) -> bool {
+    (is_etoobig(rust_msg) != is_etoobig(c_msg)) && stack_band_carve(pat, cflags)
+}
+
 /// Rust-side export serialization — the exact layout pg_diff_reg_export
 /// writes (see the C header comment). Truncation cap identical.
 fn rust_export(re: &RegexT) -> Vec<i32> {
@@ -248,18 +408,23 @@ pub fn regex_diff(data: &[u8]) {
                 return;
             }
             let c_msg = c_regerror(c_code);
-            if c_code != 0 && (is_etoobig(&f.message) != is_etoobig(&c_msg)) {
-                // BOTH sides failed, exactly one with too-complex: the guard
-                // side gave up mid-parse before reaching the true syntax
-                // error the other side reports — the SAME environmental
-                // stack-band asymmetry as the error-vs-success carve above
-                // (r2/r3 CI cluster class crash-04cf69b5 &c: Rust ETOOBIG at the
-                // 2048kB default vs C "parentheses () not balanced"; at a
-                // 30MiB budget both report the syntax error — see
-                // regex_core/tests/etoobig_error_priority.rs). The exec and
-                // prefix planes below already carve this direction; the
-                // compile plane's hole is closed here. The DETERMINISTIC
-                // too-complex mechanism stays pinned by
+            if c_code != 0 && compile_error_carve_applies(&pat, cflags, &f.message, &c_msg) {
+                // BOTH sides failed, exactly one with too-complex, on a
+                // pattern the input predicate puts in the stack band: the
+                // guard side gave up mid-duplication before reaching the
+                // true syntax error the other side reports (r2/r3 CI cluster
+                // class crash-04cf69b5, crash-067339cc &c: Rust ETOOBIG at
+                // the 2048kB default vs C "parentheses () not balanced" /
+                // "invalid escape \ sequence"; at a 30MiB budget both
+                // report the syntax error — regex_core/tests/
+                // etoobig_error_priority.rs pins that, and the r3
+                // adjudication measured the mechanism: identical guard
+                // placement in duptraverse, 96B Rust vs 48B C frames).
+                // Unlike the r2-era carve this one is INPUT-DECIDABLE
+                // (stack_band_carve, pattern-only) — out-of-band one-sided
+                // ETOOBIG and in-band wrong-message pairs both still fail
+                // the plane (tests::stack_band_must_fail_controls). The
+                // DETERMINISTIC too-complex mechanism stays pinned by
                 // tests::etoobig_spaceused_parity.
                 unsafe { pg_diff_regfree() };
                 return;
@@ -745,6 +910,104 @@ mod tests {
             code += 1;
         }
         eprintln!("exhaustive_regerror_full_i32: {n} compares in {:?}", t0.elapsed());
+    }
+
+    /// Decode a corpus unit's (cflags, pattern chrs) exactly as the driver does.
+    fn unit_pattern(bytes: &[u8]) -> (i32, Vec<u32>) {
+        assert!(bytes.len() >= 4);
+        let plen = (bytes[3] as usize).min(MAX_PATTERN);
+        (bytes[0] as i32, decode_wchars(&bytes[4..4 + plen]))
+    }
+
+    fn chrs(s: &str) -> Vec<u32> {
+        s.chars().map(|c| c as u32).collect()
+    }
+
+    /// Task #69 r3 adjudication: the stack-band predicate is INPUT-decidable
+    /// and lands where calibrated — every banked r2+r3 class seed is in
+    /// band, shallow/malformed-but-cheap patterns are out.
+    #[test]
+    fn stack_band_estimator_pins() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/regex_diff");
+        for name in [
+            "seed-r2-etoobig-priority-04cf69b5",
+            "seed-r2-etoobig-priority-1cc6391a",
+            "seed-r2-etoobig-priority-1e9d853e",
+            "seed-r2-etoobig-priority-a17fc732",
+            "seed-r2-etoobig-priority-fb86624b",
+            "seed-r3-etoobig-priority-067339cc",
+            "seed-r3-etoobig-priority-4aba7b57",
+            "seed-r3-etoobig-priority-8ff0c3ef",
+            "seed-r3-etoobig-priority-956d58cd",
+            "seed-r3-etoobig-priority-acc8219c",
+        ] {
+            let bytes = std::fs::read(format!("{dir}/{name}")).unwrap();
+            let (cflags, pat) = unit_pattern(&bytes);
+            assert!(
+                stack_band_carve(&pat, cflags),
+                "{name} must be in the stack band (est {})",
+                dup_chain_estimate(&pat)
+            );
+        }
+        // shallow syntax errors and cheap quantifiers stay strict
+        for p in [
+            "(", ")", "a\\", "a{", "a{2,1}", "((((((((((a))))))))))",
+            "x{100000}", // > DUPMAX: REG_BADBR before any duplication
+            "(ab){255}", // single-level chain, est 510
+            "^((f*)\\0{7}4(x*).|){96}fo", // the r1 accounting-regression shape, est ~1.3k
+        ] {
+            let pat = chrs(p);
+            assert!(
+                !stack_band_carve(&pat, ADV as i32),
+                "{p:?} must stay on the strict plane (est {})",
+                dup_chain_estimate(&pat)
+            );
+        }
+        // nested bounded chains cross the floor
+        assert!(stack_band_carve(&chrs("((x{250}){250})"), ADV as i32));
+        // grammar gate: BASIC and QUOTE never carve, whatever the bytes say
+        let deep = chrs("((x{250}){250})");
+        assert!(!stack_band_carve(&deep, 0o0)); // REG_BASIC
+        assert!(!stack_band_carve(&deep, 0o4)); // REG_QUOTE
+    }
+
+    /// Must-fail controls for the stack-band carve (carve-discipline rule:
+    /// a carve needs proof it does not blind the plane). The tolerance is
+    /// probed as a pure function with mutant message pairs.
+    #[test]
+    fn stack_band_must_fail_controls() {
+        const ETOOBIG: &str = "regular expression is too complex";
+        const EPAREN: &str = "parentheses () not balanced";
+        const EESCAPE: &str = "invalid escape \\ sequence";
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/regex_diff");
+        let bytes =
+            std::fs::read(format!("{dir}/seed-r3-etoobig-priority-4aba7b57")).unwrap();
+        let (cflags, deep) = unit_pattern(&bytes);
+
+        // the adjudicated class is tolerated, either direction
+        assert!(compile_error_carve_applies(&deep, cflags, ETOOBIG, EESCAPE));
+        assert!(compile_error_carve_applies(&deep, cflags, EESCAPE, ETOOBIG));
+
+        // CONTROL 1: in-band mutant reporting a WRONG non-ETOOBIG message
+        // is still caught (the carve never compares two syntax errors)
+        assert!(!compile_error_carve_applies(&deep, cflags, EPAREN, EESCAPE));
+
+        // CONTROL 2: both-ETOOBIG is not the carve's business — it passes
+        // (or fails) on byte equality like any other message pair
+        assert!(!compile_error_carve_applies(&deep, cflags, ETOOBIG, ETOOBIG));
+
+        // CONTROL 3: one-sided ETOOBIG on an out-of-band pattern is still
+        // a plane failure — a guard/accounting regression that trips on a
+        // shallow pattern cannot hide behind the carve
+        let shallow = chrs("(");
+        assert!(!compile_error_carve_applies(&shallow, cflags, ETOOBIG, EPAREN));
+        let cheap = chrs("('\\y.|){62}"); // one level of the class shape, est 186
+        assert!(!compile_error_carve_applies(&cheap, cflags, ETOOBIG, EPAREN));
+
+        // CONTROL 4: the band is grammar-gated — the same deep chr string
+        // under QUOTE/BASIC flags is not carved
+        assert!(!compile_error_carve_applies(&deep, 0o4, ETOOBIG, EESCAPE));
+        assert!(!compile_error_carve_applies(&deep, 0o0, ETOOBIG, EESCAPE));
     }
 
     /// p1-laneag banked engine finding: the Rust engine reported
