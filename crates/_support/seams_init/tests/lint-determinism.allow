@@ -168,8 +168,8 @@ fs	crates/backend/replication/slot/src/lib.rs	6
 fs	crates/backend/replication/walsender/src/lib.rs	1
 # --- crates/backend/storage/aio/aio_uring (4 sites) ---
 fs	crates/backend/storage/aio/aio_uring/src/lib.rs	4
-# --- crates/backend/storage/file/fd (6 sites) ---
-fs	crates/backend/storage/file/fd/src/copydir.rs	1	DST-REVIEW(port-sweep-wave2b): clone_file's Linux HAVE_COPY_FILE_RANGE arm (copydir.c:236 C parity) — libc::copy_file_range over OpenTransientFile fds inside the fd/vfd choke crate (file_copy_method=clone); Vfs choke routing (s2.1) rides the fd family
+# --- crates/backend/storage/file/fd (7 sites) ---
+fs	crates/backend/storage/file/fd/src/copydir.rs	1	DST-REVIEW(testmode-m1): clone_file (copydir.c HAVE_COPY_FILE_RANGE arm, test-mode M0) — ONE libc::copy_file_range loop inside the sanctioned fd choke (desc.rs/sync.rs's SANCTIONED class; the Vfs op-set is a frozen contract, not revised for a sim-unreachable arm): file_copy_method=clone is gated out of the GUC options under pgrust_sim (guc_tables) and the cfg(pgrust_sim) arm panics as C's pg_unreachable — no sim world can reach the raw syscall
 fs	crates/backend/storage/file/fd/src/desc.rs	4	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1); # pending: posix-streams-excluded-P1 — fopen (AllocateFile) / popen (OpenPipeStream) stream sites + raw-fd carve-out (WS-C retirement spec, notes/dst-p1-ws-c-allowlist-rows.md)
 fs	crates/backend/storage/file/fd/src/sync.rs	2	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1); # pending: pg-flush-data-mmap-arm — mmap/msync writeback arm + fcntl(F_GETFL) probe (WS-C retirement spec)
 # --- crates/backend/storage/file/vfs (40 sites) ---

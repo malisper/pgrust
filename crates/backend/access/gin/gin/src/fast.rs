@@ -7,8 +7,9 @@ use ::gin_vocab::*;
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::nbtree::itup::{self, ItupBuf};
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, InvalidBuffer, OffsetNumber, BLCKSZ};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_rel::Relation;
+use ::types_storage::lock::ExclusiveLock;
 use ::types_tuple::itemptr::{FirstOffsetNumber, ItemPointerData, ItemPointerEquals};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
@@ -578,8 +579,16 @@ fn process_pending_page<'s>(
     Ok(())
 }
 
-/// ginInsertCleanup. Page-level heavyweight lock arbitration is a no-op in
-/// the single-backend model.
+fn pending_page_deleted(blkno: BlockNumber, relname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "unexpected deleted page {blkno} in pending list of GIN index \"{relname}\""
+    )))
+}
+
+/// ginInsertCleanup: move tuples from pending pages into the regular GIN
+/// structure. Concurrent cleanups are serialized by a heavyweight page lock
+/// on the metapage block (see below); nothing else takes that lock, so
+/// concurrent insertion into the pending list remains possible.
 pub fn ginInsertCleanup<'s>(
     _outer: Mcx<'s>,
     rel: &Relation<'_>,
@@ -589,9 +598,25 @@ pub fn ginInsertCleanup<'s>(
     force_cleanup: bool,
     mut stats: Option<&mut ::types_nbtree::IndexBulkDeleteResult>,
 ) -> PgResult<()> {
+    // Prevent concurrent cleanup: lock the metapage block in exclusive mode
+    // via LockPage().
     let work_memory = if force_cleanup {
-        init_small::globals::maintenance_work_mem()
+        // Called from [auto]vacuum/analyze or gin_clean_pending_list(): wait
+        // for any concurrent cleanup to finish.
+        lmgr::LockPage(rel, GIN_METAPAGE_BLKNO, ExclusiveLock)?;
+        if miscinit::GetMyBackendType() == ::types_core::BackendType::AutovacWorker
+            && guc_tables::vars::autovacuum_work_mem.read() != -1
+        {
+            guc_tables::vars::autovacuum_work_mem.read()
+        } else {
+            init_small::globals::maintenance_work_mem()
+        }
     } else {
+        // Called from a regular insert: if we see a concurrent cleanup, just
+        // exit in the hope that the concurrent process cleans the list.
+        if !lmgr::ConditionalLockPage(rel, GIN_METAPAGE_BLKNO, ExclusiveLock)? {
+            return Ok(());
+        }
         init_small::globals::work_mem()
     };
 
@@ -602,6 +627,7 @@ pub fn ginInsertCleanup<'s>(
     if metadata0.head == InvalidBlockNumber {
         bm::lock_buffer::call(metabuffer, GIN_UNLOCK)?;
         bm::release_buffer::call(metabuffer)?;
+        lmgr::UnlockPage(rel, GIN_METAPAGE_BLKNO, ExclusiveLock)?;
         return Ok(());
     }
     let blkno_finish = metadata0.tail;
@@ -654,8 +680,13 @@ pub fn ginInsertCleanup<'s>(
 
             bm::lock_buffer::call(metabuffer, GIN_EXCLUSIVE)?;
             bm::lock_buffer::call(buffer, GIN_SHARE)?;
+            // Release-effective: only the metapage-block page lock keeps a
+            // concurrent cleanup from deleting this page while we had it
+            // unlocked; scanning a deleted page would corrupt the index.
             // SAFETY: pin + share lock held.
-            debug_assert!(!GinPageIsDeleted(&page_opaque(&unsafe { page_ref(buffer) })));
+            if GinPageIsDeleted(&page_opaque(&unsafe { page_ref(buffer) })) {
+                return Err(pending_page_deleted(blkno, rel.name()));
+            }
 
             // SAFETY: pin + share lock held.
             let new_maxoff = { unsafe { page_ref(buffer) }.max_offset_number() };
@@ -701,6 +732,7 @@ pub fn ginInsertCleanup<'s>(
         bm::lock_buffer::call(buffer, GIN_SHARE)?;
     }
 
+    lmgr::UnlockPage(rel, GIN_METAPAGE_BLKNO, ExclusiveLock)?;
     bm::release_buffer::call(metabuffer)?;
     drop(accum);
 

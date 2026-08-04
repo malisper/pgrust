@@ -1016,11 +1016,20 @@ fn write_relcache_init_file(shared: bool) -> PgResult<()> {
     }
 
     // Temp file + rename: a backend starting concurrently must never see a
-    // partially written file.
+    // partially written file. C's temp name is unique per WRITER because
+    // MyProcPid is per-process; under the thread model every backend shares
+    // one pid, so the pid alone would let two concurrently-starting
+    // sessions of the same database open THE SAME temp file (each O_TRUNCs
+    // the other's partial writes; the survivor renames a torn file into
+    // place — the loader's magic/format/nailed-count checks reject it, so
+    // the damage is a silent rebuild, but the C uniqueness contract is
+    // still owed). MyProcNumber is unique per live backend thread and
+    // restores it.
     let temp_path = final_path.with_file_name(format!(
-        "{}.{}",
+        "{}.{}.{}",
         RELCACHE_INIT_FILENAME,
-        init_small::globals::process_id()
+        init_small::globals::process_id(),
+        init_small::globals::MyProcNumber()
     ));
     // vfs-routed (provider-seam reroute): datadir-domain create/write/rename
     // must ride the vfs; std::fs would bypass the sim namespace.

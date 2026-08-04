@@ -741,7 +741,30 @@ pub fn InitPostgres(
         dboid = TEMPLATE1_DB_OID;
         init_small::globals::SetMyDatabaseTableSpace(DEFAULTTABLESPACE_OID);
     } else if let Some(in_dbname) = in_dbname {
-        let Some(dbform) = GetDatabaseTuple(mcx, in_dbname)? else {
+        let mut tuple = GetDatabaseTuple(mcx, in_dbname)?;
+        // pgrust-only mint-on-connect (docs/design/test-views.md D2).
+        // Reached ONLY on the lookup miss — the hit path executes zero new
+        // instructions — for authenticated client backends, when the
+        // janitor crate installed the seam (uninstalled seam == stock
+        // behavior). Ok(true) means the janitor completed an idempotent
+        // Ensure for this name: drain invalidations and retry the lookup
+        // ONCE (the InvalidateCatalogSnapshot precedent below at the
+        // MyDatabaseId assignment; the retry lives here, not in the seam,
+        // because the PgDatabaseForm must come from this file's
+        // GetDatabaseTuple for parity — M3 addendum). Ok(false) or a
+        // second miss falls through to the stock FATAL, byte-identical;
+        // Err (paused/absent janitor, timeout, failed CREATE) propagates
+        // as its own clean FATAL.
+        if tuple.is_none()
+            && miscinit::GetMyBackendType() == BackendType::Backend
+            && janitor_seams::ephemeral_db_mint_on_connect::is_installed()
+            && janitor_seams::ephemeral_db_mint_on_connect::call(in_dbname)?
+        {
+            inval_seams::accept_invalidation_messages::call()?;
+            snapmgr::InvalidateCatalogSnapshot();
+            tuple = GetDatabaseTuple(mcx, in_dbname)?;
+        }
+        let Some(dbform) = tuple else {
             return ereport(FATAL)
                 .errcode(ERRCODE_UNDEFINED_DATABASE)
                 .errmsg(format!("database \"{in_dbname}\" does not exist"))

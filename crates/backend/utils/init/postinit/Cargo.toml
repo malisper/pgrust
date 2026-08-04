@@ -66,6 +66,7 @@ timestamp_seams = { path = "../../adt/timestamp_seams" }
 ps_status_seams = { path = "../../misc/ps_status_seams" }
 auth_seams = { path = "../../../libpq/auth_seams" }
 hba_seams = { path = "../../../libpq/hba_seams" }
+janitor_seams = { path = "../../../postmaster/janitor_seams" }
 superuser_seams = { path = "../../misc/superuser_seams" }
 pg_locale_seams = { path = "../../adt/pg_locale_seams" }
 pg_database_seams = { path = "../../../catalog/pg_database_seams" }

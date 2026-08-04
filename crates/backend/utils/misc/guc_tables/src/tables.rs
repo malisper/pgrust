@@ -523,18 +523,17 @@ pub static wal_compression_options: &[config_enum_entry] = &[
     config_enum_entry { name: "0", val: WAL_COMPRESSION_NONE, hidden: true },
 ];
 
-// C compile-gates "clone" on platform support (guc_tables.c:489):
-// HAVE_COPYFILE+COPYFILE_CLONE_FORCE (macOS) or HAVE_COPY_FILE_RANGE (Linux).
-// clone_file (fd/copydir.rs) ports both arms; other targets keep the pruned
-// list, the same surface as a C build without either.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+// C compile-gates "clone" on platform support (guc_tables.c:489). Both product
+// targets have clone_file's syscall (macOS copyfile, Linux copy_file_range),
+// so product builds carry the entry. Sim builds gate it out — sim fds are
+// foreign to those kernel calls — presenting the same surface as a C build
+// without HAVE_COPYFILE/HAVE_COPY_FILE_RANGE: SET file_copy_method=clone is a
+// clean invalid-value ERROR there, and clone_file's pg_unreachable() arm
+// stays unreachable.
 pub static file_copy_method_options: &[config_enum_entry] = &[
     config_enum_entry { name: "copy", val: FILE_COPY_METHOD_COPY, hidden: false },
+    #[cfg(not(pgrust_sim))]
     config_enum_entry { name: "clone", val: FILE_COPY_METHOD_CLONE, hidden: false },
-];
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub static file_copy_method_options: &[config_enum_entry] = &[
-    config_enum_entry { name: "copy", val: FILE_COPY_METHOD_COPY, hidden: false },
 ];
 
 pub static file_extend_method_options: &[config_enum_entry] = &[
@@ -703,6 +702,14 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // tier under the auto RE2 dispatch (regexp_alt::program). Hidden like
     // regex_engine; OFF restores the exact pre-tier RE2 arm — the toggle is
     // the four-engine differential's fourth arm and the escape hatch.
+    // pgrust.ephemeral_db_prewarm (pgrust-only, test-views.md prewarm
+    // addendum): after every successful janitor mint (warm-pool spares AND
+    // cold mints), a short-lived internal worker connects once to the new
+    // database so its relcache init file gets written and its catalog pages
+    // are warm BEFORE the first client session pays for them. Default ON:
+    // it only acts on janitor-minted databases, so an unarmed janitor makes
+    // it free; PGC_SIGHUP as the off switch.
+    GucBoolSetting { name: "pgrust.ephemeral_db_prewarm", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Prewarms janitor-minted ephemeral databases with a one-shot background session (relcache init file + catalog pages)."), long_desc: Some("After each successful mint the janitor launches a short-lived internal worker that connects to the new database and exits, off the connecting client's critical path. Warm-pool spares are prewarmed at replenish time, so a handed-out spare's first client session skips the fresh-database catalog bootstrap cost."), flags: 0, variable: &vars::pgrust_ephemeral_db_prewarm, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pgrust.regex_pattern_program", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Enables the anchored pattern-program fast tier for RE2-dispatched regexps."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_regex_pattern_program, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.regex_re2_linked: build-property preset (debug_assertions
     // shape) — the runtime witness that this binary carries the RE2 tier.
@@ -905,6 +912,36 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // this many MB into a session-lifetime "WatchdogTestHog" context. Hidden
     // (NOT_IN_SAMPLE + NO_SHOW_ALL): a deliberate leak is never a product knob.
     GucIntSetting { name: "pgrust.memory_watchdog_test_hog", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Leaks this many MB per query into a named memory context (memory watchdog test instrumentation)."), long_desc: None, flags: GUC_UNIT_MB | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_memory_watchdog_test_hog, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024 * 1024, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_grace (pgrust-only, docs/design/test-views.md D1):
+    // how long a prefix-matching ephemeral database must sit at zero backends
+    // before the janitor reaps it. PGC_SIGHUP so operators tune it without a
+    // restart (the janitor polls; reload is free). GUC_UNIT_S: '15s'/'1min'
+    // parse like C interval GUCs.
+    GucIntSetting { name: "pgrust.ephemeral_db_grace", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Sets how long an ephemeral database must be idle before the janitor drops it."), long_desc: Some("Applies to non-template databases named under pgrust.ephemeral_db_prefix that are not pinned. Zero reaps at the first idle observation."), flags: GUC_UNIT_S, variable: &vars::pgrust_ephemeral_db_grace, boot_val: GucDefaultValue::Int(15), min: 0, max: 86400, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_max_per_role (pgrust-only, test-views.md D2
+    // security posture): caps live minted databases per connecting role;
+    // 0 = unlimited. Counting semantics documented on
+    // janitor::mint::live_owned_names' call site.
+    GucIntSetting { name: "pgrust.ephemeral_db_max_per_role", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Caps how many live ephemeral databases mint-on-connect will hold per role (0 = unlimited)."), long_desc: Some("Counted as prefix-matching non-template databases owned by the connecting role, plus that role's in-flight and just-completed mints."), flags: 0, variable: &vars::pgrust_ephemeral_db_max_per_role, boot_val: GucDefaultValue::Int(0), min: 0, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_pool_size (pgrust-only, test-views.md D3 warm-pool
+    // addendum): how many pre-minted spare clones of the DEFAULT template the
+    // janitor keeps warm; 0 = feature off. v1 scope is the default template
+    // ONLY — named-template pools are out of scope (recorded decision, the
+    // addendum). PGC_SIGHUP: the janitor re-reads it every tick after its
+    // reload idiom — shrinking it (or 0) drains the pool, growing refills
+    // it. Max 4096 = registry::MAX_SPARES (the spare table's fixed bound;
+    // entries are small — name + oids — so memory stays modest even full).
+    GucIntSetting { name: "pgrust.ephemeral_db_pool_size", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Number of pre-minted spare clones of the default template the janitor keeps warm (0 = off)."), long_desc: Some("Applies to pgrust.ephemeral_db_default_template only (v1; named-template pools are out of scope). A default-template mint request is satisfied by a catalog-only RENAME of a spare instead of a file copy; spares are named <prefix>spare_<seq> (a namespace reserved from minting), owned by the janitor and not connectable until handout, and replenished in background janitor ticks. Spares are invalidated on template repoint/rebuild/unseal and on any observed change of the template's ALLOW_CONNECTIONS; a permanently connectable default template keeps its spares, so handouts may serve content as old as each spare's mint — reseal the template (or rebuild it under a new name) to force freshness."), flags: 0, variable: &vars::pgrust_ephemeral_db_pool_size, boot_val: GucDefaultValue::Int(0), min: 0, max: 4096, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_wal_log_threshold (pgrust-only, test-views.md
+    // mint-strategy addendum): swept-relation count (every pg_class row with
+    // storage, catalogs included — an empty template already sweeps a few
+    // hundred) at or above which a janitor mint runs CREATE DATABASE
+    // STRATEGY wal_log — zero checkpoints — instead of file_copy; -1 = never
+    // (always file_copy, the shipped default until the crossover is
+    // CI-confirmed; notes/appbench/SPEED-REPORT.md "mint strategy" holds
+    // the measurements). Counts are cached per template in the janitor
+    // registry and re-observed after any observed unseal.
+    GucIntSetting { name: "pgrust.ephemeral_db_wal_log_threshold", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Swept-relation count at or above which the janitor mints ephemeral databases with STRATEGY wal_log (-1 = never)."), long_desc: Some("A template whose pg_class sweep (every relation with storage, system catalogs included) counts at least this many relations is cloned with CREATE DATABASE STRATEGY wal_log, which requests no checkpoints; smaller templates keep STRATEGY file_copy and the janitor's batched checkpoint machinery. -1 disables wal_log picks entirely. The count is observed once per sealed template and cached; unsealing a template invalidates the cache."), flags: 0, variable: &vars::pgrust_ephemeral_db_wal_log_threshold, boot_val: GucDefaultValue::Int(-1), min: -1, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
     // DOP cap for runtime-engine engagements, consulted ONLY under
     // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm
@@ -1071,6 +1108,24 @@ pub static ConfigureNamesString: &[GucStringSetting] = &[
     // fd crate reports above-VFD-cache counters — allocated transient descs,
     // the allocated-desc cap, max_safe_fds, max_files_per_process).
     GucStringSetting { name: "pgrust.resource_counters", context: PGC_INTERNAL, group: DEVELOPER_OPTIONS, short_desc: Some("Shows per-backend fd-class resource counters (test-harness channel)."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL | GUC_DISALLOW_IN_FILE, variable: &vars::pgrust_resource_counters, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: Some(&hooks::show_resource_counters) },
+    // pgrust.ephemeral_db_prefix (pgrust-only, docs/design/test-views.md D1):
+    // arms the ephemeral-database janitor at postmaster start; empty = the
+    // feature is off. PGC_POSTMASTER because it gates static bgworker
+    // registration. Also the framework-adapter detection probe: SHOW of this
+    // name distinguishes stock PG / janitor-off / janitor-on.
+    GucStringSetting { name: "pgrust.ephemeral_db_prefix", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Database-name prefix owned by the ephemeral-database janitor (empty disables it)."), long_desc: Some("Non-template, unpinned databases named under the prefix are dropped after pgrust.ephemeral_db_grace of idleness and swept at server start. Template databases are never touched."), flags: 0, variable: &vars::pgrust_ephemeral_db_prefix, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_mint_roles (pgrust-only, test-views.md D2 security
+    // posture): the mint-on-connect master arm. Identifier-list syntax
+    // (SplitIdentifierString conventions: unquoted entries downcase); the
+    // sentinel $createdb admits any role with CREATEDB. The check hook
+    // (janitor crate, installed via janitor::init_seams) validates SYNTAX
+    // only — roles resolve at mint time, missing roles never match (the
+    // pg_hba convention).
+    GucStringSetting { name: "pgrust.ephemeral_db_mint_roles", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Roles allowed to mint ephemeral databases by connecting to them (empty disables minting)."), long_desc: Some("A comma-separated list of role names; the entry $createdb admits any role with the CREATEDB attribute and is reserved (quoting does not demote it, so a role literally named $createdb cannot be listed by name). The minted database is owned by the connecting role; if two listed roles race a connect to the same not-yet-minted name, it is created once, owned by the first requester."), flags: GUC_LIST_INPUT, variable: &vars::pgrust_ephemeral_db_mint_roles, boot_val: GucDefaultValue::String(Some("")), check_hook: Some(&hooks::check_pgrust_ephemeral_db_mint_roles), assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_default_template (pgrust-only, test-views.md D2):
+    // the template for bare <prefix><token> connects; '' = bare tokens
+    // refuse to mint (stock does-not-exist FATAL).
+    GucStringSetting { name: "pgrust.ephemeral_db_default_template", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Template used when minting a bare <prefix><token> ephemeral database (empty refuses bare tokens)."), long_desc: None, flags: 0, variable: &vars::pgrust_ephemeral_db_default_template, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: None },
     GucStringSetting { name: "log_connections", context: PGC_SU_BACKEND, group: LOGGING_WHAT, short_desc: Some("Logs specified aspects of connection establishment and setup."), long_desc: None, flags: GUC_LIST_INPUT, variable: &vars::log_connections_string, boot_val: GucDefaultValue::String(Some("")), check_hook: Some(&hooks::check_log_connections), assign_hook: Some(&hooks::assign_log_connections), show_hook: None },
 ];
 

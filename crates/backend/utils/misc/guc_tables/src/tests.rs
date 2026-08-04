@@ -47,12 +47,25 @@ fn table_counts_match_compiled_backend_shape() {
     //   -> 135), Int +4 (pgrust.memory_watchdog_interval / _threshold /
     //   _limit, plus the hidden developer hog pgrust.memory_watchdog_test_hog
     //   -> 166) = 453.
-    assert_eq!(ConfigureNamesBool.len(), 135);
-    assert_eq!(ConfigureNamesInt.len(), 166);
+    // testmode M1 (pgrust-only, docs/design/test-views.md D1): the
+    //   ephemeral-database janitor — String +1 pgrust.ephemeral_db_prefix
+    //   (-> 78), Int +1 pgrust.ephemeral_db_grace (-> 167) = 455.
+    // testmode M3 (pgrust-only, docs/design/test-views.md D2): the
+    //   mint-on-connect security posture — String +2
+    //   pgrust.ephemeral_db_mint_roles / pgrust.ephemeral_db_default_template
+    //   (-> 80), Int +1 pgrust.ephemeral_db_max_per_role (-> 168) = 458.
+    // testmode D3 warm pool (pgrust-only, test-views.md warm-pool addendum):
+    //   Int +1 pgrust.ephemeral_db_pool_size (-> 169) = 459.
+    // testmode mint-strategy addendum (pgrust-only): Int +1
+    //   pgrust.ephemeral_db_wal_log_threshold (-> 170) = 460.
+    // testmode prewarm addendum (pgrust-only): Bool +1
+    //   pgrust.ephemeral_db_prewarm (-> 136) = 461.
+    assert_eq!(ConfigureNamesBool.len(), 136);
+    assert_eq!(ConfigureNamesInt.len(), 170);
     assert_eq!(ConfigureNamesReal.len(), 28);
-    assert_eq!(ConfigureNamesString.len(), 77);
+    assert_eq!(ConfigureNamesString.len(), 80);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 453);
+    assert_eq!(all_settings().count(), 461);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -255,6 +268,26 @@ fn m5_probe_requires_a_live_pool() {
     // (process-lifetime flag: production never unsets it, so no restore).
     crate::runtime_pool::set_runtime_pool_live();
     assert!(crate::parallel_engine::m5_gather_suppression_active());
+}
+
+#[test]
+fn file_copy_method_options_match_platform_clone_support() {
+    let opts = find("file_copy_method").options().unwrap().entries();
+    let copy = opts.iter().find(|o| o.name == "copy").unwrap();
+    assert_eq!(copy.val, consts::FILE_COPY_METHOD_COPY);
+    assert!(!copy.hidden);
+    #[cfg(not(pgrust_sim))]
+    {
+        let clone = opts.iter().find(|o| o.name == "clone").unwrap();
+        assert_eq!(clone.val, consts::FILE_COPY_METHOD_CLONE);
+        assert!(!clone.hidden);
+    }
+    #[cfg(pgrust_sim)]
+    assert!(!opts.iter().any(|o| o.name == "clone"));
+    assert_eq!(
+        find("file_copy_method").default_value(),
+        GucDefaultValue::Enum(consts::FILE_COPY_METHOD_COPY)
+    );
 }
 
 #[test]

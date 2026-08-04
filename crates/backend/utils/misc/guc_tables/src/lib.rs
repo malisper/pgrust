@@ -252,6 +252,38 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_memory_watchdog_test_hog,
         set: backing::set_pgrust_memory_watchdog_test_hog,
     });
+    vars::pgrust_ephemeral_db_prefix.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_prefix,
+        set: backing::set_pgrust_ephemeral_db_prefix,
+    });
+    vars::pgrust_ephemeral_db_grace.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_grace,
+        set: backing::set_pgrust_ephemeral_db_grace,
+    });
+    vars::pgrust_ephemeral_db_mint_roles.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_mint_roles,
+        set: backing::set_pgrust_ephemeral_db_mint_roles,
+    });
+    vars::pgrust_ephemeral_db_max_per_role.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_max_per_role,
+        set: backing::set_pgrust_ephemeral_db_max_per_role,
+    });
+    vars::pgrust_ephemeral_db_default_template.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_default_template,
+        set: backing::set_pgrust_ephemeral_db_default_template,
+    });
+    vars::pgrust_ephemeral_db_pool_size.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_pool_size,
+        set: backing::set_pgrust_ephemeral_db_pool_size,
+    });
+    vars::pgrust_ephemeral_db_wal_log_threshold.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_wal_log_threshold,
+        set: backing::set_pgrust_ephemeral_db_wal_log_threshold,
+    });
+    vars::pgrust_ephemeral_db_prewarm.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_prewarm,
+        set: backing::set_pgrust_ephemeral_db_prewarm,
+    });
     vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
         get: backing::pgrust_runtime_scan_pool,
         set: backing::set_pgrust_runtime_scan_pool,

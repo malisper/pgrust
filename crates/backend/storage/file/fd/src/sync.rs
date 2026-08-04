@@ -61,20 +61,32 @@ pub fn pg_fsync(fd: RawFd) -> i32 {
         set_errno(0);
     }
 
-    // HAVE_FSYNC_WRITETHROUGH platforms only (macOS here). Before the GUC
-    // machinery installs the slot (early startup, unit tests), behave as the
-    // default: wal_sync_method != fsync_writethrough (C's macOS default is
-    // fsync), i.e. fall through to pg_fsync_no_writethrough.
-    #[cfg(target_os = "macos")]
-    if guc_tables::vars::wal_sync_method.installed()
-        && guc_tables::vars::wal_sync_method.read() == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH
-    {
+    if fsync_writethrough_active() {
         return pg_fsync_writethrough(fd);
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = WAL_SYNC_METHOD_FSYNC_WRITETHROUGH;
-
     pg_fsync_no_writethrough(fd)
+}
+
+/// Would `pg_fsync` currently route through `pg_fsync_writethrough`?
+/// Read-only predicate over pg_fsync's own routing condition (single
+/// source for the janitor's parallel batch-copy workers, which must
+/// snapshot the SEMANTICS of pg_fsync on the backend thread and then issue
+/// TLS-free raw syscalls — test-views.md mint-strategy addendum). On
+/// HAVE_FSYNC_WRITETHROUGH platforms only (macOS here); before the GUC
+/// machinery installs the slot (early startup, unit tests), behaves as the
+/// default: wal_sync_method != fsync_writethrough (C's macOS default is
+/// fsync).
+pub fn fsync_writethrough_active() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        guc_tables::vars::wal_sync_method.installed()
+            && guc_tables::vars::wal_sync_method.read() == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = WAL_SYNC_METHOD_FSYNC_WRITETHROUGH;
+        false
+    }
 }
 
 pub fn pg_fsync_no_writethrough(fd: RawFd) -> i32 {

@@ -16,8 +16,8 @@ use types_storage::lock::{AccessExclusiveLock, LOCKMODE};
 use types_storage::storage::ProcSignalBarrierType;
 use xlogreader_seams::XLogReaderState;
 
-pub mod builtins;
 mod alterdb;
+pub mod builtins;
 mod createdb;
 mod dropdb;
 mod walcopy;
@@ -26,9 +26,14 @@ pub use alterdb::{
     movedb, AlterDatabase, AlterDatabaseOwner, AlterDatabaseRefreshColl, AlterDatabaseSet,
     RenameDatabase,
 };
-pub use createdb::{check_encoding_locale_matches, createdb};
-pub use dropdb::dropdb;
+pub use createdb::{
+    check_encoding_locale_matches, createdb, createdb_deferred_file_copy,
+    createdb_skip_checkpoints, forget_walog_database, log_file_copy_record, DeferredFileCopy,
+    FileCopyDir,
+};
+pub use walcopy::count_swept_relations;
 pub(crate) use dropdb::name_key;
+pub use dropdb::{dropdb, dropdb_skip_checkpoint};
 
 #[track_caller]
 pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
@@ -171,7 +176,11 @@ pub fn errdetail_busy_db(notherbackends: i32, npreparedxacts: i32) -> String {
 /// remove_dbtablespaces (dbcommands.c): rmtree every per-tablespace dir of the
 /// database and log one XLOG_DBASE_DROP record naming them all.
 pub fn remove_dbtablespaces(mcx: Mcx<'_>, db_id: Oid) -> PgResult<()> {
-    let rel = table::table_open(mcx, TableSpaceRelationId, types_storage::lock::AccessShareLock)?;
+    let rel = table::table_open(
+        mcx,
+        TableSpaceRelationId,
+        types_storage::lock::AccessShareLock,
+    )?;
     let mut tablespace_ids: Vec<Oid> = Vec::new();
     let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
@@ -224,7 +233,11 @@ pub fn remove_dbtablespaces(mcx: Mcx<'_>, db_id: Oid) -> PgResult<()> {
 /// check_db_file_conflict (dbcommands.c): any tablespace already holding a
 /// directory for this OID makes the OID unusable.
 pub fn check_db_file_conflict(mcx: Mcx<'_>, db_id: Oid) -> PgResult<bool> {
-    let rel = table::table_open(mcx, TableSpaceRelationId, types_storage::lock::AccessShareLock)?;
+    let rel = table::table_open(
+        mcx,
+        TableSpaceRelationId,
+        types_storage::lock::AccessShareLock,
+    )?;
     let mut result = false;
     let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
@@ -288,7 +301,10 @@ fn recovery_create_dbdir(path: &str, only_tblspc: bool) -> PgResult<()> {
 /// dbase_redo (dbcommands.c). WAL_LOG-strategy create records are loud: the
 /// WAL_LOG copy engine is unported (createdb runs FILE_COPY only).
 pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
-    let decoded = record.record.as_ref().expect("dbase_redo with no decoded record");
+    let decoded = record
+        .record
+        .as_ref()
+        .expect("dbase_redo with no decoded record");
     let info = decoded.xl_info & !XLR_INFO_MASK;
     // SAFETY: the decoded record's main data lives for the redo call.
     let data = unsafe { decoded.main_data_bytes() };
@@ -326,7 +342,10 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
                 // C names dst_path here, not the parent it stat'ed.
                 return Err(ereport(types_error::FATAL)
                     .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                    .errmsg(format!("could not stat directory \"{}\": %m", dst_path.as_str()))
+                    .errmsg(format!(
+                        "could not stat directory \"{}\": %m",
+                        dst_path.as_str()
+                    ))
                     .into_error()
                     .into());
             }
@@ -392,7 +411,12 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
         if xlogutils::InHotStandby() {
             // Release prior to commit; the reconnect race window is small, as C.
-            lmgr::UnlockSharedObjectForSession(DATABASE_RELATION_ID, db_id, 0, AccessExclusiveLock)?;
+            lmgr::UnlockSharedObjectForSession(
+                DATABASE_RELATION_ID,
+                db_id,
+                0,
+                AccessExclusiveLock,
+            )?;
         }
     } else {
         panic!("dbase_redo: unknown op code {info}");

@@ -63,6 +63,7 @@ auth_seams = { path = "../../libpq/auth_seams" }
 autovacuum_seams = { path = "../autovacuum_seams" }
 syslogger = { path = "../syslogger" }
 syslogger_seams = { path = "../syslogger_seams" }
+janitor_seams = { path = "../janitor_seams" }
 launcher_seams = { path = "../../replication/launcher_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
