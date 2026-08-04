@@ -40,10 +40,49 @@ extern volatile int cref_InterruptPending;
 	do { if (cref_InterruptPending) abort(); } while (0)
 
 #define MCXT_ALLOC_NO_OOM 0x0002
-#define palloc_extended(sz, flags) malloc(sz)
-#define repalloc_extended(p, sz, flags) realloc((p), (sz))
-static inline void *palloc(Size sz) { return malloc(sz); }
-static inline void pfree(void *p) { free(p); }
+
+/* Per-thread live-allocation balance over the engine's MALLOC/FREE/REALLOC
+ * contract (counting shim only — allocation semantics are untouched libc).
+ * The real server frees engine memory via pg_regfree OR by deleting the
+ * memory context the engine palloc'd into (regcustom.h MALLOC =
+ * palloc_extended @ 18.3); here context deletion does not exist, so any
+ * caller that skips pg_regfree leaks silently — task #150 (trgm_diff arm 9)
+ * accumulated ~25-30KB/exec exactly this way.  The balance lets harness
+ * tests assert engine memory returns to a mark across execs.  Defined in
+ * pg_regexfam.c; read via pg_diff_regexfam_live_allocs().
+ * NB: regc_pg_locale.c's pg_ctype_cache uses RAW malloc/free by upstream
+ * design (process-lifetime cache) and is intentionally outside this
+ * balance. */
+extern _Thread_local long cref_engine_live_allocs;
+static inline void *
+cref_counted_malloc(Size sz)
+{
+	void	   *p = malloc(sz);
+
+	if (p)
+		cref_engine_live_allocs++;
+	return p;
+}
+static inline void *
+cref_counted_realloc(void *p, Size sz)
+{
+	void	   *q = realloc(p, sz);
+
+	if (q && p == NULL)
+		cref_engine_live_allocs++;
+	return q;
+}
+static inline void
+cref_counted_free(void *p)
+{
+	if (p)
+		cref_engine_live_allocs--;
+	free(p);
+}
+#define palloc_extended(sz, flags) cref_counted_malloc(sz)
+#define repalloc_extended(p, sz, flags) cref_counted_realloc((p), (sz))
+static inline void *palloc(Size sz) { return cref_counted_malloc(sz); }
+static inline void pfree(void *p) { cref_counted_free(p); }
 
 #define ereport(elevel, rest) abort()
 #define ERROR 21

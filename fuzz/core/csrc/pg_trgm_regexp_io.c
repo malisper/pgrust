@@ -127,16 +127,41 @@ extern int	trgmf_t_isalnum_with_len(const char *ptr, int mblen);
  * — the 2026-08-03 trgm CONFIRM ASan stack-overflow class. */
 extern void pg_diff_regex_stack_arm(void);
 
+/* TLS slot for the live compiled regex (pg_regexp_io.c precedent): the
+ * REAL server frees the engine's memory via MemoryContextDelete of
+ * createTrgmNFA's tmpcontext (regcustom.h MALLOC = palloc_extended into
+ * the current context @ 18.3); this TU's shim maps palloc_extended to raw
+ * malloc and context deletion to a no-op, so the engine's guts MUST be
+ * pg_regfree'd explicitly.  The compile wrapper below registers every
+ * successful compile here; trgmrx_enter frees the previous one at the
+ * next entry, so an ereport-longjmp between compile and use cannot leak
+ * either.  (Task #150: this registration was missing — every arm-9
+ * compile leaked its whole regex guts, ~25-30KB/exec RSS climb that
+ * killed sustained fuzz runs at ~125k execs.) */
+static _Thread_local regex_t trgmrx_live_re;
+static _Thread_local bool trgmrx_live;
+
 /* Capture pg_regcomp's result code so the driver entries can classify
- * REG_ETOOBIG separately (class 5 above). Plumbing only: the verbatim
- * RE_compile body below is unchanged — its pg_regcomp call resolves to
- * this wrapper via the #define. */
+ * REG_ETOOBIG separately (class 5 above), and register the live engine
+ * memory for cleanup at the next entry (see trgmrx_live_re above).
+ * Plumbing only: the verbatim RE_compile body below is unchanged — its
+ * pg_regcomp call resolves to this wrapper via the #define. */
 static _Thread_local int trgmrx_last_regcomp_code;
 static int
 trgmrx_pg_regcomp_capture(regex_t *re, const pg_wchar *w, size_t wlen,
 						  int cflags, Oid collation)
 {
 	trgmrx_last_regcomp_code = pg_regcomp(re, w, wlen, cflags, collation);
+	if (trgmrx_last_regcomp_code == REG_OKAY)
+	{
+		/* Shallow struct copy shares re_guts/re_fns with the caller's
+		 * stack regex_t; pg_regfree through the copy frees the same
+		 * engine memory (a failed compile frees itself — no
+		 * registration). trgmrx_enter cleared the previous slot before
+		 * this compile, so at most one regex is ever live. */
+		trgmrx_live_re = *re;
+		trgmrx_live = true;
+	}
 	return trgmrx_last_regcomp_code;
 }
 #define pg_regcomp trgmrx_pg_regcomp_capture
@@ -2267,11 +2292,9 @@ mul_size(Size s1, Size s2)
 	return s1 * s2;
 }
 
-/* TLS slot for the live compiled regex (pg_regexp_io.c precedent): freed at
- * the next entry so an ereport-longjmp between compile and use cannot leak
- * engine memory (the engine allocates with malloc, not the arena). */
-static _Thread_local regex_t trgmrx_live_re;
-static _Thread_local bool trgmrx_live;
+/* The live-regex TLS slot (trgmrx_live_re/trgmrx_live) is declared next to
+ * the compile wrapper that registers into it, above; trgmrx_enter below is
+ * the release point. */
 
 #define C_COLLATION_OID 950
 

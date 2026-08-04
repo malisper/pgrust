@@ -40,6 +40,17 @@
 volatile int cref_InterruptPending = 0;
 int			cref_database_encoding = 6; /* PG_UTF8 (GetDatabaseEncoding shim) */
 
+/* Engine live-allocation balance (vendor/postgres.h counting shim; task
+ * #150 standing rail).  Per-thread: cargo-test drives the oracles from many
+ * threads, and a shared counter would tangle unrelated lanes' engines. */
+_Thread_local long cref_engine_live_allocs = 0;
+
+long
+pg_diff_regexfam_live_allocs(void)
+{
+	return cref_engine_live_allocs;
+}
+
 /* stack_depth.c shape (see bench/cref/regex_ref.c): base + frame compare.
  * Budget = 2048kB, the REAL SERVER default (guc.c max_stack_depth after the
  * rlimit adjustment every production platform hits) — the bench rig's 100kB

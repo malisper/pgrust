@@ -1388,6 +1388,56 @@ mod regexp_tests {
         }
     }
 
+    /// STANDING RAIL (task #150): arm-9 execs must not accumulate regex
+    /// ENGINE memory. The vendored 18.3 createTrgmNFA frees engine memory
+    /// via MemoryContextDelete of its tmpcontext (regcustom.h MALLOC =
+    /// palloc_extended into the current context); the oracle shim maps
+    /// palloc_extended to raw malloc and context deletion to a no-op, so
+    /// the compiled regex guts MUST be pg_regfree'd through the TLS
+    /// live-regex slot (trgmrx_pg_regcomp_capture registers, trgmrx_enter
+    /// frees). When that registration was missing, every arm-9 compile
+    /// leaked its whole regex (~25-30KB/exec RSS climb, sustained runs
+    /// died at ~125k execs, CI cluster CONFIRM flooded with leak artifacts).
+    ///
+    /// Witness = the per-thread malloc-level balance over the engine's
+    /// MALLOC/FREE/REALLOC contract (vendor/postgres.h counting shim) —
+    /// it counts REAL engine allocations, so removing the registration
+    /// again turns this red; it cannot go vacuous on bookkeeping.
+    /// Steady-state contract: after any completed exec exactly one
+    /// deferred-free compiled regex is live, so the balance after N execs
+    /// of the same pattern must equal the balance after the first.
+    /// (Detection power witnessed 2026-08-03: registration disabled ->
+    /// 363 -> 3267 live allocs over 8 execs, red on the first pattern.)
+    #[test]
+    fn regexp_engine_memory_does_not_accumulate() {
+        extern "C" {
+            fn pg_diff_regexfam_live_allocs() -> std::os::raw::c_long;
+        }
+        let _serial = crate::c_oracle_serial();
+        // Success-path pattern (extraction + all 32 graph rounds => 33
+        // compiles per exec); plus a fallback and an error pattern so all
+        // three verdict paths are held to the same balance.
+        let pats: [&[u8]; 3] = [b"abc(def|ghi)jkl", b"a", b"(abc"];
+        for pat in pats {
+            rx(pat); // warm ctype cache + leave the deferred regex live
+            let base = unsafe { pg_diff_regexfam_live_allocs() };
+            for _ in 0..8 {
+                rx(pat);
+            }
+            let after = unsafe { pg_diff_regexfam_live_allocs() };
+            assert_eq!(
+                after, base,
+                "regex engine allocations accumulated across arm-9 execs \
+                 (pat={:?}: {} -> {}): per-entry pg_regfree cleanup regressed \
+                 — see trgmrx_pg_regcomp_capture / trgmrx_enter in \
+                 csrc/pg_trgm_regexp_io.c",
+                String::from_utf8_lossy(pat),
+                base,
+                after
+            );
+        }
+    }
+
     #[test]
     fn regexp_explore_dump() {
         let _serial = crate::c_oracle_serial();
