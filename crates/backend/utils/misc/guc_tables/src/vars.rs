@@ -331,6 +331,14 @@ pub static pgrust_memory_watchdog_test_hog: GucIntVar = GucSlot::new("pgrust_mem
 // janitor re-reads every tick.
 pub static pgrust_ephemeral_db_prefix: GucStringVar = GucSlot::new("pgrust_ephemeral_db_prefix");
 pub static pgrust_ephemeral_db_grace: GucIntVar = GucSlot::new("pgrust_ephemeral_db_grace");
+// pgrust-only (docs/design/test-views.md D2, no C symbol): mint-on-connect
+// security posture, all PGC_SIGHUP. mint_roles ('' = minting disabled) is
+// the master arm; max_per_role (0 = unlimited) caps live minted databases
+// per role; default_template ('' = bare tokens refuse) names the template
+// for bare <prefix><token> connects.
+pub static pgrust_ephemeral_db_mint_roles: GucStringVar = GucSlot::new("pgrust_ephemeral_db_mint_roles");
+pub static pgrust_ephemeral_db_max_per_role: GucIntVar = GucSlot::new("pgrust_ephemeral_db_max_per_role");
+pub static pgrust_ephemeral_db_default_template: GucStringVar = GucSlot::new("pgrust_ephemeral_db_default_template");
 // pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
 // force-overrides + the Gather read-fairness stride. Registered from the
 // deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is

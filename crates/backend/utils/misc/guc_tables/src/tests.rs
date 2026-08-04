@@ -50,12 +50,16 @@ fn table_counts_match_compiled_backend_shape() {
     // testmode M1 (pgrust-only, docs/design/test-views.md D1): the
     //   ephemeral-database janitor — String +1 pgrust.ephemeral_db_prefix
     //   (-> 78), Int +1 pgrust.ephemeral_db_grace (-> 167) = 455.
+    // testmode M3 (pgrust-only, docs/design/test-views.md D2): the
+    //   mint-on-connect security posture — String +2
+    //   pgrust.ephemeral_db_mint_roles / pgrust.ephemeral_db_default_template
+    //   (-> 80), Int +1 pgrust.ephemeral_db_max_per_role (-> 168) = 458.
     assert_eq!(ConfigureNamesBool.len(), 135);
-    assert_eq!(ConfigureNamesInt.len(), 167);
+    assert_eq!(ConfigureNamesInt.len(), 168);
     assert_eq!(ConfigureNamesReal.len(), 28);
-    assert_eq!(ConfigureNamesString.len(), 78);
+    assert_eq!(ConfigureNamesString.len(), 80);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 455);
+    assert_eq!(all_settings().count(), 458);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

@@ -910,6 +910,11 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // restart (the janitor polls; reload is free). GUC_UNIT_S: '15s'/'1min'
     // parse like C interval GUCs.
     GucIntSetting { name: "pgrust.ephemeral_db_grace", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Sets how long an ephemeral database must be idle before the janitor drops it."), long_desc: Some("Applies to non-template databases named under pgrust.ephemeral_db_prefix that are not pinned. Zero reaps at the first idle observation."), flags: GUC_UNIT_S, variable: &vars::pgrust_ephemeral_db_grace, boot_val: GucDefaultValue::Int(15), min: 0, max: 86400, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_max_per_role (pgrust-only, test-views.md D2
+    // security posture): caps live minted databases per connecting role;
+    // 0 = unlimited. Counting semantics documented on
+    // janitor::mint::live_owned_names' call site.
+    GucIntSetting { name: "pgrust.ephemeral_db_max_per_role", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Caps how many live ephemeral databases mint-on-connect will hold per role (0 = unlimited)."), long_desc: Some("Counted as prefix-matching non-template databases owned by the connecting role, plus that role's in-flight and just-completed mints."), flags: 0, variable: &vars::pgrust_ephemeral_db_max_per_role, boot_val: GucDefaultValue::Int(0), min: 0, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
     // DOP cap for runtime-engine engagements, consulted ONLY under
     // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm
@@ -1082,6 +1087,18 @@ pub static ConfigureNamesString: &[GucStringSetting] = &[
     // registration. Also the framework-adapter detection probe: SHOW of this
     // name distinguishes stock PG / janitor-off / janitor-on.
     GucStringSetting { name: "pgrust.ephemeral_db_prefix", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Database-name prefix owned by the ephemeral-database janitor (empty disables it)."), long_desc: Some("Non-template, unpinned databases named under the prefix are dropped after pgrust.ephemeral_db_grace of idleness and swept at server start. Template databases are never touched."), flags: 0, variable: &vars::pgrust_ephemeral_db_prefix, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_mint_roles (pgrust-only, test-views.md D2 security
+    // posture): the mint-on-connect master arm. Identifier-list syntax
+    // (SplitIdentifierString conventions: unquoted entries downcase); the
+    // sentinel $createdb admits any role with CREATEDB. The check hook
+    // (janitor crate, installed via janitor::init_seams) validates SYNTAX
+    // only — roles resolve at mint time, missing roles never match (the
+    // pg_hba convention).
+    GucStringSetting { name: "pgrust.ephemeral_db_mint_roles", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Roles allowed to mint ephemeral databases by connecting to them (empty disables minting)."), long_desc: Some("A comma-separated list of role names; the entry $createdb admits any role with the CREATEDB attribute and is reserved (quoting does not demote it, so a role literally named $createdb cannot be listed by name). The minted database is owned by the connecting role; if two listed roles race a connect to the same not-yet-minted name, it is created once, owned by the first requester."), flags: GUC_LIST_INPUT, variable: &vars::pgrust_ephemeral_db_mint_roles, boot_val: GucDefaultValue::String(Some("")), check_hook: Some(&hooks::check_pgrust_ephemeral_db_mint_roles), assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_default_template (pgrust-only, test-views.md D2):
+    // the template for bare <prefix><token> connects; '' = bare tokens
+    // refuse to mint (stock does-not-exist FATAL).
+    GucStringSetting { name: "pgrust.ephemeral_db_default_template", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Template used when minting a bare <prefix><token> ephemeral database (empty refuses bare tokens)."), long_desc: None, flags: 0, variable: &vars::pgrust_ephemeral_db_default_template, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: None },
     GucStringSetting { name: "log_connections", context: PGC_SU_BACKEND, group: LOGGING_WHAT, short_desc: Some("Logs specified aspects of connection establishment and setup."), long_desc: None, flags: GUC_LIST_INPUT, variable: &vars::log_connections_string, boot_val: GucDefaultValue::String(Some("")), check_hook: Some(&hooks::check_log_connections), assign_hook: Some(&hooks::assign_log_connections), show_hook: None },
 ];
 

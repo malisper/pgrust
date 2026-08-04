@@ -5,13 +5,14 @@
 use elog::{elog as log_report, ereport};
 use init_small::globals as g;
 use procsignal::ThreadSignalHandler::Simple;
-use types_core::{InvalidOid, Oid};
+use types_core::Oid;
 use types_error::{PgResult, ERRCODE_ADMIN_SHUTDOWN, FATAL, LOG, WARNING};
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
+use crate::dbscan::{scan_prefix_rows, DbRow};
 use crate::marker::{self, Guard};
 use crate::reap::{reap_candidate, StreakTracker};
-use crate::registry;
+use crate::{grammar, mint, registry};
 
 /// Poll cadence (spec: "~500ms").
 const TICK_MS: i64 = 500;
@@ -68,6 +69,19 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
     impl Drop for ClearProc {
         fn drop(&mut self) {
             registry::set_janitor_proc(None);
+            // Exit drain (D2): BGW_NEVER_RESTART means nothing will ever
+            // service the Ensure queue again — fail every pending entry and
+            // wake its waiters (parking on a latch with only a deadline as
+            // the escape is a hang in spec terms). Runs on FATAL unwinds
+            // too, which is the point.
+            mint::fail_pending_and_wake(
+                &types_error::PgError::error(
+                    "the pgrust ephemeral-db janitor exited; it is disabled until the server \
+                     restarts"
+                        .to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_CANNOT_CONNECT_NOW),
+            );
         }
     }
     let _clear_proc = ClearProc;
@@ -121,8 +135,14 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
 
         // Paused (adoption guard): no sweep, no reaping, and D2 mint
         // Ensures are rejected against registry::is_paused(). Keep ticking
-        // so SIGHUP/shutdown stay responsive.
+        // so SIGHUP/shutdown stay responsive. The drain matters: Ensures
+        // posted between set_janitor_proc (above) and the guard's pause
+        // decision would otherwise wait out their full timeout — the
+        // backend post path refuses NEW ones, this rejects the window's
+        // stragglers (both halves are required; neither alone closes the
+        // race).
         if registry::is_paused() {
+            mint::reject_pending_paused();
             continue;
         }
 
@@ -142,9 +162,21 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
             }
         }
 
+        // D2 mint servicing, AFTER the deferred sweep (a fresh mint must
+        // not race the sweep it may have been queued behind) and BEFORE the
+        // reap pass (mint-before-reap: the ordering decision and its safety
+        // argument live on mint::service_pass).
+        if let Err(e) = mint::service_pass() {
+            contain(e, "mint service pass")?;
+        }
+
         if let Err(e) = reap_pass(&prefix, &mut streaks) {
             contain(e, "reap pass")?;
         }
+
+        // Retire resolved Ensure entries whose waiters left and whose
+        // fresh-mint shield linger expired.
+        registry::gc_ensures(pg_clock::mono_ns());
     }
 }
 
@@ -152,8 +184,9 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
 /// transaction, and keep the loop alive. FATAL-class errors (shutdown,
 /// InitPostgres-grade failures) are unrecoverable and propagate — in C a
 /// FATAL would never reach PG_CATCH at all (the autovacuum-worker
-/// containment shape, worker.rs).
-fn contain(e: Box<types_error::PgError>, what: &str) -> PgResult<()> {
+/// containment shape, worker.rs). pub(crate): mint::service_pass contains
+/// per-Ensure createdb failures through the same choreography.
+pub(crate) fn contain(e: Box<types_error::PgError>, what: &str) -> PgResult<()> {
     if e.level() >= FATAL {
         return Err(e);
     }
@@ -169,68 +202,14 @@ fn contain(e: Box<types_error::PgError>, what: &str) -> PgResult<()> {
     Ok(())
 }
 
-/// One enumerated pg_database row the janitor cares about.
-struct DbRow {
-    oid: Oid,
-    name: String,
-    istemplate: bool,
-}
-
 /// Seqscan pg_database inside a private transaction (the autovacuum
-/// get_database_list template) and keep only prefix-matching rows. Non-UTF-8
-/// datnames are skipped: the prefix is UTF-8 configuration and `dropdb`
-/// takes &str — a harness minting non-UTF-8 ephemeral names is out of
-/// contract.
+/// get_database_list template); the scan body itself is shared with the
+/// backend-side mint cap count (dbscan.rs, which documents the row shape
+/// and the non-UTF-8 skip).
 fn list_prefix_databases(prefix: &str) -> PgResult<Vec<DbRow>> {
-    let mut rows = Vec::new();
-
     xact::StartTransactionCommand()?;
-    {
-        let cx = mcx::MemoryContext::new("pgrust janitor pg_database scan");
-        let mcx = cx.mcx();
-        let rd = table::table_open(
-            mcx,
-            types_core::catalog::DATABASE_RELATION_ID,
-            types_rel::lock::AccessShareLock,
-        )?;
-        let desc = rd.descr();
-        let mut scan = genam::systable_beginscan(mcx, &rd, InvalidOid, false, None, &[])?;
-        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-            let att = |attnum: i32| -> datum::Datum {
-                let mut isnull = false;
-                // SAFETY: pg_database row under pg_database's descriptor;
-                // oid/datname/datistemplate are fixed never-null columns.
-                let d = unsafe { types_tuple::heap_getattr(tup, attnum, desc, &mut isnull) };
-                debug_assert!(!isnull);
-                d
-            };
-            let name_d = att(pg_database::Anum_pg_database_datname);
-            // SAFETY: a NameData column datum: NAMEDATALEN readable bytes,
-            // NUL-terminated (the pg_database crate's own decode contract).
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    name_d.as_usize() as *const u8,
-                    types_core::fmgr::NAMEDATALEN as usize,
-                )
-            };
-            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-            if !bytes[..end].starts_with(prefix.as_bytes()) {
-                continue;
-            }
-            let Ok(name) = core::str::from_utf8(&bytes[..end]) else {
-                continue;
-            };
-            rows.push(DbRow {
-                oid: att(pg_database::Anum_pg_database_oid).as_oid(),
-                name: name.to_string(),
-                istemplate: att(pg_database::Anum_pg_database_datistemplate).as_bool(),
-            });
-        }
-        genam::systable_endscan(mcx, scan)?;
-        rd.close(types_rel::lock::AccessShareLock)?;
-    }
+    let rows = scan_prefix_rows(prefix)?;
     xact::CommitTransactionCommand()?;
-
     Ok(rows)
 }
 
@@ -316,6 +295,7 @@ fn sweep_rows(prefix: &str, rows: &[DbRow]) -> PgResult<()> {
                 d.istemplate,
                 registry::is_pinned(&d.name),
                 d.oid == own,
+                registry::ensure_shields(&d.name),
             )
         })
         .map(|d| (d.oid, d.name.as_str()))
@@ -341,8 +321,7 @@ fn sweep_rows(prefix: &str, rows: &[DbRow]) -> PgResult<()> {
 fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
     let rows = list_prefix_databases(prefix)?;
     let own = g::MyDatabaseId();
-    let grace_secs = crate::ephemeral_db_grace_secs().max(0) as u64;
-    let grace_ns = grace_secs * 1_000_000_000;
+    let default_grace_secs = crate::ephemeral_db_grace_secs().max(0) as u64;
     // The one monotonic authority (determinism choke; never std::time).
     let now_ns = pg_clock::mono_ns();
 
@@ -355,10 +334,20 @@ fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
             d.istemplate,
             registry::is_pinned(&d.name),
             d.oid == own,
+            registry::ensure_shields(&d.name),
         ) {
             continue;
         }
         seen.push(d.oid);
+        // Per-template grace (spec D2: a clone of template A reaps on A's
+        // override, not the default). Attribution is by NAME GRAMMAR alone
+        // (grammar::template_of): bare tokens carry no template segment and
+        // reap on the default grace.
+        let grace_secs = grammar::template_of(prefix, &d.name)
+            .and_then(|t| registry::template_grace_override(t))
+            .map(|s| s.max(0) as u64)
+            .unwrap_or(default_grace_secs);
+        let grace_ns = grace_secs * 1_000_000_000;
         // Procarray ground truth — never refcounts (spec item 2). NOTE:
         // CountDBBackends does not count prepared xacts, so a database
         // holding only a prepared transaction accrues a streak; its drop
@@ -383,9 +372,9 @@ fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
     let _ = log_report(
         LOG,
         format!(
-            "pgrust ephemeral-db janitor: reaping {} idle database(s) (grace {}s): {}",
+            "pgrust ephemeral-db janitor: reaping {} idle database(s) (default grace {}s): {}",
             victims.len(),
-            grace_secs,
+            default_grace_secs,
             names.join(", ")
         ),
     );
@@ -547,7 +536,10 @@ mod tests {
             assert_eq!(name, free, "gate must forward the victim name");
             Ok(true)
         });
-        assert!(matches!(r, Ok(true)), "unpinned drop verdict passes through, got {r:?}");
+        assert!(
+            matches!(r, Ok(true)),
+            "unpinned drop verdict passes through, got {r:?}"
+        );
         assert!(ran.get(), "unpinned victim must reach the drop action");
     }
 }

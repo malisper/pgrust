@@ -260,6 +260,18 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_ephemeral_db_grace,
         set: backing::set_pgrust_ephemeral_db_grace,
     });
+    vars::pgrust_ephemeral_db_mint_roles.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_mint_roles,
+        set: backing::set_pgrust_ephemeral_db_mint_roles,
+    });
+    vars::pgrust_ephemeral_db_max_per_role.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_max_per_role,
+        set: backing::set_pgrust_ephemeral_db_max_per_role,
+    });
+    vars::pgrust_ephemeral_db_default_template.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_default_template,
+        set: backing::set_pgrust_ephemeral_db_default_template,
+    });
     vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
         get: backing::pgrust_runtime_scan_pool,
         set: backing::set_pgrust_runtime_scan_pool,

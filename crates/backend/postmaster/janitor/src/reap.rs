@@ -20,18 +20,25 @@ use types_core::Oid;
 ///   would refuse it anyway (ERRCODE_OBJECT_IN_USE), but a prefix that
 ///   happens to cover the home database must not produce a per-cycle error
 ///   drumbeat.
+/// - An in-flight or just-completed mint Ensure (`ensure_shielded`, from
+///   `registry::ensure_shields`) exempts like a pin: the startup/deferred
+///   sweep is graceless and a zero/short per-template grace reaps at the
+///   first idle observation, so without the shield a minted database could
+///   be dropped in the mint-to-first-connect window (D2 race suite).
 pub fn reap_candidate(
     name: &str,
     prefix: &str,
     istemplate: bool,
     pinned: bool,
     is_own_db: bool,
+    ensure_shielded: bool,
 ) -> bool {
     !prefix.is_empty()
         && name.as_bytes().starts_with(prefix.as_bytes())
         && !istemplate
         && !pinned
         && !is_own_db
+        && !ensure_shielded
 }
 
 /// Continuous zero-backend streaks, keyed by database oid, living in janitor
@@ -109,32 +116,70 @@ mod tests {
     #[test]
     fn template_exemption_is_absolute() {
         // Prefix-matching template: never a candidate (spec item 1).
-        assert!(!reap_candidate("tv_tpl", "tv_", true, false, false));
+        assert!(!reap_candidate("tv_tpl", "tv_", true, false, false, false));
         // Sealed template under the recommended out-of-prefix convention.
-        assert!(!reap_candidate("tpl_abc", "tv_", true, false, false));
+        assert!(!reap_candidate("tpl_abc", "tv_", true, false, false, false));
         // The same name without the template bit IS a candidate.
-        assert!(reap_candidate("tv_tpl", "tv_", false, false, false));
+        assert!(reap_candidate("tv_tpl", "tv_", false, false, false, false));
     }
 
     #[test]
     fn pin_exempts() {
-        assert!(!reap_candidate("tv_pinned", "tv_", false, true, false));
-        assert!(reap_candidate("tv_pinned", "tv_", false, false, false));
+        assert!(!reap_candidate(
+            "tv_pinned",
+            "tv_",
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(reap_candidate(
+            "tv_pinned",
+            "tv_",
+            false,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn prefix_scoping_is_exact() {
-        assert!(reap_candidate("tv_x", "tv_", false, false, false));
-        assert!(!reap_candidate("tx_x", "tv_", false, false, false));
-        assert!(!reap_candidate("tv", "tv_", false, false, false));
+        assert!(reap_candidate("tv_x", "tv_", false, false, false, false));
+        assert!(!reap_candidate("tx_x", "tv_", false, false, false, false));
+        assert!(!reap_candidate("tv", "tv_", false, false, false, false));
         // Empty prefix means the feature is off: nothing ever matches, even
         // though every string starts with "".
-        assert!(!reap_candidate("tv_x", "", false, false, false));
+        assert!(!reap_candidate("tv_x", "", false, false, false, false));
     }
 
     #[test]
     fn own_database_is_never_a_candidate() {
-        assert!(!reap_candidate("postgres", "post", false, false, true));
+        assert!(!reap_candidate(
+            "postgres", "post", false, false, true, false
+        ));
+    }
+
+    #[test]
+    fn ensure_shield_exempts_like_a_pin() {
+        // An in-flight/lingering mint Ensure shields from sweep AND reap
+        // (deleting the ensure_shielded clause fails this).
+        assert!(!reap_candidate(
+            "tv_minting",
+            "tv_",
+            false,
+            false,
+            false,
+            true
+        ));
+        assert!(reap_candidate(
+            "tv_minting",
+            "tv_",
+            false,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]

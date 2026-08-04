@@ -39,8 +39,11 @@
 #![allow(non_snake_case)]
 
 pub mod builtins;
+mod dbscan;
+pub mod grammar;
 mod main_loop;
 pub mod marker;
+pub mod mint;
 pub mod reap;
 pub mod registry;
 
@@ -67,6 +70,27 @@ pub fn ephemeral_db_prefix() -> String {
 /// janitor re-reads this every tick after running the SIGHUP reload idiom.
 pub fn ephemeral_db_grace_secs() -> i32 {
     guc_tables::vars::pgrust_ephemeral_db_grace.read()
+}
+
+/// `pgrust.ephemeral_db_mint_roles` (PGC_SIGHUP, default `''` = minting
+/// disabled). Read at mint time, never cached (spec: SIGHUP-tunable).
+pub fn ephemeral_db_mint_roles() -> String {
+    guc_tables::vars::pgrust_ephemeral_db_mint_roles
+        .read()
+        .unwrap_or_default()
+}
+
+/// `pgrust.ephemeral_db_max_per_role` (PGC_SIGHUP, default 0 = unlimited).
+pub fn ephemeral_db_max_per_role() -> i32 {
+    guc_tables::vars::pgrust_ephemeral_db_max_per_role.read()
+}
+
+/// `pgrust.ephemeral_db_default_template` (PGC_SIGHUP, default `''` = bare
+/// tokens refuse to mint).
+pub fn ephemeral_db_default_template() -> String {
+    guc_tables::vars::pgrust_ephemeral_db_default_template
+        .read()
+        .unwrap_or_default()
 }
 
 /// Static bgworker registration (ApplyLauncherRegister precedent): called by
@@ -110,4 +134,9 @@ pub fn JanitorRegister() {
 
 pub fn init_seams() {
     janitor_seams::janitor_register::set(JanitorRegister);
+    // D2 mint-on-connect: the InitPostgres lookup-miss hook (uninstalled =
+    // stock behavior; the postinit guard checks is_installed()).
+    janitor_seams::ephemeral_db_mint_on_connect::set(mint::mint_on_connect);
+    guc_tables::hooks::check_pgrust_ephemeral_db_mint_roles
+        .install(mint::check_ephemeral_db_mint_roles);
 }

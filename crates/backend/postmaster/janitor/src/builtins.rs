@@ -19,7 +19,8 @@ use elog::ereport;
 use types_core::catalog::DATABASE_RELATION_ID;
 use types_core::Oid;
 use types_error::{
-    PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_DATABASE, ERROR,
+    PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_UNDEFINED_DATABASE, ERROR,
 };
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
@@ -30,6 +31,7 @@ use crate::{marker, registry};
 pub const PGRUST_PIN_DATABASE_FOID: Oid = 9001;
 pub const PGRUST_UNPIN_DATABASE_FOID: Oid = 9002;
 pub const PGRUST_JANITOR_UNPAUSE_FOID: Oid = 9003;
+pub const PGRUST_SET_TEMPLATE_GRACE_FOID: Oid = 9004;
 
 /// Decode the text arg of a STRICT single-arg builtin into an owned name.
 fn text_arg0(fcinfo: &mut Fcinfo) -> PgResult<String> {
@@ -173,6 +175,49 @@ pub fn fc_pgrust_janitor_unpause(
     })
 }
 
+/// Ceiling for per-template grace overrides: the same bound as
+/// pgrust.ephemeral_db_grace's GUC max (guc_tables). Without it a
+/// NON-SUPERUSER template owner could set an ~68-year override
+/// (i32 seconds) and make that template's clones effectively unreapable,
+/// escaping the operator-facing knob's 0..=86400 range.
+const MAX_TEMPLATE_GRACE_SECS: i32 = 86_400;
+
+/// pgrust_set_template_grace(text, integer) -> bool (D2): set — or clear,
+/// with a negative argument — the reap-grace override for clones of the
+/// named template (databases matching `<prefix><template>__<token>`).
+/// Seconds as a plain integer, DEVIATION from the spec's `interval` arg,
+/// recorded in the M3 addendum: the grace GUC itself is integer seconds
+/// (GUC_UNIT_S), and an int keeps the builtin free of interval-datum
+/// plumbing. Bounded above by the grace GUC's own ceiling (86400s), so
+/// the override can never exceed what the operator-facing knob allows.
+/// Restart-lossy like pins. Privilege (spec security posture):
+/// owner of the TEMPLATE database or superuser; the check resolves the
+/// catalog datname and the override is keyed on it (the pin rationale —
+/// NAMEDATALEN truncation). Returns true when an override is in place
+/// after the call, false when it cleared.
+pub fn fc_pgrust_set_template_grace(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let name = text_arg0(fcinfo)?;
+    let secs = fcinfo.arg_i32(1);
+    if secs > MAX_TEMPLATE_GRACE_SECS {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!(
+                "grace override {secs} is out of range for pgrust_set_template_grace \
+                 (maximum {MAX_TEMPLATE_GRACE_SECS} seconds, the pgrust.ephemeral_db_grace \
+                 ceiling)"
+            ))
+            .into_error()
+            .into());
+    }
+    let datname = owner_or_superuser_check(fcinfo, &name, "pgrust_set_template_grace")?;
+    Ok(Datum::from_bool(registry::set_template_grace(
+        &datname, secs,
+    )?))
+}
+
 /// The extra-builtin table seams_init appends to EXTRA_BUILTINS.
 pub static JANITOR_BUILTINS: &[FmgrBuiltin] = &[
     FmgrBuiltin {
@@ -198,6 +243,14 @@ pub static JANITOR_BUILTINS: &[FmgrBuiltin] = &[
         strict: true,
         retset: false,
         func: fc_pgrust_janitor_unpause,
+    },
+    FmgrBuiltin {
+        foid: PGRUST_SET_TEMPLATE_GRACE_FOID,
+        name: "pgrust_set_template_grace",
+        nargs: 2,
+        strict: true,
+        retset: false,
+        func: fc_pgrust_set_template_grace,
     },
 ];
 

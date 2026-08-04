@@ -22,6 +22,7 @@ dbcommands = { path = "../../commands/dbcommands" }
 elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }
 genam = { path = "../../access/index/genam" }
+guc = { path = "../../utils/misc/guc" }
 guc_file = { path = "../../utils/misc/guc_file" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }
@@ -30,10 +31,12 @@ janitor_seams = { path = "../janitor_seams" }
 latch = { path = "../../storage/ipc/latch" }
 libc = "0.2"
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+mbutils = { path = "../../utils/mb/mbutils" }
 pg_clock = { path = "../../../port/pg_clock" }
 mcx = { path = "../../../_support/mcx" }
 miscinit = { path = "../../utils/init/miscinit" }
 pg_database = { path = "../../catalog/pg_database" }
+pg_db_role_setting = { path = "../../catalog/pg_db_role_setting" }
 pgsync = { path = "../../../_support/pgsync" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 procarray = { path = "../../storage/ipc/procarray" }
@@ -45,6 +48,8 @@ types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_guc = { path = "../../../_support/types/types_guc" }
+types_nodes = { path = "../../../_support/types/nodes" }
+varlena = { path = "../../utils/adt/varlena" }
 types_rel = { path = "../../../_support/types/rel" }
 types_storage = { path = "../../../_support/types/types_storage" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

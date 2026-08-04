@@ -250,6 +250,27 @@ int_var!(
     set_pgrust_ephemeral_db_grace,
     15
 );
+// D2 mint-on-connect posture (docs/design/test-views.md): all PGC_SIGHUP,
+// read at mint time on the connecting backend's thread (which processed the
+// config at startup) and by the janitor after its reload idiom.
+string_var!(
+    CELL_pgrust_ephemeral_db_mint_roles,
+    pgrust_ephemeral_db_mint_roles,
+    set_pgrust_ephemeral_db_mint_roles,
+    Some("")
+);
+int_var!(
+    I_pgrust_ephemeral_db_max_per_role,
+    pgrust_ephemeral_db_max_per_role,
+    set_pgrust_ephemeral_db_max_per_role,
+    0
+);
+string_var!(
+    CELL_pgrust_ephemeral_db_default_template,
+    pgrust_ephemeral_db_default_template,
+    set_pgrust_ephemeral_db_default_template,
+    Some("")
+);
 bool_var!(
     B_integer_datetimes,
     integer_datetimes,

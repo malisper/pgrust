@@ -7996,6 +7996,7 @@ dependencies = [
  "fd",
  "fmgr_core",
  "genam",
+ "guc",
  "guc_file",
  "guc_tables",
  "init_small",
@@ -8004,10 +8005,12 @@ dependencies = [
  "latch",
  "libc",
  "lmgr_proc",
+ "mbutils",
  "mcx",
  "miscinit",
  "pg_clock",
  "pg_database",
+ "pg_db_role_setting",
  "pgsync",
  "postgres_seams",
  "procarray",
@@ -8019,9 +8022,11 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_guc",
+ "types_nodes",
  "types_rel",
  "types_storage",
  "types_tuple",
+ "varlena",
  "xact",
 ]
 
@@ -8030,6 +8035,7 @@ name = "janitor_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -13589,6 +13595,7 @@ dependencies = [
  "init_small",
  "inval_seams",
  "ipc_seams",
+ "janitor_seams",
  "latch",
  "libc",
  "lmgr",
