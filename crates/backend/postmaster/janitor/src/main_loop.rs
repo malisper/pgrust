@@ -439,6 +439,20 @@ fn drop_batch(victims: &[(Oid, &str)], mut streaks: Option<&mut StreakTracker>) 
 /// Drop one enumerated victim. Returns true if the database was dropped,
 /// false if the drop was skipped.
 fn drop_one(oid: Oid, name: &str) -> PgResult<bool> {
+    drop_one_gated(oid, name, dropdb_this_victim)
+}
+
+/// drop_one's gate-then-drop choreography, generic over the drop action so
+/// the pre-drop pin re-check is unit-testable (the reap.rs convention:
+/// decision logic separated from catalog/xact I/O — the pinsoak gate's E2E
+/// NON-COVERAGE note owes exactly this check to a unit test). Production
+/// injects `dropdb_this_victim`, which needs a booted catalog; tests inject
+/// a probe.
+fn drop_one_gated(
+    oid: Oid,
+    name: &str,
+    drop_action: impl FnOnce(Oid, &str) -> PgResult<bool>,
+) -> PgResult<bool> {
     // Pin re-check, immediately before the drop: a pgrust_pin_database()
     // call that returned true after this cycle's candidate scan must still
     // protect the database — the window between enumeration and this point
@@ -455,6 +469,12 @@ fn drop_one(oid: Oid, name: &str) -> PgResult<bool> {
         );
         return Ok(false);
     }
+    drop_action(oid, name)
+}
+
+/// The real drop action: the sanctioned skip-checkpoint dropdb wrapper in
+/// its own transaction.
+fn dropdb_this_victim(oid: Oid, name: &str) -> PgResult<bool> {
     let cx = mcx::MemoryContext::new("pgrust janitor dropdb");
     xact::StartTransactionCommand()?;
     // missing_ok=true: the database may have vanished since enumeration
@@ -474,4 +494,60 @@ fn loc(func: &'static str) -> types_error::ErrorLocation {
         0,
         func,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-drop pin re-check (the pinsoak gate's owed unit test:
+    /// a pin landing inside the enumeration->drop window is not provocable
+    /// from bash timing). RELEASE-effective — plain asserts, no
+    /// debug_assert. Deleting the is_pinned re-check in drop_one_gated
+    /// fails this test: the injected drop action would run on a pinned
+    /// database.
+    ///
+    /// ONE test function on purpose (the registry.rs convention), under the
+    /// crate-wide pin-table test lock: the pin table is process-global and
+    /// registry_semantics transiently fills it to capacity.
+    #[test]
+    fn pre_drop_pin_recheck_gates_the_drop() {
+        use core::cell::Cell;
+
+        let _table = registry::test_pin_table_lock();
+
+        // A pin that landed mid-cycle (after enumeration chose this victim,
+        // before its drop) must stop the drop action from running AT ALL,
+        // and the skip must report Ok(false) — "nothing dropped, no
+        // checkpoint owed" (drop_batch's contract).
+        let pinned = "tv_dropgate_pinned";
+        assert!(registry::pin(pinned).unwrap());
+        let ran = Cell::new(false);
+        let r = drop_one_gated(90201, pinned, |_, _| {
+            ran.set(true);
+            Ok(true)
+        });
+        assert!(
+            matches!(r, Ok(false)),
+            "pinned victim must be skipped as Ok(false), got {r:?}"
+        );
+        assert!(
+            !ran.get(),
+            "drop action ran on a pinned database: the pre-drop pin re-check is gone"
+        );
+        assert!(registry::unpin(pinned));
+
+        // Unpinned: the gate passes straight through to the action with the
+        // enumerated (oid, name) intact, and returns its verdict unchanged.
+        let free = "tv_dropgate_free";
+        let ran = Cell::new(false);
+        let r = drop_one_gated(90202, free, |oid, name| {
+            ran.set(true);
+            assert_eq!(oid, 90202, "gate must forward the enumerated oid");
+            assert_eq!(name, free, "gate must forward the victim name");
+            Ok(true)
+        });
+        assert!(matches!(r, Ok(true)), "unpinned drop verdict passes through, got {r:?}");
+        assert!(ran.get(), "unpinned victim must reach the drop action");
+    }
 }

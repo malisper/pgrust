@@ -148,6 +148,20 @@ pub fn wake_janitor() {
     }
 }
 
+/// Serializes every test that touches the process-global pin table, across
+/// ALL of this crate's test modules (registry_semantics' capacity phase
+/// transiently FILLS the table; any concurrent pin/unpin — e.g.
+/// main_loop's pre-drop re-check test — would perturb its accounting, and
+/// vice versa). Same discipline as registry_semantics' one-test-function
+/// rule, extended crate-wide.
+#[cfg(test)]
+pub(crate) fn test_pin_table_lock() -> pgsync::MutexGuard<'static, ()> {
+    pgsync::process_global! {
+        static TEST_PIN_TABLE: pgsync::Mutex<()> = pgsync::Mutex::new(());
+    }
+    TEST_PIN_TABLE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +171,7 @@ mod tests {
     // across #[test] fns would race through the shared pin table.
     #[test]
     fn registry_semantics() {
+        let _table = test_pin_table_lock();
         // pin is idempotent and reports first-pin.
         assert!(pin("tv_reg_a").unwrap());
         assert!(!pin("tv_reg_a").unwrap());

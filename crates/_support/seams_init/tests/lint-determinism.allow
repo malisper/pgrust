@@ -168,7 +168,8 @@ fs	crates/backend/replication/slot/src/lib.rs	6
 fs	crates/backend/replication/walsender/src/lib.rs	1
 # --- crates/backend/storage/aio/aio_uring (4 sites) ---
 fs	crates/backend/storage/aio/aio_uring/src/lib.rs	4
-# --- crates/backend/storage/file/fd (6 sites) ---
+# --- crates/backend/storage/file/fd (7 sites) ---
+fs	crates/backend/storage/file/fd/src/copydir.rs	1	DST-REVIEW(testmode-m1): clone_file (copydir.c HAVE_COPY_FILE_RANGE arm, test-mode M0) — ONE libc::copy_file_range loop inside the sanctioned fd choke (desc.rs/sync.rs's SANCTIONED class; the Vfs op-set is a frozen contract, not revised for a sim-unreachable arm): file_copy_method=clone is gated out of the GUC options under pgrust_sim (guc_tables) and the cfg(pgrust_sim) arm panics as C's pg_unreachable — no sim world can reach the raw syscall
 fs	crates/backend/storage/file/fd/src/desc.rs	4	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1); # pending: posix-streams-excluded-P1 — fopen (AllocateFile) / popen (OpenPipeStream) stream sites + raw-fd carve-out (WS-C retirement spec, notes/dst-p1-ws-c-allowlist-rows.md)
 fs	crates/backend/storage/file/fd/src/sync.rs	2	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1); # pending: pg-flush-data-mmap-arm — mmap/msync writeback arm + fcntl(F_GETFL) probe (WS-C retirement spec)
 # --- crates/backend/storage/file/vfs (40 sites) ---
@@ -220,6 +221,10 @@ fs	crates/backend/utils/misc/guc/src/select.rs	2
 fs	crates/backend/utils/misc/guc_file/src/lib.rs	1
 # --- crates/backend/utils/misc/tzparser (2 sites) ---
 fs	crates/backend/utils/misc/tzparser/src/lib.rs	2
+# --- crates/bin/psql (10 sites) ---
+fs	crates/bin/psql/src/auth.rs	1	DST-REVIEW(testmode-m1): psql is a CLIENT binary outside the server sim/DST boundary (bin/waldesc + interfaces/pgclient precedent) — SCRAM client-nonce entropy read from /dev/urandom (pg_strong_random is the SERVER-side funnel; the wasm32-wasip1 arm derives from time+pid instead). Rows added retroactively: the psql-wasm lane sealed without its ratchet rows (the hjprobe precedent)
+fs	crates/bin/psql/src/input.rs	7	DST-REVIEW(testmode-m1): client binary outside the server sim/DST boundary (see the auth.rs row) — \i / -f script File::open + raw-terminal libc::read for the interactive line editor
+fs	crates/bin/psql/src/proto.rs	2	DST-REVIEW(testmode-m1): client binary outside the server sim/DST boundary (see the auth.rs row) — FE-protocol wire IO, libc::read/write on the connection fds
 # --- crates/bin/waldesc (5 sites) ---
 fs	crates/bin/waldesc/src/main.rs	5
 # --- crates/contrib/file_fdw (3 sites) ---
@@ -284,9 +289,12 @@ time	crates/backend/utils/misc/pg_rusage/src/lib.rs	1	INFRA-telemetry
 time	crates/port/pg_clock/src/posix.rs	1	DST-REVIEW(ws-clk): sanctioned clock authority internals (s2.2) — the ONE clock_gettime hub; PosixClock #[inline] wrappers
 time	crates/backend/replication/slotsync/src/lib.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the pg_clock authority (s2.2) chartered to the DST program (t28)
 time	crates/backend/replication/walreceiverfuncs/src/lib.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the pg_clock authority (s2.2) chartered to the DST program (t28)
+time	crates/bin/psql/src/auth.rs	2	DST-REVIEW(testmode-m1): CLIENT binary outside the server sim/DST boundary (see the fs rows) — wasm32-wasip1 SCRAM-nonce fallback (no /dev/urandom on wasi): SystemTime+pid uniqueness seed, cfg'd out of native builds
+time	crates/bin/psql/src/main.rs	2	DST-REVIEW(testmode-m1): CLIENT binary outside the server sim/DST boundary (see the fs rows) — \timing's Instant::now/elapsed pair (C psql parity)
 
 # ==== rand ====
 rand	crates/port/pg_strong_random/src/os.rs	4	DST-REVIEW(ws-rng): SANCTIONED entropy funnel internals (s2.3) — OsEntropy getentropy+urandom moved verbatim from lib.rs behind the EntropySource seam (P2); pg_strong_random callers are never flagged
+rand	crates/bin/psql/src/auth.rs	2	DST-REVIEW(testmode-m1): CLIENT binary outside the server sim/DST boundary (see the fs rows) — SCRAM client nonce from /dev/urandom; 2 = the File::open site + its error-message string (both match the bare urandom needle)
 
 # ==== spawn ====
 spawn	crates/backend/access/pgrcolumnar/src/loadsort.rs	2	DST-REVIEW(simvfs-shared): row 16 CONVERTED + sim-REACHABLE — feeder pool AND the sim_demo share-proof helper spawn via the pgsync::thread child-registering wrapper (scanner sees the textual thread::Builder, not the pgsync routing); feeders adopt the pump's shared universe (s2 #6 item 1 DISCHARGED; row 8 converted with it)
@@ -413,6 +421,7 @@ env	crates/port/pg_path/src/lib.rs	1
 env	crates/port/pg_strong_random/src/sim.rs	1	DST-REVIEW(ws-rng): PGRUST_SIM_SEED knob read (R-KNOBS, s2.3); pgrust_sim-cfg-only — no product reader exists; retires onto the P2 knobs-registry charter when that lands
 env	crates/backend/executor/execgrouping/src/lib.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the knobs registry (s2.5) chartered to the DST program (t28)
 env	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residual car (PROCPERF P2) PGRUST_* knob gate landed post-census; routing onto the knobs registry (s2.5) chartered to the DST program (t28)
+env	crates/bin/psql/src/main.rs	5	DST-REVIEW(testmode-m1): psql is a CLIENT binary outside the server sim/DST boundary — the libpq PG* environment contract (PGDATABASE/PGPASSWORD/PGCLIENTENCODING + connection defaults + PSQL_INTERACTIVE), read at startup exactly as C psql does; the knobs registry is server-side configuration, not the client env contract
 
 # ==== blocking ====
 blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
@@ -580,6 +589,7 @@ once	crates/backend/utils/adt/float/src/funcs.rs	1
 once	crates/backend/utils/adt/geo/src/tests_full.rs	1
 once	crates/backend/utils/adt/pg_locale/src/lib.rs	1	DST-REVIEW(t32-train): range-constructor-flags car boarding reconciliation — icu_unicode_version's process-constant version cache (OnceLock<Option<String>>, dlopen-bound libicu probed once; locale/ICU identity is boot-time config, not sim-visible entropy; same class as the setup.rs env rows). The car sealed without its ratchet rows (the hjprobe precedent, second instance this train).
 once	crates/backend/utils/adt/pg_locale/src/icu_ffi.rs	2	DST-REVIEW(t32-train): +1 = the dlopen'd IcuApi table OnceLock (range-constructor-flags car; process-constant library handle)
+once	crates/backend/utils/adt/rowtypes/src/tests_ws.rs	1	DST-REVIEW(testmode-m1): cfg(test) FILE-module — lib.rs gates `#[path = "tests_ws.rs"] mod ws_tests` behind #[cfg(test)] (SLOC-v2 tests_* naming, which the scanner's *_tests.rs basename filter does not match; the scanner sees the file, not the gate at the mod decl). Zero product codegen; the geo tests_full.rs rows' exact class. Site = the test seam-installer's Once::call_once
 once	crates/backend/utils/adt/xml/src/libxml.rs	1
 once	crates/backend/utils/cache/relcache/src/initfile.rs	1
 once	crates/backend/utils/cache/syscache_seams/src/lib.rs	3
@@ -760,6 +770,7 @@ rawsync	crates/backend/utils/adt/float/src/funcs.rs	1
 rawsync	crates/backend/utils/adt/geo/src/tests_full.rs	1
 rawsync	crates/backend/utils/adt/pg_locale/src/lib.rs	1	DST-REVIEW(t32-train): range-constructor-flags car boarding reconciliation — icu_unicode_version's process-constant version cache (OnceLock<Option<String>>, dlopen-bound libicu probed once; locale/ICU identity is boot-time config, not sim-visible entropy; same class as the setup.rs env rows). The car sealed without its ratchet rows (the hjprobe precedent, second instance this train).
 rawsync	crates/backend/utils/adt/pg_locale/src/icu_ffi.rs	1
+rawsync	crates/backend/utils/adt/rowtypes/src/tests_ws.rs	1	DST-REVIEW(testmode-m1): cfg(test) FILE-module invisible to the scanner at the mod decl (see the once row) — the test seam-installer's std::sync::Once static; zero product codegen; the geo tests_full.rs rows' exact class
 rawsync	crates/backend/utils/adt/xml/src/libxml.rs	1
 rawsync	crates/backend/utils/cache/relcache/src/initfile.rs	1
 rawsync	crates/backend/utils/cache/typcache_seams/src/lib.rs	1

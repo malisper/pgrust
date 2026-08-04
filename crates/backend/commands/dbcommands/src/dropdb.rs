@@ -202,6 +202,26 @@ pub fn dropdb_skip_checkpoint(
     dropdb_guts(mcx, dbname, missing_ok, force, false, expected_oid)
 }
 
+/// The `expected_oid` guard's decision, extracted to a pure predicate so the
+/// oid-mismatch skip is unit-testable without a booted catalog (the storm
+/// gate's HONESTY NOTE, scripts/testmode/janitor-storm.sh: the e2e rig can
+/// exercise the re-mint choreography but cannot falsify this comparison).
+/// `dropdb_guts` calls it on the oid the name JUST resolved to, under the
+/// AccessExclusiveLock that resolution took — behavior-preserving extraction,
+/// no lock or catalog state is consulted here.
+///
+/// Returns true when the drop must be SKIPPED: the caller enumerated a
+/// specific victim oid and the name now resolves to a DIFFERENT database
+/// (re-minted since enumeration — it earned none of the old oid's reap
+/// eligibility). `None` means no expectation: drop whatever the name
+/// resolves to (the C-shaped `dropdb` path), never skip.
+fn victim_was_reminted(resolved_oid: Oid, expected_oid: Option<Oid>) -> bool {
+    match expected_oid {
+        Some(expected) => resolved_oid != expected,
+        None => false,
+    }
+}
+
 fn dropdb_guts(
     mcx: Mcx<'_>,
     dbname: &str,
@@ -228,16 +248,14 @@ fn dropdb_guts(
     };
     let db_id = db.oid;
 
-    if let Some(expected) = expected_oid {
-        if db_id != expected {
-            // The name was re-minted since the caller enumerated it: the
-            // brand-new database earned none of the caller's eligibility.
-            // Release the lock we just took on the innocent database and
-            // skip (see the doc comment on `dropdb_skip_checkpoint`).
-            lmgr::UnlockSharedObject(DATABASE_RELATION_ID, db_id, 0, AccessExclusiveLock)?;
-            pgdbrel.close(RowExclusiveLock)?;
-            return Ok(false);
-        }
+    if victim_was_reminted(db_id, expected_oid) {
+        // The name was re-minted since the caller enumerated it: the
+        // brand-new database earned none of the caller's eligibility.
+        // Release the lock we just took on the innocent database and
+        // skip (see the doc comment on `dropdb_skip_checkpoint`).
+        lmgr::UnlockSharedObject(DATABASE_RELATION_ID, db_id, 0, AccessExclusiveLock)?;
+        pgdbrel.close(RowExclusiveLock)?;
+        return Ok(false);
     }
 
     if !adt_acl::has_privs_of_role(miscinit::GetUserId(), db.datdba)? {
@@ -365,4 +383,37 @@ fn dropdb_guts(
 
     xact::ForceSyncCommit();
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Discrimination of the expected_oid skip (owed by the janitor-storm
+    /// gate's HONESTY NOTE; RELEASE-effective — plain asserts, no
+    /// debug_assert). Kills the live mutations of the guard: comparison
+    /// flipped or dropped (same-oid case), mismatch ignored (re-mint case),
+    /// and `None` treated as a mismatch (the C-shaped path must never skip).
+    #[test]
+    fn expected_oid_guard_discriminates() {
+        let enumerated: Oid = 90101;
+        let reminted: Oid = 90102;
+
+        // The name still resolves to the enumerated victim: proceed.
+        assert!(
+            !victim_was_reminted(enumerated, Some(enumerated)),
+            "guard must let the enumerated victim drop"
+        );
+        // Re-minted under the same name (different oid): SKIP — the new
+        // database inherited none of the old oid's eligibility.
+        assert!(
+            victim_was_reminted(reminted, Some(enumerated)),
+            "guard must skip a re-minted (oid-mismatched) database"
+        );
+        // No expectation = the C-shaped drop-by-name entry: never skip.
+        assert!(
+            !victim_was_reminted(reminted, None),
+            "C-shaped dropdb (expected_oid=None) must never skip on oid"
+        );
+    }
 }
