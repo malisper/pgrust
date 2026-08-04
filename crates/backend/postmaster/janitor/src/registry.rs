@@ -164,7 +164,7 @@ pub struct PendingEnsure {
 /// OPERATOR-sized (one GUC), never concurrency-scaled, and overflow is a
 /// silent skip-add (the replenisher simply stops early), not an error a
 /// connect path can hit.
-pub const MAX_SPARES: usize = 64;
+pub const MAX_SPARES: usize = 4096;
 
 /// One pre-minted spare clone of the default template (D3 warm pool),
 /// restart-lossy like everything here: post-restart leftovers are
