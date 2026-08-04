@@ -904,6 +904,12 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // this many MB into a session-lifetime "WatchdogTestHog" context. Hidden
     // (NOT_IN_SAMPLE + NO_SHOW_ALL): a deliberate leak is never a product knob.
     GucIntSetting { name: "pgrust.memory_watchdog_test_hog", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Leaks this many MB per query into a named memory context (memory watchdog test instrumentation)."), long_desc: None, flags: GUC_UNIT_MB | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_memory_watchdog_test_hog, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024 * 1024, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_grace (pgrust-only, docs/design/test-views.md D1):
+    // how long a prefix-matching ephemeral database must sit at zero backends
+    // before the janitor reaps it. PGC_SIGHUP so operators tune it without a
+    // restart (the janitor polls; reload is free). GUC_UNIT_S: '15s'/'1min'
+    // parse like C interval GUCs.
+    GucIntSetting { name: "pgrust.ephemeral_db_grace", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Sets how long an ephemeral database must be idle before the janitor drops it."), long_desc: Some("Applies to non-template databases named under pgrust.ephemeral_db_prefix that are not pinned. Zero reaps at the first idle observation."), flags: GUC_UNIT_S, variable: &vars::pgrust_ephemeral_db_grace, boot_val: GucDefaultValue::Int(15), min: 0, max: 86400, check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
     // DOP cap for runtime-engine engagements, consulted ONLY under
     // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm
@@ -1070,6 +1076,12 @@ pub static ConfigureNamesString: &[GucStringSetting] = &[
     // fd crate reports above-VFD-cache counters — allocated transient descs,
     // the allocated-desc cap, max_safe_fds, max_files_per_process).
     GucStringSetting { name: "pgrust.resource_counters", context: PGC_INTERNAL, group: DEVELOPER_OPTIONS, short_desc: Some("Shows per-backend fd-class resource counters (test-harness channel)."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL | GUC_DISALLOW_IN_FILE, variable: &vars::pgrust_resource_counters, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: Some(&hooks::show_resource_counters) },
+    // pgrust.ephemeral_db_prefix (pgrust-only, docs/design/test-views.md D1):
+    // arms the ephemeral-database janitor at postmaster start; empty = the
+    // feature is off. PGC_POSTMASTER because it gates static bgworker
+    // registration. Also the framework-adapter detection probe: SHOW of this
+    // name distinguishes stock PG / janitor-off / janitor-on.
+    GucStringSetting { name: "pgrust.ephemeral_db_prefix", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Database-name prefix owned by the ephemeral-database janitor (empty disables it)."), long_desc: Some("Non-template, unpinned databases named under the prefix are dropped after pgrust.ephemeral_db_grace of idleness and swept at server start. Template databases are never touched."), flags: 0, variable: &vars::pgrust_ephemeral_db_prefix, boot_val: GucDefaultValue::String(Some("")), check_hook: None, assign_hook: None, show_hook: None },
     GucStringSetting { name: "log_connections", context: PGC_SU_BACKEND, group: LOGGING_WHAT, short_desc: Some("Logs specified aspects of connection establishment and setup."), long_desc: None, flags: GUC_LIST_INPUT, variable: &vars::log_connections_string, boot_val: GucDefaultValue::String(Some("")), check_hook: Some(&hooks::check_log_connections), assign_hook: Some(&hooks::assign_log_connections), show_hook: None },
 ];
 

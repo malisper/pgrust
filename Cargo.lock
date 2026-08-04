@@ -7984,6 +7984,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "janitor"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "bgworker",
+ "checkpointer",
+ "datum",
+ "dbcommands",
+ "elog",
+ "fd",
+ "fmgr_core",
+ "genam",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "janitor_seams",
+ "latch",
+ "libc",
+ "lmgr_proc",
+ "mcx",
+ "miscinit",
+ "pg_clock",
+ "pg_database",
+ "pgsync",
+ "postgres_seams",
+ "procarray",
+ "procsignal",
+ "superuser_seams",
+ "table",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
+name = "janitor_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+]
+
+[[package]]
 name = "jit_deform"
 version = "0.1.0"
 dependencies = [
@@ -13612,6 +13661,7 @@ dependencies = [
  "ipc_seams",
  "ipci",
  "ipci_seams",
+ "janitor_seams",
  "latch",
  "launch_backend",
  "launcher_seams",
@@ -15640,6 +15690,7 @@ dependencies = [
  "ipc",
  "ipci",
  "isn",
+ "janitor",
  "large_object",
  "latch",
  "launch_backend",

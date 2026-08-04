@@ -233,6 +233,23 @@ int_var!(
     set_pgrust_memory_watchdog_limit,
     0
 );
+// pgrust-only (docs/design/test-views.md D1): the ephemeral-database
+// janitor. Both are process-global cells per this file's header law —
+// prefix is PGC_POSTMASTER, grace PGC_SIGHUP (the janitor thread runs the
+// reload idiom and reads the cell each tick). Grace is stored in seconds
+// (GUC_UNIT_S row in tables.rs).
+string_var!(
+    CELL_pgrust_ephemeral_db_prefix,
+    pgrust_ephemeral_db_prefix,
+    set_pgrust_ephemeral_db_prefix,
+    Some("")
+);
+int_var!(
+    I_pgrust_ephemeral_db_grace,
+    pgrust_ephemeral_db_grace,
+    set_pgrust_ephemeral_db_grace,
+    15
+);
 bool_var!(
     B_integer_datetimes,
     integer_datetimes,

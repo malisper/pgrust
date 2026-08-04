@@ -219,6 +219,7 @@ pub fn init_all_with_transport(transport: Transport) {
     postmaster_startup::init_seams();
     syslogger::init_seams();
     launcher::init_seams();
+    janitor::init_seams();
     walsender_config::init_seams();
     walsender::init_seams();
     syncrep::init_seams();
@@ -446,7 +447,7 @@ pub fn init_all_with_transport(transport: Transport) {
     ts_cache::init_hooks();
     seclabel::init();
 
-    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 7] = [
+    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 8] = [
         adt_misc::builtins::MISC_BUILTINS,
         catalog_namespace::builtins::NAMESPACE_BUILTINS,
         format_type::builtins::FORMAT_TYPE_BUILTINS,
@@ -457,6 +458,11 @@ pub fn init_all_with_transport(transport: Transport) {
         // coverage view SRF (execmain lanev2/coverage.rs; created on demand
         // by scripts/lane-coverage-view.sql — no catalog delta by default).
         execmain::LANEV2_BUILTINS,
+        // pgrust-native (reserved-range oids 9001-9003): the ephemeral-db
+        // janitor's pin/unpin/unpause trio (created on demand by
+        // scripts/testmode/janitor-functions.sql — no catalog delta by
+        // default; the test-server recipe installs them into templates).
+        janitor::JANITOR_BUILTINS,
     ];
     fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);
 }

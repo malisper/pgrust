@@ -325,6 +325,12 @@ pub static pgrust_memory_watchdog_interval: GucIntVar = GucSlot::new("pgrust_mem
 pub static pgrust_memory_watchdog_threshold: GucIntVar = GucSlot::new("pgrust_memory_watchdog_threshold");
 pub static pgrust_memory_watchdog_limit: GucIntVar = GucSlot::new("pgrust_memory_watchdog_limit");
 pub static pgrust_memory_watchdog_test_hog: GucIntVar = GucSlot::new("pgrust_memory_watchdog_test_hog");
+// pgrust-only (docs/design/test-views.md D1, no C symbol): the ephemeral-
+// database janitor. prefix (PGC_POSTMASTER, '' = feature off) arms janitor
+// registration; grace (PGC_SIGHUP, seconds) is the reap idle threshold the
+// janitor re-reads every tick.
+pub static pgrust_ephemeral_db_prefix: GucStringVar = GucSlot::new("pgrust_ephemeral_db_prefix");
+pub static pgrust_ephemeral_db_grace: GucIntVar = GucSlot::new("pgrust_ephemeral_db_grace");
 // pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
 // force-overrides + the Gather read-fairness stride. Registered from the
 // deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is

@@ -252,6 +252,14 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_memory_watchdog_test_hog,
         set: backing::set_pgrust_memory_watchdog_test_hog,
     });
+    vars::pgrust_ephemeral_db_prefix.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_prefix,
+        set: backing::set_pgrust_ephemeral_db_prefix,
+    });
+    vars::pgrust_ephemeral_db_grace.install(GucVarAccessors {
+        get: backing::pgrust_ephemeral_db_grace,
+        set: backing::set_pgrust_ephemeral_db_grace,
+    });
     vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
         get: backing::pgrust_runtime_scan_pool,
         set: backing::set_pgrust_runtime_scan_pool,
