@@ -16,14 +16,61 @@ use types_error::{PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED};
 /// a suite pinning more than this many at once is holding the janitor wrong
 /// (the error says so). Small on purpose: the table is scanned linearly
 /// under the lock on every reap tick.
+///
+/// Capacity-cliff audit (2026-08-04, the STORM_N=200 Ensure-table finding):
+/// a fixed bound stays CORRECT here, unlike the Ensure table, because pins
+/// are USER-driven — one explicit `pgrust_pin_database()` call per database
+/// a suite wants kept — and do not scale with connection concurrency. The
+/// overflow error is clean, names the limit, and the actionable remedy
+/// (unpin something) is entirely in the caller's hands.
 pub const MAX_PINS: usize = 64;
 
-/// Fixed Ensure-table capacity (the MAX_PINS shape: bounded, linear scan
-/// under the lock, reject-loud on overflow — a full table must refuse a
-/// mint, never park its waiter).
-pub const MAX_ENSURES: usize = 64;
+/// Headroom on top of `max_connections` in `ensure_capacity`: covers the
+/// entries that hold no connection slot — resolved (Done/Failed) entries
+/// lingering through ENSURE_LINGER_NS after their last waiter left, and
+/// pending stragglers whose waiter timed out or died between service ticks.
+/// Mints serialize in the janitor (two synchronous checkpoints each) and
+/// resolved entries retire ENSURE_LINGER_NS after completion, so the
+/// waiter-less population is a short tail, not a scale factor; 64 (the old
+/// fixed capacity) is generous for it.
+pub const ENSURE_CAPACITY_SLACK: usize = 64;
 
-/// Fixed per-template grace-override capacity (same bounded-table law).
+/// Boot default of `max_connections` (guc tables), the `ensure_capacity`
+/// fallback for unit tests that run without the GUC accessors installed.
+const MAX_CONNECTIONS_BOOT_VAL: usize = 100;
+
+/// Ensure-table capacity: `max_connections + ENSURE_CAPACITY_SLACK`.
+///
+/// Sizing rationale (the CI cluster STORM_N=200 capacity cliff, 2026-08-04):
+/// every PENDING entry with waiters was posted by a connecting client
+/// backend that is parked on it, and concurrent client backends are
+/// bounded by max_connections — so the table sized from max_connections
+/// (plus the waiter-less slack above) can never legitimately fill. The
+/// old fixed 64 was a capacity cliff, not a resource bound: a 200-token
+/// cold-start storm FATALed every waiter past the 64th. max_connections
+/// is PGC_POSTMASTER — fixed for the postmaster's lifetime and loaded at
+/// config time, long before the first backend can post (mint posts
+/// require a registered janitor, which registers after config load) — so
+/// this reads the live backing cell instead of snapshotting; the analog
+/// of shmem tables sizing themselves from MaxConnections at allocation.
+/// Overflow (`PostEnsure::TableFull`) is therefore an invariant
+/// violation — a janitor defect such as leaked entries — and mint.rs
+/// words its FATAL accordingly.
+pub fn ensure_capacity() -> usize {
+    let max_conn = if guc_tables::vars::MaxConnections.installed() {
+        guc_tables::vars::MaxConnections.read().max(1) as usize
+    } else {
+        MAX_CONNECTIONS_BOOT_VAL
+    };
+    max_conn + ENSURE_CAPACITY_SLACK
+}
+
+/// Fixed per-template grace-override capacity (the MAX_PINS shape: bounded,
+/// linear scan under the lock, reject-loud on overflow). Same capacity-cliff
+/// audit verdict as MAX_PINS (2026-08-04): overrides are USER-driven — one
+/// `pgrust_set_template_grace()` call per template — never
+/// concurrency-scaled, and the overflow error is clean and actionable
+/// (clear an override).
 pub const MAX_TEMPLATE_GRACES: usize = 64;
 
 /// How long a resolved (Done/Failed) Ensure entry with no remaining waiters
@@ -89,8 +136,11 @@ pub enum PostEnsure {
     JanitorPaused,
     /// live + in-flight minted databases for this role reached the cap.
     PerRoleCap { counted: usize, max: i32 },
-    /// The Ensure table is full.
-    TableFull,
+    /// The Ensure table is full — an invariant violation, not a load
+    /// condition, since `ensure_capacity()` sizes the table from
+    /// max_connections (see its rationale). Carried with the capacity so
+    /// the FATAL can name it without re-deriving.
+    TableFull { cap: usize },
 }
 
 /// Janitor-side view of a pending entry.
@@ -118,7 +168,7 @@ struct RegistryState {
     /// longer-than-datname argument would find the database through the
     /// truncating scan key yet never match the reap loop's comparison.
     pins: Vec<String>,
-    /// D2 mint requests (bounded by MAX_ENSURES).
+    /// D2 mint requests (bounded by `ensure_capacity()`).
     ensures: Vec<EnsureEntry>,
     next_ensure_gen: u64,
     /// D2 per-template grace overrides, seconds, keyed by template name
@@ -321,8 +371,9 @@ pub fn post_ensure(
                 };
             }
         }
-        if r.ensures.len() >= MAX_ENSURES {
-            return PostEnsure::TableFull;
+        let cap = ensure_capacity();
+        if r.ensures.len() >= cap {
+            return PostEnsure::TableFull { cap };
         }
         let gen = r.next_ensure_gen;
         r.next_ensure_gen += 1;
@@ -705,9 +756,18 @@ mod tests {
         assert!(matches!(ensure_status(gen_p), EnsureStatus::Gone));
 
         // Capacity: fill the table with pending entries; the next distinct
-        // name is refused loudly.
+        // name is refused loudly. The capacity is max_connections-derived
+        // (ensure_capacity; boot-default fallback in unit tests) and the
+        // refusal reports it — the invariant-violation path stays covered
+        // even though live servers can no longer reach it.
+        let cap = ensure_capacity();
+        assert_eq!(
+            cap,
+            100 + ENSURE_CAPACITY_SLACK,
+            "unit tests run on the boot-default max_connections fallback"
+        );
         let mut gens = Vec::new();
-        for i in 0..MAX_ENSURES {
+        for i in 0..cap {
             match post(&format!("tv_e_fill_{i}"), 9, &[], 0) {
                 PostEnsure::Posted(g) => gens.push(g),
                 _ => panic!("fill {i} refused"),
@@ -715,7 +775,7 @@ mod tests {
         }
         assert!(matches!(
             post("tv_e_overflow", 9, &[], 0),
-            PostEnsure::TableFull
+            PostEnsure::TableFull { cap: c } if c == cap
         ));
         // A join still works while full (idempotent path precedes capacity).
         assert!(matches!(

@@ -27,8 +27,8 @@ use init_small::globals as g;
 use mcx::Mcx;
 use types_core::{Oid, ProcNumber};
 use types_error::{
-    PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_DATABASE,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR, FATAL, LOG,
+    PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, FATAL, LOG,
 };
 use types_guc::GucSource;
 use types_nodes::parsenodes::{CreatedbStmt, DefElem, DefElemAction};
@@ -190,13 +190,24 @@ pub fn mint_on_connect(dbname: &str) -> PgResult<bool> {
             )
             .into_error()
             .into()),
-        PostEnsure::TableFull => Err(ereport(FATAL)
-            .errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
+        // Invariant violation, not load: the table is sized from
+        // max_connections (registry::ensure_capacity — every concurrent
+        // connecting backend fits, plus slack for waiter-less stragglers),
+        // so filling it means the janitor leaked entries. Kept as a clean
+        // FATAL rather than a panic because a connect attempt is the wrong
+        // process to crash for a janitor-side accounting bug; the errcode
+        // says "server defect", not "raise a knob".
+        PostEnsure::TableFull { cap } => Err(ereport(FATAL)
+            .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg(format!(
                 "cannot mint ephemeral database \"{dbname}\": the mint request table is full \
-                 ({} entries)",
-                registry::MAX_ENSURES
+                 ({cap} entries)"
             ))
+            .errdetail(
+                "The table is sized from max_connections so every connecting backend fits; \
+                 overflowing it indicates a janitor defect (leaked mint entries), not load."
+                    .to_string(),
+            )
             .into_error()
             .into()),
         PostEnsure::Posted(gen) | PostEnsure::Joined(gen) => {
