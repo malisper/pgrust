@@ -35,7 +35,8 @@
 //!
 //! pgrust-only code discipline: ported C-parity crates are touched only at
 //! public entry points (`dropdb`, `CountDBBackends`, catalog scans) plus the
-//! one sanctioned additive extension, `dropdb_skip_checkpoint`.
+//! two sanctioned additive extensions, `dropdb_skip_checkpoint` (batched
+//! reaps) and `createdb_skip_checkpoints` (batched mints).
 #![allow(non_snake_case)]
 
 pub mod builtins;

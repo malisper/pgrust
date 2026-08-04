@@ -127,12 +127,13 @@ fn CreateDatabaseUsingFileCopy(
     dst_dboid: Oid,
     src_tsid: Oid,
     dst_tsid: Oid,
+    request_checkpoints: bool,
 ) -> PgResult<()> {
     use transam_xlog::{
         CHECKPOINT_FLUSH_ALL, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_WAIT,
     };
 
-    if !init_small::globals::IsBinaryUpgrade() {
+    if request_checkpoints && !init_small::globals::IsBinaryUpgrade() {
         checkpointer::RequestCheckpoint(
             CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FLUSH_ALL,
         )?;
@@ -178,7 +179,7 @@ fn CreateDatabaseUsingFileCopy(
 
     // Checkpoint before commit so committed FILE_COPY creates never need
     // ordinary crash-recovery replay (dbcommands.c's #1/#2 scenarios).
-    if !init_small::globals::IsBinaryUpgrade() {
+    if request_checkpoints && !init_small::globals::IsBinaryUpgrade() {
         checkpointer::RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT)?;
     }
     Ok(())
@@ -200,6 +201,78 @@ fn createdb_failure_cleanup(
 }
 
 pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid> {
+    createdb_guts(mcx, stmt, true)
+}
+
+/// pgrust-only additive entry (docs/design/test-views.md, "Batched-minting
+/// addendum"; the `dropdb_skip_checkpoint` precedent — the second and last
+/// sanctioned extension of this C-parity crate): `createdb` minus BOTH of
+/// FILE_COPY's per-create `RequestCheckpoint`s, for the ephemeral-db
+/// janitor's batched mints. The janitor brackets a whole batch with ONE
+/// checkpoint pair inside a single transaction: the FLUSH_ALL pre-checkpoint
+/// before the first copy, this entry once per batch member, the plain
+/// post-checkpoint after the LAST copy, THEN the commit.
+///
+/// Why hoisting the pair out of the loop is safe — C's rationale for each
+/// request (dbcommands.c CreateDatabaseUsingFileCopy) discharges per batch:
+///
+/// 1. Pre-copy FLUSH_ALL ("Force a checkpoint before starting the copy of
+///    the source database... including private buffers of unlogged
+///    relations, so the copy sees every committed page on disk"): one
+///    batch-level FLUSH_ALL covers every member because nothing dirties a
+///    template's per-database files between it and the copies — the batch
+///    transaction itself writes only shared catalogs (pg_database,
+///    pg_shdepend, pg_db_role_setting: global tablespace, never inside the
+///    directories copydir copies), a batch member's freshly copied database
+///    goes through the filesystem rather than shared buffers, and each
+///    member's own `CountOtherDBBackends` still refuses an occupied source
+///    immediately before its copy. A backend that connects to a source and
+///    dirties it AFTER that check is C's own documented FILE_COPY residual
+///    (the "source database must remain idle" caveat); the batch widens
+///    that window from one copy to one batch, it does not add a state.
+///    NOTE the check's honest limit: `CountOtherDBBackends` cannot see a
+///    writer that already DISCONNECTED — a connect-dirty-disconnect
+///    entirely inside the widened window passes every member's check while
+///    its unflushed pages sit in shared buffers. The janitor caller
+///    therefore restricts batch members to templates with
+///    datallowconn = false (verified at preflight AND re-checked inside
+///    the batch transaction), making the widened window unreachable by
+///    ordinary connections; connectable templates mint on the serial path,
+///    whose window is stock C's own one-copy-wide residual.
+/// 2. Post-copy checkpoint before commit ("committed FILE_COPY creates
+///    never need ordinary crash-recovery replay", the #1/#2 scenarios): the
+///    invariant is per-member "commit implies a checkpoint ran after this
+///    member's copy". One post-checkpoint after the last copy, INSIDE the
+///    single transaction that carries every member, precedes the one commit
+///    that makes any member visible — so it holds for all of them. A crash
+///    before the commit aborts every member (scenario-free); a crash after
+///    it finds every copy checkpointed.
+/// 3. `IsBinaryUpgrade` skips both requests in stock createdb; this entry
+///    is janitor-only and never runs in binary upgrade, so the flag gating
+///    stays inside the guts unchanged.
+///
+/// Everything else — option parsing, privilege checks, template occupancy,
+/// catalog insert, WAL FILE_COPY records, failure cleanup, ForceSyncCommit —
+/// is the shared guts, byte-identical; the C-shaped `createdb` entry above
+/// passes `request_checkpoints = true` and keeps its exact behavior. The
+/// flag is a no-op under STRATEGY wal_log (that path has no checkpoint
+/// sites). Callers of this entry MUST bracket their batch:
+/// `RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE |
+/// CHECKPOINT_WAIT | CHECKPOINT_FLUSH_ALL)` before the first call and
+/// `RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE |
+/// CHECKPOINT_WAIT)` after the last, before committing the transaction.
+pub fn createdb_skip_checkpoints<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CreatedbStmt<'mcx>,
+) -> PgResult<Oid> {
+    createdb_guts(mcx, stmt, false)
+}
+
+fn createdb_guts<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CreatedbStmt<'mcx>,
+    request_checkpoints: bool,
+) -> PgResult<Oid> {
     let dbname = stmt.dbname.unwrap_or("");
 
     let mut tablespacename_el: Option<&DefElem> = None;
@@ -772,6 +845,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             dboid,
             src_deftablespace,
             dst_deftablespace,
+            request_checkpoints,
         ),
     };
     if let Err(e) = copy {

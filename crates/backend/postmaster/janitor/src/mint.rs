@@ -12,7 +12,12 @@
 //!   STRATEGY file_copy` (a direct `dbcommands::createdb` call in its own
 //!   transaction — the dropdb_this_victim shape; `PreventInTransactionBlock`
 //!   lives only in utility dispatch, which is exactly why this is legal),
-//!   then waking every waiter by ProcNumber.
+//!   then waking every waiter by ProcNumber. Since the batched-mint
+//!   addendum, >= 2 pending Ensures in one tick share ONE checkpoint pair
+//!   through a single batch transaction of
+//!   `dbcommands::createdb_skip_checkpoints` calls (preflight-validated
+//!   per entry; whole-batch abort falls back to the serial path) — the
+//!   service_pass doc carries the choreography.
 //!
 //! Refusal discipline (the security posture's teeth): every disqualification
 //! that must look stock — feature off, non-matching grammar, unlisted role,
@@ -45,11 +50,14 @@ use crate::registry::{self, EnsureStatus, PostEnsure};
 use types_error::ERRCODE_CANNOT_CONNECT_NOW;
 
 /// Hard cap on how long a connecting backend parks waiting for its mint.
-/// FILE_COPY mints are checkpoint-bound (two synchronous checkpoints each)
-/// and the janitor serializes them, so a cold-start storm of K distinct
-/// tokens costs O(K) checkpoints before the last waiter wakes; 60s covers
-/// hundreds of cheap-preset mints while still bounding a wedged janitor to
-/// one minute of connect latency (spec: waiters must NEVER hang).
+/// FILE_COPY mints are checkpoint-bound, but the janitor batches them: a
+/// mint cycle of up to MINT_BATCH_MAX entries shares ONE synchronous
+/// checkpoint pair (the batched-mint addendum), so a cold-start storm of K
+/// distinct tokens costs O(K/32) checkpoint pairs before the last waiter
+/// wakes — with the serial fallback's O(K) pairs as the degraded worst
+/// case; 60s covers hundreds of cheap-preset mints while still bounding a
+/// wedged janitor to one minute of connect latency (spec: waiters must
+/// NEVER hang).
 const MINT_WAIT_TIMEOUT_NS: u64 = 60 * 1_000_000_000;
 
 /// Waiter tick: WL_LATCH_SET is advisory (the proc latch is shared with
@@ -402,6 +410,13 @@ pub fn check_ephemeral_db_mint_roles(
 // Janitor side.
 // ---------------------------------------------------------------------------
 
+/// Batch ceiling per janitor cycle (docs/design/test-views.md batched-mint
+/// addendum): bounds the single batch transaction's lock footprint and the
+/// crash-orphan window. Excess entries simply stay Pending for the next
+/// tick — the pass re-arms the janitor's own latch so the follow-up tick is
+/// immediate, and waiters carry the 60s deadline regardless.
+pub(crate) const MINT_BATCH_MAX: usize = 32;
+
 /// One mint service pass, run from the janitor tick BEFORE the reap pass.
 /// Ordering rationale (recorded decision): mint-before-reap makes waiter
 /// latency one tick at worst and lets a mint racing a same-name reap
@@ -411,27 +426,122 @@ pub fn check_ephemeral_db_mint_roles(
 /// and through the post-completion linger, and (b) reaping additionally
 /// requires a full observed-idle grace streak.
 ///
-/// Per-entry errors are contained (main_loop::contain) and the SAVED error
-/// is fanned out to every waiter — a failed CREATE must fail the waiters,
-/// never the janitor. FATAL-class errors propagate; the janitor's exit
-/// drain (main_loop's ClearProc) then fails whatever is still pending.
+/// Batched minting (the dropdb_skip_checkpoint precedent applied to
+/// creates): N pending Ensures in one cycle share ONE checkpoint pair
+/// instead of N pairs — a preflight pass fails misconfigured entries
+/// individually and routes entries whose template is CONNECTABLE
+/// (datallowconn = true) to the serial path (the batch-eligibility law on
+/// `PreflightVerdict::Mint`: only templates ordinary connections cannot
+/// reach may share the batch's widened torn-copy window), then every
+/// batch-eligible entry runs `dbcommands::createdb_skip_checkpoints`
+/// inside a SINGLE janitor transaction bracketed by one FLUSH_ALL
+/// pre-checkpoint and one post-checkpoint (inside the transaction, after
+/// the last copy), THEN the one commit, THEN the waiters wake. Any error
+/// inside the batch transaction aborts the WHOLE batch, and the pass falls
+/// back to the serial per-mint path for the same entries this same tick —
+/// one bad entry degrades throughput, never the others' minting; an error
+/// out of the preflight PROBE itself is contained and falls back to the
+/// serial path the same way, so a persistent infrastructure failure
+/// resolves every entry per-entry instead of wedging the queue Pending.
+/// A single-entry tick takes the serial path directly: identical
+/// checkpoint cost (one pair either way), zero new machinery on the
+/// low-rate path.
+///
+/// Per-entry errors are contained (main_loop::contain choreography) and the
+/// SAVED error is fanned out to every waiter — a failed CREATE must fail
+/// the waiters, never the janitor. FATAL-class errors propagate; the
+/// janitor's exit drain (main_loop's ClearProc) then fails whatever is
+/// still pending.
 pub(crate) fn service_pass() -> PgResult<()> {
-    for p in registry::pending_ensures() {
-        let outcome = match mint_one(&p) {
+    let pending = registry::pending_ensures();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let (batch, deferred) = split_batch(pending, MINT_BATCH_MAX);
+    if deferred > 0 {
+        let _ = log_report(
+            LOG,
+            format!(
+                "pgrust ephemeral-db janitor: deferring {deferred} pending mint request(s) to \
+                 the next tick (batch cap {MINT_BATCH_MAX})"
+            ),
+        );
+        // Deferral must cost one loop turn, not a full 500ms tick: the
+        // janitor sets its own latch (wake_janitor targets janitor_proc,
+        // which is us).
+        registry::wake_janitor();
+    }
+    if batch.len() == 1 {
+        return service_serial(&batch);
+    }
+
+    // Preflight (its own transaction, probes only): fail each misconfigured
+    // entry ALONE — template missing/unsealed, or the name already exists
+    // (idempotent success) — so per-entry misconfiguration never poisons
+    // the batch transaction below. A probe error is infrastructure, not
+    // per-entry state — but it must NOT strand the batch: mirroring the
+    // batch-abort fallback below, the error is contained (FATAL-class
+    // still propagates to the exit drain) and the SAME entries run through
+    // the serial path, whose per-entry containment resolves every one. A
+    // TRANSIENT error costs one degraded (per-entry-checkpointed) cycle; a
+    // PERSISTENT one fans the saved error out to the waiters instead of
+    // wedging the entries Pending forever — where waiters would degrade
+    // from a prompt saved-error to 60s-deadline FATALs and the retrying
+    // entries would accumulate toward ensure_capacity() TableFull.
+    let verdicts = match preflight_probe(&batch) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::main_loop::contain(e, "mint preflight probe")?;
+            return service_serial(&batch);
+        }
+    };
+    let now = pg_clock::mono_ns();
+    let mut to_batch: Vec<registry::PendingEnsure> = Vec::new();
+    let mut to_serial: Vec<registry::PendingEnsure> = Vec::new();
+    for (p, v) in batch.into_iter().zip(verdicts) {
+        match v {
+            PreflightVerdict::Mint => to_batch.push(p),
+            PreflightVerdict::MintSerial => to_serial.push(p),
+            PreflightVerdict::AlreadyExists => {
+                let waiters = registry::complete_ensure(p.gen, Ok(()), now);
+                log_mint_success(false, &p, waiters.len());
+                wake_waiters(&waiters);
+            }
+            PreflightVerdict::TemplateMissing | PreflightVerdict::TemplateUnsealed => {
+                let e = match v {
+                    PreflightVerdict::TemplateMissing => template_missing_error(&p.template),
+                    _ => template_unsealed_error(&p.template, &p.name),
+                };
+                report_contained_refusal(&e, &p.name);
+                let waiters = registry::complete_ensure(p.gen, Err(e), now);
+                wake_waiters(&waiters);
+            }
+        }
+    }
+
+    // A lone batch-eligible entry gains nothing from the batch machinery
+    // (identical checkpoint cost serially — the single-entry rationale).
+    if to_batch.len() < 2 {
+        to_serial.append(&mut to_batch);
+    }
+    if to_batch.len() >= 2 {
+        service_batch(&to_batch)?;
+    }
+    if to_serial.is_empty() {
+        return Ok(());
+    }
+    service_serial(&to_serial)
+}
+
+/// The serial per-mint path: each entry in its own transaction with its own
+/// checkpoint pair (`dbcommands::createdb`, C-shaped). This is both the
+/// single-entry fast path and the whole-batch-abort fallback.
+fn service_serial(entries: &[registry::PendingEnsure]) -> PgResult<()> {
+    for p in entries {
+        let outcome = match mint_one(p) {
             Ok(minted) => {
                 let waiters = registry::complete_ensure(p.gen, Ok(()), pg_clock::mono_ns());
-                let _ = log_report(
-                    LOG,
-                    format!(
-                        "pgrust ephemeral-db janitor: {} ephemeral database \"{}\" from \
-                         template \"{}\" for role \"{}\" ({} waiter(s))",
-                        if minted { "minted" } else { "found existing" },
-                        p.name,
-                        p.template,
-                        p.owner_name,
-                        waiters.len()
-                    ),
-                );
+                log_mint_success(minted, p, waiters.len());
                 waiters
             }
             Err(e) => {
@@ -446,11 +556,109 @@ pub(crate) fn service_pass() -> PgResult<()> {
                 registry::complete_ensure(p.gen, Err(saved), pg_clock::mono_ns())
             }
         };
-        for w in outcome {
-            latch::SetLatch(types_storage::latch::LatchHandle::proc(w));
-        }
+        wake_waiters(&outcome);
     }
     Ok(())
+}
+
+/// The batch fast path over >= 2 validated entries. Completion and waking
+/// run strictly AFTER the batch commit (as the serial path wakes after its
+/// per-entry commit); on batch failure the transaction is aborted, orphaned
+/// batch datadirs are removed (pre-commit failures only — see
+/// `cleanup_orphaned_datadirs`), and the SAME entries retry serially this
+/// same tick.
+fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
+    let mut created: Vec<Oid> = Vec::new();
+    match mint_batch(to_mint, &mut created) {
+        Ok(outcomes) => {
+            let now = pg_clock::mono_ns();
+            // The batch witness line (race-suite storm phase), BEFORE any
+            // completion/wake: a woken waiter finishes its connect fast
+            // enough that the gate may snapshot the log the moment the last
+            // client returns — every line the gate accounts must already be
+            // written by then. The commit above already happened, so the
+            // line is truthful at this point.
+            let n_minted = outcomes
+                .iter()
+                .filter(|o| matches!(o, BatchOutcome::Minted { .. }))
+                .count();
+            if n_minted > 0 {
+                let _ = log_report(
+                    LOG,
+                    format!(
+                        "pgrust ephemeral-db janitor: batch-minted {n_minted} ephemeral \
+                         database(s) in one transaction with one checkpoint pair"
+                    ),
+                );
+            }
+            let mut deferred_serial: Vec<registry::PendingEnsure> = Vec::new();
+            for (p, o) in to_mint.iter().zip(outcomes) {
+                match o {
+                    BatchOutcome::Minted { copied } => {
+                        if copied > 0 {
+                            let _ = log_report(
+                                LOG,
+                                format!(
+                                    "pgrust ephemeral-db janitor: copied {copied} \
+                                     database-setting row(s) from template \"{}\" to ephemeral \
+                                     database \"{}\"",
+                                    p.template, p.name
+                                ),
+                            );
+                        }
+                        let waiters = registry::complete_ensure(p.gen, Ok(()), now);
+                        log_mint_success(true, p, waiters.len());
+                        wake_waiters(&waiters);
+                    }
+                    BatchOutcome::FoundExisting => {
+                        let waiters = registry::complete_ensure(p.gen, Ok(()), now);
+                        log_mint_success(false, p, waiters.len());
+                        wake_waiters(&waiters);
+                    }
+                    BatchOutcome::Refused(e) => {
+                        report_contained_refusal(&e, &p.name);
+                        let waiters = registry::complete_ensure(p.gen, Err(e), now);
+                        wake_waiters(&waiters);
+                    }
+                    // Not completed: the entry stayed Pending through the
+                    // batch (it did no work in it) and mints serially now.
+                    BatchOutcome::DeferSerial => deferred_serial.push(registry::PendingEnsure {
+                        gen: p.gen,
+                        name: p.name.clone(),
+                        template: p.template.clone(),
+                        owner_name: p.owner_name.clone(),
+                    }),
+                }
+            }
+            if deferred_serial.is_empty() {
+                Ok(())
+            } else {
+                service_serial(&deferred_serial)
+            }
+        }
+        Err(failure) => {
+            let (e, pre_commit) = match failure {
+                BatchFailure::BeforeCommit(e) => (e, true),
+                BatchFailure::AtCommit(e) => (e, false),
+            };
+            // contain() aborts the batch transaction, reports, and
+            // propagates FATAL-class untouched (entries stay Pending for
+            // the exit drain).
+            crate::main_loop::contain(e, "batch mint transaction")?;
+            if pre_commit {
+                cleanup_orphaned_datadirs(&created);
+            }
+            let _ = log_report(
+                LOG,
+                format!(
+                    "pgrust ephemeral-db janitor: mint batch aborted; retrying {} request(s) \
+                     serially this tick",
+                    to_mint.len()
+                ),
+            );
+            service_serial(to_mint)
+        }
+    }
 }
 
 /// Reject every pending Ensure against a paused janitor (the loop's paused
@@ -492,6 +700,347 @@ pub(crate) fn fail_pending_and_wake(cause: &PgError) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Batch assembly + preflight (pure halves unit-tested below).
+// ---------------------------------------------------------------------------
+
+/// Take at most `cap` entries off the front of the pending snapshot (oldest
+/// first — registry insertion order); the rest wait for the next tick.
+/// Returns (batch, deferred_count). Pure: unit-tested.
+fn split_batch(
+    mut pending: Vec<registry::PendingEnsure>,
+    cap: usize,
+) -> (Vec<registry::PendingEnsure>, usize) {
+    let deferred = pending.len().saturating_sub(cap);
+    pending.truncate(cap);
+    (pending, deferred)
+}
+
+/// Per-entry preflight classification. Precedence mirrors `mint_one`'s
+/// check order: name-exists wins (idempotent success even when the template
+/// has meanwhile vanished — the database IS there, which is all the waiter
+/// asked for), then template resolution, then sealing. Pure: unit-tested.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PreflightVerdict {
+    /// The name already exists: instant success to all waiters.
+    AlreadyExists,
+    /// The template does not resolve: fail this entry alone.
+    TemplateMissing,
+    /// The template is not sealed (datistemplate = false): fail this entry
+    /// alone (the superuser-janitor clone guard, M3 addendum item 7).
+    TemplateUnsealed,
+    /// Validated AND batch-eligible: sealed with datallowconn = false. The
+    /// batch widens FILE_COPY's connect-dirty-disconnect torn-copy window
+    /// from one copy to one batch, and a writer that DISCONNECTS before a
+    /// member's CountOtherDBBackends check is invisible to it — so only
+    /// templates ordinary connections cannot reach at all may share a
+    /// batch (createdb_skip_checkpoints rationale item 1).
+    Mint,
+    /// Validated but the template is CONNECTABLE (datallowconn = true, the
+    /// template1 shape): mint on the SERIAL path, whose window is one copy
+    /// wide and immediately adjacent — stock C's own residual, no wider.
+    MintSerial,
+}
+
+fn preflight_verdict(
+    name_exists: bool,
+    // (datistemplate, datallowconn); None = template row missing.
+    template: Option<(bool, bool)>,
+) -> PreflightVerdict {
+    if name_exists {
+        return PreflightVerdict::AlreadyExists;
+    }
+    match template {
+        None => PreflightVerdict::TemplateMissing,
+        Some((false, _)) => PreflightVerdict::TemplateUnsealed,
+        Some((true, true)) => PreflightVerdict::MintSerial,
+        Some((true, false)) => PreflightVerdict::Mint,
+    }
+}
+
+/// The catalog-probe half of the preflight: one read-only transaction, two
+/// name lookups per entry, classification via the pure verdict above.
+fn preflight_probe(batch: &[registry::PendingEnsure]) -> PgResult<Vec<PreflightVerdict>> {
+    let cx = mcx::MemoryContext::new("pgrust janitor mint preflight");
+    xact::StartTransactionCommand()?;
+    let mcx = cx.mcx();
+    let mut verdicts = Vec::with_capacity(batch.len());
+    for p in batch {
+        let name_exists = pg_database::get_database_tuple_by_name(mcx, &p.name)?.is_some();
+        let template_state = pg_database::get_database_tuple_by_name(mcx, &p.template)?
+            .map(|t| (t.datistemplate, t.datallowconn));
+        verdicts.push(preflight_verdict(name_exists, template_state));
+    }
+    xact::CommitTransactionCommand()?;
+    Ok(verdicts)
+}
+
+// ---------------------------------------------------------------------------
+// The batch transaction.
+// ---------------------------------------------------------------------------
+
+/// Per-entry result inside a successful batch transaction.
+enum BatchOutcome {
+    /// createdb ran for this entry (`copied` = pg_db_role_setting rows).
+    Minted { copied: usize },
+    /// The name appeared between preflight and the batch transaction (the
+    /// manual-CREATE residual, M3 addendum item 10): idempotent success.
+    FoundExisting,
+    /// The template vanished/unsealed between preflight and the batch
+    /// transaction. Recorded BEFORE any transactional work for this entry,
+    /// so it fails alone without poisoning the batch.
+    Refused(Box<PgError>),
+    /// The template turned CONNECTABLE (datallowconn = true) between
+    /// preflight and the batch re-check: this entry did no transactional
+    /// work in the batch and stays Pending; the caller mints it on the
+    /// serial path after the batch commits (the batch-eligibility law on
+    /// `PreflightVerdict::Mint`, enforced at the batch's own snapshot too).
+    DeferSerial,
+}
+
+/// Batch failure, split on the commit boundary: pre-commit failures abort
+/// every member and their copied datadirs are safe to remove (no catalog
+/// row ever became visible); an error out of the commit itself is ambiguous
+/// (the record may have made it durable), so the caller must NOT remove
+/// files — the serial retry's exists-check resolves the ambiguity.
+enum BatchFailure {
+    BeforeCommit(Box<PgError>),
+    AtCommit(Box<PgError>),
+}
+
+/// Run the whole batch in ONE transaction: one FLUSH_ALL pre-checkpoint,
+/// N x `createdb_skip_checkpoints` (+ the M4 setting copy, same as the
+/// serial path), one post-checkpoint after the last copy, then the commit.
+/// This preserves C's FILE_COPY crash invariant for every member —
+/// committed create implies a checkpoint ran after its copy — because the
+/// single commit is preceded by the single post-checkpoint (the safety
+/// analysis lives on `dbcommands::createdb_skip_checkpoints`).
+///
+/// `created` collects the dst oids of every completed createdb as we go, so
+/// the caller can remove orphaned datadirs when a later member (or the
+/// post-checkpoint) fails and the whole transaction aborts.
+fn mint_batch(
+    batch: &[registry::PendingEnsure],
+    created: &mut Vec<Oid>,
+) -> Result<Vec<BatchOutcome>, BatchFailure> {
+    let cx = mcx::MemoryContext::new("pgrust janitor batch mint");
+    if let Err(e) = xact::StartTransactionCommand() {
+        return Err(BatchFailure::BeforeCommit(e));
+    }
+    match mint_batch_body(cx.mcx(), batch, created) {
+        Ok(outcomes) => match xact::CommitTransactionCommand() {
+            Ok(()) => Ok(outcomes),
+            Err(e) => Err(BatchFailure::AtCommit(e)),
+        },
+        Err(e) => Err(BatchFailure::BeforeCommit(e)),
+    }
+}
+
+fn mint_batch_body(
+    mcx: Mcx<'_>,
+    batch: &[registry::PendingEnsure],
+    created: &mut Vec<Oid>,
+) -> PgResult<Vec<BatchOutcome>> {
+    use transam_xlog::{
+        CHECKPOINT_FLUSH_ALL, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_WAIT,
+    };
+
+    // ONE pre-checkpoint for the whole batch — the exact flags createdb's
+    // own FILE_COPY pre-checkpoint uses (the caller contract on
+    // `createdb_skip_checkpoints`) — requested LAZILY, before the FIRST
+    // member that actually copies: a batch whose every member resolves
+    // without a copy (all FoundExisting/Refused/DeferSerial) then requests
+    // no checkpoints at all, so the storm gate's flush-all bookkeeping
+    // stays exact (flush-all lines == cycles that created something) and
+    // no synchronous checkpoint stall is paid for nothing.
+    let mut pre_checkpointed = false;
+
+    let mut outcomes = Vec::with_capacity(batch.len());
+    for p in batch {
+        // Re-checks under the batch transaction (preflight ran in an
+        // earlier transaction; the windows are the manual-CREATE /
+        // concurrent-ALTER residuals). A refusal here has done no
+        // transactional work for this entry yet, so it is a per-entry
+        // outcome, not a batch abort.
+        if pg_database::get_database_tuple_by_name(mcx, &p.name)?.is_some() {
+            outcomes.push(BatchOutcome::FoundExisting);
+            continue;
+        }
+        let tpl = match pg_database::get_database_tuple_by_name(mcx, &p.template)? {
+            None => {
+                outcomes.push(BatchOutcome::Refused(template_missing_error(&p.template)));
+                continue;
+            }
+            Some(t) if !t.datistemplate => {
+                outcomes.push(BatchOutcome::Refused(template_unsealed_error(
+                    &p.template,
+                    &p.name,
+                )));
+                continue;
+            }
+            // Batch-eligibility re-check: preflight admitted only
+            // datallowconn=false templates, but an ALTER DATABASE ...
+            // ALLOW_CONNECTIONS true can land between the two
+            // transactions. Deferring to the serial path keeps the batch's
+            // widened torn-copy window UNREACHABLE by ordinary connections
+            // (provably, at the batch's own snapshot) instead of
+            // convention-guarded.
+            Some(t) if t.datallowconn => {
+                outcomes.push(BatchOutcome::DeferSerial);
+                continue;
+            }
+            Some(t) => t,
+        };
+        if !pre_checkpointed {
+            checkpointer::RequestCheckpoint(
+                CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FLUSH_ALL,
+            )?;
+            pre_checkpointed = true;
+        }
+        let stmt = build_createdb_stmt(mcx, &p.name, &p.template, &p.owner_name)?;
+        let db_oid = dbcommands::createdb_skip_checkpoints(mcx, &stmt)?;
+        created.push(db_oid);
+        let copied = pg_db_role_setting::copy_database_settings(mcx, tpl.oid, db_oid)?;
+        outcomes.push(BatchOutcome::Minted { copied });
+        // Multi-statement-transaction shape: make this member's catalog
+        // rows command-visible before the next member's scans (not strictly
+        // required — member names are registry-unique and templates are
+        // pre-committed; GetNewOidWithIndex scans SnapshotAny — but it is
+        // the conservative utility-statement convention).
+        xact::CommandCounterIncrement()?;
+    }
+
+    if !created.is_empty() {
+        // ONE post-checkpoint INSIDE the transaction, after the last copy
+        // and before the single commit (skipped when nothing was copied —
+        // no member owes the invariant then).
+        checkpointer::RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT)?;
+    }
+    Ok(outcomes)
+}
+
+/// Best-effort removal of datadirs copied by an ABORTED batch transaction:
+/// the catalog rows never became visible, so the files are unreferencable
+/// orphans — the same shape `createdb_failure_cleanup` handles for a
+/// single failed copy (`remove_dbtablespaces`: rmtree + one XLOG_DBASE_DROP
+/// record), run in a fresh transaction because the batch transaction is
+/// already gone. A failure here (or a crash before/mid-cleanup) leaves the
+/// orphans on disk — the documented residual of the batch design (same
+/// class as C createdb's own abort-after-copy window; the boot sweep is
+/// catalog-driven and will not see them). A crash AFTER a successful
+/// cleanup cannot resurrect them: the DROP records are XLogFlush'd before
+/// the commit (the flush comment in the body), so recovery never replays
+/// the aborted batch's durable CREATE_FILE_COPY records without the DROPs
+/// that follow them. Never fails the pass.
+fn cleanup_orphaned_datadirs(created: &[Oid]) {
+    if created.is_empty() {
+        return;
+    }
+    let run = || -> PgResult<()> {
+        let cx = mcx::MemoryContext::new("pgrust janitor batch-abort cleanup");
+        xact::StartTransactionCommand()?;
+        for &oid in created {
+            dbcommands::remove_dbtablespaces(cx.mcx(), oid)?;
+        }
+        // The XLOG_DBASE_DROP records must be DURABLE before cleanup counts
+        // as done: this transaction changes no catalog, so its commit
+        // assigns no xid, writes no commit record, and flushes nothing on
+        // its own — while the aborted batch's XLOG_DBASE_CREATE_FILE_COPY
+        // records may already be flushed (walwriter, or the serial retry's
+        // ForceSyncCommit). A crash after an apparently successful cleanup
+        // would then replay CREATE without DROP and resurrect the just-
+        // removed orphans. Flush the tail explicitly (dropdb's
+        // set_database_invalid shape); a no-op when nothing was inserted.
+        transam_xlog::write::XLogFlush(transam_xlog::XactLastRecEnd())?;
+        xact::CommitTransactionCommand()?;
+        Ok(())
+    };
+    if let Err(e) = run() {
+        let _ = xact::AbortOutOfAnyTransaction();
+        let _ = log_report(
+            LOG,
+            format!(
+                "pgrust ephemeral-db janitor: could not remove {} orphaned datadir(s) after a \
+                 mint-batch abort (harmless but wasteful; remove base/<oid> manually): {}",
+                created.len(),
+                e.message()
+            ),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers (serial + batch paths).
+// ---------------------------------------------------------------------------
+
+fn wake_waiters(waiters: &[ProcNumber]) {
+    for &w in waiters {
+        latch::SetLatch(types_storage::latch::LatchHandle::proc(w));
+    }
+}
+
+/// The per-entry success line, IDENTICAL between the serial and batch paths
+/// (the race suite's `minted_count` greps it per database name).
+fn log_mint_success(minted: bool, p: &registry::PendingEnsure, n_waiters: usize) {
+    let _ = log_report(
+        LOG,
+        format!(
+            "pgrust ephemeral-db janitor: {} ephemeral database \"{}\" from \
+             template \"{}\" for role \"{}\" ({} waiter(s))",
+            if minted { "minted" } else { "found existing" },
+            p.name,
+            p.template,
+            p.owner_name,
+            n_waiters
+        ),
+    );
+}
+
+/// Report a per-entry refusal with the containment choreography's exact log
+/// convention (main_loop::contain minus the transaction abort — refusals
+/// are decided outside, or before any work inside, a live transaction), so
+/// the gates' contained-failure audits count batch-path refusals the same
+/// way they count serial ones.
+fn report_contained_refusal(e: &PgError, name: &str) {
+    g::HoldInterrupts();
+    elog::emit_error_report_for(e);
+    let _ = log_report(
+        LOG,
+        format!(
+            "pgrust ephemeral-db janitor: minting ephemeral database \"{name}\" failed \
+             (see above); continuing"
+        ),
+    );
+    elog::FlushErrorState();
+    g::ResumeInterrupts();
+}
+
+/// The two per-entry refusal shapes, shared verbatim by `mint_one` and the
+/// preflight/batch paths so waiters see byte-identical errors on either
+/// path.
+fn template_missing_error(template: &str) -> Box<PgError> {
+    ereport(ERROR)
+        .errcode(ERRCODE_UNDEFINED_DATABASE)
+        .errmsg(format!("template database \"{template}\" does not exist"))
+        .into_error()
+        .into()
+}
+
+fn template_unsealed_error(template: &str, name: &str) -> Box<PgError> {
+    ereport(ERROR)
+        .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+        .errmsg(format!(
+            "database \"{template}\" is not a template; refusing to mint \"{name}\" from it"
+        ))
+        .errhint(
+            "Seal it first: ALTER DATABASE ... WITH IS_TEMPLATE true ALLOW_CONNECTIONS \
+             false."
+                .to_string(),
+        )
+        .into_error()
+        .into()
+}
+
 /// Mint one Ensure: idempotency pre-check, sealed-template enforcement,
 /// then the internal CREATE DATABASE — all in one private transaction (the
 /// dropdb_this_victim template). Returns Ok(true) = created, Ok(false) =
@@ -518,29 +1067,10 @@ fn mint_one(p: &registry::PendingEnsure) -> PgResult<bool> {
     // home database for any listed role. datistemplate is the sealing bit
     // (D1 item 1); ALLOW_CONNECTIONS false is convention on top of it.
     let Some(tpl) = pg_database::get_database_tuple_by_name(mcx, &p.template)? else {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_UNDEFINED_DATABASE)
-            .errmsg(format!(
-                "template database \"{}\" does not exist",
-                p.template
-            ))
-            .into_error()
-            .into());
+        return Err(template_missing_error(&p.template));
     };
     if !tpl.datistemplate {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-            .errmsg(format!(
-                "database \"{}\" is not a template; refusing to mint \"{}\" from it",
-                p.template, p.name
-            ))
-            .errhint(
-                "Seal it first: ALTER DATABASE ... WITH IS_TEMPLATE true ALLOW_CONNECTIONS \
-                 false."
-                    .to_string(),
-            )
-            .into_error()
-            .into());
+        return Err(template_unsealed_error(&p.template, &p.name));
     }
 
     // Owner = the connecting role (spec security posture). The utility path
@@ -648,5 +1178,86 @@ mod tests {
         assert!(!q("", "alice"));
         assert!(!q("alice,,bob", "alice"));
         assert!(!q("\"unterminated", "alice"));
+    }
+
+    fn pe(gen: u64, name: &str) -> registry::PendingEnsure {
+        registry::PendingEnsure {
+            gen,
+            name: name.to_string(),
+            template: "tpl_x".to_string(),
+            owner_name: "minter".to_string(),
+        }
+    }
+
+    /// Batch assembly (split_batch) + validation split (preflight_verdict):
+    /// the pure halves of the batched-mint fast path. RELEASE-effective —
+    /// plain asserts. No registry state is touched (PendingEnsure values
+    /// are built directly), so no crate-wide lock is needed.
+    #[test]
+    fn batch_assembly_and_preflight_split() {
+        // Under the cap: everything batches, nothing deferred.
+        let (b, d) = split_batch(vec![pe(1, "a"), pe(2, "b")], MINT_BATCH_MAX);
+        assert_eq!(d, 0);
+        assert_eq!(b.len(), 2);
+
+        // Exactly at the cap: still nothing deferred.
+        let all: Vec<_> = (0..MINT_BATCH_MAX as u64)
+            .map(|i| pe(i, &format!("n{i}")))
+            .collect();
+        let (b, d) = split_batch(all, MINT_BATCH_MAX);
+        assert_eq!((b.len(), d), (MINT_BATCH_MAX, 0));
+
+        // Over the cap: the OLDEST cap entries batch IN ORDER (oldest-first
+        // is the fairness contract — a deferred waiter must not be passed
+        // by a younger one forever), the excess count is reported.
+        let all: Vec<_> = (0..(MINT_BATCH_MAX as u64 + 5))
+            .map(|i| pe(i, &format!("n{i}")))
+            .collect();
+        let (b, d) = split_batch(all, MINT_BATCH_MAX);
+        assert_eq!((b.len(), d), (MINT_BATCH_MAX, 5));
+        assert_eq!(b.first().unwrap().gen, 0, "oldest entry leads the batch");
+        assert_eq!(
+            b.last().unwrap().gen,
+            MINT_BATCH_MAX as u64 - 1,
+            "batch is a prefix, never a sample"
+        );
+
+        // Validation split. Existing name = idempotent success, and it WINS
+        // over any template state (the database is there — that is all the
+        // waiter asked for; mint_one's check order).
+        assert_eq!(
+            preflight_verdict(true, Some((true, false))),
+            PreflightVerdict::AlreadyExists
+        );
+        assert_eq!(preflight_verdict(true, None), PreflightVerdict::AlreadyExists);
+        assert_eq!(
+            preflight_verdict(true, Some((false, true))),
+            PreflightVerdict::AlreadyExists
+        );
+        // Fresh name: template must resolve AND be sealed to mint at all;
+        // each refusal classifies distinctly (distinct errors). Sealing is
+        // decided on datistemplate alone — datallowconn never turns a
+        // refusal into a mint or vice versa.
+        assert_eq!(preflight_verdict(false, None), PreflightVerdict::TemplateMissing);
+        assert_eq!(
+            preflight_verdict(false, Some((false, false))),
+            PreflightVerdict::TemplateUnsealed
+        );
+        assert_eq!(
+            preflight_verdict(false, Some((false, true))),
+            PreflightVerdict::TemplateUnsealed
+        );
+        // Batch-eligibility law: only a sealed AND unconnectable
+        // (datallowconn = false) template may share the batch's widened
+        // torn-copy window; a sealed-but-connectable template (the
+        // template1 shape) still mints, on the SERIAL path.
+        assert_eq!(
+            preflight_verdict(false, Some((true, false))),
+            PreflightVerdict::Mint
+        );
+        assert_eq!(
+            preflight_verdict(false, Some((true, true))),
+            PreflightVerdict::MintSerial
+        );
     }
 }

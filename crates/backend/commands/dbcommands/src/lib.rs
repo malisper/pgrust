@@ -26,7 +26,7 @@ pub use alterdb::{
     movedb, AlterDatabase, AlterDatabaseOwner, AlterDatabaseRefreshColl, AlterDatabaseSet,
     RenameDatabase,
 };
-pub use createdb::{check_encoding_locale_matches, createdb};
+pub use createdb::{check_encoding_locale_matches, createdb, createdb_skip_checkpoints};
 pub(crate) use dropdb::name_key;
 pub use dropdb::{dropdb, dropdb_skip_checkpoint};
 
