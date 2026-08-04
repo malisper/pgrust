@@ -35,8 +35,12 @@
 //!
 //! pgrust-only code discipline: ported C-parity crates are touched only at
 //! public entry points (`dropdb`, `CountDBBackends`, catalog scans) plus the
-//! two sanctioned additive extensions, `dropdb_skip_checkpoint` (batched
-//! reaps) and `createdb_skip_checkpoints` (batched mints).
+//! sanctioned additive extensions: `dropdb_skip_checkpoint` (batched
+//! reaps), `createdb_skip_checkpoints` (batched mints), and the
+//! mint-strategy addendum's `createdb_deferred_file_copy` /
+//! `log_file_copy_record` / `count_swept_relations` /
+//! `forget_walog_database` (parallel batch copies + the per-template
+//! wal_log strategy pick).
 #![allow(non_snake_case)]
 
 pub mod builtins;
@@ -45,6 +49,12 @@ pub mod grammar;
 mod main_loop;
 pub mod marker;
 pub mod mint;
+// The parallel batch-copy helper is LIVE-ONLY: its workers issue raw
+// path-based syscalls (std::fs / libc), which are foreign to the
+// thread-local SimVfs; under pgrust_sim the batch mints copy serially
+// through fd::copydir exactly as before (mint.rs cfg-gates the phases).
+#[cfg(not(pgrust_sim))]
+mod parcopy;
 pub mod pool;
 pub mod reap;
 pub mod registry;
@@ -99,6 +109,14 @@ pub fn ephemeral_db_default_template() -> String {
 /// The janitor re-reads it every tick after its reload idiom (pool.rs).
 pub fn ephemeral_db_pool_size() -> i32 {
     guc_tables::vars::pgrust_ephemeral_db_pool_size.read()
+}
+
+/// `pgrust.ephemeral_db_wal_log_threshold` (PGC_SIGHUP, default -1 = never
+/// wal_log). Swept-relation count at or above which a mint's CREATE
+/// DATABASE picks STRATEGY wal_log (zero checkpoints) over file_copy.
+/// Read at every strategy pick (mint.rs), never cached.
+pub fn ephemeral_db_wal_log_threshold() -> i32 {
+    guc_tables::vars::pgrust_ephemeral_db_wal_log_threshold.read()
 }
 
 /// Static bgworker registration (ApplyLauncherRegister precedent): called by

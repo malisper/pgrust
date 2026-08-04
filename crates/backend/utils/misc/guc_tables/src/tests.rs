@@ -56,12 +56,14 @@ fn table_counts_match_compiled_backend_shape() {
     //   (-> 80), Int +1 pgrust.ephemeral_db_max_per_role (-> 168) = 458.
     // testmode D3 warm pool (pgrust-only, test-views.md warm-pool addendum):
     //   Int +1 pgrust.ephemeral_db_pool_size (-> 169) = 459.
+    // testmode mint-strategy addendum (pgrust-only): Int +1
+    //   pgrust.ephemeral_db_wal_log_threshold (-> 170) = 460.
     assert_eq!(ConfigureNamesBool.len(), 135);
-    assert_eq!(ConfigureNamesInt.len(), 169);
+    assert_eq!(ConfigureNamesInt.len(), 170);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 80);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 459);
+    assert_eq!(all_settings().count(), 460);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

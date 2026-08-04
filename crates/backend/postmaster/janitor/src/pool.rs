@@ -482,8 +482,8 @@ fn probe_template_and_self(tpl_name: &str) -> PgResult<(Option<TplProbe>, Option
 /// let the NEXT tick retry from a fresh deficit count (under fresh burned
 /// names) — no serial fallback needed for background refill.
 fn replenish_batch(specs: &[PendingEnsure]) -> PgResult<Vec<(String, Oid)>> {
-    use crate::mint::{BatchFailure, BatchOutcome};
-    let mut created: Vec<Oid> = Vec::new();
+    use crate::mint::{BatchFailure, BatchOutcome, CreatedDb};
+    let mut created: Vec<CreatedDb> = Vec::new();
     match crate::mint::mint_batch(specs, &mut created) {
         Ok(outcomes) => {
             let mut minted = Vec::with_capacity(specs.len());
@@ -491,7 +491,8 @@ fn replenish_batch(specs: &[PendingEnsure]) -> PgResult<Vec<(String, Oid)>> {
             for (spec, o) in specs.iter().zip(outcomes) {
                 match o {
                     BatchOutcome::Minted { .. } => {
-                        let oid = oids.next().expect("created oids track Minted outcomes");
+                        let oid =
+                            oids.next().expect("created oids track Minted outcomes").oid;
                         minted.push((spec.name.clone(), oid));
                     }
                     // A foreign database squatting a spare name is NEVER

@@ -33,7 +33,8 @@ use mcx::Mcx;
 use types_core::{Oid, ProcNumber};
 use types_error::{
     PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, ERRCODE_INTERNAL_ERROR,
-    ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, FATAL, LOG,
+    ERRCODE_OBJECT_IN_USE, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, FATAL,
+    LOG,
 };
 use types_guc::GucSource;
 use types_nodes::parsenodes::{CreatedbStmt, DefElem, DefElemAction};
@@ -417,6 +418,123 @@ pub fn check_ephemeral_db_mint_roles(
 /// immediate, and waiters carry the 60s deadline regardless.
 pub(crate) const MINT_BATCH_MAX: usize = 32;
 
+/// Worker-pool ceiling for the batch copy phase (F1): workers =
+/// min(this, batch members with a deferred copy). Small on purpose — the
+/// copies are IO-bound and the janitor must not commandeer the box.
+#[cfg(not(pgrust_sim))]
+const MINT_COPY_WORKERS_MAX: usize = 8;
+
+/// Per-mint CREATE DATABASE strategy (F2, the mint-strategy addendum):
+/// picked per template from its cached swept-relation count against
+/// `pgrust.ephemeral_db_wal_log_threshold`. file_copy keeps the batched
+/// checkpoint machinery (flush marks, one pair per batch); wal_log has no
+/// checkpoint sites at all — `createdb_skip_checkpoints`' flag is a
+/// documented no-op there — so wal_log members consult and record NO flush
+/// mark and trigger NEITHER batch checkpoint. Mixed batches are legal: the
+/// pre-checkpoint fires only for a file-copying member lacking its mark,
+/// the post-checkpoint only when >= 1 file_copy member actually minted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MintStrategy {
+    FileCopy,
+    WalLog,
+}
+
+/// The pure pick (unit-tested): threshold < 0 = wal_log disabled; an
+/// unknown count (probe unavailable) stays on the C-shaped file_copy path.
+fn pick_strategy(relcount: Option<usize>, threshold: i32) -> MintStrategy {
+    match relcount {
+        _ if threshold < 0 => MintStrategy::FileCopy,
+        None => MintStrategy::FileCopy,
+        Some(n) if n >= threshold as usize => MintStrategy::WalLog,
+        Some(_) => MintStrategy::FileCopy,
+    }
+}
+
+/// Does this member's mint owe the batch a FLUSH_ALL pre-checkpoint (absent
+/// one already requested this batch)? Pure half of the batch checkpoint
+/// decision table (unit-tested); `marked` = the template carries a live
+/// flush mark.
+fn member_pays_pre(strategy: MintStrategy, marked: bool) -> bool {
+    strategy == MintStrategy::FileCopy && !marked
+}
+
+/// Does this member's completed mint oblige the batch's post-checkpoint?
+/// Pure half of the decision table (unit-tested): only file_copy members
+/// carry the commit-implies-checkpointed crash invariant.
+fn member_owes_post(strategy: MintStrategy) -> bool {
+    strategy == MintStrategy::FileCopy
+}
+
+/// The FULL per-member pre-checkpoint decision (pure, unit-tested):
+/// `member_pays_pre` gated by the batch's lazy single-checkpoint term —
+/// EXCEPT when this member's own strategy pick ran the pg_class probe
+/// (`probed`), which may have dirtied the template's buffers with hint
+/// bits AFTER any checkpoint an earlier member requested: a checkpoint
+/// that completed before the dirtying covers nothing, so a probed
+/// file_copy member re-pays the FLUSH_ALL unconditionally. (`probed`
+/// implies `!marked`: the probe cleared the mark.) Steady state — counts
+/// cached, no probes — keeps the one-checkpoint-per-batch shape; only a
+/// template's FIRST-ever pick can add a re-fire.
+fn member_fires_pre(
+    strategy: MintStrategy,
+    marked: bool,
+    probed: bool,
+    pre_checkpointed: bool,
+) -> bool {
+    member_pays_pre(strategy, marked) && (!pre_checkpointed || probed)
+}
+
+/// The strategy pick for one template, cache-through: a cached swept-
+/// relation count is reused; a miss runs the pg_class sweep probe
+/// (`dbcommands::count_swept_relations`, inside the caller's transaction)
+/// and caches it. The cache is invalidated at every observed-unseal site
+/// (registry::clear_template_flushed) and pruned with the flush marks.
+/// With the threshold at -1 (disabled) the probe never runs at all.
+///
+/// PROBE DIRTIES THE TEMPLATE (the flush-mark hazard): the probe READS the
+/// template's pg_class through shared buffers and can DIRTY those buffers
+/// via hint bits (heap_tuple_satisfies_visibility -> SetHintBits ->
+/// MarkBufferDirtyHint), which falsifies the sealed-template flush mark's
+/// premise ("no dirty buffer of the template can exist"). Therefore a
+/// probe FIRST clears the template's mark — before the scan, so an error
+/// mid-probe cannot leave a stale mark either (clear_template_flushed
+/// also drops any cached count; the fresh count is re-cached after) — and
+/// the returned `probed` flag tells the batch checkpoint decision to
+/// (re)pay the FLUSH_ALL for this member even when the batch already
+/// checkpointed for an earlier member (`member_fires_pre`). The SERIAL
+/// path needs no flag: its C-shaped createdb runs its own FLUSH_ALL after
+/// the probe (file_copy), or needs none (wal_log) — the cleared mark
+/// alone keeps future batches honest there.
+fn strategy_for_template(
+    mcx: Mcx<'_>,
+    oid: Oid,
+    dattablespace: Oid,
+) -> PgResult<(MintStrategy, bool)> {
+    let threshold = crate::ephemeral_db_wal_log_threshold();
+    if threshold < 0 {
+        return Ok((MintStrategy::FileCopy, false));
+    }
+    match registry::template_relcount(oid) {
+        Some(n) => Ok((pick_strategy(Some(n), threshold), false)),
+        None => {
+            registry::clear_template_flushed(oid);
+            let n = dbcommands::count_swept_relations(mcx, oid, dattablespace)?;
+            registry::set_template_relcount(oid, n);
+            Ok((pick_strategy(Some(n), threshold), true))
+        }
+    }
+}
+
+/// One committed-or-pending createdb of the CURRENT batch transaction:
+/// oid + the strategy it ran under, so the batch-abort cleanup can give
+/// wal_log members their buffer-drop arm (file_copy members only need the
+/// rmtree + DROP-record path).
+#[derive(Clone, Copy)]
+pub(crate) struct CreatedDb {
+    pub oid: Oid,
+    pub strategy: MintStrategy,
+}
+
 /// One mint service pass, run from the janitor tick BEFORE the reap pass.
 /// Ordering rationale (recorded decision): mint-before-reap makes waiter
 /// latency one tick at worst and lets a mint racing a same-name reap
@@ -579,7 +697,7 @@ fn service_serial(entries: &[registry::PendingEnsure]) -> PgResult<()> {
 /// `cleanup_orphaned_datadirs`), and the SAME entries retry serially this
 /// same tick.
 fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
-    let mut created: Vec<Oid> = Vec::new();
+    let mut created: Vec<CreatedDb> = Vec::new();
     match mint_batch(to_mint, &mut created) {
         Ok(outcomes) => {
             let now = pg_clock::mono_ns();
@@ -596,12 +714,22 @@ fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
             if n_minted > 0 {
                 // "shared checkpoint cycle", not "pair": the sealed-template
                 // skip (mint_batch_body) may have elided the pre-checkpoint,
-                // in which case the adjacent skip line says so.
+                // in which case the adjacent skip line says so. An
+                // all-wal_log batch (F2) requested NO checkpoints at all —
+                // its suffix says that instead (the race suite's
+                // zero-checkpoint witness).
+                let n_filecopy =
+                    created.iter().filter(|c| c.strategy == MintStrategy::FileCopy).count();
+                let suffix = if n_filecopy > 0 {
+                    "one shared checkpoint cycle"
+                } else {
+                    "zero checkpoints (all wal_log)"
+                };
                 let _ = log_report(
                     LOG,
                     format!(
                         "pgrust ephemeral-db janitor: batch-minted {n_minted} ephemeral \
-                         database(s) in one transaction with one shared checkpoint cycle"
+                         database(s) in one transaction with {suffix}"
                     ),
                 );
             }
@@ -847,7 +975,7 @@ pub(crate) enum BatchFailure {
 /// post-checkpoint) fails and the whole transaction aborts.
 pub(crate) fn mint_batch(
     batch: &[registry::PendingEnsure],
-    created: &mut Vec<Oid>,
+    created: &mut Vec<CreatedDb>,
 ) -> Result<Vec<BatchOutcome>, BatchFailure> {
     let cx = mcx::MemoryContext::new("pgrust janitor batch mint");
     if let Err(e) = xact::StartTransactionCommand() {
@@ -865,7 +993,7 @@ pub(crate) fn mint_batch(
 fn mint_batch_body(
     mcx: Mcx<'_>,
     batch: &[registry::PendingEnsure],
-    created: &mut Vec<Oid>,
+    created: &mut Vec<CreatedDb>,
 ) -> PgResult<Vec<BatchOutcome>> {
     use transam_xlog::{
         CHECKPOINT_FLUSH_ALL, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_WAIT,
@@ -910,9 +1038,33 @@ fn mint_batch_body(
     //   — documented residual, and the recipe never unseals (rebuilds get a
     //   NEW template name).
     // The POST-checkpoint is NOT touched (option 4 stays parked).
+    //
+    // STRATEGY (F2): both checkpoint terms above apply ONLY to file_copy
+    // members. A wal_log member's copy is WAL-logged page by page through
+    // shared buffers — it needs no source-flush before and no crash-replay
+    // exemption after — so it consults no flush mark, records none, and
+    // an all-wal_log batch requests ZERO checkpoints. The strategy PICK
+    // itself is a batch-transaction writer the original discharge missed:
+    // its pg_class probe can dirty the TEMPLATE's buffers via hint bits —
+    // so a probing pick clears the template's flush mark and its member
+    // (re)pays the FLUSH_ALL even when the batch already checkpointed
+    // (strategy_for_template + member_fires_pre carry the analysis).
+    //
+    // BATCH ORDER (F1, live builds): catalog-all (this loop, file_copy
+    // members deferring their directory copies) -> copy-all (the parallel
+    // worker pool, run_deferred_copies) -> WAL-record-all (this thread) ->
+    // post-checkpoint -> the caller's commit. Replay-equivalent to the old
+    // per-member interleaving: every FILE_COPY record still precedes the
+    // single post-checkpoint and the single commit, every record still
+    // strictly follows its member's completed (and fsynced) copy, and
+    // member-to-member record order carries no constraint (independent
+    // src/dst pairs). Under pgrust_sim the copies run inline (serial
+    // fd::copydir through the sim vfs), preserving the pre-F1 shape.
     let mut pre_checkpointed = false;
 
     let mut outcomes = Vec::with_capacity(batch.len());
+    #[cfg(not(pgrust_sim))]
+    let mut deferred: Vec<dbcommands::DeferredFileCopy> = Vec::new();
     for p in batch {
         // Re-checks under the batch transaction (preflight ran in an
         // earlier transaction; the windows are the manual-CREATE /
@@ -953,22 +1105,51 @@ fn mint_batch_body(
             }
             Some(t) => t,
         };
-        if !pre_checkpointed
-            && !registry::template_flushed_matches(tpl.oid, tpl.datfrozenxid, tpl.datminmxid)
-        {
-            checkpointer::RequestCheckpoint(
-                CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FLUSH_ALL,
-            )?;
-            pre_checkpointed = true;
+        let (strategy, probed) = strategy_for_template(mcx, tpl.oid, tpl.dattablespace)?;
+        if strategy == MintStrategy::FileCopy {
+            let marked =
+                registry::template_flushed_matches(tpl.oid, tpl.datfrozenxid, tpl.datminmxid);
+            // `probed` forces a (re)fire even when the batch already
+            // checkpointed: the pick's pg_class scan may have dirtied THIS
+            // template's buffers (hint bits) after that earlier checkpoint,
+            // which would otherwise be file-copied dirty AND wrongly marked
+            // flushed (member_fires_pre's rationale). Probes touch only
+            // their own template, and a same-template later member cache-
+            // hits (probed=false), so at most one re-fire per NEW template.
+            if member_fires_pre(strategy, marked, probed, pre_checkpointed) {
+                checkpointer::RequestCheckpoint(
+                    CHECKPOINT_IMMEDIATE
+                        | CHECKPOINT_FORCE
+                        | CHECKPOINT_WAIT
+                        | CHECKPOINT_FLUSH_ALL,
+                )?;
+                pre_checkpointed = true;
+            }
+            // Reaching here implies marked-or-just-checkpointed — the
+            // probed case cleared the mark and fired above, so nothing in
+            // this batch dirtied the template after the checkpoint that
+            // covers it — and the mark is sound to (re)record NOW, even if
+            // the batch later aborts: the checkpoint itself is synchronous
+            // and non-transactional, and an abort dirties no template
+            // buffers.
+            registry::mark_template_flushed(tpl.oid, tpl.datfrozenxid, tpl.datminmxid);
         }
-        // Reaching here implies marked-or-just-checkpointed, so the mark is
-        // sound to (re)record NOW, even if the batch later aborts: the
-        // checkpoint itself is synchronous and non-transactional, and an
-        // abort dirties no template buffers.
-        registry::mark_template_flushed(tpl.oid, tpl.datfrozenxid, tpl.datminmxid);
-        let stmt = build_createdb_stmt(mcx, p)?;
-        let db_oid = dbcommands::createdb_skip_checkpoints(mcx, &stmt)?;
-        created.push(db_oid);
+        let stmt = build_createdb_stmt(mcx, p, strategy)?;
+        let db_oid = match strategy {
+            MintStrategy::WalLog => dbcommands::createdb_skip_checkpoints(mcx, &stmt)?,
+            #[cfg(not(pgrust_sim))]
+            MintStrategy::FileCopy => {
+                // F1: catalog work now, the directory copies (and their
+                // WAL records) after the loop.
+                let d = dbcommands::createdb_deferred_file_copy(mcx, &stmt)?;
+                let oid = d.db_oid;
+                deferred.push(d);
+                oid
+            }
+            #[cfg(pgrust_sim)]
+            MintStrategy::FileCopy => dbcommands::createdb_skip_checkpoints(mcx, &stmt)?,
+        };
+        created.push(CreatedDb { oid: db_oid, strategy });
         let copied = pg_db_role_setting::copy_database_settings(mcx, tpl.oid, db_oid)?;
         outcomes.push(BatchOutcome::Minted { copied });
         // Multi-statement-transaction shape: make this member's catalog
@@ -979,7 +1160,18 @@ fn mint_batch_body(
         xact::CommandCounterIncrement()?;
     }
 
-    if !created.is_empty() {
+    // F1 copy-all + WAL-record-all phases (live builds; a sim batch copied
+    // inline above). Any error here aborts the whole batch onto the serial
+    // fallback; partially copied datadirs are the caller's
+    // cleanup_orphaned_datadirs orphans, exactly like an inline copy
+    // failure's.
+    #[cfg(not(pgrust_sim))]
+    if !deferred.is_empty() {
+        run_deferred_copies(&deferred)?;
+    }
+
+    let n_filecopy = created.iter().filter(|c| member_owes_post(c.strategy)).count();
+    if n_filecopy > 0 {
         if !pre_checkpointed {
             // The race suite's skip witness: copies happened and the
             // pre-checkpoint was skipped outright (every copying member's
@@ -992,11 +1184,99 @@ fn mint_batch_body(
             );
         }
         // ONE post-checkpoint INSIDE the transaction, after the last copy
-        // and before the single commit (skipped when nothing was copied —
-        // no member owes the invariant then).
+        // and before the single commit (skipped when no FILE_COPY member
+        // copied — wal_log members never owe the invariant, so an
+        // all-wal_log batch requests zero checkpoints).
         checkpointer::RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT)?;
     }
     Ok(outcomes)
+}
+
+/// F1's copy-all + WAL-record-all phases, live builds only. Re-asserts
+/// source occupancy first (createdb_deferred_file_copy's contract: the
+/// catalog-time CountOtherDBBackends no longer sits adjacent to the copy),
+/// then copies fan out across min(8, members) scoped worker threads
+/// issuing raw path-based syscalls (parcopy.rs carries the thread-safety
+/// analysis); this thread babysits interrupts meanwhile, then runs the
+/// per-directory fsyncs, then inserts every member's
+/// XLOG_DBASE_CREATE_FILE_COPY records — WAL insertion state is
+/// backend-thread TLS, so the records CANNOT move to the workers. The
+/// witness line is the race suite's parallel-path proof.
+#[cfg(not(pgrust_sim))]
+fn run_deferred_copies(deferred: &[dbcommands::DeferredFileCopy]) -> PgResult<()> {
+    // Occupancy re-check, restoring the guard deferral widened: C's
+    // CountOtherDBBackends runs "immediately before its copy", but each
+    // member's catalog-time check (createdb_guts) now sits a whole batch of
+    // catalog work — and any checkpoint stall — before the copies. An
+    // anti-wraparound autovacuum worker attaching to a template in that gap
+    // (ordinary connections cannot: batch templates are datallowconn=false
+    // at the batch snapshot) would otherwise write-race the parallel copy
+    // where the pre-F1 inline path would have terminated it. Re-run the
+    // check per unique source HERE, adjacent to the copies; occupied
+    // aborts the whole batch onto the serial fallback, whose per-member
+    // C-shaped check (with its autovacuum-kill retry loop) resolves it.
+    let mut checked: Vec<Oid> = Vec::with_capacity(deferred.len());
+    for d in deferred {
+        if checked.contains(&d.src_dboid) {
+            continue;
+        }
+        checked.push(d.src_dboid);
+        if let Some((notherbackends, npreparedxacts)) =
+            procarray::CountOtherDBBackends(d.src_dboid)?
+        {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_IN_USE)
+                .errmsg(format!(
+                    "source database with OID {} is being accessed by other users",
+                    d.src_dboid
+                ))
+                .errdetail(dbcommands::errdetail_busy_db(notherbackends, npreparedxacts))
+                .into_error()
+                .into());
+        }
+    }
+    let mut jobs = Vec::new();
+    for d in deferred {
+        for dir in &d.dirs {
+            jobs.push(crate::parcopy::enumerate_dir_job(&dir.srcpath, &dir.dstpath)?);
+        }
+    }
+    let members = deferred.len();
+    let workers = members.min(MINT_COPY_WORKERS_MAX);
+    let knobs = crate::parcopy::snapshot_knobs();
+    let stats = crate::parcopy::copy_dirs_parallel(jobs, workers, knobs)?;
+
+    // Destination-directory fsyncs (copydir's tail), on THIS thread:
+    // per-file fsyncs already ran on the workers' own fds.
+    if init_small::globals::enableFsync() {
+        for d in deferred {
+            for dir in &d.dirs {
+                fd::fsync_fname(&dir.dstpath, true)?;
+            }
+        }
+    }
+    for d in deferred {
+        for dir in &d.dirs {
+            dbcommands::log_file_copy_record(
+                d.db_oid,
+                dir.dst_tablespace,
+                d.src_dboid,
+                dir.src_tablespace,
+            )?;
+        }
+    }
+    let _ = log_report(
+        LOG,
+        format!(
+            "pgrust ephemeral-db janitor: batch copy: {members} member(s) across {} thread(s): \
+             {} file(s), wall {:.1} ms, summed worker time {:.1} ms",
+            stats.threads,
+            stats.files,
+            stats.wall_ns as f64 / 1e6,
+            stats.busy_ns as f64 / 1e6,
+        ),
+    );
+    Ok(())
 }
 
 /// Best-effort removal of datadirs copied by an ABORTED batch transaction:
@@ -1012,15 +1292,24 @@ fn mint_batch_body(
 /// the commit (the flush comment in the body), so recovery never replays
 /// the aborted batch's durable CREATE_FILE_COPY records without the DROPs
 /// that follow them. Never fails the pass.
-pub(crate) fn cleanup_orphaned_datadirs(created: &[Oid]) {
+/// wal_log members (F2) additionally get createdb_failure_cleanup's
+/// buffer-drop arm FIRST (`dbcommands::forget_walog_database`): their copy
+/// ran through shared buffers, and a dirty dst-database buffer surviving
+/// past the rmtree would have the checkpointer writing into a removed
+/// directory. The same flushed-DROP discipline covers their durable
+/// CREATE_WAL_LOG records.
+pub(crate) fn cleanup_orphaned_datadirs(created: &[CreatedDb]) {
     if created.is_empty() {
         return;
     }
     let run = || -> PgResult<()> {
         let cx = mcx::MemoryContext::new("pgrust janitor batch-abort cleanup");
         xact::StartTransactionCommand()?;
-        for &oid in created {
-            dbcommands::remove_dbtablespaces(cx.mcx(), oid)?;
+        for c in created {
+            if c.strategy == MintStrategy::WalLog {
+                dbcommands::forget_walog_database(c.oid)?;
+            }
+            dbcommands::remove_dbtablespaces(cx.mcx(), c.oid)?;
         }
         // The XLOG_DBASE_DROP records must be DURABLE before cleanup counts
         // as done: this transaction changes no catalog, so its commit
@@ -1169,7 +1458,16 @@ pub(crate) fn mint_one(p: &registry::PendingEnsure) -> PgResult<Option<Oid>> {
     // reaches the same effect via createdb's "owner" DefElem (datdba
     // resolution + member_can_set_role, which the janitor's superuser
     // session passes) — no post-CREATE ALTER OWNER needed.
-    let stmt = build_createdb_stmt(mcx, p)?;
+    //
+    // Strategy (F2) applies on the serial path too: a wal_log pick makes
+    // this C-shaped createdb checkpoint-free (that strategy has no
+    // checkpoint sites), a file_copy pick keeps the stock pair. Stock
+    // failure cleanup handles both arms. The probe flag is moot here: a
+    // file_copy createdb below runs its OWN FLUSH_ALL after the probe
+    // (covering any hint-bit dirtying), and the probe already cleared the
+    // template's flush mark so later BATCHES re-pay theirs.
+    let (strategy, _probed) = strategy_for_template(mcx, tpl.oid, tpl.dattablespace)?;
+    let stmt = build_createdb_stmt(mcx, p, strategy)?;
     let db_oid = dbcommands::createdb(mcx, &stmt)?;
 
     // M4 clone fidelity, MINT-TIME ONLY: inherit the template's
@@ -1211,7 +1509,7 @@ fn def<'mcx>(mcx: Mcx<'mcx>, defname: &'static str, value: &str) -> PgResult<Nod
     )
 }
 
-/// Programmatic `CREATE DATABASE <name> TEMPLATE <t> STRATEGY file_copy
+/// Programmatic `CREATE DATABASE <name> TEMPLATE <t> STRATEGY <picked>
 /// OWNER <role>`, plus `ALLOW_CONNECTIONS false` for warm-pool spare specs
 /// (`p.spare`): a listed spare must not be enterable — any role with
 /// CONNECT could otherwise connect-write-disconnect between ticks and the
@@ -1219,12 +1517,19 @@ fn def<'mcx>(mcx: Mcx<'mcx>, defname: &'static str, value: &str) -> PgResult<Nod
 /// (the handout's occupancy check only sees clients still connected AT
 /// handout time). The handout transaction flips connectability back on
 /// (pool::handout_one). Client Ensures keep the stock createdb default.
+/// The strategy word is the F2 per-template pick (file_copy unless the
+/// template's swept-relation count crosses the wal_log threshold).
 fn build_createdb_stmt<'mcx>(
     mcx: Mcx<'mcx>,
     p: &registry::PendingEnsure,
+    strategy: MintStrategy,
 ) -> PgResult<CreatedbStmt<'mcx>> {
+    let strategy_word = match strategy {
+        MintStrategy::FileCopy => "file_copy",
+        MintStrategy::WalLog => "wal_log",
+    };
     let mut options = NodeList::make1(mcx, def(mcx, "template", &p.template)?)?;
-    options.lappend(mcx, def(mcx, "strategy", "file_copy")?)?;
+    options.lappend(mcx, def(mcx, "strategy", strategy_word)?)?;
     options.lappend(mcx, def(mcx, "owner", &p.owner_name)?)?;
     if p.spare {
         options.lappend(mcx, def(mcx, "allow_connections", "false")?)?;
@@ -1309,6 +1614,95 @@ mod tests {
             owner_name: "minter".to_string(),
             spare: false,
         }
+    }
+
+    /// F2 strategy pick (pure half): the threshold sign disables, an
+    /// unknown count stays file_copy, the boundary is inclusive
+    /// (count >= threshold -> wal_log). RELEASE-effective plain asserts.
+    #[test]
+    fn strategy_pick_semantics() {
+        use MintStrategy::*;
+        // Disabled: -1 beats everything, even a huge count.
+        assert_eq!(pick_strategy(None, -1), FileCopy);
+        assert_eq!(pick_strategy(Some(0), -1), FileCopy);
+        assert_eq!(pick_strategy(Some(1_000_000), -1), FileCopy);
+        // Unknown count: conservative file_copy at any enabled threshold.
+        assert_eq!(pick_strategy(None, 0), FileCopy);
+        assert_eq!(pick_strategy(None, 50), FileCopy);
+        // Inclusive boundary.
+        assert_eq!(pick_strategy(Some(49), 50), FileCopy);
+        assert_eq!(pick_strategy(Some(50), 50), WalLog);
+        assert_eq!(pick_strategy(Some(51), 50), WalLog);
+        // Threshold 0 = everything (with a known count) goes wal_log.
+        assert_eq!(pick_strategy(Some(0), 0), WalLog);
+        assert_eq!(pick_strategy(Some(231), 0), WalLog);
+    }
+
+    /// F2 mixed-batch checkpoint decision table, driven through the SAME
+    /// per-member predicates the batch body folds over
+    /// (member_fires_pre/member_owes_post): pre fires iff some file_copy
+    /// member lacks its flush mark — RE-firing when a member's own probe
+    /// ran after an earlier member's checkpoint (the probe-dirties-template
+    /// hazard) — post fires iff any file_copy member minted, and an
+    /// all-wal_log batch requests NEITHER — mark state irrelevant on
+    /// wal_log members.
+    #[test]
+    fn mixed_batch_checkpoint_decision_table() {
+        use MintStrategy::*;
+        // (members as (strategy, marked, probed)) -> (n_pres, post): the
+        // body's fold. probed => !marked (the probe clears the mark).
+        let plan = |members: &[(MintStrategy, bool, bool)]| -> (usize, bool) {
+            let mut pres = 0usize;
+            let mut pre_checkpointed = false;
+            let mut post = false;
+            for &(s, marked, probed) in members {
+                assert!(!(probed && marked), "probe clears the mark by construction");
+                if member_fires_pre(s, marked, probed, pre_checkpointed) {
+                    pres += 1;
+                    pre_checkpointed = true;
+                }
+                if member_owes_post(s) {
+                    post = true;
+                }
+            }
+            (pres, post)
+        };
+        // All file_copy, nothing marked, no probes: ONE shared pre.
+        assert_eq!(plan(&[(FileCopy, false, false), (FileCopy, false, false)]), (1, true));
+        // All file_copy, all marked: pre skipped (the D3 skip), post owed.
+        assert_eq!(plan(&[(FileCopy, true, false), (FileCopy, true, false)]), (0, true));
+        // Marked + unmarked file_copy: one pre (the unmarked member), post.
+        assert_eq!(plan(&[(FileCopy, true, false), (FileCopy, false, false)]), (1, true));
+        // All wal_log: ZERO checkpoints, regardless of mark state.
+        assert_eq!(plan(&[(WalLog, false, false), (WalLog, true, false)]), (0, false));
+        assert_eq!(plan(&[]), (0, false));
+        // Mixed: wal_log members never contribute a term; the file_copy
+        // member alone decides.
+        assert_eq!(plan(&[(WalLog, false, false), (FileCopy, true, false)]), (0, true));
+        assert_eq!(plan(&[(WalLog, true, false), (FileCopy, false, false)]), (1, true));
+        // THE HAZARD CELL (probe-dirties-template): a first-touch batch
+        // over two distinct new templates probes both; member 2's probe
+        // lands AFTER member 1's checkpoint, so it must RE-fire — two
+        // pres, never one.
+        assert_eq!(plan(&[(FileCopy, false, true), (FileCopy, false, true)]), (2, true));
+        // Same template twice: the second member cache-hits (no probe) and
+        // is marked by member 1 — steady one-pre shape.
+        assert_eq!(plan(&[(FileCopy, false, true), (FileCopy, true, false)]), (1, true));
+        // A probing WAL_LOG pick never fires (no file copy to protect).
+        assert_eq!(plan(&[(WalLog, false, true), (WalLog, false, true)]), (0, false));
+        // SIGHUP-flip shape: mark exists from an earlier era but the first
+        // post-flip pick probes (mark cleared, probed) — re-pays even as
+        // the batch's first member.
+        assert_eq!(plan(&[(FileCopy, false, true)]), (1, true));
+        // Wal_log-only mark state can never turn the pre on (the guard the
+        // charter pins: the flush-mark machinery is file_copy-only).
+        assert!(!member_pays_pre(WalLog, false));
+        assert!(!member_owes_post(WalLog));
+        // The probed flag can only ADD fires, never suppress one.
+        assert!(member_fires_pre(FileCopy, false, true, true));
+        assert!(member_fires_pre(FileCopy, false, false, false));
+        assert!(!member_fires_pre(FileCopy, true, false, true));
+        assert!(!member_fires_pre(FileCopy, false, false, true));
     }
 
     /// Batch assembly (split_batch) + validation split (preflight_verdict):

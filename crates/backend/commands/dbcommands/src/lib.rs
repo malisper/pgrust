@@ -26,7 +26,12 @@ pub use alterdb::{
     movedb, AlterDatabase, AlterDatabaseOwner, AlterDatabaseRefreshColl, AlterDatabaseSet,
     RenameDatabase,
 };
-pub use createdb::{check_encoding_locale_matches, createdb, createdb_skip_checkpoints};
+pub use createdb::{
+    check_encoding_locale_matches, createdb, createdb_deferred_file_copy,
+    createdb_skip_checkpoints, forget_walog_database, log_file_copy_record, DeferredFileCopy,
+    FileCopyDir,
+};
+pub use walcopy::count_swept_relations;
 pub(crate) use dropdb::name_key;
 pub use dropdb::{dropdb, dropdb_skip_checkpoint};
 

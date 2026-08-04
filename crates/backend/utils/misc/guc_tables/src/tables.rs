@@ -923,6 +923,16 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // reload idiom — shrinking it (or 0) drains the pool, growing refills
     // it. Max 64 = registry::MAX_SPARES (the spare table's fixed bound).
     GucIntSetting { name: "pgrust.ephemeral_db_pool_size", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Number of pre-minted spare clones of the default template the janitor keeps warm (0 = off)."), long_desc: Some("Applies to pgrust.ephemeral_db_default_template only (v1; named-template pools are out of scope). A default-template mint request is satisfied by a catalog-only RENAME of a spare instead of a file copy; spares are named <prefix>spare_<seq> (a namespace reserved from minting), owned by the janitor and not connectable until handout, and replenished in background janitor ticks. Spares are invalidated on template repoint/rebuild/unseal and on any observed change of the template's ALLOW_CONNECTIONS; a permanently connectable default template keeps its spares, so handouts may serve content as old as each spare's mint — reseal the template (or rebuild it under a new name) to force freshness."), flags: 0, variable: &vars::pgrust_ephemeral_db_pool_size, boot_val: GucDefaultValue::Int(0), min: 0, max: 64, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.ephemeral_db_wal_log_threshold (pgrust-only, test-views.md
+    // mint-strategy addendum): swept-relation count (every pg_class row with
+    // storage, catalogs included — an empty template already sweeps a few
+    // hundred) at or above which a janitor mint runs CREATE DATABASE
+    // STRATEGY wal_log — zero checkpoints — instead of file_copy; -1 = never
+    // (always file_copy, the shipped default until the crossover is
+    // CI-confirmed; notes/appbench/SPEED-REPORT.md "mint strategy" holds
+    // the measurements). Counts are cached per template in the janitor
+    // registry and re-observed after any observed unseal.
+    GucIntSetting { name: "pgrust.ephemeral_db_wal_log_threshold", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Swept-relation count at or above which the janitor mints ephemeral databases with STRATEGY wal_log (-1 = never)."), long_desc: Some("A template whose pg_class sweep (every relation with storage, system catalogs included) counts at least this many relations is cloned with CREATE DATABASE STRATEGY wal_log, which requests no checkpoints; smaller templates keep STRATEGY file_copy and the janitor's batched checkpoint machinery. -1 disables wal_log picks entirely. The count is observed once per sealed template and cached; unsealing a template invalidates the cache."), flags: 0, variable: &vars::pgrust_ephemeral_db_wal_log_threshold, boot_val: GucDefaultValue::Int(-1), min: -1, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
     // DOP cap for runtime-engine engagements, consulted ONLY under
     // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm

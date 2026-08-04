@@ -62,6 +62,18 @@ pub(crate) fn CreateDatabaseUsingWalLog(
     Ok(())
 }
 
+/// pgrust-only additive probe (test-views.md mint-strategy addendum): the
+/// number of relations a wal_log CREATE DATABASE of `src_dboid` would sweep
+/// — `ScanSourceDatabasePgClass`'s list length, nothing else. The janitor's
+/// per-template strategy pick prices wal_log with it. Caller must hold an
+/// open transaction; cost is one read of the source database's pg_class
+/// through shared buffers (bulk-read strategy), same as the wal_log scan
+/// itself.
+pub fn count_swept_relations(mcx: Mcx<'_>, src_dboid: Oid, src_tsid: Oid) -> PgResult<usize> {
+    let srcpath = relpath::GetDatabasePath(mcx, src_dboid, src_tsid)?;
+    Ok(ScanSourceDatabasePgClass(src_tsid, src_dboid, srcpath.as_str())?.len())
+}
+
 fn ScanSourceDatabasePgClass(
     tbid: Oid,
     dbid: Oid,

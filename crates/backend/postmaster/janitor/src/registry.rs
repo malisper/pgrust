@@ -244,6 +244,17 @@ struct RegistryState {
     /// stops (every batch then re-pays the pre-checkpoint, with no
     /// witness).
     template_flush_marks: Vec<(Oid, u32, u32)>,
+    /// Cached swept-relation counts per template oid (mint-strategy pick,
+    /// F2): the wal_log price observed by `dbcommands::count_swept_relations`
+    /// the first time a strategy pick needs it. Cleared at every
+    /// observed-unseal/connectable site TOGETHER with the flush mark
+    /// (`clear_template_flushed`) — once ordinary connections can reach the
+    /// template its relation population can change — and pruned with the
+    /// marks when the template is dropped. Restart-lossy like everything
+    /// here (first pick after janitor start re-counts). Staleness is a
+    /// strategy-quality concern only, never correctness: either strategy
+    /// mints a correct clone.
+    template_relcounts: Vec<(Oid, usize)>,
     /// One-shot latch for the replenisher's prefix-too-long-for-spare-names
     /// refusal line: the prefix is PGC_POSTMASTER and the spare seq is
     /// monotonic, so the condition is permanent once true — without the
@@ -264,6 +275,7 @@ pgsync::process_global! {
         spares: Vec::new(),
         next_spare_seq: 1,
         template_flush_marks: Vec::new(),
+        template_relcounts: Vec::new(),
         pool_name_overflow_logged: false,
     });
 }
@@ -792,10 +804,12 @@ pub(crate) fn mark_template_flushed(oid: Oid, frozenxid: u32, minmxid: u32) {
     })
 }
 
-/// Drop `oid`'s flush mark. Called whenever a janitor probe OBSERVES the
-/// template unsealed or connectable (datistemplate = false or datallowconn
-/// = true): once ordinary connections can reach it, "no dirty buffers can
-/// exist" no longer holds and the mark must not survive a later re-seal.
+/// Drop `oid`'s flush mark AND its cached swept-relation count. Called
+/// whenever a janitor probe OBSERVES the template unsealed or connectable
+/// (datistemplate = false or datallowconn = true): once ordinary
+/// connections can reach it, "no dirty buffers can exist" no longer holds
+/// (the mark must not survive a later re-seal) and its relation population
+/// can change (the strategy pick must re-count on the next observation).
 /// (An unseal-write-reseal cycle entirely between janitor observations is
 /// invisible — the documented residual; the recipe never unseals a
 /// template, rebuilds get a NEW name.) All observation sites clear:
@@ -803,7 +817,36 @@ pub(crate) fn mark_template_flushed(oid: Oid, frozenxid: u32, minmxid: u32) {
 /// (mint_one — the single-entry tick bypasses preflight entirely), and
 /// the warm-pool probe + handout re-check.
 pub(crate) fn clear_template_flushed(oid: Oid) {
-    with_registry(|r| r.template_flush_marks.retain(|&(o, _, _)| o != oid))
+    with_registry(|r| {
+        r.template_flush_marks.retain(|&(o, _, _)| o != oid);
+        r.template_relcounts.retain(|&(o, _)| o != oid);
+    })
+}
+
+/// Cached swept-relation count for `oid` (mint-strategy pick), if observed.
+pub(crate) fn template_relcount(oid: Oid) -> Option<usize> {
+    with_registry(|r| {
+        r.template_relcounts
+            .iter()
+            .find(|&&(o, _)| o == oid)
+            .map(|&(_, n)| n)
+    })
+}
+
+/// Upsert the swept-relation count for `oid`. Skip-on-full is fail-safe
+/// (an uncached template re-counts at each pick — costs a pg_class read,
+/// never correctness); bounded by the flush-mark table's cap, the same
+/// one-slot-per-live-template population.
+pub(crate) fn set_template_relcount(oid: Oid, n: usize) {
+    with_registry(|r| {
+        if let Some(slot) = r.template_relcounts.iter_mut().find(|(o, _)| *o == oid) {
+            slot.1 = n;
+            return;
+        }
+        if r.template_relcounts.len() < MAX_TEMPLATE_FLUSH_MARKS {
+            r.template_relcounts.push((oid, n));
+        }
+    })
 }
 
 /// Prune flush marks whose template no longer exists (reap-pass tail, fed
@@ -816,7 +859,10 @@ pub(crate) fn clear_template_flushed(oid: Oid) {
 pub(crate) fn retain_template_flush_marks(live_oids: &[Oid]) {
     with_registry(|r| {
         r.template_flush_marks
-            .retain(|&(o, _, _)| live_oids.contains(&o))
+            .retain(|&(o, _, _)| live_oids.contains(&o));
+        // The relcount cache leaks a slot per dropped template exactly the
+        // same way; prune it on the same feed.
+        r.template_relcounts.retain(|&(o, _)| live_oids.contains(&o));
     })
 }
 
@@ -1231,6 +1277,26 @@ mod tests {
         assert!(!template_flushed_matches(92001, 1, 1), "dead-oid mark pruned");
         retain_template_flush_marks(&[]);
         assert!(!template_flushed_matches(92000, 1, 1));
+
+        // Relcount cache (mint-strategy pick): miss -> None; set -> hit;
+        // upsert replaces; the observed-unseal clear drops BOTH the flush
+        // mark and the count; dead-oid pruning covers it on the same feed.
+        assert_eq!(template_relcount(90500), None);
+        set_template_relcount(90500, 231);
+        assert_eq!(template_relcount(90500), Some(231));
+        set_template_relcount(90500, 260);
+        assert_eq!(template_relcount(90500), Some(260));
+        mark_template_flushed(90500, 700, 1);
+        clear_template_flushed(90500);
+        assert_eq!(template_relcount(90500), None, "unseal observation clears the count");
+        assert!(!template_flushed_matches(90500, 700, 1));
+        set_template_relcount(90501, 5);
+        set_template_relcount(90502, 6);
+        retain_template_flush_marks(&[90502]);
+        assert_eq!(template_relcount(90501), None, "dead-oid relcount pruned");
+        assert_eq!(template_relcount(90502), Some(6));
+        retain_template_flush_marks(&[]);
+        assert_eq!(template_relcount(90502), None);
 
         // The spare-name-overflow log latch fires exactly once per
         // lifetime (the misconfiguration is permanent: PGC_POSTMASTER

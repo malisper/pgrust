@@ -279,6 +279,14 @@ int_var!(
     set_pgrust_ephemeral_db_pool_size,
     0
 );
+// Mint-strategy pick (test-views.md mint-strategy addendum): PGC_SIGHUP,
+// read by the janitor at each strategy pick.
+int_var!(
+    I_pgrust_ephemeral_db_wal_log_threshold,
+    pgrust_ephemeral_db_wal_log_threshold,
+    set_pgrust_ephemeral_db_wal_log_threshold,
+    -1
+);
 bool_var!(
     B_integer_datetimes,
     integer_datetimes,

@@ -343,6 +343,11 @@ pub static pgrust_ephemeral_db_default_template: GucStringVar = GucSlot::new("pg
 // symbol): how many pre-minted spare clones of the DEFAULT template the
 // janitor keeps warm (0 = off). PGC_SIGHUP, re-read every janitor tick.
 pub static pgrust_ephemeral_db_pool_size: GucIntVar = GucSlot::new("pgrust_ephemeral_db_pool_size");
+// pgrust-only (test-views.md mint-strategy addendum, no C symbol): swept-
+// relation count at or above which a janitor mint picks CREATE DATABASE
+// STRATEGY wal_log (zero checkpoints) over file_copy; -1 = never (always
+// file_copy). PGC_SIGHUP, read at each strategy pick.
+pub static pgrust_ephemeral_db_wal_log_threshold: GucIntVar = GucSlot::new("pgrust_ephemeral_db_wal_log_threshold");
 // pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
 // force-overrides + the Gather read-fairness stride. Registered from the
 // deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is
