@@ -149,6 +149,7 @@ adt_like = { path = "../../crates/backend/utils/adt/like" }  # like_diff (scaffo
 adt_regexp = { path = "../../crates/backend/utils/adt/regexp" }  # regexp_diff (scaffold.py)
 regexp_alt = { path = "../../crates/backend/utils/adt/regexp_alt" }  # regexp_diff: pin regex_engine=spencer (RE2 dispatch carve)
 regex_core = { path = "../../crates/backend/regex/regex_core" }  # regexp_diff: install the Spencer engine seams
+regex_core_seams = { path = "../../crates/backend/regex/regex_core_seams" }  # task #155 must-fail control: conflicting seam install must still panic
 # regex_diff (p1-regexcore Spencer engine differential): regex_core,
 # stack_depth, syscache_seams, types_tuple and pg_locale are already
 # dependencies above; regex_diff reuses those single registrations. Its

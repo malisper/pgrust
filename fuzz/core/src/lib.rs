@@ -572,6 +572,37 @@ mod tests {
             wire_pqformat(&[i, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         }
     }
+
+    /// Must-fail control for the regex_diff/regexp_diff seam-race fix
+    /// (c9e3c10911b, task #155): that fix makes the IDENTITY install
+    /// first-wins by swallowing the "seam installed twice" panic with
+    /// `catch_unwind` at both drivers' init sites. This control pins the two
+    /// properties the swallow relies on, in THIS binary:
+    ///   1. a genuinely CONFLICTING second install is still DETECTED —
+    ///      `seam_core::set()`'s double-install panic must stay live, and
+    ///   2. it fails WITHOUT clobbering the shipped impl (set() is a
+    ///      compare_exchange from the stub, so the loser never writes) —
+    /// which is what makes it safe to run in parallel with the live regex
+    /// tests. If someone ever "cleans up" the double-install panic or lets a
+    /// second installer win the slot, this test fails.
+    #[test]
+    #[should_panic(expected = "seam installed twice: regex_core_seams::pg_regcomp")]
+    fn conflicting_regex_core_seam_install_still_panics() {
+        fn conflicting(
+            _pattern: &[types_core::PgWChar],
+            _cflags: i32,
+            _collation: types_core::Oid,
+        ) -> types_error::PgResult<regex::RegcompResult> {
+            unreachable!("a conflicting install must never win the seam slot")
+        }
+        // Identity install first, exactly as the drivers do (first-wins; a
+        // benefactor family may already have installed the shipped impls —
+        // the identical fn pointers either way).
+        let _ = std::panic::catch_unwind(regex_core::init_seams);
+        assert!(regex_core_seams::pg_regcomp::is_installed());
+        // The conflicting install must still fail loudly.
+        regex_core_seams::pg_regcomp::set(conflicting);
+    }
 }
 
 // encode_diff: scaffolded by fuzz/scaffold.py — see ../../README-TODO-encode_diff.md.

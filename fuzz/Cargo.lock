@@ -3915,6 +3915,7 @@ dependencies = [
  "readfuncs",
  "regex",
  "regex_core",
+ "regex_core_seams",
  "regexp_alt",
  "relpath",
  "relpath_seams",
