@@ -554,6 +554,13 @@ fn install_guc_tables_owned_vars() {
         get: backing::compute_query_id,
         set: backing::set_compute_query_id,
     });
+    // if_absent: heaptoast's unit tests pre-install a test-controlled
+    // accessor for this slot (tests.rs install_default_toast_compression_guc)
+    // and then boot through test_boot, which runs this installer too.
+    vars::default_toast_compression.install_if_absent(GucVarAccessors {
+        get: backing::default_toast_compression,
+        set: backing::set_default_toast_compression,
+    });
     vars::huge_pages_status.install(GucVarAccessors {
         get: backing::huge_pages_status,
         set: backing::set_huge_pages_status,

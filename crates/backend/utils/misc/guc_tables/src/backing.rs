@@ -96,6 +96,11 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     (log_min_duration_statement_cell, i32, log_min_duration_statement, set_log_min_duration_statement, -1),
     (log_statement_cell, i32, log_statement, set_log_statement, 0),
     (compute_query_id_cell, i32, compute_query_id, set_compute_query_id, 2),
+    // C: int default_toast_compression (toast_compression.c). PGC_USERSET
+    // enum; the heaptoast invalid-attcompression fallback reads this slot
+    // (toast_internals.c:59), so the product MUST install it — the reader
+    // landed with only a test-local install (the gate-blindness class).
+    (default_toast_compression_cell, i32, default_toast_compression, set_default_toast_compression, crate::consts::TOAST_PGLZ_COMPRESSION),
     (phony_random_seed_cell, f64, phony_random_seed, set_phony_random_seed, (0.0) as f64),
     (log_statement_sample_rate_cell, f64, log_statement_sample_rate, set_log_statement_sample_rate, (1.0) as f64),
     (log_xact_sample_rate_cell, f64, log_xact_sample_rate, set_log_xact_sample_rate, (0.0) as f64),
