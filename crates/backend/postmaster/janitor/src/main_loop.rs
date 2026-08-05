@@ -12,7 +12,7 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 use crate::dbscan::{scan_prefix_rows, DbRow};
 use crate::marker::{self, Guard};
 use crate::reap::{reap_candidate, StreakTracker};
-use crate::{grammar, maint, mint, pool, prewarm, registry};
+use crate::{grammar, maint, mint, pool, prewarm, registry, seal};
 
 /// Poll cadence (spec: "~500ms").
 const TICK_MS: i64 = 500;
@@ -171,6 +171,15 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
             contain(e, "mint service pass")?;
         }
 
+        // pgrust_seal_template servicing (seal.rs state machine), AFTER
+        // mint servicing (waiter latency outranks the rare seal) and
+        // BEFORE the warm-pool replenish (a template sealed this tick is
+        // then visible to the same tick's replenish probe). Per-entry
+        // failures are contained inside the pass; only FATALs reach here.
+        if let Err(e) = seal::seal_pass() {
+            contain(e, "template seal pass")?;
+        }
+
         // D3 warm-pool replenish, BETWEEN mint servicing and the reap pass
         // (recorded ordering decision): after the deferred sweep (fresh
         // spares must not be minted just to be swept), after mint servicing
@@ -218,8 +227,10 @@ fn janitor_main(_main_arg: u64) -> PgResult<()> {
         }
 
         // Retire resolved Ensure entries whose waiters left and whose
-        // fresh-mint shield linger expired.
+        // fresh-mint shield linger expired; retire terminal seal entries
+        // whose waiters left (no linger — the flip committed before Done).
         registry::gc_ensures(pg_clock::mono_ns());
+        registry::gc_seals();
     }
 }
 
@@ -352,6 +363,7 @@ fn sweep_rows(prefix: &str, rows: &[DbRow]) -> PgResult<()> {
                 d.oid == own,
                 registry::ensure_shields(&d.name),
                 registry::spare_shields(&d.name),
+                registry::seal_shields(&d.name),
             )
         })
         .map(|d| (d.oid, d.name.as_str()))
@@ -399,6 +411,7 @@ fn reap_pass(prefix: &str, streaks: &mut StreakTracker) -> PgResult<()> {
             d.oid == own,
             registry::ensure_shields(&d.name),
             registry::spare_shields(&d.name),
+            registry::seal_shields(&d.name),
         ) {
             continue;
         }
@@ -544,6 +557,22 @@ fn drop_one_gated(
         );
         return Ok(false);
     }
+    // Seal re-check, same last-instant discipline: a pgrust_seal_template()
+    // posted from a backend after this cycle's candidate scan (its entry
+    // shields the instant post_seal returns) must still protect the target
+    // — the seal pass that will drive it runs in this same loop, but the
+    // POST is backend-side and can land anywhere inside the
+    // enumeration-to-drop window.
+    if registry::seal_shields(name) {
+        let _ = log_report(
+            LOG,
+            format!(
+                "pgrust ephemeral-db janitor: skipping drop of \"{name}\": a seal request is in \
+                 flight for it"
+            ),
+        );
+        return Ok(false);
+    }
     drop_action(oid, name)
 }
 
@@ -652,5 +681,38 @@ mod tests {
             "drop action ran on a listed spare: the pre-drop spare re-check is gone"
         );
         assert!(registry::remove_spare(spare));
+
+        // The seal re-check gates identically (deleting the seal_shields
+        // re-check in drop_one_gated fails this): a non-terminal seal entry
+        // shields; completing it releases the gate.
+        let sealing = "tv_dropgate_sealing";
+        registry::set_janitor_proc(Some(11));
+        let registry::PostSeal::Posted(gen) = registry::post_seal(sealing, 12) else {
+            panic!("expected Posted");
+        };
+        let ran = Cell::new(false);
+        let r = drop_one_gated(90204, sealing, |_, _| {
+            ran.set(true);
+            Ok(true)
+        });
+        assert!(
+            matches!(r, Ok(false)),
+            "seal-in-flight victim must be skipped as Ok(false), got {r:?}"
+        );
+        assert!(
+            !ran.get(),
+            "drop action ran under an in-flight seal: the pre-drop seal re-check is gone"
+        );
+        registry::complete_seal(gen, Ok(()));
+        let ran = Cell::new(false);
+        let r = drop_one_gated(90204, sealing, |_, _| {
+            ran.set(true);
+            Ok(true)
+        });
+        assert!(matches!(r, Ok(true)), "terminal seal stops shielding");
+        assert!(ran.get());
+        registry::remove_seal_waiter(gen, 12);
+        registry::gc_seals();
+        registry::set_janitor_proc(None);
     }
 }

@@ -9,7 +9,7 @@
 //! for a database that must survive restarts, `ALTER DATABASE ... RENAME`
 //! out of the prefix.
 
-use types_core::{Oid, ProcNumber};
+use types_core::{InvalidOid, Oid, ProcNumber};
 use types_error::{PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED};
 
 /// Fixed pin-table capacity. Ephemeral databases are per-test-worker scoped;
@@ -201,6 +201,85 @@ pub struct SpareEntry {
 /// simply keeps paying the pre-checkpoint.
 pub const MAX_TEMPLATE_FLUSH_MARKS: usize = 64;
 
+/// Fixed seal-request capacity (the MAX_PINS shape: bounded, linear scan
+/// under the lock, reject-loud on overflow). Seals are USER-driven — one
+/// `pgrust_seal_template()` call per template a suite builds — never
+/// concurrency-scaled, and each seal is a once-per-schema-change event;
+/// eight concurrent ones is already holding the janitor wrong.
+pub const MAX_SEALS: usize = 8;
+
+/// One `pgrust_seal_template()` request (seal.rs owns the choreography;
+/// this is the storage). Keyed by resolved catalog datname; concurrent
+/// same-name callers JOIN one entry (the Ensure idempotency shape).
+struct SealEntry {
+    /// Monotonic generation, the waiter's AND the vacuum worker's handle
+    /// (the EnsureEntry ABA-guard rationale: never address by index/name).
+    gen: u64,
+    name: String,
+    /// The target's pg_database oid, recorded by `begin_seal_vacuum` when
+    /// the janitor validated the entry (InvalidOid while Pending): the
+    /// vacuum worker fetches it by gen (`seal_vacuum_target`).
+    oid: Oid,
+    /// Parked backends to SetLatch on completion.
+    waiters: Vec<ProcNumber>,
+    state: SealState,
+}
+
+enum SealState {
+    /// Posted, not yet picked up by the janitor's seal pass.
+    Pending,
+    /// The one-shot vacuum worker was launched; `deadline_ns` is the leak
+    /// bound (a worker the postmaster never started never reports back).
+    Vacuuming { deadline_ns: u64 },
+    /// The worker reported: Ok = VACUUM (FREEZE, ANALYZE) committed, the
+    /// janitor flips the flags next pass; Err = the janitor fails the
+    /// entry next pass (report + completion stay janitor-side — the
+    /// containment/log discipline lives in one thread).
+    VacuumDone(Result<(), Box<PgError>>),
+    Done,
+    Failed(Box<PgError>),
+}
+
+impl SealState {
+    fn terminal(&self) -> bool {
+        matches!(self, SealState::Done | SealState::Failed(_))
+    }
+}
+
+/// Result of `post_seal` (plain data, the PostEnsure convention: error
+/// wording lives in seal.rs).
+pub enum PostSeal {
+    Posted(u64),
+    /// Joined an existing in-flight entry for the same datname.
+    Joined(u64),
+    JanitorAbsent,
+    JanitorPaused,
+    TableFull,
+}
+
+/// Waiter-visible snapshot of a seal entry's state.
+pub enum SealStatus {
+    /// Pending / Vacuuming / VacuumDone — still being driven.
+    InProgress,
+    Done,
+    Failed(Box<PgError>),
+    /// Retired (a bug or a GC race, the EnsureStatus::Gone contract):
+    /// callers fail closed, never park on it.
+    Gone,
+}
+
+/// One unit of janitor-side seal work this pass (seal.rs drives these).
+pub(crate) enum SealWork {
+    /// Pending entry: validate the target and launch the vacuum worker.
+    Validate { gen: u64, name: String },
+    /// Worker reported success: flip IS_TEMPLATE/ALLOW_CONNECTIONS.
+    Flip { gen: u64, name: String, oid: Oid },
+    /// Worker reported failure: fail the entry with its saved error.
+    VacuumFailed { gen: u64, name: String, err: Box<PgError> },
+    /// Vacuuming past its deadline with no report: fail the entry.
+    TimedOut { gen: u64, name: String },
+}
+
 struct RegistryState {
     /// Adoption-guard pause (spec item 4): while true the janitor performs
     /// no sweep and no reaping. D2's mint path must reject Ensures
@@ -283,6 +362,10 @@ struct RegistryState {
     /// refill yields the loop to handout dispatch instead of shadowing
     /// arrivals behind its copy+checkpoint wall. 0 = never.
     last_ensure_post_ns: u64,
+    /// `pgrust_seal_template()` requests (bounded by MAX_SEALS; seal.rs
+    /// owns the choreography).
+    seals: Vec<SealEntry>,
+    next_seal_gen: u64,
 }
 
 pgsync::process_global! {
@@ -303,6 +386,8 @@ pgsync::process_global! {
         touch_inflight: Vec::new(),
         catalog_churn: 0,
         last_ensure_post_ns: 0,
+        seals: Vec::new(),
+        next_seal_gen: 1,
     });
 }
 
@@ -677,6 +762,208 @@ pub fn template_grace_override(template: &str) -> Option<i32> {
             .find(|(t, _)| t == template)
             .map(|&(_, s)| s)
     })
+}
+
+// ---------------------------------------------------------------------------
+// pgrust_seal_template requests (seal.rs owns the choreography; the state
+// machine lives here so waiters, the janitor loop, and the one-shot vacuum
+// worker all mutate it under the one registry lock).
+// ---------------------------------------------------------------------------
+
+/// Post (or join) a seal request for the resolved datname `name`. One
+/// atomic sequence under the registry lock (the post_ensure shape):
+/// janitor-present check, paused check, same-name join, capacity, insert.
+/// The join is keyed by name over NON-TERMINAL entries only — a terminal
+/// (Done/Failed) entry lingering for its waiters must not absorb a fresh
+/// request, which legitimately re-seals after a manual unseal.
+pub fn post_seal(name: &str, waiter: ProcNumber) -> PostSeal {
+    with_registry(|r| {
+        if r.janitor_proc.is_none() {
+            return PostSeal::JanitorAbsent;
+        }
+        if r.paused {
+            return PostSeal::JanitorPaused;
+        }
+        if let Some(e) = r
+            .seals
+            .iter_mut()
+            .find(|e| e.name == name && !e.state.terminal())
+        {
+            if !e.waiters.contains(&waiter) {
+                e.waiters.push(waiter);
+            }
+            return PostSeal::Joined(e.gen);
+        }
+        if r.seals.len() >= MAX_SEALS {
+            return PostSeal::TableFull;
+        }
+        let gen = r.next_seal_gen;
+        r.next_seal_gen += 1;
+        r.seals.push(SealEntry {
+            gen,
+            name: name.to_string(),
+            oid: InvalidOid,
+            waiters: vec![waiter],
+            state: SealState::Pending,
+        });
+        PostSeal::Posted(gen)
+    })
+}
+
+/// Waiter-side poll (Failed hands back a clone of the saved error).
+pub fn seal_status(gen: u64) -> SealStatus {
+    with_registry(|r| match r.seals.iter().find(|e| e.gen == gen) {
+        None => SealStatus::Gone,
+        Some(e) => match &e.state {
+            SealState::Done => SealStatus::Done,
+            SealState::Failed(err) => SealStatus::Failed(err.clone()),
+            _ => SealStatus::InProgress,
+        },
+    })
+}
+
+/// Deregister a waiter (every waiter exit path, via seal.rs's drop guard —
+/// the remove_ensure_waiter contract).
+pub fn remove_seal_waiter(gen: u64, waiter: ProcNumber) {
+    with_registry(|r| {
+        if let Some(e) = r.seals.iter_mut().find(|e| e.gen == gen) {
+            e.waiters.retain(|&w| w != waiter);
+        }
+    });
+}
+
+/// The janitor seal pass's work snapshot: everything that needs driving
+/// this tick, oldest first. `now_ns` classifies Vacuuming deadlines.
+pub(crate) fn seal_work(now_ns: u64) -> Vec<SealWork> {
+    with_registry(|r| {
+        r.seals
+            .iter()
+            .filter_map(|e| match &e.state {
+                SealState::Pending => Some(SealWork::Validate {
+                    gen: e.gen,
+                    name: e.name.clone(),
+                }),
+                SealState::Vacuuming { deadline_ns } if now_ns >= *deadline_ns => {
+                    Some(SealWork::TimedOut {
+                        gen: e.gen,
+                        name: e.name.clone(),
+                    })
+                }
+                SealState::Vacuuming { .. } => None,
+                SealState::VacuumDone(Ok(())) => Some(SealWork::Flip {
+                    gen: e.gen,
+                    name: e.name.clone(),
+                    oid: e.oid,
+                }),
+                SealState::VacuumDone(Err(err)) => Some(SealWork::VacuumFailed {
+                    gen: e.gen,
+                    name: e.name.clone(),
+                    err: err.clone(),
+                }),
+                SealState::Done | SealState::Failed(_) => None,
+            })
+            .collect()
+    })
+}
+
+/// Pending -> Vacuuming (janitor, after validation launched the worker):
+/// records the validated oid and the worker's report deadline. False = the
+/// entry is gone or no longer Pending (nothing was mutated).
+pub(crate) fn begin_seal_vacuum(gen: u64, oid: Oid, deadline_ns: u64) -> bool {
+    with_registry(|r| {
+        let Some(e) = r.seals.iter_mut().find(|e| e.gen == gen) else {
+            return false;
+        };
+        if !matches!(e.state, SealState::Pending) {
+            return false;
+        }
+        e.oid = oid;
+        e.state = SealState::Vacuuming { deadline_ns };
+        true
+    })
+}
+
+/// The vacuum worker's target lookup (bgw_main_arg carries only the gen).
+/// None = the entry was retired or is not awaiting a vacuum.
+pub fn seal_vacuum_target(gen: u64) -> Option<Oid> {
+    with_registry(|r| {
+        r.seals
+            .iter()
+            .find(|e| e.gen == gen && matches!(e.state, SealState::Vacuuming { .. }))
+            .map(|e| e.oid)
+    })
+}
+
+/// The vacuum worker's report (runs on ITS thread, the finish_touch
+/// exception to the loop-only discipline): Vacuuming -> VacuumDone. The
+/// janitor drives the rest next pass (the caller wakes it). A report
+/// against a retired/re-staged gen is a no-op — a worker outliving its
+/// entry's timeout must not resurrect it.
+pub fn finish_seal_vacuum(gen: u64, result: Result<(), Box<PgError>>) {
+    with_registry(|r| {
+        if let Some(e) = r.seals.iter_mut().find(|e| e.gen == gen) {
+            if matches!(e.state, SealState::Vacuuming { .. }) {
+                e.state = SealState::VacuumDone(result);
+            }
+        }
+    });
+}
+
+/// Vacuuming -> Pending (worker registration refused/failed): the next
+/// tick's seal pass revalidates and retries (the prewarm requeue_touch
+/// convention).
+pub(crate) fn requeue_seal(gen: u64) {
+    with_registry(|r| {
+        if let Some(e) = r.seals.iter_mut().find(|e| e.gen == gen) {
+            if matches!(e.state, SealState::Vacuuming { .. }) {
+                e.state = SealState::Pending;
+            }
+        }
+    });
+}
+
+/// Resolve a seal entry (janitor side) and return the waiters to wake
+/// OUTSIDE the lock (the complete_ensure convention). No-op on terminal
+/// entries.
+pub(crate) fn complete_seal(gen: u64, result: Result<(), Box<PgError>>) -> Vec<ProcNumber> {
+    with_registry(|r| {
+        let Some(e) = r.seals.iter_mut().find(|e| e.gen == gen) else {
+            return Vec::new();
+        };
+        if e.state.terminal() {
+            return Vec::new();
+        }
+        e.state = match result {
+            Ok(()) => SealState::Done,
+            Err(err) => SealState::Failed(err),
+        };
+        e.waiters.clone()
+    })
+}
+
+/// The seal shield, consulted by sweep and reap NEXT TO pins/ensures/
+/// spares: a database with a seal IN FLIGHT (non-terminal entry) is exempt
+/// from reaping — the target of a seal is by definition not yet a template,
+/// so an already-grace-idle in-prefix target would otherwise be reaped out
+/// from under its own seal. Terminal entries do not shield: Done means the
+/// database IS a template now (the template exemption takes over), Failed
+/// means ordinary lifecycle resumes.
+pub fn seal_shields(name: &str) -> bool {
+    with_registry(|r| {
+        r.seals
+            .iter()
+            .any(|e| e.name == name && !e.state.terminal())
+    })
+}
+
+/// Retire terminal entries whose waiters are gone (janitor tick tail, next
+/// to gc_ensures). No linger needed: unlike mints there is no
+/// mint-to-first-connect window to shield — the flip committed before Done.
+pub(crate) fn gc_seals() {
+    with_registry(|r| {
+        r.seals
+            .retain(|e| !e.state.terminal() || !e.waiters.is_empty());
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,6 +1534,143 @@ mod tests {
         for i in 0..MAX_TEMPLATE_GRACES {
             set_template_grace(&format!("tpl_fill_{i}"), -1).unwrap();
         }
+
+        set_janitor_proc(None);
+    }
+
+    // ONE test function for the whole seal-request state machine, same
+    // process-global-state rationale as its siblings, under the same
+    // crate-wide lock. No path in here may SetLatch (no proc table).
+    #[test]
+    fn seal_request_semantics() {
+        let _table = test_pin_table_lock();
+
+        // Absent/paused janitor: rejected before anything is queued (the
+        // post_ensure taxonomy).
+        set_janitor_proc(None);
+        assert!(matches!(post_seal("tv_s_a", 1), PostSeal::JanitorAbsent));
+        set_janitor_proc(Some(7));
+        set_paused(true);
+        assert!(matches!(post_seal("tv_s_a", 1), PostSeal::JanitorPaused));
+        set_paused(false);
+
+        // Post, then same-name joins coalesce (idempotent; duplicate
+        // waiters dedupe).
+        let PostSeal::Posted(gen_a) = post_seal("tv_s_a", 1) else {
+            panic!("expected Posted");
+        };
+        assert!(matches!(post_seal("tv_s_a", 2), PostSeal::Joined(g) if g == gen_a));
+        assert!(matches!(post_seal("tv_s_a", 2), PostSeal::Joined(g) if g == gen_a));
+        assert!(matches!(seal_status(gen_a), SealStatus::InProgress));
+
+        // The shield covers every non-terminal state (deleting the
+        // seal_shielded clause from reap_candidate fails main_loop/reap
+        // tests; deleting the non-terminal predicate here fails this).
+        assert!(seal_shields("tv_s_a"));
+        assert!(!seal_shields("tv_s_zzz"));
+
+        // Pending work is Validate; begin_seal_vacuum stages the oid and
+        // moves to Vacuuming (work then hides it until the deadline).
+        let now = 100_000_000_000u64;
+        let work = seal_work(now);
+        assert!(matches!(
+            work.as_slice(),
+            [SealWork::Validate { gen, name }] if *gen == gen_a && name == "tv_s_a"
+        ));
+        assert!(begin_seal_vacuum(gen_a, 90601, now + 1_000));
+        assert!(!begin_seal_vacuum(gen_a, 90601, now + 1_000), "not Pending anymore");
+        assert!(seal_work(now).is_empty(), "in-deadline Vacuuming is not work");
+        assert_eq!(seal_vacuum_target(gen_a), Some(90601));
+        assert_eq!(seal_vacuum_target(999_999), None);
+
+        // Worker success: VacuumDone(Ok) surfaces as Flip work with the
+        // staged oid; completion returns the waiters exactly once and the
+        // shield drops on the terminal state.
+        finish_seal_vacuum(gen_a, Ok(()));
+        let work = seal_work(now);
+        assert!(matches!(
+            work.as_slice(),
+            [SealWork::Flip { gen, oid, .. }] if *gen == gen_a && *oid == 90601
+        ));
+        let w = complete_seal(gen_a, Ok(()));
+        assert_eq!(w, vec![1, 2]);
+        assert!(complete_seal(gen_a, Ok(())).is_empty(), "already terminal");
+        assert!(matches!(seal_status(gen_a), SealStatus::Done));
+        assert!(!seal_shields("tv_s_a"), "Done does not shield");
+
+        // A terminal entry lingers for its waiters but never absorbs a
+        // fresh same-name post (re-seal after manual unseal is legal).
+        let PostSeal::Posted(gen_a2) = post_seal("tv_s_a", 3) else {
+            panic!("terminal entry must not absorb a fresh post");
+        };
+        assert_ne!(gen_a2, gen_a);
+
+        // Worker failure: the saved error fans out through VacuumFailed
+        // work and the Failed terminal state.
+        assert!(begin_seal_vacuum(gen_a2, 90602, now + 1_000));
+        finish_seal_vacuum(
+            gen_a2,
+            Err(Box::new(PgError::error("vacuum blew up".to_string()))),
+        );
+        let work = seal_work(now);
+        assert!(matches!(
+            work.as_slice(),
+            [SealWork::VacuumFailed { gen, err, .. }]
+                if *gen == gen_a2 && err.message() == "vacuum blew up"
+        ));
+        let w = complete_seal(gen_a2, Err(Box::new(PgError::error("vacuum blew up".to_string()))));
+        assert_eq!(w, vec![3]);
+        match seal_status(gen_a2) {
+            SealStatus::Failed(e) => assert_eq!(e.message(), "vacuum blew up"),
+            _ => panic!("expected Failed"),
+        }
+
+        // Deadline expiry: Vacuuming past its deadline is TimedOut work; a
+        // late worker report against the timed-out-and-completed entry is a
+        // no-op (never resurrects).
+        let PostSeal::Posted(gen_b) = post_seal("tv_s_b", 4) else {
+            panic!("expected Posted");
+        };
+        assert!(begin_seal_vacuum(gen_b, 90603, now + 1_000));
+        let work = seal_work(now + 1_000);
+        assert!(matches!(
+            work.as_slice(),
+            [SealWork::TimedOut { gen, .. }] if *gen == gen_b
+        ));
+        let w = complete_seal(gen_b, Err(Box::new(PgError::error("timed out".to_string()))));
+        assert_eq!(w, vec![4]);
+        finish_seal_vacuum(gen_b, Ok(()));
+        assert!(matches!(seal_status(gen_b), SealStatus::Failed(_)));
+
+        // GC retires terminal entries once their waiters leave; live gens
+        // report Gone afterwards (fail-closed for any stale waiter).
+        gc_seals();
+        assert!(matches!(seal_status(gen_a), SealStatus::Done), "waiters still registered");
+        remove_seal_waiter(gen_a, 1);
+        remove_seal_waiter(gen_a, 2);
+        remove_seal_waiter(gen_a2, 3);
+        remove_seal_waiter(gen_b, 4);
+        gc_seals();
+        assert!(matches!(seal_status(gen_a), SealStatus::Gone));
+        assert!(matches!(seal_status(gen_b), SealStatus::Gone));
+
+        // Capacity: the table is bounded; overflow refuses; joins still
+        // work while full (idempotent path precedes capacity).
+        let mut gens = Vec::new();
+        for i in 0..MAX_SEALS {
+            match post_seal(&format!("tv_s_fill_{i}"), 9) {
+                PostSeal::Posted(g) => gens.push(g),
+                _ => panic!("fill {i} refused"),
+            }
+        }
+        assert!(matches!(post_seal("tv_s_overflow", 9), PostSeal::TableFull));
+        assert!(matches!(post_seal("tv_s_fill_0", 10), PostSeal::Joined(_)));
+        for &g in &gens {
+            complete_seal(g, Ok(()));
+            remove_seal_waiter(g, 9);
+        }
+        remove_seal_waiter(gens[0], 10);
+        gc_seals();
 
         set_janitor_proc(None);
     }

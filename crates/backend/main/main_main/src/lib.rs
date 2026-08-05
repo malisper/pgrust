@@ -99,14 +99,22 @@ pub const KNOWN_PROFILES: &[&str] = &["test"];
 /// The `--profile test` expansion list — THE single place it is defined.
 ///
 /// First section = conf/test.conf verbatim (same keys, same values, same
-/// order); the `conf_sync` test parses that file and fails on any drift —
-/// a divergence between file and flag would be a silent doc lie. Second
-/// section = janitor arming (prewarm is already default-on when armed).
+/// order, module GUC-file quoting); the `conf_sync` test parses that file
+/// and fails on any drift — a divergence between file and flag would be a
+/// silent doc lie. Second section = janitor arming (prewarm is already
+/// default-on when armed).
 ///
-/// Deliberately NOT included: `pgrust.ephemeral_db_mint_roles` and
-/// `pgrust.ephemeral_db_default_template` — minting stays off by default
-/// (a profile must never silently enable minting); users add those via
-/// additional -c flags or the config file.
+/// The profile INCLUDES `pgrust.ephemeral_db_mint_roles = *` (user ruling
+/// 2026-08-05: the profile declares a DISPOSABLE test server — mint gating
+/// there is friction without protection). The GUC's own default (`''` =
+/// minting off) is unchanged, so a janitor armed WITHOUT the profile — a
+/// durable dev/preview box — keeps the fail-closed allowlist posture. A
+/// later explicit `-c` still overrides the profile (same source, later
+/// SetConfigOption wins; the argv tests pin this).
+///
+/// Deliberately NOT included: `pgrust.ephemeral_db_default_template` —
+/// there is no sane default template name; users add it via additional
+/// -c flags or the config file when they want bare-token minting.
 pub const PROFILE_TEST_SETTINGS: &[(&str, &str)] = &[
     // conf/test.conf — non-durable + quiet-background + test-shaped defaults
     ("fsync", "off"),
@@ -120,8 +128,11 @@ pub const PROFILE_TEST_SETTINGS: &[(&str, &str)] = &[
     ("file_copy_method", "clone"),
     ("jit", "off"),
     ("shared_buffers", "128MB"),
-    // janitor arming (docs/design/test-views.md D1)
-    ("pgrust.ephemeral_db_prefix", "tv_"),
+    ("pgrust.ephemeral_db_wal_log_threshold", "50"),
+    ("pgrust.ephemeral_db_mint_roles", "*"),
+    // janitor arming (docs/design/test-views.md D1); tdb_ = "test db"
+    // (ruling 2026-08-05, renamed from tv_)
+    ("pgrust.ephemeral_db_prefix", "tdb_"),
     ("pgrust.ephemeral_db_grace", "15s"),
 ];
 
@@ -558,7 +569,15 @@ mod tests {
                 continue;
             }
             let (k, v) = line.split_once('=').expect("conf line must be name = value");
-            file_settings.push((k.trim().to_string(), v.trim().to_string()));
+            // GUC-file quoting is file-syntax only: a quoted file value
+            // ('*') and the argv form (-c ...=*) denote the same setting,
+            // so strip one layer of single quotes before comparing.
+            let v = v.trim();
+            let v = v
+                .strip_prefix('\'')
+                .and_then(|m| m.strip_suffix('\''))
+                .unwrap_or(v);
+            file_settings.push((k.trim().to_string(), v.to_string()));
         }
         assert!(!file_settings.is_empty(), "parsed zero settings from conf/test.conf");
         let table: Vec<(String, String)> = PROFILE_TEST_SETTINGS
@@ -571,21 +590,29 @@ mod tests {
             &file_settings[..],
             "PROFILE_TEST_SETTINGS conf section drifted from conf/test.conf"
         );
-        // Remainder: exactly the janitor arming pair; minting GUCs must
-        // NEVER creep in (security posture).
+        // Remainder: exactly the janitor arming pair. mint_roles = '*' now
+        // lives in the conf section BY RULING (2026-08-05: the profile
+        // declares a disposable test server); default_template stays out —
+        // there is no sane default template name.
         let rest = &table[file_settings.len()..];
         assert_eq!(
             rest,
             &[
-                ("pgrust.ephemeral_db_prefix".to_string(), "tv_".to_string()),
+                ("pgrust.ephemeral_db_prefix".to_string(), "tdb_".to_string()),
                 ("pgrust.ephemeral_db_grace".to_string(), "15s".to_string()),
             ],
             "profile extras must be exactly the janitor arming pair"
         );
+        assert!(
+            table
+                .iter()
+                .any(|(k, v)| k == "pgrust.ephemeral_db_mint_roles" && v == "*"),
+            "the test profile must enable minting for all roles (ruling 2026-08-05)"
+        );
         for (k, _) in &table {
             assert!(
-                !k.contains("mint_roles") && !k.contains("default_template"),
-                "profile must never silently enable minting: {k}"
+                !k.contains("default_template"),
+                "no sane default template name exists; users pass it explicitly: {k}"
             );
         }
     }

@@ -32,6 +32,15 @@ use types_core::Oid;
 ///   leftovers (post-restart — the registry is restart-lossy — or spares
 ///   dropped from the pool after a poisoned handout) are ordinary
 ///   candidates, which is exactly the wanted cold-start/self-heal behavior.
+/// - An in-flight `pgrust_seal_template()` request (`seal_shielded`, from
+///   `registry::seal_shields`) exempts like a pin while non-terminal: the
+///   seal's target is by definition NOT yet a template, so an in-prefix
+///   target already grace-idle when the seal was posted (built, then
+///   abandoned, then sealed from another database) would otherwise be
+///   reaped out from under its own seal. Terminal seals stop shielding —
+///   Done hands over to the template exemption, Failed resumes ordinary
+///   lifecycle.
+#[allow(clippy::too_many_arguments)]
 pub fn reap_candidate(
     name: &str,
     prefix: &str,
@@ -40,6 +49,7 @@ pub fn reap_candidate(
     is_own_db: bool,
     ensure_shielded: bool,
     spare_shielded: bool,
+    seal_shielded: bool,
 ) -> bool {
     !prefix.is_empty()
         && name.as_bytes().starts_with(prefix.as_bytes())
@@ -48,6 +58,7 @@ pub fn reap_candidate(
         && !is_own_db
         && !ensure_shielded
         && !spare_shielded
+        && !seal_shielded
 }
 
 /// Continuous zero-backend streaks, keyed by database oid, living in janitor
@@ -125,11 +136,11 @@ mod tests {
     #[test]
     fn template_exemption_is_absolute() {
         // Prefix-matching template: never a candidate (spec item 1).
-        assert!(!reap_candidate("tv_tpl", "tv_", true, false, false, false, false));
+        assert!(!reap_candidate("tv_tpl", "tv_", true, false, false, false, false, false));
         // Sealed template under the recommended out-of-prefix convention.
-        assert!(!reap_candidate("tpl_abc", "tv_", true, false, false, false, false));
+        assert!(!reap_candidate("tpl_abc", "tv_", true, false, false, false, false, false));
         // The same name without the template bit IS a candidate.
-        assert!(reap_candidate("tv_tpl", "tv_", false, false, false, false, false));
+        assert!(reap_candidate("tv_tpl", "tv_", false, false, false, false, false, false));
     }
 
     #[test]
@@ -139,28 +150,28 @@ mod tests {
             false,
             true,
             false,
-            false, false));
+            false, false, false));
         assert!(reap_candidate("tv_pinned",
             "tv_",
             false,
             false,
             false,
-            false, false));
+            false, false, false));
     }
 
     #[test]
     fn prefix_scoping_is_exact() {
-        assert!(reap_candidate("tv_x", "tv_", false, false, false, false, false));
-        assert!(!reap_candidate("tx_x", "tv_", false, false, false, false, false));
-        assert!(!reap_candidate("tv", "tv_", false, false, false, false, false));
+        assert!(reap_candidate("tv_x", "tv_", false, false, false, false, false, false));
+        assert!(!reap_candidate("tx_x", "tv_", false, false, false, false, false, false));
+        assert!(!reap_candidate("tv", "tv_", false, false, false, false, false, false));
         // Empty prefix means the feature is off: nothing ever matches, even
         // though every string starts with "".
-        assert!(!reap_candidate("tv_x", "", false, false, false, false, false));
+        assert!(!reap_candidate("tv_x", "", false, false, false, false, false, false));
     }
 
     #[test]
     fn own_database_is_never_a_candidate() {
-        assert!(!reap_candidate("postgres", "post", false, false, true, false, false));
+        assert!(!reap_candidate("postgres", "post", false, false, true, false, false, false));
     }
 
     #[test]
@@ -172,13 +183,13 @@ mod tests {
             false,
             false,
             false,
-            true, false));
+            true, false, false));
         assert!(reap_candidate("tv_minting",
             "tv_",
             false,
             false,
             false,
-            false, false));
+            false, false, false));
     }
 
     #[test]
@@ -195,7 +206,7 @@ mod tests {
             false,
             false,
             true
-        ));
+        , false));
         assert!(reap_candidate(
             "tv_spare_1",
             "tv_",
@@ -204,6 +215,19 @@ mod tests {
             false,
             false,
             false
+        , false));
+    }
+
+    #[test]
+    fn seal_shield_exempts_like_a_pin() {
+        // An in-flight pgrust_seal_template target is exempt from sweep AND
+        // reap (deleting the seal_shielded clause fails this); the same
+        // name without an in-flight seal is an ordinary candidate.
+        assert!(!reap_candidate(
+            "tv_sealing", "tv_", false, false, false, false, false, true
+        ));
+        assert!(reap_candidate(
+            "tv_sealing", "tv_", false, false, false, false, false, false
         ));
     }
 

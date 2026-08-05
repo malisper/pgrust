@@ -60,6 +60,7 @@ mod parcopy;
 pub mod pool;
 pub mod reap;
 pub mod registry;
+pub mod seal;
 
 pub use builtins::JANITOR_BUILTINS;
 
