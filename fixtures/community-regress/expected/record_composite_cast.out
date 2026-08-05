@@ -1,0 +1,109 @@
+-- Imported from public PR malisper/pgrust#48 (author: jschaf, case commit dc98e1ff5db).
+-- Expected output captured from real PostgreSQL 18.
+--
+-- RECORD to named composite type coercion
+--
+-- A PL/pgSQL trigger's NEW is a row variable of the triggering table's
+-- composite type, so passing it to a function declared to take that type
+-- resolves in C PostgreSQL -- both directly and as an EXECUTE ... USING
+-- parameter. pgrust passes NEW as an anonymous record instead and rejects the
+-- call with "cannot cast type record to <type>".
+--
+-- The genuinely anonymous cases below (a PL/pgSQL `record` variable) are
+-- rejected by C PostgreSQL too; they are here to pin the error text, which
+-- C reports with LINE/caret/QUERY framing.
+--
+CREATE TABLE rcc_target (k int PRIMARY KEY, requires_update boolean);
+CREATE FUNCTION rcc_recompute(r rcc_target) RETURNS text
+    LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN format('k=%s update=%s', r.k, r.requires_update);
+END $$;
+-- Control: an explicit RowExpr cast is a compile-time coercion.
+SELECT rcc_recompute(row(1, true)::rcc_target);
+ rcc_recompute 
+---------------
+ k=1 update=t
+(1 row)
+
+-- NEW passed directly to the composite-typed function.
+CREATE FUNCTION rcc_direct_tg() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE NOTICE 'direct %', rcc_recompute(NEW);
+    RETURN NULL;
+END $$;
+CREATE TRIGGER rcc_direct
+    AFTER UPDATE ON rcc_target
+    FOR EACH ROW WHEN (new.requires_update)
+    EXECUTE FUNCTION rcc_direct_tg();
+INSERT INTO rcc_target VALUES (1, false);
+UPDATE rcc_target SET requires_update = true WHERE k = 1;
+NOTICE:  direct k=1 update=t
+DROP TRIGGER rcc_direct ON rcc_target;
+-- The generic deferred-cache dispatch this pattern exists for: a deferred
+-- constraint trigger hands NEW to a recompute function named by TG_ARGV.
+CREATE FUNCTION rcc_refresh_tg() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+DECLARE
+    result text;
+BEGIN
+    EXECUTE format('SELECT %s($1)', TG_ARGV[0]) INTO result USING NEW;
+    RAISE NOTICE 'refresh %', result;
+    RETURN NULL;
+END $$;
+CREATE CONSTRAINT TRIGGER rcc_refresh
+    AFTER UPDATE ON rcc_target
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW WHEN (new.requires_update)
+    EXECUTE FUNCTION rcc_refresh_tg('rcc_recompute');
+INSERT INTO rcc_target VALUES (2, false);
+UPDATE rcc_target SET requires_update = true WHERE k = 2;
+NOTICE:  refresh k=2 update=t
+-- An explicit cast inside the dynamic statement takes the same coercion
+-- path, so it is not a workaround for the failure above.
+CREATE OR REPLACE FUNCTION rcc_refresh_tg() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+DECLARE
+    result text;
+BEGIN
+    EXECUTE format('SELECT %s($1::%I.%I)', TG_ARGV[0], TG_TABLE_SCHEMA, TG_TABLE_NAME)
+        INTO result USING NEW;
+    RAISE NOTICE 'refresh cast %', result;
+    RETURN NULL;
+END $$;
+INSERT INTO rcc_target VALUES (3, false);
+UPDATE rcc_target SET requires_update = true WHERE k = 3;
+NOTICE:  refresh cast k=3 update=t
+-- Anonymous records: rejected by C PostgreSQL as well. These pin the error
+-- text and its LINE/caret/QUERY framing.
+DO $$
+DECLARE
+    r record;
+BEGIN
+    SELECT 4 AS k, true AS requires_update INTO r;
+    RAISE NOTICE '%', rcc_recompute(r);
+END $$;
+ERROR:  cannot cast type record to rcc_target
+LINE 1: rcc_recompute(r)
+                      ^
+QUERY:  rcc_recompute(r)
+CONTEXT:  PL/pgSQL function inline_code_block line 6 at RAISE
+DO $$
+DECLARE
+    r record;
+    result text;
+BEGIN
+    SELECT 5 AS k, false AS requires_update INTO r;
+    EXECUTE 'SELECT rcc_recompute($1)' INTO result USING r;
+END $$;
+ERROR:  cannot cast type record to rcc_target
+LINE 1: SELECT rcc_recompute($1)
+                             ^
+QUERY:  SELECT rcc_recompute($1)
+CONTEXT:  PL/pgSQL function inline_code_block line 7 at EXECUTE
+DROP TRIGGER rcc_refresh ON rcc_target;
+DROP FUNCTION rcc_refresh_tg();
+DROP FUNCTION rcc_direct_tg();
+DROP FUNCTION rcc_recompute(rcc_target);
+DROP TABLE rcc_target;

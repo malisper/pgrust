@@ -8,7 +8,7 @@ mod tests;
 use datum::Datum;
 use fmgr::FmgrInfo;
 use mcx::Mcx;
-use nodes_core::node_funcs::{expr_type, expr_typmod};
+use nodes_core::node_funcs::{expr_location, expr_type, expr_typmod};
 use parser_small1::{
     parser_errposition, variable_coerce_param_hook, ParseRefHookState, ParseState,
 };
@@ -299,6 +299,11 @@ fn coerce_record_to_complex<'mcx>(
     cformat: CoercionForm,
     location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
+    // C's error sites here go through parser_coercion_errposition: the
+    // coercion request's own location if it has one, else the input
+    // expression's — without the fallback a coercion requested with
+    // location -1 (make_fn_arguments) loses C's LINE/caret/QUERY framing.
+    let node_errloc = if location >= 0 { location } else { expr_location(node) };
     // A RowExpr source is RECORD-typed, so it holds no dropped columns.
     let args = match node.as_row_expr() {
         Some(r) => r.args.clone_in(mcx)?,
@@ -312,7 +317,7 @@ fn coerce_record_to_complex<'mcx>(
                     v.location,
                 )?
             }
-            _ => return Err(record_cast_error(pstate, targetTypeId, Option::None, location)),
+            _ => return Err(record_cast_error(pstate, targetTypeId, Option::None, node_errloc)),
         },
     };
     let mut baseTypeMod = -1;
@@ -335,11 +340,12 @@ fn coerce_record_to_complex<'mcx>(
                 pstate,
                 targetTypeId,
                 Some("Input has too few columns.".to_string()),
-                location,
+                node_errloc,
             ));
         }
         let expr = args.nth(argix);
         let exprtype = expr_type(expr);
+        let expr_errloc = if location >= 0 { location } else { expr_location(expr) };
         let cexpr = coerce_to_target_type(
             mcx,
             pstate,
@@ -352,7 +358,7 @@ fn coerce_record_to_complex<'mcx>(
             -1,
         )?
         .ok_or_else(|| {
-            record_cast_column_error(pstate, exprtype, attr.atttypid, targetTypeId, ucolno, location)
+            record_cast_column_error(pstate, exprtype, attr.atttypid, targetTypeId, ucolno, expr_errloc)
         })?;
         newargs.lappend(mcx, cexpr)?;
         ucolno += 1;
@@ -363,7 +369,7 @@ fn coerce_record_to_complex<'mcx>(
             pstate,
             targetTypeId,
             Some("Input has too many columns.".to_string()),
-            location,
+            node_errloc,
         ));
     }
     let rowexpr = Node::mk(
