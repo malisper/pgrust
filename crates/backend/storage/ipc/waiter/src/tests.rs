@@ -76,10 +76,15 @@ fn timed_park_lapped_by_cadence_returns_recheck() {
             std::thread::yield_now();
         }
     });
-    // Caller deadline 5000ms, cadence 250ms: the cadence lap fires FIRST and
-    // reports Recheck (re-test + re-park), never sleeping out the deadline.
+    // Caller deadline far beyond any reachable clock, cadence 250ms: the
+    // cadence lap fires FIRST and reports Recheck (re-test + re-park), never
+    // sleeping out the deadline. The deadline must be UNLAPPABLE, not merely
+    // large: the ticker free-runs, so if this thread is descheduled while
+    // parked the fake clock can advance arbitrarily far before the single
+    // coalesced wakeup classifies the park — a 5000ms deadline was lapped
+    // under pod contention and misreported TimedOut (CI flake, 2026-08-04).
     assert_eq!(
-        slot.park_core(Some(5_000), Some(250), &CLK),
+        slot.park_core(Some(i64::MAX / 4), Some(250), &CLK),
         ParkResult::Recheck
     );
     // Caller deadline shorter than the cadence: TimedOut, exactly as before.
