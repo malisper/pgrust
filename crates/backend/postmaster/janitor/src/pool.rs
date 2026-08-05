@@ -1,19 +1,26 @@
-//! D3 warm pool (docs/design/test-views.md warm-pool addendum): the janitor
-//! keeps `pgrust.ephemeral_db_pool_size` pre-minted spare clones of the
-//! DEFAULT template warm, and a default-template mint Ensure is satisfied by
-//! `ALTER DATABASE ... RENAME` of a spare — catalog-only (the oid and the
-//! datadir path are untouched; RenameDatabase heap-updates only datname, and
-//! its own CountOtherDBBackends check discharges the zero-connection
-//! requirement under its AccessExclusiveLock) — plus an owner assignment,
-//! taking the connect-path mint cost from a FILE_COPY-plus-checkpoint-pair
-//! to a sub-millisecond catalog transaction.
+//! D3 warm pool, usage-keyed per-template redesign (item A ruling
+//! 2026-08-05): the janitor keeps up to `pgrust.ephemeral_db_pool_size`
+//! pre-minted spare clones warm PER TEMPLATE MINTED-FROM SINCE BOOT, and a
+//! mint Ensure is satisfied by `ALTER DATABASE ... RENAME` of a spare of
+//! the RIGHT template — catalog-only (the oid and the datadir path are
+//! untouched; RenameDatabase heap-updates only datname, and its own
+//! CountOtherDBBackends check discharges the zero-connection requirement
+//! under its AccessExclusiveLock) — plus an owner assignment, taking the
+//! connect-path mint cost from a FILE_COPY-plus-checkpoint-pair to a
+//! sub-millisecond catalog transaction.
 //!
-//! v1 SCOPE (recorded decision): the pool exists for the DEFAULT template
-//! only — `pgrust.ephemeral_db_default_template` names the one identity the
-//! replenisher mints. Named-template pools are out of scope. (A
-//! template-form request that happens to NAME the default template still
-//! takes a spare: the handout matches by template identity, and a spare of
-//! that identity is exactly what such a request asked for.)
+//! USAGE KEYING: there is no default template and no per-template
+//! configuration. The FIRST mint of a template registers it as pooled
+//! (registry::note_pooled_template, called from the cold mint paths) and is
+//! served cold; the replenisher maintains warmth thereafter. The global
+//! MAX_SPARES cap binds when pooled-templates x pool_size exceeds it: fair
+//! per-template targets share the cap, the remainder rotating with a
+//! round-robin cursor, and the per-tick mint quota is allocated one spare
+//! per template per rotation (the pure planners below, unit-tested).
+//! Per-template drain: a pooled template that is dropped, rebuilt,
+//! unsealed, or crosses a connectable edge — including via
+//! `pgrust_seal_template` on a rebuilt successor — drains ITS spares only;
+//! every other template's pool is untouched.
 //!
 //! Invariants inherited from the loop design:
 //! - ALL pool mutations run inside the janitor loop (main_loop's
@@ -30,29 +37,20 @@
 //! - Handout failures NEVER fail the waiter: the entry falls through to the
 //!   normal mint paths in the same service pass.
 //!
-//! Adoption-guard interaction, documented deliberately: with the pool ON,
-//! prefix-matching survivors (the spares) always exist across restarts, so
-//! a lost/changed marker now deterministically starts the janitor PAUSED —
-//! not a wedge (unpause runs the deferred sweep, which drops the
-//! unregistered leftovers, and replenish re-mints), but a behavior change
-//! an operator will see.
-//!
 //! Spare naming: `<prefix>spare_<seq>`, seq monotonic per postmaster
 //! lifetime — a name that ever failed a handout (a squatter created it
 //! first) is burned, never reused. The spare namespace
 //! (`<prefix>spare_<digits>`) is RESERVED in the mint grammar
 //! (grammar::parse_mint_name), so no client Ensure can ever collide with a
-//! spare name — without the reservation, an Ensure racing a replenish
-//! could complete idempotently ON a listed spare (double-booked: the pool
-//! would later rename the client's database out from under it). Spares are
-//! also minted ALLOW_CONNECTIONS false (mint::build_createdb_stmt) and
-//! flipped connectable only inside the handout transaction: a connectable
-//! spare could be entered, written, and left between ticks, and the
-//! handout's occupancy check (CountOtherDBBackends, point-in-time) would
-//! never see the visit — the next waiter would receive a dirtied database
-//! as a fresh template clone. A squatter still connected at handout time
-//! fails the rename's occupancy check as before: the spare is dropped from
-//! the pool and the ordinary reap path collects the database once idle.
+//! spare name. Spares are also minted ALLOW_CONNECTIONS false
+//! (mint::build_createdb_stmt) and flipped connectable only inside the
+//! handout transaction: a connectable spare could be entered, written, and
+//! left between ticks, and the handout's occupancy check
+//! (CountOtherDBBackends, point-in-time) would never see the visit — the
+//! next waiter would receive a dirtied database as a fresh template clone.
+//! A squatter still connected at handout time fails the rename's occupancy
+//! check as before: the spare is dropped from the pool and the ordinary
+//! reap path collects the database once idle.
 
 use elog::elog as log_report;
 use types_core::{InvalidOid, Oid};
@@ -76,9 +74,9 @@ enum HandoutVerdict {
     Renamed,
     /// The spare's recorded template identity no longer matches the
     /// catalog (template repointed/rebuilt/unsealed, or its datallowconn
-    /// changed, since the spare was minted): no handout, and the pass
-    /// stops consulting the pool — replenish (later this tick) drains the
-    /// stale spares.
+    /// changed, since the spare was minted): no handout for THIS entry —
+    /// replenish (later this tick) drains that template's stale spares;
+    /// other templates' handouts proceed.
     SpareStale,
     /// The requesting role vanished between post and service: fall through
     /// to the mint path, whose createdb surfaces the clean role error to
@@ -95,18 +93,15 @@ enum HandoutVerdict {
 
 /// Try to satisfy each entry from the warm pool; return the entries the
 /// pool could not serve (they continue through the normal mint paths).
-/// With no spares listed this is one registry probe.
+/// Handouts match by the ENTRY's template (registry::peek_spare keys on
+/// template name): a request is only ever served from the RIGHT template's
+/// spares. With no spares listed this is one registry probe.
 pub(crate) fn service_handouts(batch: Vec<PendingEnsure>) -> PgResult<Vec<PendingEnsure>> {
     if !registry::any_spares() {
         return Ok(batch);
     }
     let mut rest: Vec<PendingEnsure> = Vec::with_capacity(batch.len());
-    let mut pool_usable = true;
     for p in batch {
-        if !pool_usable {
-            rest.push(p);
-            continue;
-        }
         let Some(spare) = registry::peek_spare(&p.template) else {
             rest.push(p);
             continue;
@@ -149,7 +144,9 @@ pub(crate) fn service_handouts(batch: Vec<PendingEnsure>) -> PgResult<Vec<Pendin
                 registry::note_catalog_churn(1);
             }
             Ok(HandoutVerdict::SpareStale) => {
-                pool_usable = false;
+                // Per-template staleness: this template's requests go cold
+                // this pass (replenish drains its spares later this tick);
+                // OTHER templates' spares stay usable in this same loop.
                 rest.push(p);
             }
             Ok(HandoutVerdict::OwnerMissing) => {
@@ -284,46 +281,72 @@ fn handout_one(spare: &SpareEntry, p: &PendingEnsure) -> PgResult<HandoutVerdict
 // — the ordering rationale lives on the main_loop call site).
 // ---------------------------------------------------------------------------
 
-/// Identity/staleness probe of the default template plus the janitor's own
-/// role name (spare owner), in one read-only transaction.
+/// Identity/staleness probe of one pooled template.
 struct TplProbe {
     oid: Oid,
     datistemplate: bool,
     datallowconn: bool,
 }
 
-/// Top the pool up to `pgrust.ephemeral_db_pool_size` (capped per tick),
-/// dropping stale spares first. Errors propagate to the tick's contain().
+/// Top each pooled template's pool up toward its fair target (capped per
+/// tick), dropping stale spares first. Errors propagate to the tick's
+/// contain().
 pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
     let pool_size = crate::ephemeral_db_pool_size().max(0) as usize;
-    let tpl_name = crate::ephemeral_db_default_template();
-    // Feature-off fast path: no catalog probe, one registry lock.
-    if pool_size == 0 && !registry::any_spares() {
+    let pooled = registry::pooled_templates();
+    // Feature-off / nothing-pooled fast path: no catalog probe.
+    if (pool_size == 0 || pooled.is_empty()) && !registry::any_spares() {
         return Ok(());
     }
 
-    let (probe, janitor_role) = probe_template_and_self(&tpl_name)?;
+    let (probes, janitor_role) = probe_templates_and_self(&pooled)?;
 
-    // The one identity the pool may hold spares of. None = no valid pool
-    // (feature off, template unset/missing/unsealed): every spare is
+    // De-list pooled templates whose catalog row is GONE (dropped; a
+    // rebuild under the same name keeps the listing — the new oid simply
+    // drains the old spares below and replenish re-fills from the new
+    // row). An unsealed-but-present template stays listed with no valid
+    // identity: its spares drain, nothing mints, and a re-seal re-warms
+    // without waiting for a fresh cold mint.
+    for (name, probe) in pooled.iter().zip(&probes) {
+        if probe.is_none() && registry::remove_pooled_template(name) {
+            let _ = log_report(
+                LOG,
+                format!(
+                    "pgrust ephemeral-db janitor: template \"{name}\" is gone; no longer \
+                     pooling spares of it"
+                ),
+            );
+        }
+    }
+
+    // The identities the pool may hold spares of (one per pooled template
+    // with a live SEALED row and a non-zero pool): everything else is
     // stale. The datallowconn term drains spares across a connectable
     // EDGE (either direction) while keeping a pool whose template's
     // datallowconn is STABLE — a permanently connectable (template1-shape)
-    // template must not mint-and-drain its whole pool every tick, and its
+    // template must not mint-and-drain its whole pool every tick; its
     // accepted content-staleness residual is documented on
-    // SpareEntry::template_connectable and addendum item 6.
-    let identity: Option<(&str, Oid, bool)> = match &probe {
-        Some(t) if pool_size > 0 && t.datistemplate => {
-            Some((tpl_name.as_str(), t.oid, t.datallowconn))
+    // SpareEntry::template_connectable.
+    let mut identities: Vec<(String, Oid, bool)> = Vec::new();
+    let mut live: Vec<(&str, &TplProbe)> = Vec::new();
+    if pool_size > 0 {
+        for (name, probe) in pooled.iter().zip(&probes) {
+            if let Some(t) = probe {
+                if t.datistemplate {
+                    identities.push((name.clone(), t.oid, t.datallowconn));
+                    live.push((name.as_str(), t));
+                }
+            }
         }
-        _ => None,
-    };
+    }
 
-    // Invalidation: drain-and-drop spares that no longer match. Drained
+    // Invalidation: drain-and-drop spares that no longer match THEIR
+    // template's live identity — per-template by construction (a drained
+    // template's siblings keep matching their own identities). Drained
     // entries stop shielding (drain first, then drop — the gate re-checks
     // shields), and the drop is immediate via the batch drop path (one
     // checkpoint for the lot) rather than waiting out a reap grace.
-    let stale = registry::drain_stale_spares(identity);
+    let stale = registry::drain_stale_spares(&identities);
     if !stale.is_empty() {
         let names: Vec<&str> = stale.iter().map(|s| s.name.as_str()).collect();
         let _ = log_report(
@@ -337,39 +360,60 @@ pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
         let victims: Vec<(Oid, &str)> = stale.iter().map(|s| (s.oid, s.name.as_str())).collect();
         crate::main_loop::drop_batch(&victims, None)?;
     }
-
-    let Some((_, tpl_oid, _)) = identity else {
+    if live.is_empty() {
         return Ok(());
-    };
-    let probe = probe.expect("identity implies a probed template");
+    }
     let Some(janitor_role) = janitor_role else {
         // The janitor's own role must resolve; skipping a tick is the safe
         // containment (next tick retries).
         return Ok(());
     };
 
-    let have = registry::spare_count(&tpl_name, tpl_oid);
-    if have > pool_size {
-        // pool_size shrank under the live pool (SIGHUP): drain the excess —
-        // the GUC contract says shrinking drains, and surplus spares would
-        // otherwise sit shielded forever.
-        let excess = registry::take_excess_spares(&tpl_name, tpl_oid, pool_size);
-        let names: Vec<&str> = excess.iter().map(|s| s.name.as_str()).collect();
-        let _ = log_report(
-            LOG,
-            format!(
-                "pgrust ephemeral-db janitor: dropping {} excess warm spare(s) \
-                 (pool_size {pool_size}): {}",
-                excess.len(),
-                names.join(", ")
-            ),
-        );
-        let victims: Vec<(Oid, &str)> = excess.iter().map(|s| (s.oid, s.name.as_str())).collect();
-        crate::main_loop::drop_batch(&victims, None)?;
+    // Fair per-template targets under the global cap, remainder rotated by
+    // the round-robin cursor (advanced once per pass so the extra slots —
+    // and the mint order below — visit every template over successive
+    // ticks when the cap binds).
+    let rr = registry::advance_pool_rr(live.len());
+    let targets = per_template_targets(pool_size, registry::max_spares_cap(), live.len(), rr);
+    let haves: Vec<usize> = live
+        .iter()
+        .map(|(name, t)| registry::spare_count(name, t.oid))
+        .collect();
+
+    // Excess drain, per template: pool_size shrank under the live pool
+    // (SIGHUP), or a newly pooled template shrank this one's fair share
+    // under a binding cap — surplus spares would otherwise sit shielded
+    // forever.
+    let mut drained_excess = false;
+    for (i, (name, t)) in live.iter().enumerate() {
+        if haves[i] > targets[i] {
+            let excess = registry::take_excess_spares(name, t.oid, targets[i]);
+            if excess.is_empty() {
+                continue;
+            }
+            drained_excess = true;
+            let names: Vec<&str> = excess.iter().map(|s| s.name.as_str()).collect();
+            let _ = log_report(
+                LOG,
+                format!(
+                    "pgrust ephemeral-db janitor: dropping {} excess warm spare(s) of template \
+                     \"{name}\" (target {}): {}",
+                    excess.len(),
+                    targets[i],
+                    names.join(", ")
+                ),
+            );
+            let victims: Vec<(Oid, &str)> =
+                excess.iter().map(|s| (s.oid, s.name.as_str())).collect();
+            crate::main_loop::drop_batch(&victims, None)?;
+        }
+    }
+    if drained_excess {
         return Ok(());
     }
-    let want = replenish_quota(pool_size, have, POOL_REPLENISH_MAX);
-    if want == 0 {
+
+    let quotas = mint_quotas(&targets, &haves, POOL_REPLENISH_MAX);
+    if quotas.iter().all(|&q| q == 0) {
         return Ok(());
     }
     // Waiters outrank refill, EXTENDED to the dispatch shadow (the
@@ -378,14 +422,14 @@ pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
     // wall (~100ms+ per 8-member batch), so an Ensure arriving mid-cycle
     // pays that wall in connect latency — for zero pool-health gain when
     // the pool is deep. While mint traffic landed within the last tick AND
-    // the pool sits at/above HALF target, defer the top-up (the deficit
-    // simply waits; refill is background QoS by charter). Below half the
-    // refill proceeds regardless — sustained load must never starve the
-    // pool — and that residual shadow under drain pressure is accepted
-    // and documented here.
+    // the pool sits at/above HALF its total target, defer the top-up (the
+    // deficit simply waits; refill is background QoS by charter). Below
+    // half the refill proceeds regardless — sustained load must never
+    // starve the pool — and that residual shadow under drain pressure is
+    // accepted and documented here.
     if should_defer_refill(
-        pool_size,
-        have,
+        targets.iter().sum(),
+        haves.iter().sum(),
         pg_clock::mono_ns(),
         registry::last_ensure_post_ns(),
     ) {
@@ -395,57 +439,81 @@ pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
     // Mint specs under burned-forever monotonic names. The PendingEnsure
     // shape is reused so the batch/serial mint bodies are shared verbatim
     // with the Ensure path (gen 0: these have no registry entry and no
-    // waiters).
-    let mut specs: Vec<PendingEnsure> = Vec::with_capacity(want);
-    for _ in 0..want {
-        let name = format!("{prefix}spare_{}", registry::next_spare_seq());
-        if name.len() > crate::grammar::MAX_NAME_BYTES {
-            // A prefix long enough to overflow spare names would mint
-            // truncated datnames the registry could never match (shields
-            // and handouts would silently miss). Refuse loudly, ONCE per
-            // postmaster lifetime (the registry latch): the condition is
-            // permanent — the prefix is PGC_POSTMASTER and the seq only
-            // grows — so an unlatched line would repeat every deficit
-            // tick, ~2 lines/s forever.
-            if registry::pool_name_overflow_log_once() {
-                let _ = log_report(
-                    LOG,
-                    format!(
-                        "pgrust ephemeral-db janitor: pgrust.ephemeral_db_prefix is too long for \
-                         warm-pool spare names ({} > {} bytes); the pool stays empty",
-                        name.len(),
-                        crate::grammar::MAX_NAME_BYTES
-                    ),
-                );
+    // waiters). Batch-eligibility law per template (the Ensure servicing
+    // law): only datallowconn = false templates may share the batch's
+    // widened torn-copy window; connectable (template1-shape) templates
+    // replenish serially, one checkpoint pair per spare.
+    let mut batch_specs: Vec<(PendingEnsure, &str, &TplProbe)> = Vec::new();
+    let mut serial_specs: Vec<(PendingEnsure, &str, &TplProbe)> = Vec::new();
+    for (i, (name, t)) in live.iter().enumerate() {
+        for _ in 0..quotas[i] {
+            let spare_name = format!("{prefix}spare_{}", registry::next_spare_seq());
+            if spare_name.len() > crate::grammar::MAX_NAME_BYTES {
+                // A prefix long enough to overflow spare names would mint
+                // truncated datnames the registry could never match
+                // (shields and handouts would silently miss). Refuse
+                // loudly, ONCE per postmaster lifetime (the registry
+                // latch): the condition is permanent — the prefix is
+                // PGC_POSTMASTER and the seq only grows.
+                if registry::pool_name_overflow_log_once() {
+                    let _ = log_report(
+                        LOG,
+                        format!(
+                            "pgrust ephemeral-db janitor: pgrust.ephemeral_db_prefix is too \
+                             long for warm-pool spare names ({} > {} bytes); the pool stays \
+                             empty",
+                            spare_name.len(),
+                            crate::grammar::MAX_NAME_BYTES
+                        ),
+                    );
+                }
+                return Ok(());
             }
-            return Ok(());
+            let spec = PendingEnsure {
+                gen: 0,
+                name: spare_name,
+                template: name.to_string(),
+                owner_name: janitor_role.clone(),
+                spare: true,
+            };
+            if t.datallowconn {
+                serial_specs.push((spec, name, t));
+            } else {
+                batch_specs.push((spec, name, t));
+            }
         }
-        specs.push(PendingEnsure {
-            gen: 0,
-            name,
-            template: tpl_name.clone(),
-            owner_name: janitor_role.clone(),
-            spare: true,
-        });
     }
 
-    // Batch when the batch-eligibility law admits it (>= 2 members and a
-    // datallowconn = false template — the same law as Ensure servicing);
-    // a connectable default template (the template1 shape) replenishes
-    // serially, one checkpoint pair per spare — worth knowing when sizing
-    // the pool, recorded in the addendum.
-    let minted: Vec<(String, Oid)> = if specs.len() >= 2 && !probe.datallowconn {
-        replenish_batch(&specs)?
+    let mut minted: Vec<(String, Oid, &str, &TplProbe)> = Vec::new();
+    if batch_specs.len() >= 2 {
+        let specs: Vec<PendingEnsure> = batch_specs.iter().map(|(s, ..)| s.clone()).collect();
+        for (name, oid) in replenish_batch(&specs)? {
+            let &(_, tpl_name, probe) = batch_specs
+                .iter()
+                .find(|(s, ..)| s.name == name)
+                .expect("minted spare tracks its spec");
+            minted.push((name, oid, tpl_name, probe));
+        }
     } else {
-        replenish_serial(&specs)?
-    };
+        serial_specs.append(&mut batch_specs);
+    }
+    if !serial_specs.is_empty() {
+        let specs: Vec<PendingEnsure> = serial_specs.iter().map(|(s, ..)| s.clone()).collect();
+        for (name, oid) in replenish_serial(&specs)? {
+            let &(_, tpl_name, probe) = serial_specs
+                .iter()
+                .find(|(s, ..)| s.name == name)
+                .expect("minted spare tracks its spec");
+            minted.push((name, oid, tpl_name, probe));
+        }
+    }
 
     let n = minted.len();
     // Shared-catalog churn (maint.rs): one pg_database insert (plus
     // shdepend/setting rows) per minted spare.
     registry::note_catalog_churn(n as u64);
     let prewarm = crate::ephemeral_db_prewarm();
-    for (name, oid) in minted {
+    for (name, oid, tpl_name, probe) in minted {
         // Post-mint touch (prewarm.rs): spares are THE prewarm payoff —
         // ALLOW_CONNECTIONS false means no client session ever warms them,
         // so without the touch every handout's first client session pays
@@ -461,27 +529,79 @@ pub(crate) fn replenish_pass(prefix: &str) -> PgResult<()> {
         registry::add_spare(SpareEntry {
             name,
             oid,
-            template_name: tpl_name.clone(),
-            template_oid: tpl_oid,
+            template_name: tpl_name.to_string(),
+            template_oid: probe.oid,
             template_connectable: probe.datallowconn,
         });
     }
     if n > 0 {
+        let names: Vec<&str> = live.iter().map(|(name, _)| *name).collect();
         let _ = log_report(
             LOG,
             format!(
-                "pgrust ephemeral-db janitor: replenished warm pool with {n} spare(s) from \
-                 template \"{tpl_name}\" ({}/{pool_size})",
-                have + n
+                "pgrust ephemeral-db janitor: replenished warm pool with {n} spare(s) across \
+                 {} pooled template(s) ({}) — {}/{} total",
+                live.len(),
+                names.join(", "),
+                registry::total_spares(),
+                targets.iter().sum::<usize>()
             ),
         );
     }
     Ok(())
 }
 
-/// Pure deficit math (unit-tested): how many spares to mint this tick.
-fn replenish_quota(pool_size: usize, have: usize, per_tick_cap: usize) -> usize {
-    pool_size.saturating_sub(have).min(per_tick_cap)
+/// Fair per-template spare targets (pure, unit-tested): each of `n` pooled
+/// templates gets `pool_size`, unless the global `cap` binds — then the cap
+/// is shared as floor(cap/n) each with the remainder's extra slot rotated
+/// by `rr` (so cap-bound pools even out over successive passes rather than
+/// permanently favoring registration order).
+fn per_template_targets(pool_size: usize, cap: usize, n: usize, rr: usize) -> Vec<usize> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if pool_size.saturating_mul(n) <= cap {
+        return vec![pool_size; n];
+    }
+    let base = cap / n;
+    let extra = cap % n;
+    (0..n)
+        .map(|i| {
+            // The `extra` slots go to the `extra` templates at rotated
+            // positions rr, rr+1, ... (mod n).
+            let rotated = (i + n - rr % n) % n;
+            let t = base + usize::from(rotated < extra);
+            t.min(pool_size)
+        })
+        .collect()
+}
+
+/// Per-tick mint quotas (pure, unit-tested): allocate `per_tick_cap` mints
+/// across the templates' deficits ONE SPARE PER TEMPLATE PER ROTATION —
+/// the round-robin the item-A ruling names — so a cap-bound tick advances
+/// every deficit instead of filling template 0 first.
+fn mint_quotas(targets: &[usize], haves: &[usize], per_tick_cap: usize) -> Vec<usize> {
+    let n = targets.len();
+    let mut quotas = vec![0usize; n];
+    let mut deficits: Vec<usize> = targets
+        .iter()
+        .zip(haves)
+        .map(|(&t, &h)| t.saturating_sub(h))
+        .collect();
+    let mut budget = per_tick_cap;
+    while budget > 0 && deficits.iter().any(|&d| d > 0) {
+        for i in 0..n {
+            if budget == 0 {
+                break;
+            }
+            if deficits[i] > 0 {
+                deficits[i] -= 1;
+                quotas[i] += 1;
+                budget -= 1;
+            }
+        }
+    }
+    quotas
 }
 
 /// Recent-traffic window for the refill deferral: one tick — traffic older
@@ -490,22 +610,26 @@ fn replenish_quota(pool_size: usize, have: usize, per_tick_cap: usize) -> usize 
 const REFILL_DEFER_TRAFFIC_NS: u64 = 500 * 1_000_000;
 
 /// Pure half of the refill deferral (unit-tested): defer iff the pool is
-/// at/above HALF target (integer arithmetic: have*2 >= pool_size) and an
-/// Ensure post landed within the last tick. `last_post_ns == 0` = never.
-fn should_defer_refill(pool_size: usize, have: usize, now_ns: u64, last_post_ns: u64) -> bool {
-    have * 2 >= pool_size
+/// at/above HALF its total target (integer arithmetic: have*2 >= target)
+/// and an Ensure post landed within the last tick. `last_post_ns == 0` =
+/// never.
+fn should_defer_refill(total_target: usize, have: usize, now_ns: u64, last_post_ns: u64) -> bool {
+    have * 2 >= total_target
         && last_post_ns != 0
         && now_ns.saturating_sub(last_post_ns) < REFILL_DEFER_TRAFFIC_NS
 }
 
-fn probe_template_and_self(tpl_name: &str) -> PgResult<(Option<TplProbe>, Option<String>)> {
+/// One read-only transaction: probe every pooled template's identity plus
+/// the janitor's own role name (spare owner).
+fn probe_templates_and_self(
+    pooled: &[String],
+) -> PgResult<(Vec<Option<TplProbe>>, Option<String>)> {
     let cx = mcx::MemoryContext::new("pgrust janitor warm-pool probe");
     xact::StartTransactionCommand()?;
     let mcx = cx.mcx();
-    let tpl = if tpl_name.is_empty() {
-        None
-    } else {
-        match pg_database::get_database_tuple_by_name(mcx, tpl_name)? {
+    let mut probes = Vec::with_capacity(pooled.len());
+    for name in pooled {
+        let probe = match pg_database::get_database_tuple_by_name(mcx, name)? {
             Some(t) => {
                 if !t.datistemplate || t.datallowconn {
                     // Observed unsealed/connectable: invalidate the
@@ -521,12 +645,13 @@ fn probe_template_and_self(tpl_name: &str) -> PgResult<(Option<TplProbe>, Option
                 })
             }
             None => None,
-        }
-    };
+        };
+        probes.push(probe);
+    }
     let role = miscinit::GetUserNameFromId(mcx, miscinit::GetUserId(), true)?
         .map(|s| s.as_str().to_string());
     xact::CommitTransactionCommand()?;
-    Ok((tpl, role))
+    Ok((probes, role))
 }
 
 /// Replenish through the shared batch-mint transaction (one checkpoint
@@ -563,13 +688,13 @@ fn replenish_batch(specs: &[PendingEnsure]) -> PgResult<Vec<(String, Oid)>> {
                     }
                     // Template vanished/unsealed inside the batch window:
                     // the entry failed alone; the next tick's probe
-                    // re-decides the pool's fate.
+                    // re-decides that template's fate.
                     BatchOutcome::Refused(e) => {
                         crate::mint::report_contained_refusal(&e, &spec.name);
                     }
                     // Template turned connectable inside the batch window:
-                    // no work was done; the next tick's probe routes the
-                    // refill serially.
+                    // no work was done; the next tick's probe routes that
+                    // template's refill serially.
                     BatchOutcome::DeferSerial => {}
                 }
             }
@@ -589,7 +714,7 @@ fn replenish_batch(specs: &[PendingEnsure]) -> PgResult<Vec<(String, Oid)>> {
     }
 }
 
-/// Serial replenish (connectable template, or a deficit of one): the
+/// Serial replenish (connectable template, or a lone batch spec): the
 /// C-shaped createdb per spare, own checkpoint pair each.
 fn replenish_serial(specs: &[PendingEnsure]) -> PgResult<Vec<(String, Oid)>> {
     let mut minted = Vec::with_capacity(specs.len());
@@ -624,25 +749,55 @@ fn replenish_serial(specs: &[PendingEnsure]) -> PgResult<Vec<(String, Oid)>> {
 mod tests {
     use super::*;
 
-    /// The pure deficit math (RELEASE-effective plain asserts; no registry
-    /// state touched).
+    /// Fair per-template targets under the global cap (RELEASE-effective
+    /// plain asserts; no registry state touched).
     #[test]
-    fn replenish_quota_math() {
-        // Full pool: nothing to do.
-        assert_eq!(replenish_quota(8, 8, POOL_REPLENISH_MAX), 0);
-        // Over-full (pool_size shrank): nothing to MINT (the excess-drain
-        // branch in replenish_pass drops the surplus separately).
-        assert_eq!(replenish_quota(4, 8, POOL_REPLENISH_MAX), 0);
-        // Deficit under the cap: exact top-up.
-        assert_eq!(replenish_quota(8, 5, POOL_REPLENISH_MAX), 3);
-        // Cold start at the cap: one tick's worth.
-        assert_eq!(replenish_quota(64, 0, POOL_REPLENISH_MAX), POOL_REPLENISH_MAX);
-        // Feature off.
-        assert_eq!(replenish_quota(0, 0, POOL_REPLENISH_MAX), 0);
+    fn per_template_target_math() {
+        // Cap slack: everyone gets pool_size.
+        assert_eq!(per_template_targets(8, 4096, 3, 0), [8, 8, 8]);
+        assert_eq!(per_template_targets(0, 4096, 2, 0), [0, 0]);
+        assert!(per_template_targets(8, 4096, 0, 0).is_empty());
+        // Cap binds evenly: 2 x 8 > 10 -> 5 each.
+        assert_eq!(per_template_targets(8, 10, 2, 0), [5, 5]);
+        // Cap binds with remainder: 3 x 8 > 10 -> base 3, one extra —
+        // rotated by rr so the favored template changes pass to pass.
+        assert_eq!(per_template_targets(8, 10, 3, 0), [4, 3, 3]);
+        assert_eq!(per_template_targets(8, 10, 3, 1), [3, 4, 3]);
+        assert_eq!(per_template_targets(8, 10, 3, 2), [3, 3, 4]);
+        assert_eq!(per_template_targets(8, 10, 3, 3), [4, 3, 3], "rr wraps");
+        // The per-template pool_size still ceilings a fair share.
+        assert_eq!(per_template_targets(2, 10, 3, 0), [2, 2, 2]);
+        // Total never exceeds the cap when it binds.
+        for rr in 0..5 {
+            let t = per_template_targets(8, 10, 3, rr);
+            assert_eq!(t.iter().sum::<usize>(), 10);
+        }
     }
 
-    /// The refill deferral (pure half): defer iff pool at/above half AND
-    /// traffic within the window. RELEASE-effective plain asserts.
+    /// The per-tick round-robin mint allocation (the item-A ruling's
+    /// "replenish round-robins under the cap").
+    #[test]
+    fn mint_quota_round_robin() {
+        // One template: plain deficit under the tick cap.
+        assert_eq!(mint_quotas(&[8], &[8], POOL_REPLENISH_MAX), [0]);
+        assert_eq!(mint_quotas(&[8], &[5], POOL_REPLENISH_MAX), [3]);
+        assert_eq!(mint_quotas(&[64], &[0], POOL_REPLENISH_MAX), [POOL_REPLENISH_MAX]);
+        // Over-full (target shrank): nothing to MINT (the excess-drain
+        // branch drops the surplus separately).
+        assert_eq!(mint_quotas(&[4], &[8], POOL_REPLENISH_MAX), [0]);
+        // TWO cold templates share the tick budget one-per-rotation:
+        // never 8 to the first and 0 to the second.
+        assert_eq!(mint_quotas(&[8, 8], &[0, 0], 8), [4, 4]);
+        assert_eq!(mint_quotas(&[8, 8, 8], &[0, 0, 0], 8), [3, 3, 2]);
+        // Uneven deficits: the rotation skips full templates.
+        assert_eq!(mint_quotas(&[8, 8], &[7, 0], 8), [1, 7]);
+        // Budget exceeds deficits: exact top-up.
+        assert_eq!(mint_quotas(&[2, 2], &[1, 1], 8), [1, 1]);
+        assert!(mint_quotas(&[], &[], 8).is_empty());
+    }
+
+    /// The refill deferral (pure half): defer iff pool at/above half its
+    /// total target AND traffic within the window.
     #[test]
     fn refill_deferral_semantics() {
         let now: u64 = 10_000_000_000;
@@ -657,7 +812,7 @@ mod tests {
         // Quiet (or never-posted) traffic: refill proceeds.
         assert!(!should_defer_refill(128, 128, now, stale));
         assert!(!should_defer_refill(128, 128, now, 0));
-        // Odd pool_size boundary: have*2 >= pool_size (integer half-up).
+        // Odd target boundary: have*2 >= target (integer half-up).
         assert!(should_defer_refill(7, 4, now, fresh));
         assert!(!should_defer_refill(7, 3, now, fresh));
     }

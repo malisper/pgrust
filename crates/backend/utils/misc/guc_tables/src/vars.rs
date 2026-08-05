@@ -334,13 +334,11 @@ pub static pgrust_ephemeral_db_grace: GucIntVar = GucSlot::new("pgrust_ephemeral
 // pgrust-only (docs/design/test-views.md D2, no C symbol): mint-on-connect
 // security posture, all PGC_SIGHUP. mint_roles ('' = minting disabled) is
 // the master arm; max_per_role (0 = unlimited) caps live minted databases
-// per role; default_template ('' = bare tokens refuse) names the template
-// for bare <prefix><token> connects.
+// per role.
 pub static pgrust_ephemeral_db_mint_roles: GucStringVar = GucSlot::new("pgrust_ephemeral_db_mint_roles");
 pub static pgrust_ephemeral_db_max_per_role: GucIntVar = GucSlot::new("pgrust_ephemeral_db_max_per_role");
-pub static pgrust_ephemeral_db_default_template: GucStringVar = GucSlot::new("pgrust_ephemeral_db_default_template");
 // pgrust-only (docs/design/test-views.md D3 warm-pool addendum, no C
-// symbol): how many pre-minted spare clones of the DEFAULT template the
+// symbol): how many pre-minted spare clones PER POOLED TEMPLATE the
 // janitor keeps warm (0 = off). PGC_SIGHUP, re-read every janitor tick.
 pub static pgrust_ephemeral_db_pool_size: GucIntVar = GucSlot::new("pgrust_ephemeral_db_pool_size");
 // pgrust-only (test-views.md mint-strategy addendum, no C symbol): swept-

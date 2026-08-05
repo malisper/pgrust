@@ -112,9 +112,10 @@ pub const KNOWN_PROFILES: &[&str] = &["test"];
 /// later explicit `-c` still overrides the profile (same source, later
 /// SetConfigOption wins; the argv tests pin this).
 ///
-/// Deliberately NOT included: `pgrust.ephemeral_db_default_template` —
-/// there is no sane default template name; users add it via additional
-/// -c flags or the config file when they want bare-token minting.
+/// There is no default-template setting to include: the template is ALWAYS
+/// in the database name (`tdb_<template>__<token>` is the only mint form;
+/// the former `pgrust.ephemeral_db_default_template` GUC was deleted with
+/// the bare form, ruling 2026-08-05).
 pub const PROFILE_TEST_SETTINGS: &[(&str, &str)] = &[
     // conf/test.conf — non-durable + quiet-background + test-shaped defaults
     ("fsync", "off"),
@@ -592,8 +593,7 @@ mod tests {
         );
         // Remainder: exactly the janitor arming pair. mint_roles = '*' now
         // lives in the conf section BY RULING (2026-08-05: the profile
-        // declares a disposable test server); default_template stays out —
-        // there is no sane default template name.
+        // declares a disposable test server).
         let rest = &table[file_settings.len()..];
         assert_eq!(
             rest,
@@ -612,7 +612,8 @@ mod tests {
         for (k, _) in &table {
             assert!(
                 !k.contains("default_template"),
-                "no sane default template name exists; users pass it explicitly: {k}"
+                "the default-template GUC was DELETED (2026-08-05): the template is always \
+                 in the database name — the profile must never resurrect it: {k}"
             );
         }
     }

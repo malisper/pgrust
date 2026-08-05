@@ -1,13 +1,12 @@
-//! The janitor's shared registry: pin table + pause state + wakeup handle.
+//! The janitor's shared registry: pin table + mint/seal queues + warm-pool
+//! state + wakeup handle.
 //!
 //! "Shmem" in the thread-per-backend port is a process-global static (the
 //! autovacuum shmem.rs / launcher CTX precedent): one `pgsync::Mutex` IS the
 //! LWLock, visible to every backend thread and the janitor by construction.
 //! Everything here is restart-lossy BY DESIGN (spec D1 items 3 and 5):
-//! pins and the pause flag protect state within one postmaster lifetime;
-//! durability across restarts is the marker file's job (marker.rs) and,
-//! for a database that must survive restarts, `ALTER DATABASE ... RENAME`
-//! out of the prefix.
+//! pins protect state within one postmaster lifetime; for a database that
+//! must survive restarts, `ALTER DATABASE ... RENAME` out of the prefix.
 
 use types_core::{InvalidOid, Oid, ProcNumber};
 use types_error::{PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED};
@@ -64,14 +63,6 @@ pub fn ensure_capacity() -> usize {
     };
     max_conn + ENSURE_CAPACITY_SLACK
 }
-
-/// Fixed per-template grace-override capacity (the MAX_PINS shape: bounded,
-/// linear scan under the lock, reject-loud on overflow). Same capacity-cliff
-/// audit verdict as MAX_PINS (2026-08-04): overrides are USER-driven — one
-/// `pgrust_set_template_grace()` call per template — never
-/// concurrency-scaled, and the overflow error is clean and actionable
-/// (clear an override).
-pub const MAX_TEMPLATE_GRACES: usize = 64;
 
 /// How long a resolved (Done/Failed) Ensure entry with no remaining waiters
 /// lingers before `gc_ensures` retires it. The linger is the fresh-mint
@@ -132,8 +123,6 @@ pub enum PostEnsure {
     Joined(u64),
     /// No janitor is registered: nothing will ever service the queue.
     JanitorAbsent,
-    /// Adoption guard is up: Ensures are rejected immediately (spec item 4).
-    JanitorPaused,
     /// live + in-flight minted databases for this role reached the cap.
     PerRoleCap { counted: usize, max: i32 },
     /// The Ensure table is full — an invariant violation, not a load
@@ -159,28 +148,60 @@ pub struct PendingEnsure {
     pub spare: bool,
 }
 
-/// Fixed spare-table capacity (D3 warm pool): the hard ceiling
-/// pgrust.ephemeral_db_pool_size is clamped under (the GUC's own max is
-/// this value). Same capacity-cliff audit verdict as MAX_PINS: the pool is
-/// OPERATOR-sized (one GUC), never concurrency-scaled, and overflow is a
-/// silent skip-add (the replenisher simply stops early), not an error a
-/// connect path can hit.
+/// Fixed spare-table capacity (D3 warm pool): the GLOBAL ceiling the
+/// per-template pools share — when pooled-templates x pool_size exceeds it,
+/// the replenisher round-robins the cap across templates (pool.rs). Also
+/// the pgrust.ephemeral_db_pool_size GUC's own max. Same capacity-cliff
+/// audit verdict as MAX_PINS: the pool is OPERATOR-sized (one GUC), never
+/// concurrency-scaled, and overflow is a silent skip-add (the replenisher
+/// simply stops early), not an error a connect path can hit.
 pub const MAX_SPARES: usize = 4096;
 
-/// One pre-minted spare clone of the default template (D3 warm pool),
-/// restart-lossy like everything here: post-restart leftovers are
-/// unregistered survivors the startup sweep drops, and the pool cold-starts
-/// empty and replenishes.
+/// The effective global spare ceiling: MAX_SPARES, or the
+/// PGRUST_EPHEMERAL_DB_MAX_SPARES environment override CLAMPED to it —
+/// a rig-only knob (janitor-mint-races' round-robin phase needs the
+/// cap-binding regime without minting thousands of spares). Read once per
+/// postmaster lifetime; never documented as user surface.
+pub(crate) fn max_spares_cap() -> usize {
+    fn read_once() -> usize {
+        match std::env::var("PGRUST_EPHEMERAL_DB_MAX_SPARES") {
+            Ok(v) => v
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|&n| n >= 1)
+                .map(|n| n.min(MAX_SPARES))
+                .unwrap_or(MAX_SPARES),
+            Err(_) => MAX_SPARES,
+        }
+    }
+    pgsync::process_global! {
+        static MAX_SPARES_CAP: pgsync::Mutex<Option<usize>> = pgsync::Mutex::new(None);
+    }
+    let mut g = MAX_SPARES_CAP.lock().unwrap_or_else(|e| e.into_inner());
+    *g.get_or_insert_with(read_once)
+}
+
+/// Fixed capacity of the pooled-template set (usage-keyed warm pools): the
+/// distinct templates minted-from since boot that the replenisher maintains
+/// spares for. Overflow is a silent skip (fail-safe QoS: an unpooled
+/// template's mints are merely cold) — the MAX_TEMPLATE_FLUSH_MARKS shape.
+pub const MAX_POOLED_TEMPLATES: usize = 64;
+
+/// One pre-minted spare clone of a POOLED template (D3 warm pool,
+/// usage-keyed redesign), restart-lossy like everything here: post-restart
+/// leftovers are unregistered survivors the startup sweep drops, and the
+/// pool cold-starts empty and replenishes as templates are minted from.
 #[derive(Clone)]
 pub struct SpareEntry {
     /// The spare's current datname (`<prefix>spare_<seq>`).
     pub name: String,
     /// Its pg_database oid (preserved across the handout RENAME).
     pub oid: Oid,
-    /// Template identity AT MINT TIME: name + oid. A default-template
-    /// repoint (name changes) or rebuild (same name, new oid) makes the
-    /// spare STALE — `drain_stale_spares` removes it and the replenisher
-    /// drops the database.
+    /// Template identity AT MINT TIME: name + oid. A template rebuild
+    /// (same name, new oid) or drop makes the spare STALE —
+    /// `drain_stale_spares` removes it and the replenisher drops the
+    /// database.
     pub template_name: String,
     pub template_oid: Oid,
     /// The template's datallowconn AT MINT TIME. A datallowconn EDGE
@@ -189,7 +210,7 @@ pub struct SpareEntry {
     /// the handout re-check makes the spare STALE too: its copied content
     /// predates a window in which ordinary connections could write the
     /// template. Both-connectable spares are kept — an always-connectable
-    /// default template serves spares whose content is as old as their
+    /// template serves spares whose content is as old as their
     /// mint, the documented pool staleness residual (addendum item 6); an
     /// unseal-reseal cycle wholly between janitor observations remains
     /// invisible, mirroring the flush-mark discipline.
@@ -253,7 +274,6 @@ pub enum PostSeal {
     /// Joined an existing in-flight entry for the same datname.
     Joined(u64),
     JanitorAbsent,
-    JanitorPaused,
     TableFull,
 }
 
@@ -281,14 +301,11 @@ pub(crate) enum SealWork {
 }
 
 struct RegistryState {
-    /// Adoption-guard pause (spec item 4): while true the janitor performs
-    /// no sweep and no reaping. D2's mint path must reject Ensures
-    /// immediately while paused — `is_paused()` is that contract stub.
-    paused: bool,
-    /// One-shot deferred-startup-sweep request, set by unpause.
+    /// One-shot deferred-startup-sweep request (set at janitor start; the
+    /// first tick runs the sweep and a contained failure re-arms it).
     sweep_pending: bool,
     /// The janitor's PGPROC number while it is running (launcher_pid
-    /// precedent): lets `pgrust_janitor_unpause()` wake the loop instead of
+    /// precedent): lets backend-side posts wake the loop instead of
     /// waiting out the tick.
     janitor_proc: Option<ProcNumber>,
     /// Pinned database names (unqualified, byte-compared against datname).
@@ -300,12 +317,19 @@ struct RegistryState {
     /// D2 mint requests (bounded by `ensure_capacity()`).
     ensures: Vec<EnsureEntry>,
     next_ensure_gen: u64,
-    /// D2 per-template grace overrides, seconds, keyed by template name
-    /// (restart-lossy like pins, spec D2).
-    template_graces: Vec<(String, i32)>,
-    /// D3 warm-pool spares (bounded by MAX_SPARES). Mutated ONLY from the
-    /// janitor loop (replenish/handout), read by the reap/sweep shields.
+    /// D3 warm-pool spares (bounded by max_spares_cap()). Mutated ONLY from
+    /// the janitor loop (replenish/handout), read by the reap/sweep shields.
     spares: Vec<SpareEntry>,
+    /// Usage-keyed pooled-template set (bounded by MAX_POOLED_TEMPLATES):
+    /// the template NAMES minted-from since boot, in first-mint order. The
+    /// replenisher maintains up to pool_size spares PER listed template
+    /// (round-robining the global spare cap when it binds) and de-lists
+    /// templates whose catalog row is gone. Restart-lossy by design: the
+    /// first mint after a restart re-registers.
+    pooled_templates: Vec<String>,
+    /// Round-robin cursor over `pooled_templates` for cap-bound replenish
+    /// fairness (advanced once per replenish pass).
+    pool_rr: usize,
     /// Monotonic spare-name sequence: a name that ever failed a handout
     /// (occupied, squatted) is burned and never reused.
     next_spare_seq: u64,
@@ -370,14 +394,14 @@ struct RegistryState {
 
 pgsync::process_global! {
     static REGISTRY: pgsync::Mutex<RegistryState> = pgsync::Mutex::new(RegistryState {
-        paused: false,
         sweep_pending: false,
         janitor_proc: None,
         pins: Vec::new(),
         ensures: Vec::new(),
         next_ensure_gen: 1,
-        template_graces: Vec::new(),
         spares: Vec::new(),
+        pooled_templates: Vec::new(),
+        pool_rr: 0,
         next_spare_seq: 1,
         template_flush_marks: Vec::new(),
         template_relcounts: Vec::new(),
@@ -394,23 +418,6 @@ pgsync::process_global! {
 fn with_registry<R>(f: impl FnOnce(&mut RegistryState) -> R) -> R {
     let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
-}
-
-pgsync::process_global! {
-    static UNPAUSE_LOCK: pgsync::Mutex<()> = pgsync::Mutex::new(());
-}
-
-/// Serialize `pgrust_janitor_unpause()` end-to-end: paused-state check +
-/// durable marker write + state flip run under one lock. Two concurrent
-/// unpause calls otherwise race on the marker's single fixed temp path
-/// (marker.rs): an interleaving could durably rename a not-yet-written temp
-/// file into place (an empty marker — fail-safe, the guard re-pauses on
-/// restart, but a defect). The registry mutex cannot cover this — the
-/// registry accessors re-lock it internally and marker I/O (fsyncs) must
-/// not run under it — hence a dedicated lock.
-pub fn with_unpause_lock<R>(f: impl FnOnce() -> R) -> R {
-    let _guard = UNPAUSE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    f()
 }
 
 /// Pin `name`: the janitor will not reap it while the pin lives (one
@@ -460,13 +467,6 @@ pub fn pinned_names() -> Vec<String> {
     with_registry(|r| r.pins.clone())
 }
 
-/// The paused-state contract point: D1's guard sets it, D2's mint path must
-/// consult it (Ensures against a paused janitor get an immediate clean
-/// FATAL, never a hang).
-pub fn is_paused() -> bool {
-    with_registry(|r| r.paused)
-}
-
 /// Is a janitor currently registered? Waiter-side belt-and-suspenders
 /// (mint::wait_for_mint): the exit drain fails pending entries, but a
 /// wedge between death and drain must not cost waiters the full deadline.
@@ -474,11 +474,8 @@ pub fn janitor_present() -> bool {
     with_registry(|r| r.janitor_proc.is_some())
 }
 
-pub(crate) fn set_paused(paused: bool) {
-    with_registry(|r| r.paused = paused);
-}
-
-/// Request the deferred startup sweep (unpause path).
+/// Request the deferred startup sweep (janitor start; re-armed on a
+/// contained sweep failure).
 pub fn request_sweep() {
     with_registry(|r| r.sweep_pending = true);
 }
@@ -505,7 +502,7 @@ pub fn wake_janitor() {
 // ---------------------------------------------------------------------------
 
 /// Post (or join) a mint Ensure for `name`. One atomic sequence under the
-/// registry lock: janitor-present check, paused check, same-name join,
+/// registry lock: janitor-present check, same-name join,
 /// per-role cap, capacity, insert. `live_owned` is the caller's catalog
 /// scan of live prefix-matching non-template database NAMES owned by
 /// `owner_oid` (computed OUTSIDE the lock — no catalog I/O in here); the
@@ -535,9 +532,6 @@ pub fn post_ensure(
     with_registry(|r| {
         if r.janitor_proc.is_none() {
             return PostEnsure::JanitorAbsent;
-        }
-        if r.paused {
-            return PostEnsure::JanitorPaused;
         }
         // Traffic stamp for the replenish-deferral signal (pool.rs), taken
         // for every admitted post shape (Joined and Posted alike): both
@@ -673,23 +667,6 @@ pub fn fail_pending_ensures(err: &PgError, now_ns: u64) -> Vec<ProcNumber> {
     with_registry(|r| fail_pending_locked(r, err, now_ns))
 }
 
-/// Paused-drain variant: fail the pending entries ONLY IF the registry is
-/// still paused, re-checked under the SAME lock post_ensure admits entries
-/// under. Without the re-check, a drain launched by a tick that observed
-/// paused==true races `pgrust_janitor_unpause()`: the flag flips, a fresh
-/// Ensure is legitimately admitted at post_ensure's paused check, and the
-/// already-in-flight drain would then fail it with a wrong-cause "paused"
-/// FATAL right after a successful unpause. Skipping is hang-free: once
-/// unpaused, the next tick's service pass handles whatever is pending.
-pub fn fail_pending_ensures_if_paused(err: &PgError, now_ns: u64) -> Vec<ProcNumber> {
-    with_registry(|r| {
-        if !r.paused {
-            return Vec::new();
-        }
-        fail_pending_locked(r, err, now_ns)
-    })
-}
-
 fn fail_pending_locked(r: &mut RegistryState, err: &PgError, now_ns: u64) -> Vec<ProcNumber> {
     let mut waiters = Vec::new();
     for e in r.ensures.iter_mut() {
@@ -722,49 +699,6 @@ pub fn gc_ensures(now_ns: u64) {
 }
 
 // ---------------------------------------------------------------------------
-// D2 per-template grace overrides.
-// ---------------------------------------------------------------------------
-
-/// Set (secs >= 0) or clear (secs < 0) the reap-grace override for clones
-/// of `template` (names matching `<prefix><template>__<token>`; keyed on
-/// the RESOLVED catalog datname — builtins.rs resolves, same rationale as
-/// pins). Returns true when an override is now in place, false when the
-/// call cleared (or found nothing to clear). Errors only on table overflow.
-pub fn set_template_grace(template: &str, secs: i32) -> PgResult<bool> {
-    with_registry(|r| {
-        if secs < 0 {
-            r.template_graces.retain(|(t, _)| t != template);
-            return Ok(false);
-        }
-        if let Some(slot) = r.template_graces.iter_mut().find(|(t, _)| t == template) {
-            slot.1 = secs;
-            return Ok(true);
-        }
-        if r.template_graces.len() >= MAX_TEMPLATE_GRACES {
-            return Err(Box::new(
-                PgError::error(format!(
-                    "cannot set grace for template \"{template}\": the override table is full \
-                     ({MAX_TEMPLATE_GRACES} entries)"
-                ))
-                .with_sqlstate(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
-            ));
-        }
-        r.template_graces.push((template.to_string(), secs));
-        Ok(true)
-    })
-}
-
-/// The override for `template`, if any (reap pass, per row).
-pub fn template_grace_override(template: &str) -> Option<i32> {
-    with_registry(|r| {
-        r.template_graces
-            .iter()
-            .find(|(t, _)| t == template)
-            .map(|&(_, s)| s)
-    })
-}
-
-// ---------------------------------------------------------------------------
 // pgrust_seal_template requests (seal.rs owns the choreography; the state
 // machine lives here so waiters, the janitor loop, and the one-shot vacuum
 // worker all mutate it under the one registry lock).
@@ -772,7 +706,7 @@ pub fn template_grace_override(template: &str) -> Option<i32> {
 
 /// Post (or join) a seal request for the resolved datname `name`. One
 /// atomic sequence under the registry lock (the post_ensure shape):
-/// janitor-present check, paused check, same-name join, capacity, insert.
+/// janitor-present check, same-name join, capacity, insert.
 /// The join is keyed by name over NON-TERMINAL entries only — a terminal
 /// (Done/Failed) entry lingering for its waiters must not absorb a fresh
 /// request, which legitimately re-seals after a manual unseal.
@@ -780,9 +714,6 @@ pub fn post_seal(name: &str, waiter: ProcNumber) -> PostSeal {
     with_registry(|r| {
         if r.janitor_proc.is_none() {
             return PostSeal::JanitorAbsent;
-        }
-        if r.paused {
-            return PostSeal::JanitorPaused;
         }
         if let Some(e) = r
             .seals
@@ -991,12 +922,67 @@ pub(crate) fn any_spares() -> bool {
 /// an unregistered spare is unshielded and reaps like any ephemeral).
 pub(crate) fn add_spare(e: SpareEntry) -> bool {
     with_registry(|r| {
-        if r.spares.len() >= MAX_SPARES || r.spares.iter().any(|s| s.name == e.name) {
+        if r.spares.len() >= max_spares_cap() || r.spares.iter().any(|s| s.name == e.name) {
             return false;
         }
         r.spares.push(e);
         true
     })
+}
+
+// ---------------------------------------------------------------------------
+// Usage-keyed pooled-template set (item A redesign): the replenisher
+// maintains spares for every template minted-from since boot.
+// ---------------------------------------------------------------------------
+
+/// Register `template` as pooled (called on every successful COLD mint;
+/// the first call per template is the registration — that mint was served
+/// cold by design, replenish maintains warmth thereafter). Idempotent;
+/// false = already listed or the set is full (silent fail-safe QoS).
+pub(crate) fn note_pooled_template(template: &str) -> bool {
+    with_registry(|r| {
+        if r.pooled_templates.iter().any(|t| t == template)
+            || r.pooled_templates.len() >= MAX_POOLED_TEMPLATES
+        {
+            return false;
+        }
+        r.pooled_templates.push(template.to_string());
+        true
+    })
+}
+
+/// Snapshot of the pooled-template names, first-mint order (replenish pass).
+pub(crate) fn pooled_templates() -> Vec<String> {
+    with_registry(|r| r.pooled_templates.clone())
+}
+
+/// De-list a pooled template (its catalog row is gone: the replenish probe
+/// missed it). Its remaining spares are drained by the same pass.
+pub(crate) fn remove_pooled_template(template: &str) -> bool {
+    with_registry(|r| {
+        let before = r.pooled_templates.len();
+        r.pooled_templates.retain(|t| t != template);
+        r.pooled_templates.len() != before
+    })
+}
+
+/// Advance and return the round-robin cursor over `n` pooled templates
+/// (cap-bound replenish fairness, one step per pass). 0 when n == 0.
+pub(crate) fn advance_pool_rr(n: usize) -> usize {
+    with_registry(|r| {
+        if n == 0 {
+            r.pool_rr = 0;
+            return 0;
+        }
+        let cur = r.pool_rr % n;
+        r.pool_rr = (cur + 1) % n;
+        cur
+    })
+}
+
+/// Total listed spares across all templates (global-cap accounting).
+pub(crate) fn total_spares() -> usize {
+    with_registry(|r| r.spares.len())
 }
 
 /// First spare minted from `template_name` (handout candidate). A clone,
@@ -1031,23 +1017,26 @@ pub(crate) fn spare_count(template_name: &str, template_oid: Oid) -> usize {
     })
 }
 
-/// Remove and return every spare NOT matching `identity` ((template name,
-/// template oid, template datallowconn AS OBSERVED NOW)); `None` = no
-/// valid pool (feature off, template unset/missing/unsealed) drains ALL
-/// spares. The datallowconn term drains spares across a connectable EDGE
-/// (either direction — see `SpareEntry::template_connectable`); a stable
-/// datallowconn keeps them. The caller drops the returned databases via
-/// the batch drop path.
-pub(crate) fn drain_stale_spares(identity: Option<(&str, Oid, bool)>) -> Vec<SpareEntry> {
+/// Remove and return every spare NOT matching one of `identities`
+/// ((template name, template oid, template datallowconn AS OBSERVED NOW) —
+/// one entry per pooled template with a VALID pool this pass; an empty
+/// slice drains ALL spares). A spare whose template was dropped, rebuilt
+/// (new oid), unsealed, or crossed a connectable EDGE (either direction —
+/// see `SpareEntry::template_connectable`) is stale; templates absent from
+/// the slice drain wholesale, which is exactly the per-template drain the
+/// item-A ruling asks for (resealing/dropping/unsealing template T drains
+/// T's spares only — every other template's identity is still listed and
+/// still matches). The caller drops the returned databases via the batch
+/// drop path.
+pub(crate) fn drain_stale_spares(identities: &[(String, Oid, bool)]) -> Vec<SpareEntry> {
     with_registry(|r| {
         let (keep, stale): (Vec<SpareEntry>, Vec<SpareEntry>) =
-            r.spares.drain(..).partition(|s| match identity {
-                Some((name, oid, allowconn)) => {
-                    s.template_name == name
-                        && s.template_oid == oid
-                        && s.template_connectable == allowconn
-                }
-                None => false,
+            r.spares.drain(..).partition(|s| {
+                identities.iter().any(|(name, oid, allowconn)| {
+                    s.template_name == *name
+                        && s.template_oid == *oid
+                        && s.template_connectable == *allowconn
+                })
             });
         r.spares = keep;
         stale
@@ -1330,12 +1319,7 @@ mod tests {
             assert!(unpin(name));
         }
 
-        // Pause + one-shot sweep request.
-        assert!(!is_paused());
-        set_paused(true);
-        assert!(is_paused());
-        set_paused(false);
-        assert!(!is_paused());
+        // One-shot sweep request.
         request_sweep();
         assert!(take_sweep_request());
         assert!(!take_sweep_request());
@@ -1350,7 +1334,7 @@ mod tests {
     // process-global state). No path in here may SetLatch: unit tests have
     // no proc table.
     #[test]
-    fn ensure_and_grace_semantics() {
+    fn ensure_semantics() {
         let _table = test_pin_table_lock();
         let now = 100_000_000_000u64;
 
@@ -1364,11 +1348,6 @@ mod tests {
         assert!(matches!(post("tv_e_a", 1, &[], 0), PostEnsure::JanitorAbsent));
 
         set_janitor_proc(Some(7));
-
-        // Paused janitor: rejected (spec item 4 / D2).
-        set_paused(true);
-        assert!(matches!(post("tv_e_a", 1, &[], 0), PostEnsure::JanitorPaused));
-        set_paused(false);
 
         // Post, then same-name joins coalesce onto one entry (idempotent
         // Ensure; duplicate waiter procnos dedupe).
@@ -1461,27 +1440,6 @@ mod tests {
         gc_ensures(now + ENSURE_LINGER_NS + 1);
         assert!(matches!(ensure_status(gen_b), EnsureStatus::Gone));
 
-        // The paused-drain variant fails pending entries ONLY while
-        // actually paused, re-checked under the lock: an unpause racing an
-        // in-flight drain must not fail a legitimately-admitted fresh
-        // Ensure with a wrong-cause "paused" FATAL.
-        let PostEnsure::Posted(gen_p) = post("tv_e_pd", 6, &[], 0) else {
-            panic!("expected Posted");
-        };
-        let cause = PgError::error("paused".to_string());
-        assert!(
-            fail_pending_ensures_if_paused(&cause, now).is_empty(),
-            "unpaused: the conditional drain must be a no-op"
-        );
-        assert!(matches!(ensure_status(gen_p), EnsureStatus::Pending));
-        set_paused(true);
-        assert_eq!(fail_pending_ensures_if_paused(&cause, now), vec![6]);
-        set_paused(false);
-        assert!(matches!(ensure_status(gen_p), EnsureStatus::Failed(_)));
-        remove_ensure_waiter(gen_p, 6);
-        gc_ensures(now + ENSURE_LINGER_NS + 1);
-        assert!(matches!(ensure_status(gen_p), EnsureStatus::Gone));
-
         // Capacity: fill the table with pending entries; the next distinct
         // name is refused loudly. The capacity is max_connections-derived
         // (ensure_capacity; boot-default fallback in unit tests) and the
@@ -1518,23 +1476,6 @@ mod tests {
         gc_ensures(u64::MAX);
         assert_eq!(pending_ensures().len(), 0);
 
-        // Template grace overrides: set, replace, lookup, clear, overflow.
-        assert_eq!(template_grace_override("tpl_g"), None);
-        assert!(set_template_grace("tpl_g", 30).unwrap());
-        assert_eq!(template_grace_override("tpl_g"), Some(30));
-        assert!(set_template_grace("tpl_g", 0).unwrap());
-        assert_eq!(template_grace_override("tpl_g"), Some(0));
-        assert!(!set_template_grace("tpl_g", -1).unwrap());
-        assert_eq!(template_grace_override("tpl_g"), None);
-        for i in 0..MAX_TEMPLATE_GRACES {
-            set_template_grace(&format!("tpl_fill_{i}"), 1).unwrap();
-        }
-        let overflow = set_template_grace("tpl_overflow", 1).unwrap_err();
-        assert!(overflow.message().contains("override table is full"));
-        for i in 0..MAX_TEMPLATE_GRACES {
-            set_template_grace(&format!("tpl_fill_{i}"), -1).unwrap();
-        }
-
         set_janitor_proc(None);
     }
 
@@ -1545,14 +1486,11 @@ mod tests {
     fn seal_request_semantics() {
         let _table = test_pin_table_lock();
 
-        // Absent/paused janitor: rejected before anything is queued (the
+        // Absent janitor: rejected before anything is queued (the
         // post_ensure taxonomy).
         set_janitor_proc(None);
         assert!(matches!(post_seal("tv_s_a", 1), PostSeal::JanitorAbsent));
         set_janitor_proc(Some(7));
-        set_paused(true);
-        assert!(matches!(post_seal("tv_s_a", 1), PostSeal::JanitorPaused));
-        set_paused(false);
 
         // Post, then same-name joins coalesce (idempotent; duplicate
         // waiters dedupe).
@@ -1717,9 +1655,11 @@ mod tests {
         assert_eq!(spare_count("tpl_a", 90499), 0, "rebuilt-template oid mismatch");
         assert_eq!(spare_count("tpl_b", 90410), 1);
 
-        // Stale drain: a repointed default template (identity = tpl_b)
-        // drains the tpl_a spares and keeps the match.
-        let stale = drain_stale_spares(Some(("tpl_b", 90410, false)));
+        // Per-template stale drain: with only tpl_b's identity valid, the
+        // tpl_a spares drain and the tpl_b spare is kept — dropping/
+        // unsealing/resealing ONE template drains ITS spares only (the
+        // item-A per-template drain contract).
+        let stale = drain_stale_spares(&[("tpl_b".to_string(), 90410, false)]);
         let mut names: Vec<&str> = stale.iter().map(|s| s.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, ["tv_spare_1", "tv_spare_3"]);
@@ -1727,9 +1667,19 @@ mod tests {
         assert!(!spare_shields("tv_spare_1"), "drained spares stop shielding");
         // Same name, NEW template oid (template rebuilt under its name):
         // stale too.
-        let stale = drain_stale_spares(Some(("tpl_b", 90411, false)));
+        let stale = drain_stale_spares(&[("tpl_b".to_string(), 90411, false)]);
         assert_eq!(stale.len(), 1);
         assert!(!any_spares());
+
+        // Multi-template keep: both identities listed, both spares stay.
+        assert!(add_spare(sp("tv_spare_m1", 90451, "tpl_m1", 90450)));
+        assert!(add_spare(sp("tv_spare_m2", 90453, "tpl_m2", 90452)));
+        let stale = drain_stale_spares(&[
+            ("tpl_m1".to_string(), 90450, false),
+            ("tpl_m2".to_string(), 90452, false),
+        ]);
+        assert!(stale.is_empty(), "matching spares of BOTH templates survive");
+        assert_eq!(drain_stale_spares(&[]).len(), 2, "empty identity set drains all");
 
         // A datallowconn EDGE drains (either direction: a spare minted from
         // a sealed template with the template now observed connectable, and
@@ -1749,15 +1699,15 @@ mod tests {
             template_oid: 90440,
             template_connectable: true,
         }));
-        let stale = drain_stale_spares(Some(("tpl_c", 90440, true)));
+        let stale = drain_stale_spares(&[("tpl_c".to_string(), 90440, true)]);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].name, "tv_spare_c1", "sealed-minted spare drains on the edge");
         assert!(spare_shields("tv_spare_c2"), "connectable-stable spare stays");
-        assert_eq!(drain_stale_spares(None).len(), 1);
+        assert_eq!(drain_stale_spares(&[]).len(), 1);
 
-        // None = no valid pool: drains everything.
+        // Empty identity set = no valid pool: drains everything.
         assert!(add_spare(sp("tv_spare_4", 90404, "tpl_a", 90400)));
-        assert_eq!(drain_stale_spares(None).len(), 1);
+        assert_eq!(drain_stale_spares(&[]).len(), 1);
         assert!(!any_spares());
 
         // Excess drain (pool_size shrink): keeps the OLDEST `keep`
@@ -1774,7 +1724,7 @@ mod tests {
         assert!(spare_shields("tv_spare_e1"), "oldest survivor stays");
         assert!(spare_shields("tv_spare_o1"), "other identities untouched");
         assert!(take_excess_spares("tpl_e", 90420, 1).is_empty());
-        assert_eq!(drain_stale_spares(None).len(), 2);
+        assert_eq!(drain_stale_spares(&[]).len(), 2);
 
         // remove_spare reports presence; the seq is monotonic (burned names
         // never reused).
@@ -1786,12 +1736,41 @@ mod tests {
         assert!(s2 > s1);
 
         // Capacity: the table is bounded and overflow is a silent skip-add
-        // (fail-safe: an unregistered spare just reaps).
+        // (fail-safe: an unregistered spare just reaps). Unit tests run
+        // without the env override, so the cap is MAX_SPARES.
+        assert_eq!(max_spares_cap(), MAX_SPARES);
         for i in 0..MAX_SPARES {
             assert!(add_spare(sp(&format!("tv_spare_f{i}"), 91000 + i as Oid, "tpl_f", 90900)));
         }
         assert!(!add_spare(sp("tv_spare_overflow", 91999, "tpl_f", 90900)));
-        assert_eq!(drain_stale_spares(None).len(), MAX_SPARES);
+        assert_eq!(total_spares(), MAX_SPARES);
+        assert_eq!(drain_stale_spares(&[]).len(), MAX_SPARES);
+
+        // Pooled-template set: idempotent registration in first-mint order,
+        // bounded, delistable; the rr cursor rotates over the live count.
+        assert!(note_pooled_template("tpl_p1"));
+        assert!(!note_pooled_template("tpl_p1"), "idempotent");
+        assert!(note_pooled_template("tpl_p2"));
+        assert_eq!(pooled_templates(), ["tpl_p1", "tpl_p2"]);
+        assert_eq!(advance_pool_rr(2), 0);
+        assert_eq!(advance_pool_rr(2), 1);
+        assert_eq!(advance_pool_rr(2), 0, "rr wraps");
+        assert!(remove_pooled_template("tpl_p1"));
+        assert!(!remove_pooled_template("tpl_p1"));
+        assert_eq!(pooled_templates(), ["tpl_p2"]);
+        assert_eq!(advance_pool_rr(1), 0);
+        assert!(remove_pooled_template("tpl_p2"));
+        for i in 0..MAX_POOLED_TEMPLATES {
+            assert!(note_pooled_template(&format!("tpl_pf{i}")));
+        }
+        assert!(
+            !note_pooled_template("tpl_p_overflow"),
+            "set overflow is a silent skip (QoS, never an error)"
+        );
+        for i in 0..MAX_POOLED_TEMPLATES {
+            assert!(remove_pooled_template(&format!("tpl_pf{i}")));
+        }
+        assert_eq!(advance_pool_rr(0), 0);
 
         // Flush marks: unmarked -> no match; mark -> exact-identity match;
         // an advanced datfrozenxid OR datminmxid (completed wraparound

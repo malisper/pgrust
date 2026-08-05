@@ -20,12 +20,13 @@
 //!   service_pass doc carries the choreography.
 //!
 //! Refusal discipline (the security posture's teeth): every disqualification
-//! that must look stock — feature off, non-matching grammar, unlisted role,
-//! bare token with no default template — returns `Ok(false)` so InitPostgres
-//! falls through to its byte-identical does-not-exist FATAL. Conditions with
-//! their own story — paused/absent janitor, cap, timeout, a failed CREATE —
-//! return `Err` (a clean FATAL), because hiding them behind "does not exist"
-//! would turn operational states into gaslighting.
+//! that must look stock — feature off, non-matching prefix, unlisted role —
+//! returns `Ok(false)` so InitPostgres falls through to its byte-identical
+//! does-not-exist FATAL. Conditions with their own story — a malformed
+//! prefix-matching name from an AUTHORIZED role (the template-form FATAL),
+//! an absent janitor, cap, timeout, a failed CREATE — return `Err` (a clean
+//! FATAL), because hiding them behind "does not exist" would turn
+//! operational states into gaslighting.
 
 use elog::{elog as log_report, ereport};
 use init_small::globals as g;
@@ -98,17 +99,6 @@ pub fn mint_on_connect(dbname: &str) -> PgResult<bool> {
     let Some(shape) = grammar::parse_mint_name(&prefix, dbname) else {
         return Ok(false);
     };
-    let template = match shape {
-        MintShape::Template { template, .. } => template.to_string(),
-        MintShape::Bare { .. } => {
-            let t = crate::ephemeral_db_default_template();
-            if t.is_empty() {
-                // Spec: '' = bare tokens refuse to mint (stock FATAL).
-                return Ok(false);
-            }
-            t
-        }
-    };
 
     let role_oid = miscinit::GetUserId();
     let cx = mcx::MemoryContext::new("pgrust mint-on-connect");
@@ -119,8 +109,33 @@ pub fn mint_on_connect(dbname: &str) -> PgResult<bool> {
         return Ok(false);
     };
     if !role_qualifies(mcx, &roles_guc, role_name.as_str())? {
+        // Authorization opacity: unauthorized roles get the stock
+        // does-not-exist FATAL for EVERY prefix-matching shape, malformed
+        // included — the namespace does not exist for them.
         return Ok(false);
     }
+    let template = match shape {
+        MintShape::Template { template, .. } => template.to_string(),
+        MintShape::Malformed => {
+            // Template-form-only grammar (ruling 2026-08-05): an authorized
+            // role connecting to a prefix-matching name without the
+            // `__` separator gets a clear FATAL naming the required form —
+            // never a silent stock error it would misread as a typo, and
+            // never a mint from some implicit template.
+            return Err(ereport(FATAL)
+                .errcode(ERRCODE_UNDEFINED_DATABASE)
+                .errmsg(format!(
+                    "database \"{dbname}\" does not exist and does not name a template to \
+                     mint it from"
+                ))
+                .errhint(format!(
+                    "Ephemeral database names embed their template: connect to \
+                     \"{prefix}<template>__<token>\" (e.g. \"{prefix}myapp_tpl__w1\")."
+                ))
+                .into_error()
+                .into());
+        }
+    };
 
     // Per-role cap. Counting semantics (documented here, referenced by the
     // GUC's long_desc): "live" = pg_database rows matching the prefix with
@@ -168,19 +183,6 @@ pub fn mint_on_connect(dbname: &str) -> PgResult<bool> {
             .errhint(
                 "The janitor may still be starting up, or it has been disabled after an \
                  unrecoverable error (see the server log); retrying shortly is safe."
-                    .to_string(),
-            )
-            .into_error()
-            .into()),
-        PostEnsure::JanitorPaused => Err(ereport(FATAL)
-            .errcode(ERRCODE_CANNOT_CONNECT_NOW)
-            .errmsg(format!(
-                "cannot mint ephemeral database \"{dbname}\": the pgrust ephemeral-db janitor \
-                 is paused by the adoption guard"
-            ))
-            .errhint(
-                "Run SELECT pgrust_janitor_unpause(); (superuser) to acknowledge the \
-                 configured prefix."
                     .to_string(),
             )
             .into_error()
@@ -347,9 +349,8 @@ fn wait_for_mint(dbname: &str, gen: u64, procno: ProcNumber) -> PgResult<bool> {
 
         // Belt-and-suspenders for a janitor that died between our post and
         // its exit drain (the drain fails every pending entry, but a wedge
-        // in between must not cost us the full deadline), and for a pause
-        // landing mid-wait.
-        if !registry::janitor_present() || registry::is_paused() {
+        // in between must not cost us the full deadline).
+        if !registry::janitor_present() {
             return Err(ereport(FATAL)
                 .errcode(ERRCODE_CANNOT_CONNECT_NOW)
                 .errmsg(format!(
@@ -690,11 +691,14 @@ fn service_serial(entries: &[registry::PendingEnsure]) -> PgResult<()> {
         wake_waiters(&outcome);
         // AFTER the wakes (prewarm is strictly off the waiter path): churn
         // accounting + the post-mint touch enqueue (prewarm.rs dispatches
-        // in a later tick step).
+        // in a later tick step) + the usage-keyed pool registration.
         if let Some(oid) = created {
             registry::note_catalog_churn(1);
-            if crate::ephemeral_db_prewarm() && !p.spare {
-                let _ = registry::enqueue_touch(&p.name, oid);
+            if !p.spare {
+                if crate::ephemeral_db_prewarm() {
+                    let _ = registry::enqueue_touch(&p.name, oid);
+                }
+                note_template_pooled(&p.template);
             }
         }
     }
@@ -770,8 +774,11 @@ fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
                         wake_waiters(&waiters);
                         // AFTER the wakes (the service_serial discipline).
                         registry::note_catalog_churn(1);
-                        if crate::ephemeral_db_prewarm() && !p.spare {
-                            let _ = registry::enqueue_touch(&p.name, db_oid);
+                        if !p.spare {
+                            if crate::ephemeral_db_prewarm() {
+                                let _ = registry::enqueue_touch(&p.name, db_oid);
+                            }
+                            note_template_pooled(&p.template);
                         }
                     }
                     BatchOutcome::FoundExisting => {
@@ -826,38 +833,9 @@ fn service_batch(to_mint: &[registry::PendingEnsure]) -> PgResult<()> {
     }
 }
 
-/// Reject every pending Ensure against a paused janitor (the loop's paused
-/// branch): entries can be queued between `set_janitor_proc` and the
-/// adoption guard's pause decision — or a whole tick can pass before the
-/// drain — and a queue nothing will service must fail loudly, never hang
-/// (spec item 4). The backend post path refuses NEW Ensures while paused;
-/// this drains the window's stragglers. The drain is CONDITIONAL —
-/// paused-ness is re-checked under the registry lock — because
-/// `pgrust_janitor_unpause()` can land between the tick's is_paused()
-/// observation and this call, and a fresh Ensure admitted after the flip
-/// must not be failed with a wrong-cause "paused" FATAL
-/// (registry::fail_pending_ensures_if_paused's rationale). Skipping never
-/// hangs anyone: once unpaused, the next tick's service pass runs.
-pub(crate) fn reject_pending_paused() {
-    let cause = ereport(ERROR)
-        .errcode(ERRCODE_CANNOT_CONNECT_NOW)
-        .errmsg("the pgrust ephemeral-db janitor is paused by the adoption guard".to_string())
-        .errhint(
-            "Run SELECT pgrust_janitor_unpause(); (superuser) to acknowledge the configured \
-             prefix."
-                .to_string(),
-        )
-        .into_error();
-    let waiters = registry::fail_pending_ensures_if_paused(&cause, pg_clock::mono_ns());
-    for w in waiters {
-        latch::SetLatch(types_storage::latch::LatchHandle::proc(w));
-    }
-}
-
 /// Fail every pending Ensure with `cause` and wake the waiters —
 /// UNCONDITIONALLY (main_loop's janitor-exit drain: nothing will ever
-/// service the queue again, paused or not). The paused drain above uses
-/// the paused-rechecking variant instead.
+/// service the queue again).
 pub(crate) fn fail_pending_and_wake(cause: &PgError) {
     let waiters = registry::fail_pending_ensures(cause, pg_clock::mono_ns());
     for w in waiters {
@@ -1440,6 +1418,23 @@ pub(crate) fn cleanup_orphaned_datadirs(created: &[CreatedDb]) {
 // Shared helpers (serial + batch paths).
 // ---------------------------------------------------------------------------
 
+/// Usage-keyed pool registration (item A): the FIRST cold mint of a
+/// template registers it as pooled — that mint was served cold by design;
+/// the replenisher keeps up to pool_size spares of it warm thereafter. The
+/// witness line fires once per template per boot (the races-suite pool
+/// phase greps it).
+fn note_template_pooled(template: &str) {
+    if registry::note_pooled_template(template) {
+        let _ = log_report(
+            LOG,
+            format!(
+                "pgrust ephemeral-db janitor: template \"{template}\" registered for warm \
+                 pooling (first mint served cold; replenish maintains spares)"
+            ),
+        );
+    }
+}
+
 pub(crate) fn wake_waiters(waiters: &[ProcNumber]) {
     for &w in waiters {
         latch::SetLatch(types_storage::latch::LatchHandle::proc(w));
@@ -1664,9 +1659,6 @@ pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
     Ok(core::str::from_utf8(v.leak()).expect("was UTF-8"))
 }
-
-// pgrust_set_template_grace's privilege boundary lives in builtins.rs with
-// its siblings; the storage is registry::set_template_grace.
 
 #[cfg(test)]
 mod tests {

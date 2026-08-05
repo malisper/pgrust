@@ -1,37 +1,36 @@
 //! `pgrust_pin_database(text)` / `pgrust_unpin_database(text)` /
-//! `pgrust_janitor_unpause()` — pgrust-native internal builtins on the
+//! `pgrust_seal_template(text)` — pgrust-native internal builtins on the
 //! reserved-oid EXTRA_BUILTINS path (the `pgrust_lane_coverage` precedent:
 //! execmain/src/lanev2/coverage.rs documents the 9000..=9099 range; 9000 is
-//! taken by the coverage SRF, this table claims 9001-9003).
+//! taken by the coverage SRF, this table claims 9001, 9002 and 9005 —
+//! 9003/9004 were pgrust_janitor_unpause and pgrust_set_template_grace,
+//! deleted 2026-08-05 and permanently retired, never reassigned).
 //!
-//! The catalog is NEVER touched by default:
-//! scripts/testmode/janitor-functions.sql creates the functions on demand
-//! (`LANGUAGE internal`), and the test-server recipe installs them into
-//! templates so clones inherit them. Stock PostgreSQL errors identically on
-//! the unknown internal names.
+//! These three are TRUE builtins: bootstrap.rs backfills their pg_proc rows
+//! (same oids, pg_catalog namespace) into every database a session reaches,
+//! so no install script exists and clones inherit nothing they didn't
+//! already have — the total janitor SQL surface is these three functions.
 //!
 //! Privileges (spec "Security posture"): pin/unpin = database owner or
-//! superuser (`object_ownercheck`, which passes superusers); unpause =
-//! superuser only.
+//! superuser (`object_ownercheck`, which passes superusers); seal = owner
+//! of the target database or superuser.
 
 use datum::Datum;
 use elog::ereport;
 use types_core::catalog::DATABASE_RELATION_ID;
 use types_core::Oid;
 use types_error::{
-    PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_UNDEFINED_DATABASE, ERROR,
+    PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_DATABASE, ERROR,
 };
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
-use crate::{marker, registry};
+use crate::registry;
 
 /// Reserved pg_proc-style oids (see PGRUST_FOID_RANGE, 9000..=9099; the
-/// range's reservation rationale lives on the coverage builtin).
+/// range's reservation rationale lives on the coverage builtin). 9003 and
+/// 9004 are RETIRED (module doc) — do not reassign them.
 pub const PGRUST_PIN_DATABASE_FOID: Oid = 9001;
 pub const PGRUST_UNPIN_DATABASE_FOID: Oid = 9002;
-pub const PGRUST_JANITOR_UNPAUSE_FOID: Oid = 9003;
-pub const PGRUST_SET_TEMPLATE_GRACE_FOID: Oid = 9004;
 pub const PGRUST_SEAL_TEMPLATE_FOID: Oid = 9005;
 
 /// Decode the text arg of a STRICT single-arg builtin into an owned name.
@@ -135,90 +134,6 @@ pub fn fc_pgrust_unpin_database(
     Ok(Datum::from_bool(registry::unpin(&key)))
 }
 
-/// pgrust_janitor_unpause() -> bool: superuser-only acknowledgement of the
-/// adoption guard. Durably writes the marker FIRST, then clears the pause
-/// flag, requests the deferred startup sweep, and wakes the janitor (the
-/// sweep itself runs in the janitor loop — all lifecycle mutations
-/// serialize there). The check-write-flip sequence runs under the unpause
-/// lock: concurrent superuser callers would otherwise race on the marker's
-/// fixed temp path (registry::with_unpause_lock's rationale). Returns true
-/// if the janitor was paused, false (no-op) otherwise.
-pub fn fc_pgrust_janitor_unpause(
-    _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
-) -> PgResult<Datum> {
-    if !superuser_seams::superuser::call()? {
-        return Err(Box::new(
-            PgError::error("must be superuser to call pgrust_janitor_unpause()")
-                .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
-        ));
-    }
-    registry::with_unpause_lock(|| {
-        if !registry::is_paused() {
-            return Ok(Datum::from_bool(false));
-        }
-        let prefix = crate::ephemeral_db_prefix();
-        // Marker before unpause: if the durable write fails the guard stays
-        // up.
-        marker::write(&prefix)?;
-        registry::set_paused(false);
-        registry::request_sweep();
-        registry::wake_janitor();
-        let _ = elog::elog(
-            types_error::LOG,
-            format!(
-                "pgrust ephemeral-db janitor: unpaused; prefix \"{prefix}\" acknowledged in \
-                 \"{}\"; deferred startup sweep requested",
-                marker::MARKER_FILE
-            ),
-        );
-        Ok(Datum::from_bool(true))
-    })
-}
-
-/// Ceiling for per-template grace overrides: the same bound as
-/// pgrust.ephemeral_db_grace's GUC max (guc_tables). Without it a
-/// NON-SUPERUSER template owner could set an ~68-year override
-/// (i32 seconds) and make that template's clones effectively unreapable,
-/// escaping the operator-facing knob's 0..=86400 range.
-const MAX_TEMPLATE_GRACE_SECS: i32 = 86_400;
-
-/// pgrust_set_template_grace(text, integer) -> bool (D2): set — or clear,
-/// with a negative argument — the reap-grace override for clones of the
-/// named template (databases matching `<prefix><template>__<token>`).
-/// Seconds as a plain integer, DEVIATION from the spec's `interval` arg,
-/// recorded in the M3 addendum: the grace GUC itself is integer seconds
-/// (GUC_UNIT_S), and an int keeps the builtin free of interval-datum
-/// plumbing. Bounded above by the grace GUC's own ceiling (86400s), so
-/// the override can never exceed what the operator-facing knob allows.
-/// Restart-lossy like pins. Privilege (spec security posture):
-/// owner of the TEMPLATE database or superuser; the check resolves the
-/// catalog datname and the override is keyed on it (the pin rationale —
-/// NAMEDATALEN truncation). Returns true when an override is in place
-/// after the call, false when it cleared.
-pub fn fc_pgrust_set_template_grace(
-    _flinfo: Option<&mut FmgrInfo>,
-    fcinfo: &mut Fcinfo,
-) -> PgResult<Datum> {
-    let name = text_arg0(fcinfo)?;
-    let secs = fcinfo.arg_i32(1);
-    if secs > MAX_TEMPLATE_GRACE_SECS {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-            .errmsg(format!(
-                "grace override {secs} is out of range for pgrust_set_template_grace \
-                 (maximum {MAX_TEMPLATE_GRACE_SECS} seconds, the pgrust.ephemeral_db_grace \
-                 ceiling)"
-            ))
-            .into_error()
-            .into());
-    }
-    let datname = owner_or_superuser_check(fcinfo, &name, "pgrust_set_template_grace")?;
-    Ok(Datum::from_bool(registry::set_template_grace(
-        &datname, secs,
-    )?))
-}
-
 /// pgrust_seal_template(text) -> void: janitor-executed one-call sealing —
 /// VACUUM (FREEZE, ANALYZE) inside the target through an internal session,
 /// then IS_TEMPLATE true ALLOW_CONNECTIONS false, in the manual recipe's
@@ -276,22 +191,6 @@ pub static JANITOR_BUILTINS: &[FmgrBuiltin] = &[
         strict: true,
         retset: false,
         func: fc_pgrust_unpin_database,
-    },
-    FmgrBuiltin {
-        foid: PGRUST_JANITOR_UNPAUSE_FOID,
-        name: "pgrust_janitor_unpause",
-        nargs: 0,
-        strict: true,
-        retset: false,
-        func: fc_pgrust_janitor_unpause,
-    },
-    FmgrBuiltin {
-        foid: PGRUST_SET_TEMPLATE_GRACE_FOID,
-        name: "pgrust_set_template_grace",
-        nargs: 2,
-        strict: true,
-        retset: false,
-        func: fc_pgrust_set_template_grace,
     },
     FmgrBuiltin {
         foid: PGRUST_SEAL_TEMPLATE_FOID,

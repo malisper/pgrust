@@ -51,21 +51,23 @@ fn table_counts_match_compiled_backend_shape() {
     //   ephemeral-database janitor — String +1 pgrust.ephemeral_db_prefix
     //   (-> 78), Int +1 pgrust.ephemeral_db_grace (-> 167) = 455.
     // testmode M3 (pgrust-only, docs/design/test-views.md D2): the
-    //   mint-on-connect security posture — String +2
-    //   pgrust.ephemeral_db_mint_roles / pgrust.ephemeral_db_default_template
-    //   (-> 80), Int +1 pgrust.ephemeral_db_max_per_role (-> 168) = 458.
+    //   mint-on-connect security posture — String +1
+    //   pgrust.ephemeral_db_mint_roles (-> 79), Int +1
+    //   pgrust.ephemeral_db_max_per_role (-> 168) = 457. (The former
+    //   pgrust.ephemeral_db_default_template was DELETED with the bare
+    //   mint form, ruling 2026-08-05.)
     // testmode D3 warm pool (pgrust-only, test-views.md warm-pool addendum):
-    //   Int +1 pgrust.ephemeral_db_pool_size (-> 169) = 459.
+    //   Int +1 pgrust.ephemeral_db_pool_size (-> 169) = 458.
     // testmode mint-strategy addendum (pgrust-only): Int +1
-    //   pgrust.ephemeral_db_wal_log_threshold (-> 170) = 460.
+    //   pgrust.ephemeral_db_wal_log_threshold (-> 170) = 459.
     // testmode prewarm addendum (pgrust-only): Bool +1
-    //   pgrust.ephemeral_db_prewarm (-> 136) = 461.
+    //   pgrust.ephemeral_db_prewarm (-> 136) = 460.
     assert_eq!(ConfigureNamesBool.len(), 136);
     assert_eq!(ConfigureNamesInt.len(), 170);
     assert_eq!(ConfigureNamesReal.len(), 28);
-    assert_eq!(ConfigureNamesString.len(), 80);
+    assert_eq!(ConfigureNamesString.len(), 79);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 461);
+    assert_eq!(all_settings().count(), 460);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
