@@ -586,7 +586,8 @@ fn speculative_insertion_lock_cycle() {
 
 // ---- WaitForLockersMultiple progress reporting (lmgr.c:936-969) ----
 
-fn progress_beentry() -> &'static backend_status::PgBackendStatus {
+fn progress_beentry(
+) -> (&'static backend_status::PgBackendStatus, std::sync::MutexGuard<'static, ()>) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         init_small::globals::SetMaxBackends(8);
@@ -595,11 +596,16 @@ fn progress_beentry() -> &'static backend_status::PgBackendStatus {
         backend_progress::init_seams();
         backend_status::BackendStatusShmemInit().unwrap();
     });
-    // One fixed slot: this is the only lmgr test binding a beentry.
+    // One fixed slot shared by every test that binds a beentry: the re-bind
+    // resets st_progress_param, so concurrent binders scribble over each
+    // other's progress view. The guard serializes them for the test's
+    // lifetime (held by the caller).
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = SLOT.lock().unwrap_or_else(|e| e.into_inner());
     init_small::globals::SetMyProcNumber(3);
     backend_status::pgstat_beinit().unwrap();
     backend_status::set_pgstat_track_activities_backing(true);
-    backend_status::MyBEEntry().expect("pgstat_beinit bound a beentry")
+    (backend_status::MyBEEntry().expect("pgstat_beinit bound a beentry"), guard)
 }
 
 fn vxid(procno: types_core::ProcNumber, lxid: u32) -> types_core::VirtualTransactionId {
@@ -613,7 +619,7 @@ fn wait_for_lockers_progress_protocol() {
     };
 
     install();
-    let be = progress_beentry();
+    let (be, _slot_guard) = progress_beentry();
     let param = |i: usize| be.st_progress_param[i].get();
 
     let mc = mcx::MemoryContext::new("waitfor-test");
@@ -682,7 +688,7 @@ fn wait_for_lockers_no_progress_and_empty_tags() {
     use backend_progress::progress::PROGRESS_WAITFOR_TOTAL;
 
     install();
-    let be = progress_beentry();
+    let (be, _slot_guard) = progress_beentry();
 
     // Empty locktag list: C returns before any progress update.
     backend_progress::pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, 7);
